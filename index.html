@@ -161,13 +161,22 @@
       font-weight: 600;
     }
 
-    .field-label input {
+    .field-label input,
+    .field-label select,
+    .field-label textarea {
       height: 44px;
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 0 12px;
       color: var(--ink);
       background: var(--surface-soft);
+    }
+
+    .field-label textarea {
+      min-height: 86px;
+      padding: 10px 12px;
+      resize: vertical;
+      line-height: 1.4;
     }
 
     .login-error {
@@ -281,6 +290,12 @@
     .nav button.active,
     .nav button:hover {
       background: rgba(255, 255, 255, .1);
+    }
+
+    .nav-status {
+      margin-left: auto;
+      color: #c9d4ce;
+      font-size: 11px;
     }
 
     .ico {
@@ -623,6 +638,28 @@
       gap: 10px;
     }
 
+    .workspace-card.add-card {
+      border-style: dashed;
+      box-shadow: none;
+      align-content: center;
+      justify-items: center;
+      text-align: center;
+      grid-template-rows: none;
+    }
+
+    .workspace-card.add-card p {
+      max-width: 280px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .workspace-card.add-card .seller-logo {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
     .seller-layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 310px;
@@ -857,6 +894,13 @@
       gap: 10px;
     }
 
+    .panel-actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     .list-row {
       display: flex;
       align-items: center;
@@ -899,6 +943,122 @@
       color: var(--muted);
       font-size: 13px;
       max-width: 240px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: rgba(31, 34, 43, .42);
+    }
+
+    .modal-backdrop.is-hidden {
+      display: none;
+    }
+
+    .modal {
+      width: min(720px, 100%);
+      max-height: min(760px, calc(100vh - 36px));
+      overflow: auto;
+      border-radius: 8px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: 0 24px 70px rgba(31, 34, 43, .22);
+    }
+
+    .modal-head {
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .modal-head h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .modal-head p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .modal-body {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .connect-mode {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .connect-mode button {
+      min-height: 64px;
+      border-radius: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      background: var(--surface-soft);
+      text-align: left;
+      color: var(--ink);
+    }
+
+    .connect-mode button.active {
+      border-color: #c8d6ff;
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
+    .connect-mode strong,
+    .connect-mode span {
+      display: block;
+    }
+
+    .connect-mode span {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .form-two {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .form-note {
+      border: 1px solid #c8d6ff;
+      border-radius: 8px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .modal-actions {
+      padding: 0 18px 18px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
     }
 
     .detail-layout {
@@ -1182,7 +1342,10 @@
 
       .workspace-grid,
       .summary-grid,
-      .pipeline {
+      .pipeline,
+      .settings-grid,
+      .form-two,
+      .connect-mode {
         grid-template-columns: 1fr;
       }
 
@@ -1280,17 +1443,14 @@
           <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
           Кабинеты
         </button>
-        <button aria-label="Задачи">
-          <svg class="ico" viewBox="0 0 24 24"><path d="M9 11l2 2 4-5"></path><path d="M5 5h14v14H5z"></path></svg>
-          Задачи
+        <button data-screen-button="audit" aria-label="Аудит">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M9 11l2 2 4-5"></path><path d="M21 12a9 9 0 1 1-4-7.5"></path></svg>
+          Аудит
+          <span class="nav-status">скоро</span>
         </button>
-        <button aria-label="Шаблоны">
-          <svg class="ico" viewBox="0 0 24 24"><path d="M7 4h10v16H7z"></path><path d="M10 8h4M10 12h4M10 16h2"></path></svg>
-          Шаблоны
-        </button>
-        <button aria-label="Отчеты">
-          <svg class="ico" viewBox="0 0 24 24"><path d="M5 19V5"></path><path d="M9 19v-7"></path><path d="M13 19V8"></path><path d="M17 19v-4"></path></svg>
-          Отчеты
+        <button data-screen-button="settings" aria-label="Настройки">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"></path><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.1 2.1 0 0 1-2.97 2.97l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.09 1.65V21a2.1 2.1 0 0 1-4.2 0v-.07a1.8 1.8 0 0 0-1.09-1.65 1.8 1.8 0 0 0-1.98.36l-.05.05a2.1 2.1 0 0 1-2.97-2.97l.05-.05A1.8 1.8 0 0 0 4.6 15a1.8 1.8 0 0 0-1.65-1.09H2.9a2.1 2.1 0 0 1 0-4.2h.07A1.8 1.8 0 0 0 4.6 8.62a1.8 1.8 0 0 0-.36-1.98l-.05-.05a2.1 2.1 0 0 1 2.97-2.97l.05.05A1.8 1.8 0 0 0 9.2 4a1.8 1.8 0 0 0 1.09-1.65V2.3a2.1 2.1 0 0 1 4.2 0v.07A1.8 1.8 0 0 0 15.58 4a1.8 1.8 0 0 0 1.98-.36l.05-.05a2.1 2.1 0 0 1 2.97 2.97l-.05.05A1.8 1.8 0 0 0 19.4 8.6a1.8 1.8 0 0 0 1.65 1.09h.05a2.1 2.1 0 0 1 0 4.2h-.07A1.8 1.8 0 0 0 19.4 15z"></path></svg>
+          Настройки
         </button>
       </nav>
 
@@ -1307,17 +1467,17 @@
       <section class="screen active" id="employees-screen">
         <header class="topbar">
           <div class="title">
-            <h1>Кабинет сотрудников</h1>
-            <p>Рабочие кабинеты клиентов, доступы, объем карточек и текущие статусы.</p>
+            <h1>Кабинеты</h1>
+            <p>Порталы клиентов, способы подключения, объем карточек и текущие статусы.</p>
           </div>
           <div class="toolbar">
-            <button class="btn" disabled title="Будет подключено после настройки реальной авторизации">
+            <button class="btn primary" data-open-portal-modal>
               <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
-              Новый кабинет
+              Добавить портал
             </button>
-            <button class="btn primary" disabled title="Сейчас тестируем только отображение данных">
+            <button class="btn" data-open-portal-modal data-start-mode="manual">
               <svg class="ico" viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>
-              Импорт карточек
+              Ручной режим
             </button>
           </div>
         </header>
@@ -1326,19 +1486,19 @@
           <div class="summary-grid">
             <div class="metric">
               <span>Активные кабинеты</span>
-              <strong>12</strong>
+              <strong id="metric-portals">1</strong>
             </div>
             <div class="metric">
               <span>Карточки в работе</span>
-              <strong>4 820</strong>
+              <strong id="metric-cards">1 284</strong>
             </div>
             <div class="metric">
-              <span>На согласовании</span>
-              <strong>317</strong>
+              <span>Подключены через API</span>
+              <strong id="metric-api">1</strong>
             </div>
             <div class="metric">
-              <span>Ошибки WB</span>
-              <strong>26</strong>
+              <span>Ручные порталы</span>
+              <strong id="metric-manual">0</strong>
             </div>
           </div>
 
@@ -1364,8 +1524,8 @@
             </div>
           </div>
 
-          <div class="workspace-grid">
-            <article class="workspace-card">
+          <div class="workspace-grid" id="portal-list">
+            <article class="workspace-card" data-demo-card data-portal-id="demo-wb">
               <div class="card-head">
                 <div class="seller">
                   <div class="seller-logo">LN</div>
@@ -1391,57 +1551,79 @@
               </div>
             </article>
 
-            <article class="workspace-card">
-              <div class="card-head">
-                <div class="seller">
-                  <div class="seller-logo" style="background: linear-gradient(135deg, #7253a4, #2d67a3);">PF</div>
-                  <div>
-                    <h2>Prime Fit</h2>
-                    <p>Wildberries · специалист Илья</p>
-                  </div>
-                </div>
-                <span class="tag amber">Таблица</span>
-              </div>
-              <div class="scope-row">
-                <span>Охват</span>
-                <strong>Выбранные карточки</strong>
-              </div>
-              <div class="card-stats">
-                <div class="mini-stat"><strong>46</strong><span>карточки</span></div>
-                <div class="mini-stat"><strong>19</strong><span>правки</span></div>
-                <div class="mini-stat"><strong>2</strong><span>ошибки</span></div>
-              </div>
-              <div class="card-actions">
-                <span class="tag amber">Согласование</span>
-                <button class="btn" data-open-seller>Открыть</button>
-              </div>
+            <article class="workspace-card add-card">
+              <div class="seller-logo">+</div>
+              <h2>Добавить портал</h2>
+              <p>Подключить кабинет Wildberries через API или начать вручную с таблицами и списками карточек.</p>
+              <button class="btn primary" data-open-portal-modal>Добавить</button>
             </article>
+          </div>
+        </div>
+      </section>
 
-            <article class="workspace-card">
-              <div class="card-head">
-                <div class="seller">
-                  <div class="seller-logo" style="background: linear-gradient(135deg, #a66510, #28785d);">KT</div>
-                  <div>
-                    <h2>Koto Textile</h2>
-                    <p>Wildberries · менеджер Мария</p>
-                  </div>
-                </div>
-                <span class="tag red">Нет доступа</span>
+      <section class="screen" id="audit-screen">
+        <header class="topbar">
+          <div class="title">
+            <h1>Аудит</h1>
+            <p>Будущая настройка аудита карточек, категорий и семантического ядра.</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn" disabled title="Раздел будет раскрыт после настройки Сергея">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+              Новая настройка
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="workspace-strip">
+            <div class="strip-head">
+              <div>
+                <h2>Готовим первый сценарий аудита</h2>
+                <p>Следующий рабочий шаг: определение категории карточки и сбор СЯ перед генерацией предложений.</p>
               </div>
-              <div class="scope-row">
-                <span>Охват</span>
-                <strong>Не выбран</strong>
+              <span class="tag amber">ожидает настройки</span>
+            </div>
+            <div class="pipeline">
+              <div class="step active"><strong>Кабинет</strong><span>источник данных</span></div>
+              <div class="step"><strong>Категория</strong><span>подтвердить</span></div>
+              <div class="step"><strong>СЯ</strong><span>собрать запросы</span></div>
+              <div class="step"><strong>Аудит</strong><span>найти проблемы</span></div>
+              <div class="step"><strong>Предложения</strong><span>подготовить правки</span></div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="screen" id="settings-screen">
+        <header class="topbar">
+          <div class="title">
+            <h1>Настройки</h1>
+            <p>Пользователи, роли, источники данных и будущие интеграции.</p>
+          </div>
+        </header>
+
+        <div class="content">
+          <div class="settings-grid">
+            <section class="panel">
+              <h2>Пользователи</h2>
+              <p>Тестовые учетные записи из `document/test-users.csv`.</p>
+              <div class="panel-list">
+                <div class="list-row"><span>Сафиуллин Дмитрий</span><strong>Администратор</strong></div>
+                <div class="list-row"><span>Кристина Январева</span><strong>Руководитель</strong></div>
+                <div class="list-row"><span>Анастсия Руднева</span><strong>Технический специалист</strong></div>
               </div>
-              <div class="card-stats">
-                <div class="mini-stat"><strong>0</strong><span>карточки</span></div>
-                <div class="mini-stat"><strong>0</strong><span>правки</span></div>
-                <div class="mini-stat"><strong>0</strong><span>ошибки</span></div>
+            </section>
+
+            <section class="panel">
+              <h2>Интеграции</h2>
+              <p>WB API подключается в режиме только чтения до отдельного решения о записи изменений.</p>
+              <div class="panel-list">
+                <div class="list-row"><span>Wildberries Content API</span><strong>read-only</strong></div>
+                <div class="list-row"><span>MPStats</span><strong>следующий этап</strong></div>
+                <div class="list-row"><span>Хранение токенов</span><strong>только сервер</strong></div>
               </div>
-              <div class="card-actions">
-                <span class="tag red">Нужен API</span>
-                <button class="btn">Настроить</button>
-              </div>
-            </article>
+            </section>
           </div>
         </div>
       </section>
@@ -1449,17 +1631,21 @@
       <section class="screen" id="seller-screen">
         <header class="topbar">
           <div class="title">
-            <h1>Демо WB кабинет</h1>
-            <p>Wildberries · полный магазин · режим только чтение · последняя загрузка сегодня в 10:40</p>
+            <h1 id="seller-title">Демо WB кабинет</h1>
+            <p id="seller-subtitle">Wildberries · полный магазин · режим только чтение · последняя загрузка сегодня в 10:40</p>
           </div>
           <div class="toolbar">
             <button class="btn ghost" data-back>
               <svg class="ico" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"></path></svg>
               Кабинеты
             </button>
+            <button class="btn" data-open-portal-modal data-start-mode="api">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>
+              Подключить API
+            </button>
             <button class="btn">
               <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
-              Выбрать карточки
+              Добавить таблицу
             </button>
             <button class="btn primary" disabled title="В read-only режиме задачи на публикацию не создаются">
               <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
@@ -1474,10 +1660,43 @@
               <section class="workspace-strip">
                 <div class="strip-head">
                   <div>
-                    <h2>Режим демо-кабинета</h2>
-                    <p>Система подключается к тестовому кабинету WB только для чтения данных. Создание, обновление, удаление и публикация изменений отключены.</p>
+                    <h2>Обзор кабинета</h2>
+                    <p>Главные данные по порталу перед переходом к аудиту категории и семантического ядра.</p>
                   </div>
-                  <span class="tag blue">read-only</span>
+                  <span class="tag blue" id="seller-mode-tag">read-only API</span>
+                </div>
+                <div class="summary-grid">
+                  <div class="metric">
+                    <span>Карточек в кабинете</span>
+                    <strong id="seller-total-cards">1 284</strong>
+                  </div>
+                  <div class="metric">
+                    <span>В работе</span>
+                    <strong id="seller-work-cards">211</strong>
+                  </div>
+                  <div class="metric">
+                    <span>Требуют внимания</span>
+                    <strong id="seller-problem-cards">38</strong>
+                  </div>
+                  <div class="metric">
+                    <span>Участников проекта</span>
+                    <strong id="seller-member-count">3</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Источник данных</h2>
+                    <p id="seller-source-copy">Система подключается к тестовому кабинету WB только для чтения данных. Создание, обновление, удаление и публикация изменений отключены.</p>
+                  </div>
+                  <span class="tag blue" id="seller-source-tag">API подключен</span>
+                </div>
+                <div class="panel-actions">
+                  <button class="btn readonly">Загрузить свежие данные</button>
+                  <button class="btn" data-open-portal-modal data-start-mode="api">Подключить API</button>
+                  <button class="btn">Добавить таблицу</button>
                 </div>
               </section>
 
@@ -1634,6 +1853,24 @@
             </div>
 
             <aside class="seller-aside">
+              <section class="panel">
+                <h2>Состав проекта</h2>
+                <p>Участники выбираются из учетных записей сотрудников.</p>
+                <div class="panel-list" id="project-members">
+                  <div class="list-row" data-member-login="dmitriy.admin"><span>Сафиуллин Дмитрий</span><strong>Администратор</strong></div>
+                  <div class="list-row" data-member-login="kristina.manager"><span>Кристина Январева</span><strong>Руководитель</strong></div>
+                  <div class="list-row" data-member-login="anastasia.tech"><span>Анастсия Руднева</span><strong>Технический специалист</strong></div>
+                </div>
+                <div class="panel-actions">
+                  <select class="select" id="member-select" aria-label="Добавить участника">
+                    <option value="dmitriy.admin">Сафиуллин Дмитрий</option>
+                    <option value="kristina.manager">Кристина Январева</option>
+                    <option value="anastasia.tech">Анастсия Руднева</option>
+                  </select>
+                  <button class="btn" id="add-member-button" type="button">Добавить</button>
+                </div>
+              </section>
+
               <section class="panel">
                 <h2>Доступ</h2>
                 <p>Права и источник карточек.</p>
@@ -1914,6 +2151,85 @@
     </main>
   </div>
 
+  <div class="modal-backdrop is-hidden" id="portal-modal" role="dialog" aria-modal="true" aria-labelledby="portal-modal-title">
+    <form class="modal" id="portal-form">
+      <div class="modal-head">
+        <div>
+          <h2 id="portal-modal-title">Добавить портал</h2>
+          <p>Можно подключить кабинет WB через API или завести портал вручную и добавить таблицы позже.</p>
+        </div>
+        <button class="icon-btn" type="button" data-close-portal-modal aria-label="Закрыть">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"></path></svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="connect-mode" aria-label="Способ подключения">
+          <button class="active" type="button" data-connect-mode="api">
+            <strong>Через API</strong>
+            <span>Для кабинета, где уже есть WB API ключ. В прототипе ключ не сохраняется.</span>
+          </button>
+          <button type="button" data-connect-mode="manual">
+            <strong>Вручную</strong>
+            <span>Для старта с Excel, таблицей, списком nmID или ссылками на карточки.</span>
+          </button>
+        </div>
+
+        <div class="form-two">
+          <label class="field-label">
+            Название портала
+            <input id="portal-name" name="portal-name" required placeholder="Например, Brand WB">
+          </label>
+          <label class="field-label">
+            Маркетплейс
+            <select id="portal-marketplace" name="portal-marketplace">
+              <option>Wildberries</option>
+              <option>Ozon</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="form-two">
+          <label class="field-label">
+            Ответственный
+            <select id="portal-owner" name="portal-owner">
+              <option value="anastasia.tech">Анастсия Руднева</option>
+              <option value="kristina.manager">Кристина Январева</option>
+              <option value="dmitriy.admin">Сафиуллин Дмитрий</option>
+            </select>
+          </label>
+          <label class="field-label">
+            Охват
+            <select id="portal-scope" name="portal-scope">
+              <option value="full">Полный магазин</option>
+              <option value="selected">Выбранные карточки</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="api-fields">
+          <label class="field-label">
+            WB API ключ
+            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Вставьте ключ кабинета">
+          </label>
+          <div class="form-note">В статическом прототипе ключ не пишется в localStorage и не отправляется в WB напрямую. Следующий серверный шаг: принять ключ на backend, сохранить зашифрованно и проверить read-only доступ.</div>
+        </div>
+
+        <div id="manual-fields" hidden>
+          <label class="field-label">
+            Что добавим первым
+            <textarea id="portal-manual-note" name="portal-manual-note" placeholder="Excel WB, список nmID, ссылки на карточки, комментарий по задаче"></textarea>
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn ghost" type="button" data-close-portal-modal>Отмена</button>
+        <button class="btn primary" type="submit">Добавить портал</button>
+      </div>
+    </form>
+  </div>
+
   <script>
     const loginScreen = document.querySelector("#login-screen");
     const appShell = document.querySelector("#app-shell");
@@ -1925,12 +2241,14 @@
     const userName = document.querySelector("#user-name");
     const userRole = document.querySelector("#user-role");
     const employeesScreen = document.querySelector("#employees-screen");
+    const auditScreen = document.querySelector("#audit-screen");
+    const settingsScreen = document.querySelector("#settings-screen");
     const sellerScreen = document.querySelector("#seller-screen");
     const cardScreen = document.querySelector("#card-screen");
-    const openButtons = document.querySelectorAll("[data-open-seller]");
     const openCardButtons = document.querySelectorAll("[data-open-card]");
     const backButton = document.querySelector("[data-back]");
     const backSellerButton = document.querySelector("[data-back-seller]");
+    const navButtons = document.querySelectorAll("[data-screen-button]");
     const navCabinets = document.querySelector("[data-screen-button='employees']");
     const scopeButtons = document.querySelectorAll("[data-scope]");
     const scopeCount = document.querySelector("#scope-count");
@@ -1939,12 +2257,56 @@
     const scopeAlerts = document.querySelector("#scope-alerts");
     const asideScope = document.querySelector("#aside-scope");
     const emptyCopy = document.querySelector("#empty-copy");
+    const portalList = document.querySelector("#portal-list");
+    const metricPortals = document.querySelector("#metric-portals");
+    const metricCards = document.querySelector("#metric-cards");
+    const metricApi = document.querySelector("#metric-api");
+    const metricManual = document.querySelector("#metric-manual");
+    const sellerTitle = document.querySelector("#seller-title");
+    const sellerSubtitle = document.querySelector("#seller-subtitle");
+    const sellerModeTag = document.querySelector("#seller-mode-tag");
+    const sellerTotalCards = document.querySelector("#seller-total-cards");
+    const sellerWorkCards = document.querySelector("#seller-work-cards");
+    const sellerProblemCards = document.querySelector("#seller-problem-cards");
+    const sellerMemberCount = document.querySelector("#seller-member-count");
+    const sellerSourceCopy = document.querySelector("#seller-source-copy");
+    const sellerSourceTag = document.querySelector("#seller-source-tag");
+    const projectMembers = document.querySelector("#project-members");
+    const memberSelect = document.querySelector("#member-select");
+    const addMemberButton = document.querySelector("#add-member-button");
+    const portalModal = document.querySelector("#portal-modal");
+    const portalForm = document.querySelector("#portal-form");
+    const portalName = document.querySelector("#portal-name");
+    const portalMarketplace = document.querySelector("#portal-marketplace");
+    const portalOwner = document.querySelector("#portal-owner");
+    const portalScope = document.querySelector("#portal-scope");
+    const portalApiKey = document.querySelector("#portal-api-key");
+    const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
+    const apiFields = document.querySelector("#api-fields");
+    const manualFields = document.querySelector("#manual-fields");
     const fallbackUsers = [
       { login: "dmitriy.admin", password: "WO-demo-2026-admin", full_name: "Сафиуллин Дмитрий", role: "Администратор", access_level: "all" },
       { login: "kristina.manager", password: "WO-demo-2026-lead", full_name: "Кристина Январева", role: "Руководитель", access_level: "overview" },
       { login: "anastasia.tech", password: "WO-demo-2026-tech", full_name: "Анастсия Руднева", role: "Технический специалист", access_level: "readonly_wb" }
     ];
     let testUsers = [...fallbackUsers];
+    let connectMode = "api";
+    const demoPortal = {
+      id: "demo-wb",
+      name: "Демо WB кабинет",
+      marketplace: "Wildberries",
+      mode: "api",
+      scope: "full",
+      status: "Read-only API",
+      ownerLogin: "anastasia.tech",
+      cardCount: 1284,
+      workCount: 211,
+      problemCount: 38,
+      memberLogins: ["dmitriy.admin", "kristina.manager", "anastasia.tech"],
+      isDemo: true
+    };
+    let currentPortal = demoPortal;
+    let userPortals = [];
 
     function parseCsv(text) {
       const [headerLine, ...lines] = text.trim().split(/\r?\n/);
@@ -1960,6 +2322,16 @@
         });
     }
 
+    function findUser(login) {
+      return testUsers.find((item) => item.login === login)
+        || fallbackUsers.find((item) => item.login === login)
+        || fallbackUsers[0];
+    }
+
+    function formatNumber(value) {
+      return new Intl.NumberFormat("ru-RU").format(value);
+    }
+
     async function loadTestUsers() {
       try {
         const response = await fetch("document/test-users.csv");
@@ -1973,6 +2345,24 @@
         loginError.textContent = "Не удалось загрузить document/test-users.csv, использую встроенные тестовые учетные записи.";
         loginError.classList.add("active");
       }
+      fillEmployeeSelects();
+      renderProjectMembers();
+    }
+
+    function fillEmployeeSelects() {
+      [portalOwner, memberSelect].forEach((select) => {
+        const selected = select.value;
+        select.innerHTML = "";
+        testUsers.forEach((user) => {
+          const option = document.createElement("option");
+          option.value = user.login;
+          option.textContent = user.full_name;
+          select.append(option);
+        });
+        select.value = testUsers.some((user) => user.login === selected)
+          ? selected
+          : select.options[0]?.value || "";
+      });
     }
 
     function initials(name) {
@@ -1991,7 +2381,204 @@
       userRole.textContent = user.role;
       loginScreen.classList.add("is-hidden");
       appShell.classList.remove("is-hidden");
-      showEmployees();
+      showScreen("employees");
+    }
+
+    function showScreen(screenName) {
+      const screens = {
+        employees: employeesScreen,
+        audit: auditScreen,
+        settings: settingsScreen,
+        seller: sellerScreen,
+        card: cardScreen
+      };
+
+      Object.values(screens).forEach((screen) => screen.classList.remove("active"));
+      screens[screenName].classList.add("active");
+
+      navButtons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.screenButton === screenName);
+      });
+
+      if (screenName !== "employees" && screenName !== "audit" && screenName !== "settings") {
+        navButtons.forEach((button) => button.classList.remove("active"));
+      }
+
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function showEmployees() {
+      showScreen("employees");
+    }
+
+    function getPortalById(id) {
+      if (id === demoPortal.id) {
+        return demoPortal;
+      }
+      return userPortals.find((portal) => portal.id === id) || demoPortal;
+    }
+
+    function showSeller(portal = currentPortal) {
+      currentPortal = portal;
+      updateSellerView();
+      showScreen("seller");
+    }
+
+    function showCard() {
+      showScreen("card");
+    }
+
+    function saveUserPortals() {
+      localStorage.setItem("opticards-portals", JSON.stringify(userPortals));
+    }
+
+    function loadUserPortals() {
+      try {
+        userPortals = JSON.parse(localStorage.getItem("opticards-portals") || "[]");
+      } catch (error) {
+        userPortals = [];
+      }
+      renderUserPortals();
+      updateDashboardMetrics();
+    }
+
+    function createPortalCard(portal) {
+      const article = document.createElement("article");
+      article.className = "workspace-card";
+      article.dataset.portalId = portal.id;
+      article.dataset.userCard = "true";
+
+      const head = document.createElement("div");
+      head.className = "card-head";
+
+      const seller = document.createElement("div");
+      seller.className = "seller";
+
+      const logo = document.createElement("div");
+      logo.className = "seller-logo";
+      logo.textContent = initials(portal.name || "WB");
+
+      const text = document.createElement("div");
+      const title = document.createElement("h2");
+      title.textContent = portal.name;
+      const owner = findUser(portal.ownerLogin);
+      const copy = document.createElement("p");
+      copy.textContent = `${portal.marketplace} · ${owner.full_name}`;
+      text.append(title, copy);
+      seller.append(logo, text);
+
+      const tag = document.createElement("span");
+      tag.className = portal.mode === "api" ? "tag blue" : "tag amber";
+      tag.textContent = portal.status;
+      head.append(seller, tag);
+
+      const scope = document.createElement("div");
+      scope.className = "scope-row";
+      scope.innerHTML = `<span>Охват</span><strong>${portal.scope === "selected" ? "Выбранные карточки" : "Полный магазин"}</strong>`;
+
+      const stats = document.createElement("div");
+      stats.className = "card-stats";
+      [
+        [portal.cardCount, "карточки"],
+        [portal.workCount, "правки"],
+        [portal.problemCount, "ошибки"]
+      ].forEach(([value, label]) => {
+        const item = document.createElement("div");
+        item.className = "mini-stat";
+        item.innerHTML = `<strong>${formatNumber(value)}</strong><span>${label}</span>`;
+        stats.append(item);
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "card-actions";
+      const mode = document.createElement("span");
+      mode.className = portal.mode === "api" ? "tag blue" : "tag amber";
+      mode.textContent = portal.mode === "api" ? "Ожидает проверки API" : "Ручное наполнение";
+      const button = document.createElement("button");
+      button.className = "btn primary";
+      button.type = "button";
+      button.dataset.openSeller = "true";
+      button.textContent = "Открыть";
+      actions.append(mode, button);
+
+      article.append(head, scope, stats, actions);
+      return article;
+    }
+
+    function renderUserPortals() {
+      portalList.querySelectorAll("[data-user-card]").forEach((card) => card.remove());
+      const addCard = portalList.querySelector(".add-card");
+      userPortals.forEach((portal) => {
+        portalList.insertBefore(createPortalCard(portal), addCard);
+      });
+    }
+
+    function updateDashboardMetrics() {
+      const allPortals = [demoPortal, ...userPortals];
+      const apiCount = allPortals.filter((portal) => portal.mode === "api").length;
+      metricPortals.textContent = formatNumber(allPortals.length);
+      metricCards.textContent = formatNumber(allPortals.reduce((sum, portal) => sum + portal.cardCount, 0));
+      metricApi.textContent = formatNumber(apiCount);
+      metricManual.textContent = formatNumber(allPortals.length - apiCount);
+    }
+
+    function updateSellerView() {
+      const owner = findUser(currentPortal.ownerLogin);
+      const isApi = currentPortal.mode === "api";
+      const scopeLabel = currentPortal.scope === "selected" ? "выбранные карточки" : "полный магазин";
+
+      sellerTitle.textContent = currentPortal.name;
+      sellerSubtitle.textContent = `${currentPortal.marketplace} · ${scopeLabel} · ${isApi ? "API read-only" : "ручной режим"} · ответственный ${owner.full_name}`;
+      sellerModeTag.className = isApi ? "tag blue" : "tag amber";
+      sellerModeTag.textContent = isApi ? "read-only API" : "ручной режим";
+      sellerTotalCards.textContent = formatNumber(currentPortal.cardCount);
+      sellerWorkCards.textContent = formatNumber(currentPortal.workCount);
+      sellerProblemCards.textContent = formatNumber(currentPortal.problemCount);
+      sellerSourceTag.className = isApi ? "tag blue" : "tag amber";
+      sellerSourceTag.textContent = isApi ? "API ожидает серверной проверки" : "таблицы и ручной ввод";
+      sellerSourceCopy.textContent = isApi
+        ? "API ключ принят в интерфейсе прототипа, но не сохраняется в браузере. Серверная проверка read-only доступа будет следующим техническим шагом."
+        : "Портал создан без API: можно добавлять Excel, списки nmID, ссылки на карточки и подключить API позже.";
+      renderProjectMembers();
+      setScope(currentPortal.scope);
+    }
+
+    function renderProjectMembers() {
+      if (!projectMembers || !currentPortal) {
+        return;
+      }
+
+      projectMembers.innerHTML = "";
+      currentPortal.memberLogins.forEach((login) => {
+        const user = findUser(login);
+        const row = document.createElement("div");
+        row.className = "list-row";
+        row.dataset.memberLogin = login;
+        row.innerHTML = `<span>${user.full_name}</span><strong>${user.role}</strong>`;
+        projectMembers.append(row);
+      });
+      sellerMemberCount.textContent = formatNumber(currentPortal.memberLogins.length);
+    }
+
+    function setConnectMode(mode) {
+      connectMode = mode;
+      connectModeButtons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.connectMode === mode);
+      });
+      apiFields.hidden = mode !== "api";
+      manualFields.hidden = mode !== "manual";
+      portalApiKey.required = mode === "api";
+    }
+
+    function openPortalModal(mode = "api") {
+      portalForm.reset();
+      setConnectMode(mode);
+      portalModal.classList.remove("is-hidden");
+      portalName.focus();
+    }
+
+    function closePortalModal() {
+      portalModal.classList.add("is-hidden");
     }
 
     loginForm.addEventListener("submit", async (event) => {
@@ -2026,54 +2613,110 @@
       });
     });
 
-    function showEmployees() {
-      employeesScreen.classList.add("active");
-      sellerScreen.classList.remove("active");
-      cardScreen.classList.remove("active");
-      navCabinets.classList.add("active");
-    }
-
-    function showSeller() {
-      sellerScreen.classList.add("active");
-      employeesScreen.classList.remove("active");
-      cardScreen.classList.remove("active");
-      navCabinets.classList.remove("active");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-
-    function showCard() {
-      cardScreen.classList.add("active");
-      sellerScreen.classList.remove("active");
-      employeesScreen.classList.remove("active");
-      navCabinets.classList.remove("active");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-
     function setScope(scope) {
       scopeButtons.forEach((button) => {
         button.classList.toggle("active", button.dataset.scope === scope);
       });
 
       const selected = scope === "selected";
-      scopeCount.textContent = selected ? "46" : "1 284";
-      scopeSource.textContent = selected ? "Таблица" : "API";
-      scopeReady.textContent = selected ? "19" : "211";
-      scopeAlerts.textContent = selected ? "6" : "38";
+      scopeCount.textContent = selected ? "46" : formatNumber(currentPortal.cardCount);
+      scopeSource.textContent = selected ? "Таблица" : (currentPortal.mode === "api" ? "API" : "Ручной");
+      scopeReady.textContent = selected ? "19" : formatNumber(currentPortal.workCount);
+      scopeAlerts.textContent = selected ? "6" : formatNumber(currentPortal.problemCount);
       asideScope.textContent = selected ? "выбранные карточки" : "весь магазин";
       emptyCopy.textContent = selected
         ? "В рабочий набор можно добавить nmID, SKU, артикулы или ссылки на карточки."
         : "Для ограниченной задачи можно импортировать список nmID, SKU или артикулов.";
     }
 
-    openButtons.forEach((button) => button.addEventListener("click", showSeller));
+    portalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+
+      if (connectMode === "api" && !portalApiKey.value.trim()) {
+        portalApiKey.setCustomValidity("Вставьте WB API ключ для подключения через API.");
+        portalApiKey.reportValidity();
+        return;
+      }
+
+      portalApiKey.setCustomValidity("");
+      const portal = {
+        id: `portal-${Date.now()}`,
+        name: portalName.value.trim(),
+        marketplace: portalMarketplace.value,
+        mode: connectMode,
+        scope: portalScope.value,
+        status: connectMode === "api" ? "API добавлен" : "Ручной режим",
+        ownerLogin: portalOwner.value,
+        cardCount: 0,
+        workCount: 0,
+        problemCount: 0,
+        memberLogins: [portalOwner.value],
+        isDemo: false
+      };
+
+      userPortals.push(portal);
+      saveUserPortals();
+      renderUserPortals();
+      updateDashboardMetrics();
+      closePortalModal();
+      showSeller(portal);
+    });
+
+    document.addEventListener("click", (event) => {
+      const openPortalButton = event.target.closest("[data-open-portal-modal]");
+      if (openPortalButton) {
+        openPortalModal(openPortalButton.dataset.startMode || "api");
+        return;
+      }
+
+      if (event.target.closest("[data-close-portal-modal]")) {
+        closePortalModal();
+        return;
+      }
+
+      const openSellerButton = event.target.closest("[data-open-seller]");
+      if (openSellerButton) {
+        const card = openSellerButton.closest(".workspace-card");
+        showSeller(getPortalById(card?.dataset.portalId || "demo-wb"));
+      }
+    });
+
+    portalModal.addEventListener("click", (event) => {
+      if (event.target === portalModal) {
+        closePortalModal();
+      }
+    });
+
+    connectModeButtons.forEach((button) => {
+      button.addEventListener("click", () => setConnectMode(button.dataset.connectMode));
+    });
+
     openCardButtons.forEach((button) => button.addEventListener("click", showCard));
     backButton.addEventListener("click", showEmployees);
-    backSellerButton.addEventListener("click", showSeller);
-    navCabinets.addEventListener("click", showEmployees);
+    backSellerButton.addEventListener("click", () => showSeller(currentPortal));
+    navButtons.forEach((button) => {
+      button.addEventListener("click", () => showScreen(button.dataset.screenButton));
+    });
     scopeButtons.forEach((button) => {
       button.addEventListener("click", () => setScope(button.dataset.scope));
     });
+    addMemberButton.addEventListener("click", () => {
+      const login = memberSelect.value;
+      if (!currentPortal.memberLogins.includes(login)) {
+        currentPortal.memberLogins.push(login);
+        if (!currentPortal.isDemo) {
+          const stored = userPortals.find((portal) => portal.id === currentPortal.id);
+          if (stored) {
+            stored.memberLogins = [...currentPortal.memberLogins];
+            saveUserPortals();
+          }
+        }
+        renderProjectMembers();
+      }
+    });
 
+    loadUserPortals();
+    updateSellerView();
     loadTestUsers();
   </script>
 </body>
