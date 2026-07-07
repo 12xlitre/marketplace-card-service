@@ -1,0 +1,2080 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marketplace Card Service Prototype</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --surface-soft: #fbfbfe;
+      --ink: #222222;
+      --muted: #707083;
+      --line: #e2e3ec;
+      --brand: #494ad8;
+      --brand-strong: #38323f;
+      --brand-soft: #ececff;
+      --green: #14845f;
+      --green-soft: #e4f5ee;
+      --blue: #3761e9;
+      --blue-soft: #e8efff;
+      --cyan: #32ccff;
+      --amber: #b36a08;
+      --amber-soft: #fff1d9;
+      --red: #c83d4a;
+      --red-soft: #fde7eb;
+      --violet: #8b42dc;
+      --shadow: 0 10px 28px rgba(34, 34, 34, .08);
+      font-family: Montserrat, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .58;
+    }
+
+    .login-screen {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 440px;
+      background: linear-gradient(135deg, #262235 0%, #494ad8 52%, #2a7dd8 100%);
+      color: #fff;
+    }
+
+    .login-hero {
+      min-height: 100vh;
+      padding: 56px;
+      display: grid;
+      align-content: space-between;
+      gap: 36px;
+    }
+
+    .login-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .login-brand .brand-mark {
+      background: #fff;
+      color: var(--brand);
+    }
+
+    .login-copy {
+      max-width: 680px;
+    }
+
+    .login-copy h1 {
+      margin: 0;
+      font-size: 44px;
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .login-copy p {
+      margin: 18px 0 0;
+      max-width: 560px;
+      color: rgba(255, 255, 255, .78);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .login-badges {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .login-badge {
+      min-height: 30px;
+      border-radius: 999px;
+      padding: 6px 11px;
+      display: inline-flex;
+      align-items: center;
+      color: rgba(255,255,255,.88);
+      border: 1px solid rgba(255,255,255,.22);
+      background: rgba(255,255,255,.1);
+      font-size: 12px;
+    }
+
+    .login-panel {
+      min-height: 100vh;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 34px;
+      display: grid;
+      align-content: center;
+      border-left: 1px solid rgba(255,255,255,.16);
+    }
+
+    .login-card {
+      display: grid;
+      gap: 18px;
+    }
+
+    .login-card h2 {
+      margin: 0;
+      font-size: 25px;
+      line-height: 1.15;
+    }
+
+    .login-card p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .field-label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .field-label input {
+      height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 12px;
+      color: var(--ink);
+      background: var(--surface-soft);
+    }
+
+    .login-error {
+      display: none;
+      border: 1px solid #efb8bf;
+      border-radius: 8px;
+      background: var(--red-soft);
+      color: var(--red);
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+
+    .login-error.active {
+      display: block;
+    }
+
+    .demo-users {
+      border-top: 1px solid var(--line);
+      padding-top: 14px;
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .demo-user {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 9px;
+      color: var(--muted);
+      text-align: left;
+    }
+
+    .demo-user:hover {
+      color: var(--brand);
+      border-color: #c8d6ff;
+      background: var(--brand-soft);
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+    }
+
+    .app.is-hidden,
+    .login-screen.is-hidden {
+      display: none;
+    }
+
+    .rail {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      background: #262235;
+      color: #f8fbf8;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 40px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, #32ccff, #e595ff);
+      color: #222;
+      font-weight: 800;
+    }
+
+    .brand strong {
+      display: block;
+      font-size: 14px;
+      line-height: 1.15;
+    }
+
+    .brand span {
+      color: #c9d4ce;
+      font-size: 12px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 6px;
+    }
+
+    .nav button {
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #e6eee9;
+      background: transparent;
+      text-align: left;
+    }
+
+    .nav button.active,
+    .nav button:hover {
+      background: rgba(255, 255, 255, .1);
+    }
+
+    .ico {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .user {
+      margin-top: auto;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255, 255, 255, .16);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #e6eee9;
+    }
+
+    .avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    .screen {
+      display: none;
+    }
+
+    .screen.active {
+      display: block;
+    }
+
+    .topbar {
+      min-height: 72px;
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      background: rgba(246, 247, 251, .92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+
+    .title h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .title p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      min-height: 38px;
+      border-radius: 8px;
+      padding: 0 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: 0 1px 0 rgba(31, 37, 34, .03);
+      text-decoration: none;
+    }
+
+    .btn.primary {
+      color: #fff;
+      background: var(--brand);
+      border-color: var(--brand);
+    }
+
+    .btn.ghost {
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .btn.danger {
+      color: #fff;
+      background: var(--red);
+      border-color: var(--red);
+    }
+
+    .btn.readonly {
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-color: #c8d6ff;
+    }
+
+    .icon-btn {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: inline-grid;
+      place-items: center;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+    }
+
+    .icon-btn:hover {
+      background: var(--surface-soft);
+    }
+
+    .content {
+      padding: 24px 28px 40px;
+      display: grid;
+      gap: 22px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      min-height: 92px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 14px;
+      display: grid;
+      align-content: space-between;
+      box-shadow: var(--shadow);
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      margin-top: 10px;
+      display: block;
+      font-size: 26px;
+      line-height: 1;
+    }
+
+    .band {
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, .5);
+      padding: 16px 0;
+    }
+
+    .filters {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .search {
+      min-width: min(360px, 100%);
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 0 12px;
+    }
+
+    .select {
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 0 32px 0 12px;
+      color: var(--ink);
+    }
+
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .workspace-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      min-height: 278px;
+      padding: 16px;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .seller {
+      display: flex;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .seller-logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      background: linear-gradient(135deg, #28785d, #3d7fb5);
+    }
+
+    .seller h2 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.2;
+    }
+
+    .seller p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .tag {
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 4px 9px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: fit-content;
+      font-size: 12px;
+      line-height: 1;
+      color: var(--muted);
+      background: var(--surface-soft);
+      border: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    .tag.green {
+      color: var(--green);
+      background: var(--green-soft);
+      border-color: #b8ddcc;
+    }
+
+    .tag.blue {
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-color: #bfd6ed;
+    }
+
+    .tag.amber {
+      color: var(--amber);
+      background: var(--amber-soft);
+      border-color: #eccd9e;
+    }
+
+    .tag.red {
+      color: var(--red);
+      background: var(--red-soft);
+      border-color: #e9b9b9;
+    }
+
+    .scope-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .card-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .mini-stat {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      min-height: 62px;
+      padding: 9px;
+    }
+
+    .mini-stat strong {
+      display: block;
+      font-size: 18px;
+      line-height: 1.1;
+    }
+
+    .mini-stat span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .card-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .seller-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 310px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .seller-main {
+      display: grid;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    .seller-aside {
+      display: grid;
+      gap: 14px;
+    }
+
+    .workspace-strip {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .strip-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .strip-head h2,
+    .panel h2 {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.2;
+    }
+
+    .strip-head p,
+    .panel p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .mode-toggle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 4px;
+    }
+
+    .mode-toggle button {
+      min-height: 34px;
+      border-radius: 6px;
+      color: var(--muted);
+      background: transparent;
+      white-space: nowrap;
+    }
+
+    .mode-toggle button.active {
+      background: var(--surface);
+      color: var(--ink);
+      box-shadow: 0 1px 4px rgba(31, 37, 34, .08);
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .step {
+      min-height: 82px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--surface-soft);
+      display: grid;
+      align-content: space-between;
+    }
+
+    .step.active {
+      border-color: #b8ddcc;
+      background: var(--green-soft);
+    }
+
+    .step strong {
+      font-size: 13px;
+      line-height: 1.15;
+    }
+
+    .step span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      overflow: auto;
+      padding-bottom: 2px;
+    }
+
+    .tabs button {
+      min-height: 36px;
+      border-radius: 8px;
+      padding: 0 12px;
+      background: transparent;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .tabs button.active {
+      background: var(--ink);
+      color: #fff;
+    }
+
+    .table-wrap {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      padding: 12px 12px;
+      text-align: left;
+      vertical-align: middle;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: var(--surface-soft);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .product-cell {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      flex: 0 0 auto;
+      background:
+        radial-gradient(circle at 62% 28%, rgba(255,255,255,.85) 0 12%, transparent 13%),
+        linear-gradient(135deg, #dfefe5 0 42%, #d6e5f1 42% 100%);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .thumb:after {
+      content: "";
+      position: absolute;
+      width: 24px;
+      height: 26px;
+      left: 10px;
+      bottom: 7px;
+      border-radius: 6px 6px 3px 3px;
+      background: rgba(40, 120, 93, .78);
+    }
+
+    .thumb.alt {
+      background:
+        radial-gradient(circle at 34% 24%, rgba(255,255,255,.9) 0 11%, transparent 12%),
+        linear-gradient(135deg, #f3e1c3 0 48%, #e4eef8 48% 100%);
+    }
+
+    .thumb.alt:after {
+      background: rgba(166, 101, 16, .76);
+    }
+
+    .product-name {
+      min-width: 0;
+    }
+
+    .product-name strong {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .product-name span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel-list {
+      margin-top: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .list-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 38px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .list-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .list-row strong {
+      color: var(--ink);
+    }
+
+    .empty-state {
+      min-height: 132px;
+      border: 1px dashed #bac5be;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      display: grid;
+      align-content: center;
+      justify-items: center;
+      gap: 10px;
+      text-align: center;
+      padding: 18px;
+    }
+
+    .empty-state strong {
+      font-size: 15px;
+    }
+
+    .empty-state span {
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 240px;
+    }
+
+    .detail-layout {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .detail-aside,
+    .detail-main {
+      display: grid;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .photo-preview {
+      min-height: 278px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 50% 18%, rgba(255,255,255,.9) 0 12%, transparent 13%),
+        linear-gradient(145deg, #e7f1ea 0 45%, #dceaf6 45% 100%);
+      position: relative;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .photo-preview:before {
+      content: "";
+      position: absolute;
+      left: 82px;
+      right: 82px;
+      top: 56px;
+      height: 152px;
+      border-radius: 46px 46px 28px 28px;
+      background: #f6d786;
+      border: 1px solid rgba(31, 37, 34, .08);
+    }
+
+    .photo-preview:after {
+      content: "";
+      position: absolute;
+      left: 94px;
+      right: 94px;
+      top: 124px;
+      height: 92px;
+      border-radius: 0 0 26px 26px;
+      background: rgba(40, 120, 93, .72);
+    }
+
+    .score {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+    }
+
+    .score-ring {
+      width: 92px;
+      height: 92px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at center, var(--surface) 0 58%, transparent 59%),
+        conic-gradient(var(--amber) 0 68%, #e6ebe5 68% 100%);
+      border: 1px solid var(--line);
+      font-weight: 800;
+      font-size: 22px;
+    }
+
+    .score-copy strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .score-copy span {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .audit-list,
+    .option-list,
+    .field-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .issue,
+    .option-row,
+    .field-box,
+    .risk-row,
+    .history-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 12px;
+    }
+
+    .issue {
+      display: grid;
+      gap: 6px;
+    }
+
+    .issue-head,
+    .option-head,
+    .risk-row,
+    .history-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .issue strong,
+    .option-row strong,
+    .field-box strong {
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .issue p,
+    .option-row p,
+    .field-box p,
+    .history-row p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .char-counter {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .char-counter.ok {
+      color: var(--green);
+    }
+
+    .before-after {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .field-box textarea {
+      width: 100%;
+      min-height: 112px;
+      margin-top: 10px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 10px;
+      font: inherit;
+      line-height: 1.4;
+    }
+
+    .field-box textarea.short {
+      min-height: 74px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .risk-row {
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .risk-row strong {
+      color: var(--ink);
+    }
+
+    .sticky-actions {
+      position: sticky;
+      bottom: 0;
+      z-index: 3;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .94);
+      backdrop-filter: blur(12px);
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    .sticky-actions span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 1180px) {
+      .login-screen {
+        grid-template-columns: 1fr;
+      }
+
+      .login-hero,
+      .login-panel {
+        min-height: auto;
+      }
+
+      .login-hero {
+        padding: 36px;
+      }
+
+      .login-panel {
+        padding: 28px;
+      }
+
+      .workspace-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .seller-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .detail-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 820px) {
+      .login-copy h1 {
+        font-size: 32px;
+      }
+
+      .login-hero,
+      .login-panel {
+        padding: 22px;
+      }
+
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .rail {
+        position: static;
+        height: auto;
+        padding: 14px;
+      }
+
+      .nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .user {
+        display: none;
+      }
+
+      .topbar {
+        position: static;
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 18px;
+      }
+
+      .content {
+        padding: 18px;
+      }
+
+      .workspace-grid,
+      .summary-grid,
+      .pipeline {
+        grid-template-columns: 1fr;
+      }
+
+      .mode-toggle {
+        grid-template-columns: 1fr;
+      }
+
+      .before-after,
+      .field-grid,
+      .sticky-actions {
+        grid-template-columns: 1fr;
+      }
+
+      .sticky-actions {
+        display: grid;
+      }
+
+      table {
+        min-width: 780px;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <section class="login-screen" id="login-screen">
+    <div class="login-hero">
+      <div class="login-brand">
+        <div class="brand-mark">WO</div>
+        <div>
+          <strong>WebOptimize</strong><br>
+          <span>Marketplace Card Service</span>
+        </div>
+      </div>
+
+      <div class="login-copy">
+        <h1>Вход в рабочий кабинет карточек</h1>
+        <p>Внутренний сервис для аудита карточек Wildberries, просмотра данных демо-кабинета и подготовки правок. Текущий режим WB - только чтение, без публикации изменений.</p>
+      </div>
+
+      <div class="login-badges">
+        <span class="login-badge">Wildberries read-only</span>
+        <span class="login-badge">Backup перед изменениями</span>
+        <span class="login-badge">Роли сотрудников</span>
+      </div>
+    </div>
+
+    <div class="login-panel">
+      <form class="login-card" id="login-form">
+        <div>
+          <h2>Авторизация</h2>
+          <p>Тестовые пользователи лежат в `document/test-users.csv`.</p>
+        </div>
+
+        <div class="form-grid">
+          <label class="field-label">
+            Логин
+            <input id="login-input" name="login" autocomplete="username" placeholder="dmitriy.admin">
+          </label>
+          <label class="field-label">
+            Пароль
+            <input id="password-input" name="password" type="password" autocomplete="current-password" placeholder="Введите пароль">
+          </label>
+        </div>
+
+        <div class="login-error" id="login-error">Логин или пароль не совпали с тестовой таблицей.</div>
+
+        <button class="btn primary" type="submit">Войти</button>
+
+        <div class="demo-users" id="demo-users">
+          <strong>Тестовые учетные записи</strong>
+          <button class="demo-user" type="button" data-fill-login="dmitriy.admin">dmitriy.admin · Администратор</button>
+          <button class="demo-user" type="button" data-fill-login="kristina.manager">kristina.manager · Руководитель</button>
+          <button class="demo-user" type="button" data-fill-login="anastasia.tech">anastasia.tech · Технический специалист</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div class="app is-hidden" id="app-shell">
+    <aside class="rail">
+      <div class="brand">
+        <div class="brand-mark">MC</div>
+        <div>
+          <strong>Card Service</strong>
+          <span>внутренний кабинет</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Основная навигация">
+        <button class="active" data-screen-button="employees" aria-label="Рабочие кабинеты">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
+          Кабинеты
+        </button>
+        <button aria-label="Задачи">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M9 11l2 2 4-5"></path><path d="M5 5h14v14H5z"></path></svg>
+          Задачи
+        </button>
+        <button aria-label="Шаблоны">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M7 4h10v16H7z"></path><path d="M10 8h4M10 12h4M10 16h2"></path></svg>
+          Шаблоны
+        </button>
+        <button aria-label="Отчеты">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M5 19V5"></path><path d="M9 19v-7"></path><path d="M13 19V8"></path><path d="M17 19v-4"></path></svg>
+          Отчеты
+        </button>
+      </nav>
+
+      <div class="user">
+        <div class="avatar" id="user-avatar">ДС</div>
+        <div>
+          <strong id="user-name">Дмитрий</strong><br>
+          <span id="user-role">руководитель</span>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <section class="screen active" id="employees-screen">
+        <header class="topbar">
+          <div class="title">
+            <h1>Кабинет сотрудников</h1>
+            <p>Рабочие кабинеты клиентов, доступы, объем карточек и текущие статусы.</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn" disabled title="Будет подключено после настройки реальной авторизации">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+              Новый кабинет
+            </button>
+            <button class="btn primary" disabled title="Сейчас тестируем только отображение данных">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>
+              Импорт карточек
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <div class="summary-grid">
+            <div class="metric">
+              <span>Активные кабинеты</span>
+              <strong>12</strong>
+            </div>
+            <div class="metric">
+              <span>Карточки в работе</span>
+              <strong>4 820</strong>
+            </div>
+            <div class="metric">
+              <span>На согласовании</span>
+              <strong>317</strong>
+            </div>
+            <div class="metric">
+              <span>Ошибки WB</span>
+              <strong>26</strong>
+            </div>
+          </div>
+
+          <div class="band">
+            <div class="filters">
+              <input class="search" type="search" placeholder="Поиск по клиенту, бренду, артикулу">
+              <select class="select" aria-label="Маркетплейс">
+                <option>Все маркетплейсы</option>
+                <option>Wildberries</option>
+                <option>Ozon</option>
+              </select>
+              <select class="select" aria-label="Охват">
+                <option>Любой охват</option>
+                <option>Полный магазин</option>
+                <option>Выбранные карточки</option>
+              </select>
+              <select class="select" aria-label="Статус">
+                <option>Все статусы</option>
+                <option>Аудит</option>
+                <option>Согласование</option>
+                <option>Ошибки</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="workspace-grid">
+            <article class="workspace-card">
+              <div class="card-head">
+                <div class="seller">
+                  <div class="seller-logo">LN</div>
+                  <div>
+                    <h2>Демо WB кабинет</h2>
+                    <p>Wildberries · тестовый кабинет · только чтение</p>
+                  </div>
+                </div>
+                <span class="tag blue">Read-only API</span>
+              </div>
+              <div class="scope-row">
+                <span>Охват</span>
+                <strong>Полный магазин</strong>
+              </div>
+              <div class="card-stats">
+                <div class="mini-stat"><strong>1 284</strong><span>карточки</span></div>
+                <div class="mini-stat"><strong>211</strong><span>правки</span></div>
+                <div class="mini-stat"><strong>8</strong><span>ошибки</span></div>
+              </div>
+              <div class="card-actions">
+                <span class="tag blue">Просмотр данных</span>
+                <button class="btn primary" data-open-seller>Открыть</button>
+              </div>
+            </article>
+
+            <article class="workspace-card">
+              <div class="card-head">
+                <div class="seller">
+                  <div class="seller-logo" style="background: linear-gradient(135deg, #7253a4, #2d67a3);">PF</div>
+                  <div>
+                    <h2>Prime Fit</h2>
+                    <p>Wildberries · специалист Илья</p>
+                  </div>
+                </div>
+                <span class="tag amber">Таблица</span>
+              </div>
+              <div class="scope-row">
+                <span>Охват</span>
+                <strong>Выбранные карточки</strong>
+              </div>
+              <div class="card-stats">
+                <div class="mini-stat"><strong>46</strong><span>карточки</span></div>
+                <div class="mini-stat"><strong>19</strong><span>правки</span></div>
+                <div class="mini-stat"><strong>2</strong><span>ошибки</span></div>
+              </div>
+              <div class="card-actions">
+                <span class="tag amber">Согласование</span>
+                <button class="btn" data-open-seller>Открыть</button>
+              </div>
+            </article>
+
+            <article class="workspace-card">
+              <div class="card-head">
+                <div class="seller">
+                  <div class="seller-logo" style="background: linear-gradient(135deg, #a66510, #28785d);">KT</div>
+                  <div>
+                    <h2>Koto Textile</h2>
+                    <p>Wildberries · менеджер Мария</p>
+                  </div>
+                </div>
+                <span class="tag red">Нет доступа</span>
+              </div>
+              <div class="scope-row">
+                <span>Охват</span>
+                <strong>Не выбран</strong>
+              </div>
+              <div class="card-stats">
+                <div class="mini-stat"><strong>0</strong><span>карточки</span></div>
+                <div class="mini-stat"><strong>0</strong><span>правки</span></div>
+                <div class="mini-stat"><strong>0</strong><span>ошибки</span></div>
+              </div>
+              <div class="card-actions">
+                <span class="tag red">Нужен API</span>
+                <button class="btn">Настроить</button>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" id="seller-screen">
+        <header class="topbar">
+          <div class="title">
+            <h1>Демо WB кабинет</h1>
+            <p>Wildberries · полный магазин · режим только чтение · последняя загрузка сегодня в 10:40</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn ghost" data-back>
+              <svg class="ico" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"></path></svg>
+              Кабинеты
+            </button>
+            <button class="btn">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+              Выбрать карточки
+            </button>
+            <button class="btn primary" disabled title="В read-only режиме задачи на публикацию не создаются">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+              Создать задачу
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <div class="seller-layout">
+            <div class="seller-main">
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Режим демо-кабинета</h2>
+                    <p>Система подключается к тестовому кабинету WB только для чтения данных. Создание, обновление, удаление и публикация изменений отключены.</p>
+                  </div>
+                  <span class="tag blue">read-only</span>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Охват работы</h2>
+                    <p>Текущий аудит и правки применяются только к выбранному охвату.</p>
+                  </div>
+                  <div class="mode-toggle" aria-label="Охват работы">
+                    <button class="active" data-scope="full">Полный магазин</button>
+                    <button data-scope="selected">Выбранные карточки</button>
+                  </div>
+                </div>
+                <div class="summary-grid">
+                  <div class="metric">
+                    <span>В текущем охвате</span>
+                    <strong id="scope-count">1 284</strong>
+                  </div>
+                  <div class="metric">
+                    <span>Источник данных</span>
+                    <strong id="scope-source">API</strong>
+                  </div>
+                  <div class="metric">
+                    <span>Готово к правкам</span>
+                    <strong id="scope-ready">211</strong>
+                  </div>
+                  <div class="metric">
+                    <span>Требуют внимания</span>
+                    <strong id="scope-alerts">38</strong>
+                  </div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Маршрут работы</h2>
+                    <p>Загрузка, аудит, правки, согласование и публикация.</p>
+                  </div>
+                  <span class="tag blue">Шаг 2 из 5</span>
+                </div>
+                <div class="pipeline">
+                  <div class="step active"><strong>Загрузка</strong><span>данные получены</span></div>
+                  <div class="step active"><strong>Аудит</strong><span>в работе</span></div>
+                  <div class="step"><strong>Правки</strong><span>211 черновиков</span></div>
+                  <div class="step"><strong>Согласование</strong><span>ожидает</span></div>
+                  <div class="step"><strong>Обновление</strong><span>не начато</span></div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Карточки</h2>
+                    <p>Таблица для аудита, отбора и массовых действий.</p>
+                  </div>
+                  <div class="toolbar">
+                    <button class="btn">
+                      <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"></path></svg>
+                      Фильтр
+                    </button>
+                    <button class="btn primary" disabled title="Массовые изменения отключены до отдельного разрешения">Массовая правка</button>
+                  </div>
+                </div>
+                <div class="tabs">
+                  <button class="active">Все</button>
+                  <button>Есть проблемы</button>
+                  <button>Предложены правки</button>
+                  <button>Согласование</button>
+                  <button>Ошибки WB</button>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style="width: 30%;">Карточка</th>
+                        <th style="width: 11%;">nmID</th>
+                        <th style="width: 14%;">Качество</th>
+                        <th style="width: 16%;">Проблема</th>
+                        <th style="width: 13%;">Статус</th>
+                        <th style="width: 8%;">Выбор</th>
+                        <th style="width: 8%;">Детали</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>
+                          <div class="product-cell">
+                            <div class="thumb"></div>
+                            <div class="product-name">
+                              <strong>Плед микрофибра 200х220</strong>
+                              <span>категория: покрывала и пледы</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>18492031</td>
+                        <td><span class="tag amber">Средняя</span></td>
+                        <td>Название без ключей</td>
+                        <td><span class="tag blue">Правка готова</span></td>
+                        <td><input type="checkbox" checked aria-label="Выбрать карточку"></td>
+                        <td>
+                          <button class="icon-btn" data-open-card aria-label="Открыть детальную карточку" title="Открыть детальную карточку">
+                            <svg class="ico" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="product-cell">
+                            <div class="thumb alt"></div>
+                            <div class="product-name">
+                              <strong>Комплект полотенец хлопок</strong>
+                              <span>категория: полотенца</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>19300482</td>
+                        <td><span class="tag red">Низкая</span></td>
+                        <td>Пустые характеристики</td>
+                        <td><span class="tag amber">Нужна проверка</span></td>
+                        <td><input type="checkbox" checked aria-label="Выбрать карточку"></td>
+                        <td>
+                          <button class="icon-btn" data-open-card aria-label="Открыть детальную карточку" title="Открыть детальную карточку">
+                            <svg class="ico" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <div class="product-cell">
+                            <div class="thumb"></div>
+                            <div class="product-name">
+                              <strong>Наволочка декоративная</strong>
+                              <span>категория: наволочки</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>20138477</td>
+                        <td><span class="tag green">Хорошая</span></td>
+                        <td>Нет критичных</td>
+                        <td><span class="tag green">Можно оставить</span></td>
+                        <td><input type="checkbox" aria-label="Выбрать карточку"></td>
+                        <td>
+                          <button class="icon-btn" data-open-card aria-label="Открыть детальную карточку" title="Открыть детальную карточку">
+                            <svg class="ico" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+
+            <aside class="seller-aside">
+              <section class="panel">
+                <h2>Доступ</h2>
+                <p>Права и источник карточек.</p>
+                <div class="panel-list">
+                  <div class="list-row"><span>Wildberries API</span><strong>только чтение</strong></div>
+                  <div class="list-row"><span>Карточки</span><strong id="aside-scope">весь магазин</strong></div>
+                  <div class="list-row"><span>Публикация</span><strong>отключена</strong></div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <h2>Быстрые действия</h2>
+                <div class="panel-list">
+                  <button class="btn readonly">Загрузить свежие данные</button>
+                  <button class="btn" disabled title="Пока тестируем только отображение данных">Импортировать список nmID</button>
+                  <button class="btn">Сравнить было/стало</button>
+                  <button class="btn">Выгрузить отчет</button>
+                </div>
+              </section>
+
+              <section class="panel">
+                <h2>Ошибки WB</h2>
+                <div class="panel-list">
+                  <div class="list-row"><span>Характеристика недоступна</span><strong>12</strong></div>
+                  <div class="list-row"><span>Название длиннее лимита</span><strong>7</strong></div>
+                  <div class="list-row"><span>Категория не совпадает</span><strong>5</strong></div>
+                </div>
+              </section>
+
+              <section class="empty-state">
+                <strong>Набор карточек</strong>
+                <span id="empty-copy">Для ограниченной задачи можно импортировать список nmID, SKU или артикулов.</span>
+                <button class="btn">Добавить карточки</button>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" id="card-screen">
+        <header class="topbar">
+          <div class="title">
+            <h1>Детальная карточка</h1>
+            <p>Панама детская летняя на завязках · WB 1111070706 · артикул 43564R-11-46</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn ghost" data-back-seller>
+              <svg class="ico" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"></path></svg>
+              Карточки
+            </button>
+            <a class="btn" href="https://www.wildberries.ru/catalog/7332835/detail.aspx?targetUrl=MI" target="_blank" rel="noreferrer">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M14 3h7v7"></path><path d="M10 14L21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg>
+              Открыть WB
+            </a>
+            <button class="btn primary">
+              <svg class="ico" viewBox="0 0 24 24"><path d="M9 11l2 2 4-5"></path><path d="M5 5h14v14H5z"></path></svg>
+              Утвердить
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <div class="detail-layout">
+            <aside class="detail-aside">
+              <div class="photo-preview" aria-label="Превью товара"></div>
+
+              <section class="panel">
+                <h2>Заполненность</h2>
+                <p>Оценка по полям карточки и рискам обновления.</p>
+                <div class="panel-list">
+                  <div class="score">
+                    <div class="score-ring">68%</div>
+                    <div class="score-copy">
+                      <strong>Есть проблемы</strong>
+                      <span>Характеристики и описание требуют ручной проверки перед публикацией.</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <h2>Данные карточки</h2>
+                <div class="panel-list">
+                  <div class="list-row"><span>Категория</span><strong>Панамы</strong></div>
+                  <div class="list-row"><span>Бренд</span><strong>Dan&Dani</strong></div>
+                  <div class="list-row"><span>Пол</span><strong>Мальчики</strong></div>
+                  <div class="list-row"><span>Состав</span><strong>хлопок 100%</strong></div>
+                  <div class="list-row"><span>Фото</span><strong>1 из 30</strong></div>
+                  <div class="list-row"><span>Цена</span><strong>требует сверки</strong></div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <h2>История</h2>
+                <div class="panel-list">
+                  <div class="history-row">
+                    <div>
+                      <strong>Аудит создан</strong>
+                      <p>Сегодня, 10:40 · импорт из Excel WB</p>
+                    </div>
+                    <span class="tag blue">аудит</span>
+                  </div>
+                  <div class="history-row">
+                    <div>
+                      <strong>Правки подготовлены</strong>
+                      <p>Сегодня, 11:15 · заголовок и описание</p>
+                    </div>
+                    <span class="tag amber">черновик</span>
+                  </div>
+                </div>
+              </section>
+            </aside>
+
+            <div class="detail-main">
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Проблемы аудита</h2>
+                    <p>Сервис показывает причину и действие для специалиста.</p>
+                  </div>
+                  <span class="tag amber">4 проблемы</span>
+                </div>
+                <div class="audit-list">
+                  <div class="issue">
+                    <div class="issue-head">
+                      <strong>Название слабее конкурентов</strong>
+                      <span class="tag amber">SEO</span>
+                    </div>
+                    <p>В заголовке есть товарный тип, но не хватает высокочастотных формулировок: "панама детская", "летняя", "на завязках".</p>
+                  </div>
+                  <div class="issue">
+                    <div class="issue-head">
+                      <strong>Описание не усиливает ключи</strong>
+                      <span class="tag blue">контент</span>
+                    </div>
+                    <p>Описание нужно оставить естественным, но добавить релевантные запросы без дублей и лишних синонимов.</p>
+                  </div>
+                  <div class="issue">
+                    <div class="issue-head">
+                      <strong>Мало фото</strong>
+                      <span class="tag red">медиа</span>
+                    </div>
+                    <p>В выгрузке указана одна ссылка на фото. Для хорошей карточки нужно проверить комплектность фото и первое изображение.</p>
+                  </div>
+                  <div class="issue">
+                    <div class="issue-head">
+                      <strong>Цена требует подтверждения</strong>
+                      <span class="tag red">риск</span>
+                    </div>
+                    <p>Цена влияет на маржинальность. Любое изменение цены должно идти через дополнительное подтверждение специалиста.</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Варианты заголовка</h2>
+                    <p>Все варианты до 60 символов и требуют ручного утверждения.</p>
+                  </div>
+                  <span class="tag green">лимит WB 60</span>
+                </div>
+                <div class="option-list">
+                  <div class="option-row">
+                    <div class="option-head">
+                      <strong>Панама детская летняя хлопковая на завязках</strong>
+                      <span class="char-counter ok">45/60</span>
+                    </div>
+                    <p>Сохраняет смысл товара и добавляет целевые запросы без дублей.</p>
+                  </div>
+                  <div class="option-row">
+                    <div class="option-head">
+                      <strong>Панама для мальчика летняя хлопок на завязках</strong>
+                      <span class="char-counter ok">47/60</span>
+                    </div>
+                    <p>Усиливает запрос по полу и материалу, подходит для категории "Панамы".</p>
+                  </div>
+                  <div class="option-row">
+                    <div class="option-head">
+                      <strong>Панама детская хлопковая для мальчика летняя</strong>
+                      <span class="char-counter ok">47/60</span>
+                    </div>
+                    <p>Более частотная структура: тип товара, аудитория, материал, сезон.</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Было / стало</h2>
+                    <p>Специалист редактирует правую колонку перед утверждением.</p>
+                  </div>
+                  <span class="tag blue">ручная проверка</span>
+                </div>
+                <div class="before-after">
+                  <div class="field-box">
+                    <strong>Было: заголовок</strong>
+                    <p>Панама детская летняя на завязках</p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Стало: заголовок</strong>
+                    <textarea class="short">Панама детская летняя хлопковая на завязках</textarea>
+                    <p><span class="char-counter ok">45/60 символов</span></p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Было: описание</strong>
+                    <p>Панама для мальчика - удобный и легкий летний головной убор для прогулок, отдыха и поездок.</p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Стало: описание</strong>
+                    <textarea>Детская летняя панама для мальчика из хлопка подходит для прогулок, отдыха, поездок и защиты от солнца. Модель на завязках удобно фиксируется, не спадает при активном движении и подходит для теплой погоды.</textarea>
+                    <p>Добавлены релевантные запросы: детская панама, летняя панама, панама для мальчика, хлопок, на завязках.</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="workspace-strip">
+                <div class="strip-head">
+                  <div>
+                    <h2>Характеристики и риски</h2>
+                    <p>Поля из Excel WB и обязательные проверки перед публикацией.</p>
+                  </div>
+                  <span class="tag red">цена под контролем</span>
+                </div>
+                <div class="field-grid">
+                  <div class="field-box">
+                    <strong>Состав</strong>
+                    <p>Было: хлопок 100%</p>
+                    <p>Предложение: оставить, значение выглядит корректным.</p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Пол</strong>
+                    <p>Было: мальчики</p>
+                    <p>Предложение: проверить, нужен ли дополнительный вариант "дети" по правилам категории.</p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Фото</strong>
+                    <p>Было: 1 ссылка</p>
+                    <p>Предложение: добавить фото на модели, крупный план ткани и завязок.</p>
+                  </div>
+                  <div class="field-box">
+                    <strong>Цена</strong>
+                    <p>Было: нет в текущем срезе прототипа</p>
+                    <p>Предложение: сверить маржинальность и конкурентов до изменения.</p>
+                  </div>
+                </div>
+                <div class="field-stack">
+                  <div class="risk-row">
+                    <div>
+                      <strong>Backup перед публикацией</strong>
+                      <span> старая версия карточки будет сохранена для отката.</span>
+                    </div>
+                    <span class="tag green">готово</span>
+                  </div>
+                  <div class="risk-row">
+                    <div>
+                      <strong>Цена и обязательные атрибуты</strong>
+                      <span> требуют отдельного подтверждения технического специалиста.</span>
+                    </div>
+                    <span class="tag red">подтвердить</span>
+                  </div>
+                </div>
+              </section>
+
+              <div class="sticky-actions">
+                <span>Статус карточки: предложены правки · WB в read-only режиме, публикация отключена.</span>
+                <div class="toolbar">
+                  <button class="btn" disabled title="Локальные черновики включим после настройки хранения">Сохранить черновик</button>
+                  <button class="btn danger" disabled title="Подтверждение цены включим после разрешения на изменения">Подтвердить риск цены</button>
+                  <button class="btn primary" disabled title="В read-only режиме система ничего не меняет на WB">Применить после проверки</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const loginScreen = document.querySelector("#login-screen");
+    const appShell = document.querySelector("#app-shell");
+    const loginForm = document.querySelector("#login-form");
+    const loginInput = document.querySelector("#login-input");
+    const passwordInput = document.querySelector("#password-input");
+    const loginError = document.querySelector("#login-error");
+    const userAvatar = document.querySelector("#user-avatar");
+    const userName = document.querySelector("#user-name");
+    const userRole = document.querySelector("#user-role");
+    const employeesScreen = document.querySelector("#employees-screen");
+    const sellerScreen = document.querySelector("#seller-screen");
+    const cardScreen = document.querySelector("#card-screen");
+    const openButtons = document.querySelectorAll("[data-open-seller]");
+    const openCardButtons = document.querySelectorAll("[data-open-card]");
+    const backButton = document.querySelector("[data-back]");
+    const backSellerButton = document.querySelector("[data-back-seller]");
+    const navCabinets = document.querySelector("[data-screen-button='employees']");
+    const scopeButtons = document.querySelectorAll("[data-scope]");
+    const scopeCount = document.querySelector("#scope-count");
+    const scopeSource = document.querySelector("#scope-source");
+    const scopeReady = document.querySelector("#scope-ready");
+    const scopeAlerts = document.querySelector("#scope-alerts");
+    const asideScope = document.querySelector("#aside-scope");
+    const emptyCopy = document.querySelector("#empty-copy");
+    const fallbackUsers = [
+      { login: "dmitriy.admin", password: "WO-demo-2026-admin", full_name: "Сафиуллин Дмитрий", role: "Администратор", access_level: "all" },
+      { login: "kristina.manager", password: "WO-demo-2026-lead", full_name: "Кристина Январева", role: "Руководитель", access_level: "overview" },
+      { login: "anastasia.tech", password: "WO-demo-2026-tech", full_name: "Анастсия Руднева", role: "Технический специалист", access_level: "readonly_wb" }
+    ];
+    let testUsers = [...fallbackUsers];
+
+    function parseCsv(text) {
+      const [headerLine, ...lines] = text.trim().split(/\r?\n/);
+      const headers = headerLine.split(",").map((item) => item.trim());
+      return lines
+        .filter(Boolean)
+        .map((line) => {
+          const values = line.split(",").map((item) => item.trim());
+          return headers.reduce((row, header, index) => {
+            row[header] = values[index] || "";
+            return row;
+          }, {});
+        });
+    }
+
+    async function loadTestUsers() {
+      try {
+        const response = await fetch("document/test-users.csv");
+        if (!response.ok) {
+          throw new Error("users file unavailable");
+        }
+        const text = await response.text();
+        testUsers = parseCsv(text);
+      } catch (error) {
+        testUsers = [...fallbackUsers];
+        loginError.textContent = "Не удалось загрузить document/test-users.csv, использую встроенные тестовые учетные записи.";
+        loginError.classList.add("active");
+      }
+    }
+
+    function initials(name) {
+      return name
+        .split(" ")
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase();
+    }
+
+    function enterApp(user) {
+      userAvatar.textContent = initials(user.full_name);
+      userName.textContent = user.full_name;
+      userRole.textContent = user.role;
+      loginScreen.classList.add("is-hidden");
+      appShell.classList.remove("is-hidden");
+      showEmployees();
+    }
+
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!testUsers.length) {
+        await loadTestUsers();
+      }
+
+      const login = loginInput.value.trim();
+      const password = passwordInput.value;
+      const user = testUsers.find((item) => item.login === login && item.password === password);
+
+      if (!user) {
+        loginError.classList.add("active");
+        return;
+      }
+
+      loginError.classList.remove("active");
+      enterApp(user);
+    });
+
+    document.querySelectorAll("[data-fill-login]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const user = testUsers.find((item) => item.login === button.dataset.fillLogin)
+          || fallbackUsers.find((item) => item.login === button.dataset.fillLogin);
+        if (!user) {
+          return;
+        }
+        loginInput.value = user.login;
+        passwordInput.value = user.password;
+        loginError.classList.remove("active");
+      });
+    });
+
+    function showEmployees() {
+      employeesScreen.classList.add("active");
+      sellerScreen.classList.remove("active");
+      cardScreen.classList.remove("active");
+      navCabinets.classList.add("active");
+    }
+
+    function showSeller() {
+      sellerScreen.classList.add("active");
+      employeesScreen.classList.remove("active");
+      cardScreen.classList.remove("active");
+      navCabinets.classList.remove("active");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function showCard() {
+      cardScreen.classList.add("active");
+      sellerScreen.classList.remove("active");
+      employeesScreen.classList.remove("active");
+      navCabinets.classList.remove("active");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function setScope(scope) {
+      scopeButtons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.scope === scope);
+      });
+
+      const selected = scope === "selected";
+      scopeCount.textContent = selected ? "46" : "1 284";
+      scopeSource.textContent = selected ? "Таблица" : "API";
+      scopeReady.textContent = selected ? "19" : "211";
+      scopeAlerts.textContent = selected ? "6" : "38";
+      asideScope.textContent = selected ? "выбранные карточки" : "весь магазин";
+      emptyCopy.textContent = selected
+        ? "В рабочий набор можно добавить nmID, SKU, артикулы или ссылки на карточки."
+        : "Для ограниченной задачи можно импортировать список nmID, SKU или артикулов.";
+    }
+
+    openButtons.forEach((button) => button.addEventListener("click", showSeller));
+    openCardButtons.forEach((button) => button.addEventListener("click", showCard));
+    backButton.addEventListener("click", showEmployees);
+    backSellerButton.addEventListener("click", showSeller);
+    navCabinets.addEventListener("click", showEmployees);
+    scopeButtons.forEach((button) => {
+      button.addEventListener("click", () => setScope(button.dataset.scope));
+    });
+
+    loadTestUsers();
+  </script>
+</body>
+</html>
