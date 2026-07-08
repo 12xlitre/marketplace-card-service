@@ -2750,6 +2750,63 @@ def audit_mpstats_post(token, path, params, body, warnings, cache_ttl=AUDIT_MARK
     return {}
 
 
+def audit_subject_path_from_info(info):
+  if not isinstance(info, dict):
+    return ""
+  candidates = [
+    info.get("path"),
+    info.get("subject_path"),
+    info.get("subjectPath"),
+    info.get("category_path"),
+    info.get("categoryPath"),
+  ]
+  subject = info.get("subject") if isinstance(info.get("subject"), dict) else {}
+  category = info.get("category") if isinstance(info.get("category"), dict) else {}
+  candidates.extend([
+    subject.get("path"),
+    subject.get("full_path"),
+    category.get("path"),
+    category.get("full_path"),
+  ])
+  for candidate in candidates:
+    if isinstance(candidate, list):
+      text = "/".join(audit_str(item) for item in candidate if audit_str(item))
+    else:
+      text = audit_str(candidate)
+    if text:
+      return text
+  return ""
+
+
+def audit_public_warning_text(message):
+  text = audit_str(message)
+  if not text:
+    return ""
+  if text.startswith("MPStats /analytics/v1/wb/subject/") or "MPStats niche path missing" in text:
+    return "Рыночный контекст MPStats по нише не загрузился: не удалось определить путь категории. Конкуренты, ценовые зоны и выводы по нише рассчитаны только по доступным данным карточки."
+  if "items/" in text and "/keywords" in text:
+    return "SEO-запросы MPStats по карточке не загрузились. Рекомендации по заголовку и описанию нужно дополнительно сверить вручную."
+  if "items/" in text and "/full" in text:
+    return "Метрики продаж MPStats по карточке не загрузились. Выводы по динамике продаж и выкупу не использовались."
+  if text.startswith("MPStats ") and "items/" in text:
+    return "Данные MPStats по карточке загрузились не полностью. Аудит использовал доступные WB-данные и локальные правила."
+  if text == "MPStats key missing" or "MPStats ключ не настроен" in text:
+    return "MPStats не подключен или временно недоступен: аудит выполнен по WB snapshot и локальным правилам."
+  if "characteristics-analysis" in text or "MPStats characteristics-analysis" in text:
+    return "MPStats-подсказки характеристик не загрузились. Значения характеристик нужно сверить по WB и вручную."
+  if text.startswith("WB CDN"):
+    return "Публичный снимок карточки WB CDN не загрузился; использован сохраненный WB snapshot."
+  if "WB справочник характеристик" in text:
+    return "Справочник характеристик WB не загрузился. Лимиты и обязательность некоторых полей нужно проверить вручную."
+  if "LLM refinement" in text or "LLM вернул" in text:
+    return "LLM-переформулировка недоступна; показан базовый аудит по фактам без дополнительной текстовой обработки."
+  return text
+
+
+def audit_public_warnings(warnings, limit=8):
+  return audit_unique((audit_public_warning_text(item) for item in warnings), limit=limit)
+
+
 def audit_card_values_from_characteristic(item):
   if not isinstance(item, dict):
     return audit_unique([item])
@@ -3041,10 +3098,19 @@ def audit_market_data(nm_id, subject_id, period, warnings):
   subject_params = {"d1": d1, "d2": d2}
   if subject_id:
     subject_params["subject_id"] = subject_id
+  subject_path = audit_subject_path_from_info(info)
   subject_body = {"startRow": 0, "endRow": 300, "filterModel": {}, "sortModel": [{"colId": "revenue", "sort": "desc"}]}
-  subject_items_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/items", subject_params, subject_body, warnings)
-  brands_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/brands", subject_params, subject_body, warnings)
-  price_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/price_segmentation", subject_params, subject_body, warnings)
+  if subject_path:
+    subject_params["path"] = subject_path
+    subject_body["path"] = subject_path
+    subject_items_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/items", subject_params, subject_body, warnings)
+    brands_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/brands", subject_params, subject_body, warnings)
+    price_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/price_segmentation", subject_params, subject_body, warnings)
+  else:
+    warnings.append("MPStats niche path missing")
+    subject_items_payload = {}
+    brands_payload = {}
+    price_payload = {}
   season_payload = audit_mpstats_get(token, f"/analytics/v1/wb/subject/season_effects/annual?{urlencode({'subject_id': subject_id})}", warnings, cache_ttl=30 * 86400) if subject_id else {}
 
   stats = stats_payload.get("period_stats") if isinstance(stats_payload, dict) else {}
@@ -3307,7 +3373,7 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
     main_problems.append(f"{len(high_characteristics)} промо-значимых характеристик требуют проверки по MPStats/WB.")
   if description_priority in {"high", "medium"}:
     main_problems.append(description_reason)
-  risk_notes = list(warnings)
+  risk_notes = audit_public_warnings(warnings)
   if not market_data.get("keywords"):
     risk_notes.append("SEO-запросы MPStats не получены: заголовок и описание оценены по WB snapshot и локальным правилам.")
   if characteristics and any(item.get("topCategoryValues") for item in characteristics):
@@ -3502,7 +3568,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
   }
   result = audit_llm_refine(evidence, base_result, warnings)
   if result is not base_result:
-    result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *warnings], limit=8)
+    result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *audit_public_warnings(warnings)], limit=8)
   draft_content = audit_draft_from_result(result, characteristic_draft)
   changed_characteristics = sum(1 for item in draft_content.get("characteristics", {}).values() if item.get("source") == "audit")
   return {
@@ -3531,7 +3597,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "keywords": len(market_data.get("keywords", [])),
       "competitors": len(competitors),
       "mpstatsCharacteristics": len(mpstats_characteristics),
-      "warnings": warnings,
+      "warnings": audit_public_warnings(warnings),
     },
     "mpstatsCharacteristics": mpstats_characteristics,
   }
