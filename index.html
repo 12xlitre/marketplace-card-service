@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Marketplace Card Service Prototype</title>
+  <title>OptiCards</title>
+  <meta http-equiv="Cache-Control" content="no-store">
   <style>
     :root {
       --bg: #f6f7fb;
@@ -100,24 +101,6 @@
       color: rgba(255, 255, 255, .78);
       font-size: 15px;
       line-height: 1.6;
-    }
-
-    .login-badges {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .login-badge {
-      min-height: 30px;
-      border-radius: 999px;
-      padding: 6px 11px;
-      display: inline-flex;
-      align-items: center;
-      color: rgba(255,255,255,.88);
-      border: 1px solid rgba(255,255,255,.22);
-      background: rgba(255,255,255,.1);
-      font-size: 12px;
     }
 
     .login-panel {
@@ -1373,19 +1356,13 @@
         <div class="brand-mark">WO</div>
         <div>
           <strong>WebOptimize</strong><br>
-          <span>Marketplace Card Service</span>
+          <span>OptiCards</span>
         </div>
       </div>
 
       <div class="login-copy">
-        <h1>Вход в рабочий кабинет карточек</h1>
-        <p>Внутренний сервис для аудита карточек Wildberries, просмотра данных демо-кабинета и подготовки правок. Текущий режим WB - только чтение, без публикации изменений.</p>
-      </div>
-
-      <div class="login-badges">
-        <span class="login-badge">Wildberries read-only</span>
-        <span class="login-badge">Backup перед изменениями</span>
-        <span class="login-badge">Роли сотрудников</span>
+        <h1>OptiCards</h1>
+        <p>Рабочее пространство WebOptimize для ведения карточек товаров, подготовки улучшений и контроля задач команды.</p>
       </div>
     </div>
 
@@ -1399,7 +1376,7 @@
         <div class="form-grid">
           <label class="field-label">
             Логин
-            <input id="login-input" name="login" autocomplete="username" placeholder="dmitriy.admin">
+            <input id="login-input" name="login" autocomplete="username" placeholder="Введите логин">
           </label>
           <label class="field-label">
             Пароль
@@ -1420,7 +1397,7 @@
         <div class="brand-mark">MC</div>
         <div>
           <strong>Card Service</strong>
-          <span>внутренний кабинет</span>
+          <span>рабочий кабинет</span>
         </div>
       </div>
 
@@ -1516,11 +1493,11 @@
                 <div class="seller">
                   <div class="seller-logo">LN</div>
                   <div>
-                    <h2>Демо WB кабинет</h2>
-                    <p>Wildberries · тестовый кабинет · только чтение</p>
+                    <h2>Кабинет WB</h2>
+                    <p>Wildberries · кабинет продавца · просмотр данных</p>
                   </div>
                 </div>
-                <span class="tag blue">Read-only API</span>
+                <span class="tag blue">API подключен</span>
               </div>
               <div class="scope-row">
                 <span>Охват</span>
@@ -1603,11 +1580,11 @@
 
             <section class="panel">
               <h2>Интеграции</h2>
-              <p>WB API подключается в режиме только чтения до отдельного решения о записи изменений.</p>
+              <p>Источники данных для загрузки карточек и аналитики магазина.</p>
               <div class="panel-list">
-                <div class="list-row"><span>Wildberries Content API</span><strong>read-only</strong></div>
+                <div class="list-row"><span>Wildberries</span><strong>подключение данных</strong></div>
                 <div class="list-row"><span>MPStats</span><strong>витрина и SEO</strong></div>
-                <div class="list-row"><span>Хранение токенов</span><strong>только сервер</strong></div>
+                <div class="list-row"><span>Безопасность доступов</span><strong>серверное хранение</strong></div>
               </div>
             </section>
           </div>
@@ -1617,7 +1594,7 @@
       <section class="screen" id="seller-screen">
         <header class="topbar">
           <div class="title">
-            <h1 id="seller-title">Демо WB кабинет</h1>
+            <h1 id="seller-title">Кабинет WB</h1>
             <p id="seller-subtitle">Wildberries · полный магазин · режим только чтение · последняя загрузка сегодня в 10:40</p>
           </div>
           <div class="toolbar">
@@ -1633,7 +1610,7 @@
               <svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
               Добавить таблицу
             </button>
-            <button class="btn primary" disabled title="В read-only режиме задачи на публикацию не создаются">
+            <button class="btn primary" disabled title="Публикация включается после настройки согласования">
               <svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
               Создать задачу
             </button>
@@ -1649,7 +1626,7 @@
                     <h2>Обзор кабинета</h2>
                     <p>Главные данные по порталу перед переходом к аудиту категории и семантического ядра.</p>
                   </div>
-                  <span class="tag blue" id="seller-mode-tag">read-only API</span>
+                  <span class="tag blue" id="seller-mode-tag">API подключен</span>
                 </div>
                 <div class="summary-grid">
                   <div class="metric">
@@ -2106,7 +2083,7 @@
                   </div>
                   <div class="field-box">
                     <strong>Цена</strong>
-                    <p>Было: нет в текущем срезе прототипа</p>
+                    <p>Было: нет в текущих данных</p>
                     <p>Предложение: сверить маржинальность и конкурентов до изменения.</p>
                   </div>
                 </div>
@@ -2129,11 +2106,11 @@
               </section>
 
               <div class="sticky-actions">
-                <span>Статус карточки: предложены правки · WB в read-only режиме, публикация отключена.</span>
+                <span>Статус карточки: предложены правки · изменения ожидают проверки.</span>
                 <div class="toolbar">
                   <button class="btn" disabled title="Локальные черновики включим после настройки хранения">Сохранить черновик</button>
                   <button class="btn danger" disabled title="Подтверждение цены включим после разрешения на изменения">Подтвердить риск цены</button>
-                  <button class="btn primary" disabled title="В read-only режиме система ничего не меняет на WB">Применить после проверки</button>
+                  <button class="btn primary" disabled title="Публикация включается после настройки согласования">Применить после проверки</button>
                 </div>
               </div>
             </div>
@@ -2204,9 +2181,9 @@
             WB API ключ
             <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Вставьте ключ кабинета">
           </label>
-          <div class="form-note">В статическом прототипе ключ не пишется в localStorage и не отправляется в WB напрямую. Следующий серверный шаг: принять ключ на backend, сохранить зашифрованно и проверить read-only доступ.</div>
+          <div class="form-note">Ключ нужен для проверки доступа к кабинету и загрузки карточек. После подключения он должен храниться только на сервере.</div>
           <div class="source-flow" aria-label="Что произойдет после подключения API">
-            <div class="list-row"><span>1. Проверка токена WB</span><strong>read-only</strong></div>
+            <div class="list-row"><span>1. Проверка токена WB</span><strong>без изменений</strong></div>
             <div class="list-row"><span>2. Определение кабинета и брендов</span><strong>WB API</strong></div>
             <div class="list-row"><span>3. Загрузка списка карточек</span><strong>nmID</strong></div>
             <div class="list-row"><span>4. Снапшот перед аудитом</span><strong>без записи в WB</strong></div>
@@ -2305,11 +2282,11 @@
     let connectMode = "api";
     const demoPortal = {
       id: "demo-wb",
-      name: "Демо WB кабинет",
+      name: "Кабинет WB",
       marketplace: "Wildberries",
       mode: "api",
       scope: "full",
-      status: "Read-only API",
+      status: "API подключен",
       ownerLogin: "anastasia.tech",
       cardCount: 1284,
       workCount: 211,
@@ -2616,16 +2593,16 @@
       const scopeLabel = currentPortal.scope === "selected" ? "выбранные карточки" : "полный магазин";
 
       sellerTitle.textContent = currentPortal.name;
-      sellerSubtitle.textContent = `${currentPortal.marketplace} · ${scopeLabel} · ${isApi ? "API read-only" : "ручной режим"} · ответственный ${owner.full_name}`;
+      sellerSubtitle.textContent = `${currentPortal.marketplace} · ${scopeLabel} · ${isApi ? "API подключение" : "ручной режим"} · ответственный ${owner.full_name}`;
       sellerModeTag.className = isApi ? "tag blue" : "tag amber";
-      sellerModeTag.textContent = isApi ? "read-only API" : "ручной режим";
+      sellerModeTag.textContent = isApi ? "API подключен" : "ручной режим";
       sellerTotalCards.textContent = formatNumber(currentPortal.cardCount);
       sellerWorkCards.textContent = formatNumber(currentPortal.workCount);
       sellerProblemCards.textContent = formatNumber(currentPortal.problemCount);
       sellerSourceTag.className = isApi ? "tag blue" : "tag amber";
       sellerSourceTag.textContent = isApi ? "API ожидает серверной проверки" : "таблицы и ручной ввод";
       sellerSourceCopy.textContent = isApi
-        ? "API ключ принят в интерфейсе прототипа, но не сохраняется в браузере. Первый backend-шаг: проверить токен, определить кабинет WB и загрузить список карточек без записи изменений."
+        ? "После проверки доступа система определит кабинет WB и загрузит список карточек без внесения изменений на маркетплейсе."
         : "Портал создан без API: ссылка на магазин нужна только для ручной сверки, а карточки добавляются через Excel, nmID, SKU, артикулы продавца или ссылки. API можно подключить позже.";
       renderSourceFlow(currentPortal);
       renderProjectMembers();
