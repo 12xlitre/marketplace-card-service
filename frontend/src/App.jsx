@@ -3405,7 +3405,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
 }
 
 function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
-  const [activeTab, setActiveTab] = useState("audit");
+  const [activeTab, setActiveTab] = useState("card");
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
@@ -4009,8 +4009,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
           <div className="detail-main">
             <nav className="detail-tabs" aria-label="Разделы карточки">
-              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Аудит</button>
               <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => setActiveTab("card")}>Карточка</button>
+              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Аудит</button>
               <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
             </nav>
 
