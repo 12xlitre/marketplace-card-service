@@ -1,22 +1,25 @@
 :root {
-  --bg: #f5f7f4;
+  --bg: #f6f7fb;
   --surface: #ffffff;
-  --surface-soft: #f0f4f1;
-  --ink: #1f2522;
-  --muted: #67736d;
-  --line: #dfe6e1;
-  --brand: #28785d;
-  --brand-soft: #e2f1ea;
-  --blue: #2f6f9f;
-  --blue-soft: #e7f0f8;
-  --amber: #9b6517;
-  --amber-soft: #fbf0dc;
-  --red: #aa3d3d;
-  --red-soft: #f7e4e4;
-  --green: #28785d;
-  --green-soft: #e4f3eb;
-  --shadow: 0 12px 34px rgba(31, 37, 34, .08);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --surface-soft: #fbfbfe;
+  --ink: #222222;
+  --muted: #707083;
+  --line: #e2e3ec;
+  --brand: #494ad8;
+  --brand-strong: #38323f;
+  --brand-soft: #ececff;
+  --blue: #3761e9;
+  --blue-soft: #e8efff;
+  --cyan: #32ccff;
+  --amber: #b36a08;
+  --amber-soft: #fff1d9;
+  --red: #c83d4a;
+  --red-soft: #fde7eb;
+  --green: #14845f;
+  --green-soft: #e4f5ee;
+  --violet: #8b42dc;
+  --shadow: 0 10px 28px rgba(34, 34, 34, .08);
+  font-family: Montserrat, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--ink);
   background: var(--bg);
 }
@@ -61,33 +64,31 @@ a {
 }
 
 .brand-mark {
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
   display: grid;
   place-items: center;
-  background: var(--brand);
-  color: #fff;
+  background: linear-gradient(135deg, #32ccff, #e595ff);
+  color: #222;
   font-weight: 800;
 }
 
 .login-screen {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 430px;
-  background: var(--surface);
+  grid-template-columns: minmax(0, 1fr) 440px;
+  background: linear-gradient(135deg, #262235 0%, #494ad8 52%, #2a7dd8 100%);
+  color: #fff;
 }
 
 .login-hero {
   min-height: 100vh;
-  padding: 44px;
+  padding: 56px;
   display: grid;
   align-content: space-between;
-  background:
-    linear-gradient(rgba(31, 37, 34, .58), rgba(31, 37, 34, .38)),
-    url("https://images.unsplash.com/photo-1556742502-ec7c0e9f34b1?auto=format&fit=crop&w=1400&q=80");
-  background-size: cover;
-  background-position: center;
+  gap: 36px;
+  background: transparent;
   color: #fff;
 }
 
@@ -95,6 +96,11 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.login-brand .brand-mark {
+  background: #fff;
+  color: var(--brand);
 }
 
 .login-brand span {
@@ -109,25 +115,27 @@ a {
 
 .login-copy h1 {
   margin: 0;
-  font-size: 46px;
-  line-height: 1;
+  font-size: 44px;
+  line-height: 1.08;
   letter-spacing: 0;
 }
 
 .login-copy p {
-  margin: 14px 0 0;
-  max-width: 520px;
-  font-size: 17px;
-  line-height: 1.5;
-  color: rgba(255, 255, 255, .86);
+  margin: 18px 0 0;
+  max-width: 560px;
+  font-size: 15px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, .78);
 }
 
 .login-card {
   min-height: 100vh;
-  padding: 44px;
+  padding: 34px;
   display: grid;
   align-content: center;
-  gap: 16px;
+  gap: 18px;
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .login-card h2 {
@@ -188,7 +196,7 @@ a {
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr);
+  grid-template-columns: 268px minmax(0, 1fr);
 }
 
 .rail {
@@ -199,8 +207,8 @@ a {
   display: grid;
   grid-template-rows: auto 1fr auto auto;
   gap: 18px;
-  background: #202923;
-  color: #fff;
+  background: #262235;
+  color: #f8fbf8;
 }
 
 .rail-brand {
@@ -240,34 +248,61 @@ a {
   background: rgba(255, 255, 255, .1);
 }
 
+.nav button:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.nav button:disabled:hover {
+  color: rgba(255, 255, 255, .72);
+  background: transparent;
+}
+
+.nav-status {
+  margin-left: auto;
+  color: #c9d4ce;
+  font-size: 11px;
+}
+
 .rail-user {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, .16);
+}
+
+.rail-user > div:last-child {
+  min-width: 0;
 }
 
 .avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
-  background: rgba(255, 255, 255, .14);
-  font-size: 12px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 13px;
   font-weight: 800;
 }
 
 .rail-user strong {
   display: block;
-  max-width: 150px;
+  max-width: 178px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
 }
 
 .rail-logout {
-  color: rgba(255, 255, 255, .82);
+  width: 100%;
+  justify-content: flex-start;
+  color: #f8fbf8;
+  background: rgba(255, 255, 255, .08);
   border-color: rgba(255, 255, 255, .18);
 }
 
@@ -289,7 +324,7 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  background: rgba(245, 247, 244, .94);
+  background: rgba(246, 247, 251, .92);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(12px);
 }
@@ -522,7 +557,8 @@ a {
   place-items: center;
   color: #fff;
   font-weight: 800;
-  background: linear-gradient(135deg, #28785d, #3d7fb5);
+  background: linear-gradient(135deg, #32ccff, #e595ff);
+  color: #222;
   flex: 0 0 auto;
 }
 
@@ -910,7 +946,8 @@ tr:last-child td {
 }
 
 .photo-preview {
-  min-height: 278px;
+  min-height: 0;
+  height: 278px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background:
@@ -921,6 +958,12 @@ tr:last-child td {
   position: relative;
   overflow: hidden;
   box-shadow: var(--shadow);
+}
+
+.photo-preview.has-image {
+  background-color: #fff;
+  background-size: contain;
+  background-repeat: no-repeat;
 }
 
 .photo-preview:before {
@@ -963,6 +1006,11 @@ tr:last-child td {
   border-radius: 8px;
   background: var(--surface-soft);
   padding: 12px;
+}
+
+.muted-row {
+  background: #f7f7fb;
+  color: var(--muted);
 }
 
 .issue-head,

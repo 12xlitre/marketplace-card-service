@@ -670,9 +670,9 @@ function LoginScreen({ onLogin }) {
 
 function Rail({ user, screen, onNavigate, onLogout }) {
   const nav = [
-    ["cabinets", "Кабинеты", LayoutDashboard],
-    ["audit", "Аудит", ClipboardList],
-    ["settings", "Настройки", Settings],
+    { key: "cabinets", label: "Кабинеты", Icon: LayoutDashboard },
+    { key: "audit", label: "Аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
+    { key: "settings", label: "Настройки", Icon: Settings },
   ];
   return (
     <aside className="rail">
@@ -684,10 +684,21 @@ function Rail({ user, screen, onNavigate, onLogout }) {
         </div>
       </div>
       <nav className="nav">
-        {nav.map(([key, label, Icon]) => (
-          <button key={key} className={screen === key ? "active" : ""} type="button" onClick={() => onNavigate(key)}>
+        {nav.map(({ key, label, Icon, disabled, status }) => (
+          <button
+            key={key}
+            className={screen === key ? "active" : ""}
+            type="button"
+            disabled={disabled}
+            onClick={() => {
+              if (!disabled) {
+                onNavigate(key);
+              }
+            }}
+          >
             <Icon size={17} />
             <span>{label}</span>
+            {status ? <span className="nav-status">{status}</span> : null}
           </button>
         ))}
       </nav>
@@ -1026,7 +1037,8 @@ function CardsTable({ cards, portal, onOpenCard }) {
 
 function CardDetailScreen({ card, portal, onBack }) {
   const photoUrl = safeHttpsUrl(card?.photoUrl);
-  const suggestions = titleSuggestions(card);
+  const currentTitle = textOrDash(card?.title);
+  const titleLength = currentTitle.length;
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
   return (
     <section className="screen active">
@@ -1081,21 +1093,26 @@ function CardDetailScreen({ card, portal, onBack }) {
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
-                  <h2>Варианты заголовка</h2>
-                  <p>Черновики не отправляются в WB без отдельного согласования.</p>
+                  <h2>Заголовок</h2>
+                  <p>Сейчас это исходное значение из WB. SEO-варианты появятся после подключения MPStats и правил категории.</p>
                 </div>
-                <Tag tone="green">лимит WB 60</Tag>
+                <Tag tone={titleLength <= 60 ? "green" : "amber"}>лимит WB 60</Tag>
               </div>
               <div className="option-list">
-                {suggestions.map((title, index) => (
-                  <div className="option-row" key={`${title}-${index}`}>
-                    <div className="option-head">
-                      <strong>{title}</strong>
-                      <span className={`char-counter ${title.length <= 60 ? "ok" : ""}`}>{title.length}/60</span>
-                    </div>
-                    <p>{index === 0 ? "Сохраняет исходный смысл и держит заголовок в лимите WB." : "Вариант для ручной SEO-проверки специалистом."}</p>
+                <div className="option-row">
+                  <div className="option-head">
+                    <strong>{currentTitle}</strong>
+                    <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
                   </div>
-                ))}
+                  <p>Это не рекомендация, а текущее название карточки из WB snapshot.</p>
+                </div>
+                <div className="option-row muted-row">
+                  <div className="option-head">
+                    <strong>SEO-варианты не рассчитаны</strong>
+                    <span className="char-counter">MPStats</span>
+                  </div>
+                  <p>Чтобы предлагать заголовки честно, нужны частотность, конкуренты и правила категории. Сейчас этих данных в системе нет.</p>
+                </div>
               </div>
             </section>
 
@@ -1110,21 +1127,21 @@ function CardDetailScreen({ card, portal, onBack }) {
               <div className="before-after">
                 <div className="field-box">
                   <strong>Было: заголовок</strong>
-                  <p>{textOrDash(card?.title)}</p>
+                  <p>{currentTitle}</p>
                 </div>
                 <div className="field-box">
-                  <strong>Стало: заголовок</strong>
-                  <textarea className="short" defaultValue={suggestions[0]} />
-                  <p><span className="char-counter ok">{suggestions[0].length}/60 символов</span></p>
+                  <strong>Черновик заголовка</strong>
+                  <textarea className="short" defaultValue={currentTitle} />
+                  <p><span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60 символов</span></p>
                 </div>
                 <div className="field-box">
                   <strong>Было: описание</strong>
-                  <p>Описание не загружено в текущем read-only снимке WB.</p>
+                  <p>Описание пока не сохраняется в текущем WB snapshot.</p>
                 </div>
                 <div className="field-box">
-                  <strong>Стало: описание</strong>
-                  <textarea defaultValue={`${textOrDash(card?.title)}. Категория WB: ${textOrDash(card?.subjectName)}. Перед публикацией нужно проверить обязательные характеристики, фото и SEO-формулировки.`} />
-                  <p>Черновик остается внутри OptiCards.</p>
+                  <strong>Черновик описания</strong>
+                  <textarea placeholder="Здесь будет локальное редактирование описания после сохранения расширенного WB snapshot." defaultValue="" />
+                  <p>Поле подготовлено под будущий черновик. Сейчас изменения не сохраняются и не отправляются в WB.</p>
                 </div>
               </div>
             </section>
