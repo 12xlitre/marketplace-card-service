@@ -16,7 +16,19 @@ http://localhost:5173/
 npm run prototype
 ```
 
-Прототип сейчас находится в `index.html` и показывает основной входной сценарий:
+Frontend переведен на React + Vite. Исходники находятся в `frontend/`, а production-сборка генерирует single-file `index.html`, чтобы текущий серверный Dockerfile продолжал копировать только корневые файлы.
+
+Команды frontend:
+
+```bash
+npm run frontend:dev
+npm run frontend:build
+npm run frontend:check
+```
+
+`npm run frontend:build` собирает `frontend/` в `.react-build/index.html` и затем обновляет корневой `index.html`, который отдает Python backend.
+
+Текущий frontend показывает основной входной сценарий:
 
 - экран логина через backend: пользователи в SQLite, пароли в PBKDF2-хешах, сессия в HttpOnly cookie;
 - главный экран `Кабинеты` с добавлением портала через API или вручную;
@@ -61,6 +73,8 @@ Read-only маршруты backend:
 POST /api/portals
 GET /api/portals
 POST /api/portals/<portal_id>/team
+POST /api/portals/<portal_id>/archive
+POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
 ```
 
