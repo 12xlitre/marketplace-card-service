@@ -2772,8 +2772,9 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
     if (onDraftActivity) {
       onDraftActivity({ audit: true, draft: true });
     }
+    const persistPromise = persistStructuredDraft(structuredDraft, { auditDone: true });
     setActiveTab("changes");
-    await persistStructuredDraft(structuredDraft, { auditDone: true });
+    await persistPromise;
   }
 
   function removeDraftCharacteristic(key) {
@@ -2827,7 +2828,15 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
 
   async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
-    localStorage.setItem(draftStorageKey, JSON.stringify({ ...structuredDraft, savedAt }));
+    let savedLocally = false;
+    try {
+      localStorage.setItem(draftStorageKey, JSON.stringify({ ...structuredDraft, savedAt }));
+      savedLocally = true;
+      setDraftSavedAt(savedAt);
+      setDraftSaveStatus(backendDraftEnabled ? "saving" : "local");
+    } catch {
+      setDraftSaveStatus("local-error");
+    }
     if (backendDraftEnabled) {
       try {
         const response = await apiRequest("/api/card-drafts", {
@@ -2850,12 +2859,11 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
         }
         return;
       } catch {
-        setDraftSaveStatus("local-fallback");
+        setDraftSaveStatus(savedLocally ? "local-fallback" : "error");
       }
     } else {
-      setDraftSaveStatus("local");
+      setDraftSaveStatus(savedLocally ? "local" : "error");
     }
-    setDraftSavedAt(savedAt);
   }
 
   async function saveDraft() {
@@ -3130,6 +3138,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
                       ? `Сохранен ${new Date(draftSavedAt).toLocaleString("ru-RU")}${draftSaveStatus === "backend" ? " на backend" : " локально"}`
                       : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
                     {draftSaveStatus === "local-fallback" ? <p>Backend недоступен для черновика, временно сохранено в этом браузере.</p> : null}
+                    {draftSaveStatus === "saving" ? <p>Сохраняем копию на backend.</p> : null}
+                    {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
