@@ -1478,6 +1478,13 @@ tr:last-child td {
   font-size: 11px;
 }
 
+.characteristic-option.custom-option {
+  border-color: #b8ddcc;
+  background: var(--green-soft);
+  color: var(--green);
+  font-weight: 700;
+}
+
 .issue,
 .option-row,
 .field-box {

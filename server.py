@@ -1230,6 +1230,8 @@ def normalize_wb_characteristic(item):
     "hasFilter": bool(item.get("hasFilter")),
     "isVariable": bool(item.get("isVariable")),
     "existNamedField": bool(item.get("existNamedField")),
+    "strictValues": False,
+    "valueMode": "free",
   }
 
 
@@ -1303,6 +1305,9 @@ def attach_wb_directory_values(token, characteristics):
           characteristic["valueOptions"] = fetch_wb_directory_values(token, cache_key, path)
         except WbApiError:
           characteristic["valueOptions"] = WB_DIRECTORY_FALLBACK_VALUES.get(cache_key, [])
+        if characteristic["valueOptions"]:
+          characteristic["strictValues"] = True
+          characteristic["valueMode"] = "directory"
         break
 
 

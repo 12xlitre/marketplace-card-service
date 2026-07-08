@@ -615,6 +615,8 @@ function normalizeCharacteristicMeta(item) {
     unitName: item?.unitName || "",
     maxCount: item?.maxCount,
     charcType: item?.charcType,
+    strictValues: Boolean(item?.strictValues),
+    valueMode: item?.valueMode || "free",
   };
 }
 
@@ -673,6 +675,26 @@ function fallbackCharacteristicValueOptions(label) {
     return ["Весна", "Лето", "Осень", "Зима", "Демисезон"];
   }
   return [];
+}
+
+function strictCharacteristicByLabel(label) {
+  const normalizedLabel = normalizedCharacteristicOption(label);
+  const words = normalizedLabel.replaceAll("/", " ").replaceAll("-", " ").split(/\s+/);
+  return (
+    words.includes("пол")
+    || normalizedLabel.includes("гендер")
+    || normalizedLabel.includes("цвет")
+    || normalizedLabel.includes("страна производства")
+    || normalizedLabel.includes("страна изготов")
+    || normalizedLabel.includes("сезон")
+    || normalizedLabel.includes("ндс")
+    || normalizedLabel.includes("тнвэд")
+    || normalizedLabel.includes("тн вэд")
+  );
+}
+
+function characteristicUsesStrictValues(meta) {
+  return Boolean(meta?.strictValues || meta?.valueMode === "directory" || strictCharacteristicByLabel(meta?.name || meta?.label || ""));
 }
 
 function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = []) {
@@ -2095,11 +2117,20 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
   const values = draftCharacteristicValues(draft);
   const limit = characteristicValueLimit(meta);
   const isLimitReached = Boolean(limit && values.length >= limit);
+  const strictValues = characteristicUsesStrictValues(meta);
   const selectedValues = new Set(values.map(normalizedCharacteristicOption));
   const normalizedQuery = normalizedCharacteristicOption(query);
+  const customValue = query.trim();
   const availableValues = valueOptions
     .filter((value) => !selectedValues.has(normalizedCharacteristicOption(value)))
     .filter((value) => !normalizedQuery || normalizedCharacteristicOption(value).includes(normalizedQuery));
+  const canAddCustomValue = Boolean(
+    customValue
+    && !strictValues
+    && !isLimitReached
+    && !selectedValues.has(normalizedCharacteristicOption(customValue))
+    && !availableValues.some((value) => normalizedCharacteristicOption(value) === normalizedCharacteristicOption(customValue))
+  );
 
   function addValue(value) {
     if (isLimitReached) {
@@ -2135,22 +2166,29 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
           onFocus={() => setIsOptionsOpen(true)}
           onBlur={() => setIsOptionsOpen(false)}
           disabled={isLimitReached}
-          placeholder={isLimitReached ? "Лимит значений достигнут" : "Выбрать из вариантов WB"}
+          placeholder={isLimitReached ? "Лимит значений достигнут" : (strictValues ? "Выбрать из списка WB" : "Выбрать или ввести свое")}
         />
       </label>
       {isOptionsOpen ? (
         <div className="draft-value-options">
           {isLimitReached ? <span className="field-empty">Сначала удалите одно значение</span> : null}
+          {!isLimitReached && canAddCustomValue ? (
+            <button className="characteristic-option custom-option" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(customValue)}>
+              <Plus size={14} />
+              <span>Добавить свое: {customValue}</span>
+            </button>
+          ) : null}
           {!isLimitReached && availableValues.length ? availableValues.map((value) => (
             <button className="characteristic-option" type="button" key={value} onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(value)}>
               <span>{value}</span>
             </button>
           )) : null}
-          {!isLimitReached && !availableValues.length ? <span className="field-empty">Нет готовых значений</span> : null}
+          {!isLimitReached && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
         </div>
       ) : null}
       <div className="draft-editor-meta">
         <span>{characteristicLimitText(meta, values.length)}</span>
+        <span>{strictValues ? "только список WB" : "можно свое значение"}</span>
         {isAuditSuggestion ? <Tag tone="blue">рекомендация аудита</Tag> : null}
         {draft && !isAuditSuggestion ? <span>ручная правка</span> : null}
       </div>
