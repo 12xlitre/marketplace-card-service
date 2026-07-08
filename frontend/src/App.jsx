@@ -554,6 +554,7 @@ function characteristicDraftsFromRows(rows) {
     charcID: row.charcID,
     label: row.label,
     value: editableCharacteristicValue(row.value),
+    source: "audit",
   }]));
 }
 
@@ -566,6 +567,7 @@ function normalizeCharacteristicMeta(item) {
     charcID: item?.charcID || null,
     label: item?.name || "Характеристика",
     value: "",
+    source: "manual",
     required: Boolean(item?.required),
     popular: Boolean(item?.popular),
     hasFilter: Boolean(item?.hasFilter),
@@ -1441,6 +1443,8 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
+  const [draftTitleSource, setDraftTitleSource] = useState("");
+  const [draftDescriptionSource, setDraftDescriptionSource] = useState("");
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
@@ -1467,6 +1471,8 @@ function CardDetailScreen({ card, portal, onBack }) {
     setAuditStatus("idle");
     setDraftTitle("");
     setDraftDescription("");
+    setDraftTitleSource("");
+    setDraftDescriptionSource("");
     setDraftCharacteristics({});
     setCharacteristicSearch("");
     setDraftSavedAt("");
@@ -1475,6 +1481,8 @@ function CardDetailScreen({ card, portal, onBack }) {
       if (saved) {
         setDraftTitle(saved.title || "");
         setDraftDescription(saved.description || "");
+        setDraftTitleSource(saved.titleSource || "");
+        setDraftDescriptionSource(saved.descriptionSource || "");
         setDraftCharacteristics(saved.characteristics || {});
         setAuditStatus(saved.auditStatus || "done");
         setDraftSavedAt(saved.savedAt || "");
@@ -1515,6 +1523,8 @@ function CardDetailScreen({ card, portal, onBack }) {
     setAuditStatus("done");
     setDraftTitle(suggestions[1] || suggestions[0] || "");
     setDraftDescription(descriptionSuggestion(card, description));
+    setDraftTitleSource("audit");
+    setDraftDescriptionSource("audit");
     setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems));
     setActiveTab("changes");
   }
@@ -1524,6 +1534,28 @@ function CardDetailScreen({ card, portal, onBack }) {
       const next = { ...current };
       delete next[key];
       return next;
+    });
+  }
+
+  function updateDraftCharacteristicValue(row, value) {
+    setDraftCharacteristics((current) => {
+      const currentDraft = current[row.key];
+      const nextValue = value;
+      if (!nextValue.trim()) {
+        const next = { ...current };
+        delete next[row.key];
+        return next;
+      }
+      return {
+        ...current,
+        [row.key]: {
+          ...currentDraft,
+          charcID: currentDraft?.charcID || row.charcID,
+          label: currentDraft?.label || row.label,
+          value: nextValue,
+          source: "manual",
+        },
+      };
     });
   }
 
@@ -1542,6 +1574,8 @@ function CardDetailScreen({ card, portal, onBack }) {
       auditStatus,
       title: draftTitle,
       description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
       characteristics: draftCharacteristics,
     }));
     setDraftSavedAt(savedAt);
@@ -1684,9 +1718,9 @@ function CardDetailScreen({ card, portal, onBack }) {
                 <div className="strip-head">
                   <div>
                     <h2>Было / стало</h2>
-                    <p>{auditDone ? "Черновик заполнен предложениями аудита." : "Черновик пустой, потому что аудит еще не запускался."}</p>
+                    <p>{auditDone ? "Рекомендации аудита помечены, но любые поля можно править вручную." : "Заполняйте колонку Стало вручную. Аудит позже добавит помеченные рекомендации."}</p>
                   </div>
-                  <Tag tone={auditDone ? "blue" : "amber"}>{auditDone ? "есть предложения" : "черновик пуст"}</Tag>
+                  <Tag tone={auditDone ? "blue" : "green"}>{auditDone ? "есть рекомендации" : "ручной черновик"}</Tag>
                 </div>
                 <div className="before-after">
                   <div className="field-box">
@@ -1695,8 +1729,19 @@ function CardDetailScreen({ card, portal, onBack }) {
                   </div>
                   <div className="field-box">
                     <strong>Стало: заголовок</strong>
-                    <textarea className="short" value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="После аудита здесь появится вариант заголовка." />
-                    <p><span className={`char-counter ${draftTitleLength <= 60 ? "ok" : ""}`}>{draftTitleLength}/60 символов</span></p>
+                    <textarea
+                      className={draftTitleSource === "audit" ? "short audit-suggestion-field" : "short"}
+                      value={draftTitle}
+                      onChange={(event) => {
+                        setDraftTitle(event.target.value);
+                        setDraftTitleSource(event.target.value.trim() ? "manual" : "");
+                      }}
+                      placeholder="Введите новый заголовок или запустите аудит для рекомендации."
+                    />
+                    <p className="draft-source-line">
+                      <span className={`char-counter ${draftTitleLength <= 60 ? "ok" : ""}`}>{draftTitleLength}/60 символов</span>
+                      <DraftSourceMark source={draftTitleSource} />
+                    </p>
                   </div>
                   <div className="field-box">
                     <strong>Было: описание</strong>
@@ -1704,7 +1749,16 @@ function CardDetailScreen({ card, portal, onBack }) {
                   </div>
                   <div className="field-box">
                     <strong>Стало: описание</strong>
-                    <textarea value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} placeholder="После аудита здесь появится вариант описания." />
+                    <textarea
+                      className={draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}
+                      value={draftDescription}
+                      onChange={(event) => {
+                        setDraftDescription(event.target.value);
+                        setDraftDescriptionSource(event.target.value.trim() ? "manual" : "");
+                      }}
+                      placeholder="Введите новое описание или запустите аудит для рекомендации."
+                    />
+                    <DraftSourceMark source={draftDescriptionSource} />
                   </div>
                   <div className="field-box characteristics-diff-box">
                     <strong>Характеристики</strong>
@@ -1718,6 +1772,7 @@ function CardDetailScreen({ card, portal, onBack }) {
                       onSearch={setCharacteristicSearch}
                       onAdd={addDraftCharacteristic}
                       onRemove={removeDraftCharacteristic}
+                      onUpdate={updateDraftCharacteristicValue}
                     />
                   </div>
                 </div>
@@ -1805,13 +1860,13 @@ function CharacteristicsBlock({ items }) {
 function CharacteristicsDiffTable({
   rows,
   drafts,
-  auditDone,
   availableCharacteristics,
   search,
   status,
   onSearch,
   onAdd,
   onRemove,
+  onUpdate,
 }) {
   const baseKeys = new Set(rows.map((row) => row.key));
   const draftOnlyRows = Object.entries(drafts)
@@ -1851,7 +1906,12 @@ function CharacteristicsDiffTable({
         <div className="characteristics-diff-row" key={row.key}>
           <strong>{row.label}</strong>
           {row.draftOnly ? <span className="raw-field-value field-empty">Добавлено в черновик</span> : <RawFieldValue value={row.value} />}
-          <DraftCharacteristicChip draft={drafts[row.key]} auditDone={auditDone} onRemove={() => onRemove(row.key)} />
+          <DraftCharacteristicEditor
+            draft={drafts[row.key]}
+            row={row}
+            onChange={(value) => onUpdate(row, value)}
+            onRemove={() => onRemove(row.key)}
+          />
         </div>
       ))}
       <div className="characteristics-search">
@@ -1884,19 +1944,39 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicChip({ draft, auditDone, onRemove }) {
-  if (!draft) {
-    return <span className="raw-field-value field-empty">{auditDone ? "Не выбрано" : "После аудита появится черновик"}</span>;
-  }
-  const value = String(draft.value || "").trim();
+function DraftCharacteristicEditor({ draft, row, onChange, onRemove }) {
+  const isAuditSuggestion = draft?.source === "audit";
   return (
-    <div className="draft-chip-list">
-      <button className={`draft-chip ${value ? "" : "empty"}`} type="button" onClick={onRemove} title="Убрать из черновика">
-        <span>{value || draft.label}</span>
-        <X size={14} />
-      </button>
+    <div className={`draft-editor ${isAuditSuggestion ? "audit-suggestion" : ""}`}>
+      <div className="draft-editor-control">
+        <textarea
+          value={draft?.value || ""}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={`Введите новое значение: ${row.label}`}
+          rows={1}
+        />
+        {draft ? (
+          <button className="icon-btn" type="button" onClick={onRemove} aria-label="Убрать из черновика" title="Убрать из черновика">
+            <X size={15} />
+          </button>
+        ) : null}
+      </div>
+      <div className="draft-editor-meta">
+        {isAuditSuggestion ? <Tag tone="blue">рекомендация аудита</Tag> : null}
+        {draft && !isAuditSuggestion ? <span>ручная правка</span> : null}
+      </div>
     </div>
   );
+}
+
+function DraftSourceMark({ source }) {
+  if (source === "audit") {
+    return <Tag tone="blue">рекомендация аудита</Tag>;
+  }
+  if (source === "manual") {
+    return <span className="draft-source-manual">ручная правка</span>;
+  }
+  return null;
 }
 
 function CharacteristicsList({ items }) {

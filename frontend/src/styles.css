@@ -1353,6 +1353,55 @@ tr:last-child td {
   white-space: nowrap;
 }
 
+.draft-editor {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.draft-editor-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: start;
+}
+
+.draft-editor textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  max-height: 92px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.draft-editor.audit-suggestion textarea {
+  border-color: #bfd6ed;
+  background: var(--blue-soft);
+}
+
+.draft-editor-meta {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.draft-source-manual {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .characteristics-search {
   border-top: 1px solid var(--line);
   padding: 12px;
@@ -1446,6 +1495,13 @@ tr:last-child td {
   line-height: 1.4;
 }
 
+.draft-source-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .char-counter {
   color: var(--muted);
   font-size: 12px;
@@ -1478,6 +1534,12 @@ tr:last-child td {
 
 .field-box textarea.short {
   min-height: 74px;
+}
+
+.field-box textarea.audit-suggestion-field,
+.field-box textarea.short.audit-suggestion-field {
+  border-color: #bfd6ed;
+  background: var(--blue-soft);
 }
 
 .empty-state {
