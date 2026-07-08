@@ -183,6 +183,19 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS portal_workset_cards (
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        nm_id TEXT NOT NULL DEFAULT '',
+        vendor_code TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        subject_name TEXT NOT NULL DEFAULT '',
+        selected_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (portal_id, card_key)
+      );
+
       CREATE TABLE IF NOT EXISTS service_integrations (
         provider TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT 'stored',
@@ -254,6 +267,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_approval_events_portal_card
       ON card_approval_events(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_portal_workset_cards_portal
+      ON portal_workset_cards(portal_id, updated_at)
       """
     )
     db.execute(
@@ -1157,6 +1176,198 @@ def public_approval_task(row, snapshot_lookup):
   }
 
 
+def normalize_workset_card(value):
+  if not isinstance(value, dict):
+    value = {}
+  card_key = draft_card_key(
+    value.get("cardKey")
+    or value.get("nmID")
+    or value.get("vendorCode")
+    or value.get("nmUUID")
+  )
+  return {
+    "cardKey": card_key,
+    "nmID": str(value.get("nmID") or "")[:80],
+    "vendorCode": str(value.get("vendorCode") or "")[:120],
+    "title": str(value.get("title") or "")[:500],
+    "subjectName": str(value.get("subjectName") or "")[:240],
+  }
+
+
+def public_workset_card(row):
+  return {
+    "cardKey": row["card_key"],
+    "nmID": row["nm_id"] or "",
+    "vendorCode": row["vendor_code"] or "",
+    "title": row["title"] or "",
+    "subjectName": row["subject_name"] or "",
+    "selectedBy": row["selected_by"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def list_portal_workset(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM portal_workset_cards
+      WHERE portal_id = ?
+      ORDER BY updated_at DESC, card_key
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {
+    "portalId": str(numeric_portal_id),
+    "cards": [public_workset_card(row) for row in rows],
+  }
+
+
+def save_portal_workset(portal_id, raw_cards, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  cards = []
+  seen = set()
+  for raw_card in raw_cards if isinstance(raw_cards, list) else []:
+    card = normalize_workset_card(raw_card)
+    if not card["cardKey"] or card["cardKey"] in seen:
+      continue
+    seen.add(card["cardKey"])
+    cards.append(card)
+  cards = cards[:500]
+  init_db()
+  with connect_db() as db:
+    db.execute("DELETE FROM portal_workset_cards WHERE portal_id = ?", (numeric_portal_id,))
+    for card in cards:
+      db.execute(
+        """
+        INSERT INTO portal_workset_cards (
+          portal_id, card_key, nm_id, vendor_code, title, subject_name, selected_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+          numeric_portal_id,
+          card["cardKey"],
+          card["nmID"],
+          card["vendorCode"],
+          card["title"],
+          card["subjectName"],
+          user["login"],
+        ),
+      )
+  return list_portal_workset(numeric_portal_id, user)
+
+
+def workset_batch_draft_payload(card, user, batch_id, existing_payload=None):
+  payload = normalize_card_draft_payload(existing_payload or {})
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  if str(approval.get("status") or "draft") == "draft":
+    approval = {
+      **approval,
+      "status": "draft",
+      "submittedBy": approval.get("submittedBy") or "",
+      "assigneeLogin": approval.get("assigneeLogin") or "",
+    }
+  payload["meta"] = {
+    **meta,
+    "approval": approval,
+    "card": {
+      "nmID": card["nmID"],
+      "vendorCode": card["vendorCode"],
+      "title": card["title"],
+      "subjectName": card["subjectName"],
+    },
+    "batch": {
+      "id": batch_id,
+      "kind": "mass_work_package",
+      "createdBy": user["login"],
+      "createdAt": utc_now().isoformat(),
+    },
+  }
+  return payload
+
+
+def create_workset_tasks(portal_id, raw_cards, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  workset = save_portal_workset(numeric_portal_id, raw_cards, user)
+  cards = workset["cards"]
+  batch_id = f"batch-{int(time.time())}-{secrets.token_hex(4)}"
+  created = 0
+  kept = 0
+  init_db()
+  with connect_db() as db:
+    for card in cards:
+      previous = db.execute(
+        "SELECT payload_json FROM card_drafts WHERE portal_id = ? AND card_key = ?",
+        (numeric_portal_id, card["cardKey"]),
+      ).fetchone()
+      previous_payload = None
+      if previous:
+        try:
+          previous_payload = json.loads(previous["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+          previous_payload = None
+      payload = workset_batch_draft_payload(card, user, batch_id, previous_payload)
+      payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+      cursor = db.execute(
+        """
+        INSERT INTO card_drafts (
+          portal_id, card_key, nm_id, vendor_code, payload_json,
+          audit_status, created_by, updated_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(portal_id, card_key) DO UPDATE SET
+          nm_id = COALESCE(NULLIF(excluded.nm_id, ''), nm_id),
+          vendor_code = COALESCE(NULLIF(excluded.vendor_code, ''), vendor_code),
+          payload_json = excluded.payload_json,
+          audit_status = excluded.audit_status,
+          updated_by = excluded.updated_by,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+          numeric_portal_id,
+          card["cardKey"],
+          card["nmID"],
+          card["vendorCode"],
+          payload_json,
+          payload["auditStatus"],
+          user["login"],
+          user["login"],
+        ),
+      )
+      if previous:
+        kept += 1
+      else:
+        created += 1
+  return {
+    "portalId": str(numeric_portal_id),
+    "batchId": batch_id,
+    "cardsCount": len(cards),
+    "tasksCreated": created,
+    "tasksUpdated": kept,
+    "workset": list_portal_workset(numeric_portal_id, user),
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
 def event_minutes_between(start, end):
   if not start or not end:
     return None
@@ -1189,12 +1400,13 @@ def approval_workflow(portal_id, user):
       SELECT *
       FROM card_drafts
       WHERE portal_id = ?
-        AND json_extract(payload_json, '$.meta.approval.status') IN ('submitted', 'changes_requested', 'approved')
+        AND json_extract(payload_json, '$.meta.approval.status') IN ('draft', 'submitted', 'changes_requested', 'approved')
       ORDER BY
         CASE json_extract(payload_json, '$.meta.approval.status')
           WHEN 'submitted' THEN 1
           WHEN 'changes_requested' THEN 2
-          ELSE 3
+          WHEN 'draft' THEN 3
+          ELSE 4
         END,
         updated_at DESC
       """,
@@ -1212,6 +1424,7 @@ def approval_workflow(portal_id, user):
     event_rows = all_event_rows[:50]
 
   tasks = [public_approval_task(row, snapshot_lookup) for row in task_rows]
+  draft_tasks = [task for task in tasks if task["status"] == "draft"]
   submitted_tasks = [task for task in tasks if task["status"] == "submitted"]
   returned_tasks = [task for task in tasks if task["status"] == "changes_requested"]
   approved_tasks = [task for task in tasks if task["status"] == "approved"]
@@ -1251,6 +1464,7 @@ def approval_workflow(portal_id, user):
     "tasks": tasks,
     "analytics": {
       "pendingCount": len(submitted_tasks),
+      "draftCount": len(draft_tasks),
       "returnedCount": len(returned_tasks),
       "approvedCount": len(approved_tasks),
       "eventCount": len(all_event_rows),
@@ -2761,6 +2975,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
+    if path == "/api/card-workset":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, list_portal_workset(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
+      return
+
     if path == "/api/card-drafts":
       user = self.require_user()
       if not user:
@@ -3160,6 +3391,38 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
         return
       self.send_json(HTTPStatus.OK, {"draft": draft})
+      return
+
+    if path == "/api/card-workset":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        workset = save_portal_workset(payload.get("portalId"), payload.get("cards"), user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_workset"})
+        return
+      self.send_json(HTTPStatus.OK, {"workset": workset})
+      return
+
+    if path == "/api/card-workset/create-tasks":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = create_workset_tasks(payload.get("portalId"), payload.get("cards"), user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_workset"})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path == "/api/logout":

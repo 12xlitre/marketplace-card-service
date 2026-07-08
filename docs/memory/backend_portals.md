@@ -8,6 +8,8 @@
 - frontend после логина загружает кабинеты через `GET /api/portals`;
 - создание кабинета идет через `POST /api/portals`;
 - изменение состава проекта идет через `POST /api/portals/<portal_id>/team`;
+- рабочий набор карточек кабинета хранится в SQLite `portal_workset_cards`, читается через `GET /api/card-workset?portal_id=...` и сохраняется через `POST /api/card-workset`;
+- создание массового пакета работы идет через `POST /api/card-workset/create-tasks`: backend создает внутренние `card_drafts` со статусом `draft` (`в работе`) без write-запросов в WB;
 - `localStorage` в frontend остается только временным fallback, когда backend еще недоступен на контуре.
 
 Правила:

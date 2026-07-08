@@ -646,7 +646,7 @@ function normalizeApprovalState(value) {
 
 function approvalStatusLabel(status) {
   return {
-    draft: "черновик",
+    draft: "в работе",
     submitted: "на согласовании",
     changes_requested: "на доработке",
     approved: "принято",
@@ -928,6 +928,16 @@ function normalizedCardSearchText(card) {
 
 function cardStableKey(card) {
   return cardDraftKey(card);
+}
+
+function cardWorksetPayload(card) {
+  return {
+    cardKey: cardStableKey(card),
+    nmID: card?.nmID || "",
+    vendorCode: card?.vendorCode || "",
+    title: card?.title || "",
+    subjectName: card?.subjectName || "",
+  };
 }
 
 function readCardWorkset(storageKey) {
@@ -2920,6 +2930,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  function replaceApprovalWorkflow(workflow) {
+    setApprovalWorkflow(normalizeApprovalWorkflow(workflow));
+    setApprovalWorkflowStatus("loaded");
+  }
+
   return (
     <section className="screen active">
       <header className="topbar">
@@ -3068,7 +3083,13 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
-              <CardsTable cards={cards} portal={portal} workflow={approvalWorkflow} onOpenCard={onOpenCard} />
+              <CardsTable
+                cards={cards}
+                portal={portal}
+                workflow={approvalWorkflow}
+                onOpenCard={onOpenCard}
+                onWorkflowChange={replaceApprovalWorkflow}
+              />
             </section>
           </div>
         </div>
@@ -3077,18 +3098,52 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   );
 }
 
-function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpenCard }) {
+function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpenCard, onWorkflowChange }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
+  const [worksetLoaded, setWorksetLoaded] = useState(Boolean(portal?.isDemo));
+  const [worksetStatus, setWorksetStatus] = useState("idle");
+  const [batchStatus, setBatchStatus] = useState("idle");
   const cardKeySignature = cards.map(cardStableKey).join("|");
 
   useEffect(() => {
     setSelectedKeys(readCardWorkset(storageKey));
+    setWorksetLoaded(Boolean(portal?.isDemo));
+    setWorksetStatus("idle");
+    setBatchStatus("idle");
   }, [storageKey]);
+
+  useEffect(() => {
+    let active = true;
+    if (!portal?.id || portal.isDemo) {
+      setWorksetLoaded(true);
+      return () => {
+        active = false;
+      };
+    }
+    setWorksetStatus("loading");
+    apiRequest(`/api/card-workset?portal_id=${encodeURIComponent(portal.id)}`)
+      .then((payload) => {
+        if (!active) return;
+        const keys = (payload.cards || payload.workset?.cards || []).map((card) => String(card.cardKey || "")).filter(Boolean);
+        setSelectedKeys(keys);
+        writeCardWorkset(storageKey, keys);
+        setWorksetLoaded(true);
+        setWorksetStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorksetLoaded(true);
+        setWorksetStatus("local-fallback");
+      });
+    return () => {
+      active = false;
+    };
+  }, [portal?.id, portal?.isDemo, storageKey]);
 
   useEffect(() => {
     const validKeys = new Set(cards.map(cardStableKey));
@@ -3097,7 +3152,20 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
 
   useEffect(() => {
     writeCardWorkset(storageKey, selectedKeys);
-  }, [storageKey, selectedKeys]);
+    if (!worksetLoaded || !portal?.id || portal.isDemo) {
+      return;
+    }
+    const selectedCardsForSave = cards
+      .filter((card) => selectedKeys.includes(cardStableKey(card)))
+      .map(cardWorksetPayload);
+    setWorksetStatus("saving");
+    apiRequest("/api/card-workset", {
+      method: "POST",
+      body: JSON.stringify({ portalId: portal.id, cards: selectedCardsForSave }),
+    })
+      .then(() => setWorksetStatus("saved"))
+      .catch(() => setWorksetStatus("local-fallback"));
+  }, [storageKey, selectedKeys, worksetLoaded, portal?.id, portal?.isDemo, cardKeySignature]);
 
   if (!cards.length) {
     return (
@@ -3187,6 +3255,32 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
     setCategoryFilter("all");
   }
 
+  async function createWorkPackage() {
+    if (!selectedCards.length || portal?.isDemo) {
+      return;
+    }
+    setBatchStatus("saving");
+    try {
+      const payload = await apiRequest("/api/card-workset/create-tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          cards: selectedCards.map(cardWorksetPayload),
+        }),
+      });
+      if (payload.workflow && onWorkflowChange) {
+        onWorkflowChange(payload.workflow);
+      }
+      const keys = (payload.workset?.cards || []).map((card) => String(card.cardKey || "")).filter(Boolean);
+      if (keys.length) {
+        setSelectedKeys(keys);
+      }
+      setBatchStatus("created");
+    } catch {
+      setBatchStatus("error");
+    }
+  }
+
   return (
     <div className="cards-workspace">
       <div className="cards-control-panel">
@@ -3242,8 +3336,17 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
         </div>
 
         <div className="cards-toolbar">
-          <span>Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}</span>
+          <span>
+            Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}
+            {worksetStatus === "saving" ? " · сохраняем набор" : ""}
+            {worksetStatus === "local-fallback" ? " · набор только в браузере" : ""}
+            {batchStatus === "created" ? " · пакет создан" : ""}
+            {batchStatus === "error" ? " · пакет не создан" : ""}
+          </span>
           <div className="toolbar">
+            <button className="btn primary" type="button" onClick={createWorkPackage} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"}>
+              <Plus size={16} />{batchStatus === "saving" ? "Создаем пакет" : "Создать пакет"}
+            </button>
             <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
               <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
             </button>
@@ -3439,6 +3542,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
+  const priceValue = firstDefined(card?.price, rawFields.price);
+  const discountValue = firstDefined(card?.discount, rawFields.discount);
+  const discountedPriceValue = firstDefined(card?.discountedPrice, rawFields.discountedPrice);
   const auditDone = auditStatus === "done";
   const auditRunning = auditStatus === "loading";
   const auditStale = auditStatus === "stale";
@@ -4094,6 +4200,38 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
             {activeTab === "card" ? (
               <>
+                <section className="workspace-strip card-snapshot-strip">
+                  <div className="card-snapshot-main">
+                    <div className={`card-snapshot-photo ${photoUrl ? "has-image" : ""}`}>
+                      {photoUrl ? <img src={photoUrl} alt={currentTitle} loading="eager" decoding="async" /> : null}
+                    </div>
+                    <div className="card-snapshot-content">
+                      <div className="strip-head">
+                        <div>
+                          <h2>{currentTitle}</h2>
+                          <p>WB {textOrDash(card?.nmID)} · артикул {textOrDash(card?.vendorCode)} · {textOrDash(card?.subjectName)}</p>
+                        </div>
+                        <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "есть сигналы" : "снимок ok"}</Tag>
+                      </div>
+                      <div className="snapshot-facts">
+                        <div><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
+                        <div><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
+                        <div><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
+                        <div><span>Размеры</span><strong>{valueSummary(sizes)}</strong></div>
+                        <div><span>Габариты</span><strong>{valueSummary(dimensions)}</strong></div>
+                        <div><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
+                        <div><span>Цена</span><strong>{valueSummary(priceValue)}</strong></div>
+                        <div><span>Скидка</span><strong>{valueSummary(discountValue)}</strong></div>
+                        <div><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+                      </div>
+                      <div className="snapshot-description">
+                        <span>Описание</span>
+                        <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
                 <section className="workspace-strip">
                   <div className="strip-head">
                     <div>
