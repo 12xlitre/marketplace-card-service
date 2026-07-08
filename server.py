@@ -672,6 +672,35 @@ def first_photo_url(card):
   return photo.get("tm") or photo.get("c246x328") or photo.get("square") or photo.get("big") or ""
 
 
+SENSITIVE_WB_FIELD_PARTS = (
+  "token",
+  "secret",
+  "password",
+  "authorization",
+  "api_key",
+  "apikey",
+  "cookie",
+  "session",
+  "credential",
+)
+
+
+def public_wb_value(value):
+  if isinstance(value, dict):
+    result = {}
+    for key, item in value.items():
+      normalized_key = str(key).lower().replace("-", "_")
+      if any(part in normalized_key for part in SENSITIVE_WB_FIELD_PARTS):
+        continue
+      result[str(key)] = public_wb_value(item)
+    return result
+  if isinstance(value, list):
+    return [public_wb_value(item) for item in value]
+  if value is None or isinstance(value, (str, int, float, bool)):
+    return value
+  return str(value)
+
+
 def card_issue(card):
   issues = []
   title = str(card.get("title") or "").strip()
@@ -710,18 +739,29 @@ def normalize_wb_card(card):
   return {
     "nmID": card.get("nmID"),
     "imtID": card.get("imtID"),
+    "nmUUID": card.get("nmUUID") or "",
     "vendorCode": card.get("vendorCode") or "",
     "title": title,
+    "description": card.get("description") or "",
     "brand": card.get("brand") or "",
+    "subjectID": card.get("subjectID"),
     "subjectName": card.get("subjectName") or "категория не указана",
     "photoUrl": first_photo_url(card),
+    "photos": public_wb_value(card.get("photos") or []),
+    "video": public_wb_value(card.get("video") or ""),
+    "characteristics": public_wb_value(card.get("characteristics") or []),
+    "dimensions": public_wb_value(card.get("dimensions") or {}),
+    "sizes": public_wb_value(card.get("sizes") or []),
+    "tags": public_wb_value(card.get("tags") or []),
     "quality": quality,
     "qualityClass": quality_class,
     "issue": issues[0] if issues else "Нет критичных",
     "issueCount": len(issues),
     "status": status,
     "statusClass": status_class,
+    "createdAt": card.get("createdAt") or "",
     "updatedAt": card.get("updatedAt") or "",
+    "rawFields": public_wb_value(card),
   }
 
 

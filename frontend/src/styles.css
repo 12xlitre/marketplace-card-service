@@ -384,6 +384,19 @@ a {
   box-shadow: none;
 }
 
+.btn.ghost.rail-logout {
+  width: 100%;
+  justify-content: flex-start;
+  color: #f8fbf8;
+  background: rgba(255, 255, 255, .08);
+  border-color: rgba(255, 255, 255, .18);
+}
+
+.btn.ghost.rail-logout:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, .14);
+}
+
 .btn.readonly {
   color: var(--blue);
   background: var(--blue-soft);
@@ -999,6 +1012,94 @@ tr:last-child td {
   gap: 10px;
 }
 
+.raw-field-list {
+  display: grid;
+  gap: 10px;
+}
+
+.raw-field-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.raw-field-name {
+  min-width: 0;
+}
+
+.raw-field-name strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.raw-field-name span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.raw-field-value,
+.field-empty {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.field-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.json-value {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 10px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.characteristics-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.characteristic-row {
+  display: grid;
+  grid-template-columns: minmax(140px, .7fr) minmax(0, 1fr);
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  min-width: 0;
+}
+
+.characteristic-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.characteristic-row > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .issue,
 .option-row,
 .field-box {
@@ -1239,7 +1340,9 @@ tr:last-child td {
   .settings-grid,
   .form-two,
   .connect-mode,
-  .before-after {
+  .before-after,
+  .raw-field-row,
+  .characteristic-row {
     grid-template-columns: 1fr;
   }
 

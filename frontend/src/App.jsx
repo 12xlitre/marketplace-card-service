@@ -120,6 +120,144 @@ function textOrDash(value) {
   return text || "Не указано";
 }
 
+function isEmptyValue(value) {
+  if (value === null || value === undefined) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim() === "";
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  if (typeof value === "object") {
+    return Object.keys(value).length === 0;
+  }
+  return false;
+}
+
+function valueSummary(value) {
+  if (isEmptyValue(value)) {
+    return "Пусто";
+  }
+  if (Array.isArray(value)) {
+    return `${value.length} ${pluralRu(value.length, "элемент", "элемента", "элементов")}`;
+  }
+  if (typeof value === "object") {
+    return `${Object.keys(value).length} ${pluralRu(Object.keys(value).length, "поле", "поля", "полей")}`;
+  }
+  if (typeof value === "boolean") {
+    return value ? "Да" : "Нет";
+  }
+  return String(value);
+}
+
+function pluralRu(value, one, few, many) {
+  const number = Math.abs(Number(value) || 0);
+  const lastTwo = number % 100;
+  const last = number % 10;
+  if (lastTwo >= 11 && lastTwo <= 14) {
+    return many;
+  }
+  if (last === 1) {
+    return one;
+  }
+  if (last >= 2 && last <= 4) {
+    return few;
+  }
+  return many;
+}
+
+function knownRawFields(card) {
+  return {
+    nmID: card?.nmID,
+    imtID: card?.imtID,
+    nmUUID: card?.nmUUID,
+    vendorCode: card?.vendorCode,
+    subjectID: card?.subjectID,
+    subjectName: card?.subjectName,
+    brand: card?.brand,
+    title: card?.title,
+    description: card?.description,
+    photos: card?.photos,
+    video: card?.video,
+    dimensions: card?.dimensions,
+    characteristics: card?.characteristics,
+    sizes: card?.sizes,
+    tags: card?.tags,
+    createdAt: card?.createdAt,
+    updatedAt: card?.updatedAt,
+  };
+}
+
+function rawFieldsForCard(card) {
+  return {
+    ...knownRawFields(card),
+    ...(card?.rawFields || {}),
+  };
+}
+
+const fieldLabels = {
+  nmID: "nmID",
+  imtID: "imtID",
+  nmUUID: "nmUUID",
+  vendorCode: "Артикул продавца",
+  subjectID: "ID категории",
+  subjectName: "Категория",
+  brand: "Бренд",
+  title: "Название",
+  description: "Описание",
+  photos: "Фото",
+  video: "Видео",
+  dimensions: "Габариты",
+  characteristics: "Характеристики",
+  sizes: "Размеры",
+  tags: "Теги",
+  createdAt: "Создано",
+  updatedAt: "Обновлено",
+};
+
+const preferredFieldOrder = [
+  "nmID",
+  "imtID",
+  "nmUUID",
+  "vendorCode",
+  "subjectID",
+  "subjectName",
+  "brand",
+  "title",
+  "description",
+  "characteristics",
+  "dimensions",
+  "sizes",
+  "photos",
+  "video",
+  "tags",
+  "createdAt",
+  "updatedAt",
+];
+
+function orderedFieldEntries(fields) {
+  const source = fields && typeof fields === "object" ? fields : {};
+  const used = new Set();
+  const ordered = [];
+  preferredFieldOrder.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      ordered.push([key, source[key]]);
+      used.add(key);
+    }
+  });
+  Object.keys(source)
+    .filter((key) => !used.has(key))
+    .sort((left, right) => left.localeCompare(right, "ru"))
+    .forEach((key) => ordered.push([key, source[key]]));
+  return ordered;
+}
+
+function fieldLabel(key) {
+  return fieldLabels[key] || key;
+}
+
 function initials(name) {
   return String(name || "WB")
     .split(" ")
@@ -583,6 +721,7 @@ export default function App() {
 
         {screen === "card" ? (
           <CardDetailScreen
+            key={selectedCard?.nmID || selectedCard?.vendorCode || selectedCard?.title}
             card={selectedCard}
             portal={currentPortal}
             onBack={() => setScreen("seller")}
@@ -1040,6 +1179,8 @@ function CardDetailScreen({ card, portal, onBack }) {
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
+  const rawFields = rawFieldsForCard(card);
+  const description = card?.description || rawFields.description || "";
   return (
     <section className="screen active">
       <header className="topbar">
@@ -1061,11 +1202,18 @@ function CardDetailScreen({ card, portal, onBack }) {
             <section className="panel">
               <h2>Данные карточки</h2>
               <div className="panel-list">
-                <div className="list-row"><span>Кабинет</span><strong>{portal.name}</strong></div>
-                <div className="list-row"><span>Категория</span><strong>{textOrDash(card?.subjectName)}</strong></div>
-                <div className="list-row"><span>Бренд</span><strong>{textOrDash(card?.brand)}</strong></div>
-                <div className="list-row"><span>Фото</span><strong>{photoUrl ? "есть" : "не передано"}</strong></div>
-                <div className="list-row"><span>Статус</span><strong>{textOrDash(card?.status)}</strong></div>
+                <div className="list-row"><span>Кабинет</span><strong>{portal?.name}</strong></div>
+                <div className="list-row"><span>nmID</span><strong>{valueSummary(card?.nmID)}</strong></div>
+                <div className="list-row"><span>imtID</span><strong>{valueSummary(card?.imtID)}</strong></div>
+                <div className="list-row"><span>Артикул продавца</span><strong>{valueSummary(card?.vendorCode)}</strong></div>
+                <div className="list-row"><span>Категория</span><strong>{valueSummary(card?.subjectName)}</strong></div>
+                <div className="list-row"><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
+                <div className="list-row"><span>Описание</span><strong>{isEmptyValue(description) ? "Пусто" : "есть"}</strong></div>
+                <div className="list-row"><span>Характеристики</span><strong>{valueSummary(card?.characteristics || rawFields.characteristics)}</strong></div>
+                <div className="list-row"><span>Фото</span><strong>{valueSummary(card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []))}</strong></div>
+                <div className="list-row"><span>Размеры</span><strong>{valueSummary(card?.sizes || rawFields.sizes)}</strong></div>
+                <div className="list-row"><span>Габариты</span><strong>{valueSummary(card?.dimensions || rawFields.dimensions)}</strong></div>
+                <div className="list-row"><span>Статус</span><strong>{valueSummary(card?.status)}</strong></div>
               </div>
             </section>
           </aside>
@@ -1088,6 +1236,17 @@ function CardDetailScreen({ card, portal, onBack }) {
                   <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
                 </div>
               </div>
+            </section>
+
+            <section className="workspace-strip">
+              <div className="strip-head">
+                <div>
+                  <h2>Все поля WB API</h2>
+                  <p>Показываем полный снимок карточки, который вернул backend. Пустые поля отмечены явно.</p>
+                </div>
+                <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
+              </div>
+              <RawFieldsView fields={rawFields} />
             </section>
 
             <section className="workspace-strip">
@@ -1136,11 +1295,11 @@ function CardDetailScreen({ card, portal, onBack }) {
                 </div>
                 <div className="field-box">
                   <strong>Было: описание</strong>
-                  <p>Описание пока не сохраняется в текущем WB snapshot.</p>
+                  <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                 </div>
                 <div className="field-box">
                   <strong>Черновик описания</strong>
-                  <textarea placeholder="Здесь будет локальное редактирование описания после сохранения расширенного WB snapshot." defaultValue="" />
+                  <textarea placeholder="Здесь будет локальное редактирование описания." defaultValue={description || ""} />
                   <p>Поле подготовлено под будущий черновик. Сейчас изменения не сохраняются и не отправляются в WB.</p>
                 </div>
               </div>
@@ -1149,6 +1308,56 @@ function CardDetailScreen({ card, portal, onBack }) {
         </div>
       </div>
     </section>
+  );
+}
+
+function RawFieldsView({ fields }) {
+  const entries = orderedFieldEntries(fields);
+  return (
+    <div className="raw-field-list">
+      {entries.map(([key, value]) => (
+        <div className="raw-field-row" key={key}>
+          <div className="raw-field-name">
+            <strong>{fieldLabel(key)}</strong>
+            <span>{key}</span>
+          </div>
+          <RawFieldValue value={value} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RawFieldValue({ value }) {
+  if (isEmptyValue(value)) {
+    return <span className="raw-field-value field-empty">Пусто</span>;
+  }
+  if (typeof value === "boolean") {
+    return <span className="raw-field-value">{value ? "Да" : "Нет"}</span>;
+  }
+  if (typeof value !== "object") {
+    return <span className="raw-field-value">{String(value)}</span>;
+  }
+  if (Array.isArray(value) && value.every((item) => item && typeof item === "object" && ("name" in item || "charcName" in item))) {
+    return <CharacteristicsList items={value} />;
+  }
+  return <pre className="json-value">{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function CharacteristicsList({ items }) {
+  return (
+    <div className="characteristics-list">
+      {items.map((item, index) => {
+        const label = item.name || item.charcName || item.id || item.charcID || `Характеристика ${index + 1}`;
+        const value = Object.prototype.hasOwnProperty.call(item, "value") ? item.value : (item.values ?? item);
+        return (
+          <div className="characteristic-row" key={`${label}-${index}`}>
+            <span>{label}</span>
+            <RawFieldValue value={value} />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
