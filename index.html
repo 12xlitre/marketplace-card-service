@@ -2391,6 +2391,7 @@
       { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview", user_role: "manager" },
       { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb", user_role: "tech" }
     ];
+    const legacyRolePlaceholders = new Set(["admin", "manager", "specialist"]);
     const hardcodedDirectoryFallback = [
       { login: "kristina", full_name: "Кристина", role: "Руководитель", access_level: "overview", user_role: "manager" },
       { login: "anastasia", full_name: "Анастасия", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" }
@@ -2426,10 +2427,28 @@
     let currentPortal = demoPortal;
     let userPortals = [];
 
+    function isLegacyPlaceholderUser(user) {
+      const login = `${user?.login || ""}`.toLowerCase();
+      if (!legacyRolePlaceholders.has(login)) {
+        return false;
+      }
+      const fullName = `${user?.full_name || ""}`.toLowerCase();
+      return fullName === "администратор" || fullName === "руководитель" || fullName === "специалист";
+    }
+
+    function getDisplayUsers() {
+      if (!users.length) {
+        return fallbackUsers;
+      }
+      const realUsers = users.filter((user) => !isLegacyPlaceholderUser(user));
+      return realUsers.length ? realUsers : fallbackUsers;
+    }
+
     function findUser(login) {
-      return users.find((item) => item.login === login)
-        || fallbackUsers.find((item) => item.login === login)
+      const candidates = getDisplayUsers();
+      return candidates.find((item) => item.login === login)
         || currentUser
+        || candidates[0]
         || fallbackUsers[0];
     }
 
@@ -2489,12 +2508,12 @@
       }).filter(Boolean);
 
       const normalizedCurrentUser = currentUser ? [publicUser(currentUser)] : [];
-      const normalizedStateUsers = rememberStateUsers || [];
+      const normalizedStateUsers = (rememberStateUsers || []).filter((user) => !isLegacyPlaceholderUser(user));
       const merged = dedupeUsers(
         apiUsers,
         normalizedDirectory,
         normalizedStateUsers,
-        normalizedCurrentUser,
+        normalizedCurrentUser.filter((user) => !isLegacyPlaceholderUser(user)),
         hardcodedDirectoryFallback
       );
 
@@ -2693,10 +2712,10 @@
     }
 
     function fillEmployeeSelects() {
+      const userOptions = getDisplayUsers();
       [portalOwner, portalTech, portalManager].forEach((select) => {
         const selected = select.value;
         select.innerHTML = "";
-        const userOptions = users.length ? users : fallbackUsers;
         userOptions.forEach((user) => {
           const option = document.createElement("option");
           option.value = user.login;
@@ -2713,10 +2732,10 @@
     function fillMemberSelect() {
       const selected = memberSelect.value;
       const projectRole = memberRoleSelect.value;
-      let userOptions = (users.length ? users : fallbackUsers)
+      let userOptions = getDisplayUsers()
         .filter((user) => userCanFillProjectRole(user, projectRole));
-      if (!userOptions.length && users.length) {
-        userOptions = users;
+      if (!userOptions.length && getDisplayUsers().length) {
+        userOptions = getDisplayUsers();
       }
 
       memberSelect.innerHTML = "";
