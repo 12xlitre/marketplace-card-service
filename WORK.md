@@ -85,6 +85,9 @@ npm run prototype
 - добавлен read-only WB API client: `POST /content/v2/get/cards/list` через backend, cursor-пагинация, timeout/retry на transient/429, `withPhoto: -1`, нормализация карточек для интерфейса.
 - добавлен route `GET /api/wb/cards?portal_id=...&limit=...`, он требует backend-сессию и не принимает токен из браузера.
 - добавлен route `POST /api/portals`: создает портал из UI, для режима API принимает WB ключ только в теле запроса, проверяет read-only доступ, сохраняет токен зашифрованно и возвращает нормализованные карточки.
+- добавлен route `GET /api/portals`: после логина frontend получает список кабинетов из SQLite, а `localStorage` остается только fallback при недоступном backend.
+- добавлен route `POST /api/portals/<portal_id>/team`: состав проекта сохраняется в backend `portal_members`.
+- счетчики карточек/правок/проблем и `last_sync_at` сохраняются на уровне портала после WB read-only загрузки.
 - добавлена команда `npm run wb-sync -- --portal-id demo-wb --limit 20` для серверной проверки WB без frontend.
 - встроенный первый кабинет в frontend теперь пытается загрузить реальные карточки WB после логина; без токена показывает состояние `API ожидает токен` и остается на демонстрационных строках.
 - форма `Добавить портал` теперь включает поле WB API ключа в API-режиме и не сохраняет ключ в localStorage; при ошибке WB/backend показывает сообщение в модальном окне.
@@ -95,7 +98,6 @@ npm run prototype
 Что осталось:
 - переключить root-owned prod-обвязку `/opt/opticards/Dockerfile` и `docker-compose.prod.yml` с nginx-static на backend `server.py`; без этого `/api/session` и `/api/wb/cards` на проде отвечают `404`;
 - после включения backend runtime добавить реальный WB API ключ через кнопку `Добавить портал` и проверить фактический ответ WB на кабинете продавца;
-- добавить устойчивый backend-сохраненный состав команды проекта на уровне портала;
 - после подключения API реализовать ограниченный рабочий список карточек.
 
 Алерты и ограничения:

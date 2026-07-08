@@ -2454,6 +2454,7 @@
     ];
     let currentPortal = demoPortal;
     let userPortals = [];
+    let backendPortalsLoaded = false;
 
     function getDisplayUsers() {
       if (!users.length) {
@@ -2729,6 +2730,7 @@
       loginScreen.classList.add("is-hidden");
       appShell.classList.remove("is-hidden");
       await loadUsers();
+      await loadBackendPortals();
       await loadWbDemoSnapshot();
       showScreen("employees");
     }
@@ -2785,6 +2787,7 @@
       currentPortal = portal;
       updateSellerView();
       showScreen("seller");
+      loadPortalCards(currentPortal);
     }
 
     function showCard() {
@@ -2792,6 +2795,9 @@
     }
 
     function saveUserPortals() {
+      if (backendPortalsLoaded) {
+        return;
+      }
       localStorage.setItem("opticards-portals", JSON.stringify(userPortals));
     }
 
@@ -2843,6 +2849,22 @@
       }
       renderUserPortals();
       updateDashboardMetrics();
+    }
+
+    async function loadBackendPortals() {
+      try {
+        const payload = await apiRequest("/api/portals");
+        userPortals = (payload.portals || []).map(normalizePortal);
+        backendPortalsLoaded = true;
+        localStorage.removeItem("opticards-portals");
+        if (currentPortal.id !== demoPortal.id) {
+          currentPortal = getPortalById(currentPortal.id);
+        }
+        renderUserPortals();
+        updateDashboardMetrics();
+      } catch (error) {
+        backendPortalsLoaded = false;
+      }
     }
 
     function createPortalCard(portal) {
@@ -3074,8 +3096,19 @@
       if (!cardsTableBody) {
         return;
       }
-      const cards = portal.realCards?.length ? portal.realCards : demoCards;
+      const cards = portal.realCards?.length ? portal.realCards : (portal.isDemo ? demoCards : []);
       cardsTableBody.innerHTML = "";
+      if (!cards.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.textContent = portal.apiConnected
+          ? "Карточки загрузятся после обновления данных WB."
+          : "Карточки появятся после подключения API или ручного импорта.";
+        row.append(cell);
+        cardsTableBody.append(row);
+        return;
+      }
       cards.slice(0, 20).forEach((card, index) => {
         cardsTableBody.append(createCardTableRow(card, index));
       });
@@ -3117,6 +3150,32 @@
       renderUserPortals();
       updateDashboardMetrics();
       updateSellerView();
+    }
+
+    function replaceUserPortal(portal) {
+      const index = userPortals.findIndex((item) => String(item.id) === String(portal.id));
+      if (index >= 0) {
+        userPortals[index] = normalizePortal(portal);
+      }
+      saveUserPortals();
+    }
+
+    async function loadPortalCards(portal) {
+      if (!portal || portal.isDemo || !portal.apiConnected || portal.realCards?.length) {
+        return;
+      }
+      try {
+        const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
+        applyWbSnapshotToPortal(portal, payload);
+        replaceUserPortal(portal);
+      } catch (error) {
+        portal.syncStatus = "error";
+      }
+      if (String(currentPortal.id) === String(portal.id)) {
+        updateSellerView();
+        renderUserPortals();
+        updateDashboardMetrics();
+      }
     }
 
     function updateSellerView() {
@@ -3353,32 +3412,62 @@
       button.addEventListener("click", () => setScope(button.dataset.scope));
     });
     memberRoleSelect.addEventListener("change", fillMemberSelect);
-    addMemberButton.addEventListener("click", () => {
+    addMemberButton.addEventListener("click", async () => {
       const projectRole = memberRoleSelect.value;
       const login = memberSelect.value;
       if (!login) {
         return;
       }
 
-      currentPortal.teamRoles = {
+      const nextTeamRoles = {
         ...getPortalTeam(currentPortal),
         [projectRole]: login
       };
-      currentPortal.ownerLogin = currentPortal.teamRoles.lead;
-      currentPortal.memberLogins = uniqueLogins(Object.values(currentPortal.teamRoles));
+      let memberSaveError = false;
 
-      if (!currentPortal.isDemo) {
-        const stored = userPortals.find((portal) => portal.id === currentPortal.id);
-        if (stored) {
-          stored.teamRoles = { ...currentPortal.teamRoles };
-          stored.ownerLogin = currentPortal.ownerLogin;
-          stored.memberLogins = [...currentPortal.memberLogins];
-          saveUserPortals();
+      if (!currentPortal.isDemo && backendPortalsLoaded) {
+        addMemberButton.disabled = true;
+        try {
+          const response = await apiRequest(`/api/portals/${encodeURIComponent(currentPortal.id)}/team`, {
+            method: "POST",
+            body: JSON.stringify({ teamRoles: nextTeamRoles })
+          });
+          const updatedPortal = normalizePortal({
+            ...currentPortal,
+            ...response.portal,
+            realCards: currentPortal.realCards || response.portal.realCards || []
+          });
+          currentPortal = updatedPortal;
+          replaceUserPortal(updatedPortal);
+        } catch (error) {
+          memberSaveError = true;
         }
+      } else {
+        currentPortal.teamRoles = nextTeamRoles;
+        currentPortal.ownerLogin = currentPortal.teamRoles.lead;
+        currentPortal.memberLogins = uniqueLogins(Object.values(currentPortal.teamRoles));
+
+        if (!currentPortal.isDemo) {
+          const stored = userPortals.find((portal) => String(portal.id) === String(currentPortal.id));
+          if (stored) {
+            stored.teamRoles = { ...currentPortal.teamRoles };
+            stored.ownerLogin = currentPortal.ownerLogin;
+            stored.memberLogins = [...currentPortal.memberLogins];
+            saveUserPortals();
+          }
+        }
+      }
+
+      if (!currentPortal.isDemo && !backendPortalsLoaded) {
+        saveUserPortals();
       }
       renderProjectMembers();
       renderUserPortals();
       updateSellerView();
+      if (memberSaveError) {
+        sellerSourceCopy.textContent = "Не удалось сохранить состав проекта на backend. Попробуйте повторить позже.";
+      }
+      fillMemberSelect();
     });
 
     async function restoreSession() {

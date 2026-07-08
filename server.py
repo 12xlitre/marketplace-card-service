@@ -104,6 +104,9 @@ def init_db():
         scope TEXT NOT NULL DEFAULT 'full',
         status TEXT NOT NULL DEFAULT 'draft',
         api_connected INTEGER NOT NULL DEFAULT 0,
+        card_count INTEGER NOT NULL DEFAULT 0,
+        work_count INTEGER NOT NULL DEFAULT 0,
+        problem_count INTEGER NOT NULL DEFAULT 0,
         created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -135,6 +138,10 @@ def init_db():
     columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "user_role" not in columns:
       db.execute("ALTER TABLE users ADD COLUMN user_role TEXT NOT NULL DEFAULT 'manager'")
+    portal_columns = {row["name"] for row in db.execute("PRAGMA table_info(portals)").fetchall()}
+    for column_name in ("card_count", "work_count", "problem_count"):
+      if column_name not in portal_columns:
+        db.execute(f"ALTER TABLE portals ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT 0")
 
 
 def hash_password(password, salt=None):
@@ -253,11 +260,21 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
     cursor = db.execute(
       """
       INSERT INTO portals (
-        name, marketplace, scope, status, api_connected, created_by, last_sync_at
+        name, marketplace, scope, status, api_connected,
+        card_count, work_count, problem_count, created_by, last_sync_at
       )
-      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?)
+      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?, ?, ?, ?)
       """,
-      (portal_name, marketplace, scope, created_by, stats.get("loadedAt")),
+      (
+        portal_name,
+        marketplace,
+        scope,
+        stats.get("cardCount", 0),
+        stats.get("workCount", 0),
+        stats.get("problemCount", 0),
+        created_by,
+        stats.get("loadedAt"),
+      ),
     )
     portal_id = cursor.lastrowid
     for project_role, user_login in team.items():
@@ -331,6 +348,9 @@ def list_portals():
         portals.scope,
         portals.status,
         portals.api_connected,
+        portals.card_count,
+        portals.work_count,
+        portals.problem_count,
         portals.last_sync_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
@@ -342,6 +362,125 @@ def list_portals():
       """
     ).fetchall()
   return rows
+
+
+def parse_portal_members(value):
+  members = {}
+  for item in (value or "").split(","):
+    role, separator, login = item.partition(":")
+    if separator and role and login:
+      members[role] = login
+  return members
+
+
+def public_portal_from_row(row):
+  team = parse_portal_members(row["members"])
+  integrations = row["integrations"] or ""
+  has_wb_integration = "wb:" in integrations
+  api_connected = bool(row["api_connected"])
+  mode = "api" if api_connected or has_wb_integration else "manual"
+  return {
+    "id": str(row["id"]),
+    "name": row["name"],
+    "marketplace": row["marketplace"],
+    "mode": mode,
+    "scope": row["scope"],
+    "status": row["status"],
+    "ownerLogin": team.get("lead", ""),
+    "cardCount": row["card_count"],
+    "workCount": row["work_count"],
+    "problemCount": row["problem_count"],
+    "apiConnected": api_connected,
+    "teamRoles": team,
+    "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
+    "realCards": [],
+    "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
+    "lastSyncAt": row["last_sync_at"] or "",
+    "isDemo": False,
+  }
+
+
+def get_portal_row(portal_id):
+  init_db()
+  with connect_db() as db:
+    return db.execute(
+      """
+      SELECT
+        portals.id,
+        portals.name,
+        portals.marketplace,
+        portals.scope,
+        portals.status,
+        portals.api_connected,
+        portals.card_count,
+        portals.work_count,
+        portals.problem_count,
+        portals.last_sync_at,
+        GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
+        GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
+      FROM portals
+      LEFT JOIN portal_members ON portal_members.portal_id = portals.id
+      LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
+      WHERE portals.id = ?
+      GROUP BY portals.id
+      """,
+      (portal_id,),
+    ).fetchone()
+
+
+def update_portal_team(portal_id, team):
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    if not portal:
+      return None
+    db.execute("DELETE FROM portal_members WHERE portal_id = ?", (portal_id,))
+    for project_role, user_login in team.items():
+      if user_login:
+        db.execute(
+          """
+          INSERT INTO portal_members (portal_id, user_login, project_role)
+          VALUES (?, ?, ?)
+          """,
+          (portal_id, user_login, project_role),
+        )
+    db.execute(
+      "UPDATE portals SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      (portal_id,),
+    )
+  return get_portal_row(portal_id)
+
+
+def update_portal_sync_stats(portal_id, snapshot):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return
+  stats = snapshot.get("stats") or {}
+  with connect_db() as db:
+    db.execute(
+      """
+      UPDATE portals
+      SET
+        name = COALESCE(NULLIF(?, ''), name),
+        status = 'WB read-only',
+        api_connected = 1,
+        card_count = ?,
+        work_count = ?,
+        problem_count = ?,
+        last_sync_at = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (
+        stats.get("portalName", ""),
+        stats.get("cardCount", 0),
+        stats.get("workCount", 0),
+        stats.get("problemCount", 0),
+        stats.get("loadedAt"),
+        numeric_portal_id,
+      ),
+    )
 
 
 def create_session(db, user_id, remember=False):
@@ -722,6 +861,15 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, {"users": [public_user(row) for row in rows]})
       return
 
+    if path == "/api/portals":
+      if not self.require_user():
+        return
+      self.send_json(
+        HTTPStatus.OK,
+        {"portals": [public_portal_from_row(row) for row in list_portals()]},
+      )
+      return
+
     if path == "/api/wb/cards":
       if not self.require_user():
         return
@@ -762,6 +910,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           },
         )
         return
+      update_portal_sync_stats(portal_id, snapshot)
       snapshot["portalId"] = portal_id
       snapshot["tokenSource"] = token_source
       self.send_json(HTTPStatus.OK, snapshot)
@@ -888,6 +1037,28 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         {"ok": True},
         {"Set-Cookie": self.session_cookie_header("", max_age=0)},
       )
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/team"):
+      if not self.require_user():
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/team")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      payload = self.read_json() or {}
+      team = clean_portal_team(payload.get("teamRoles"))
+      try:
+        row = update_portal_team(portal_id, team)
+      except sqlite3.IntegrityError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
+        return
+      if not row:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
       return
 
     self.send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})

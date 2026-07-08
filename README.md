@@ -59,6 +59,8 @@ Read-only маршруты backend:
 
 ```text
 POST /api/portals
+GET /api/portals
+POST /api/portals/<portal_id>/team
 GET /api/wb/cards?portal_id=demo-wb&limit=100
 ```
 
