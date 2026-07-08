@@ -1436,6 +1436,96 @@ def reset_portal_work_cache(portal_id, user):
   }
 
 
+def draft_has_audit_data(payload):
+  if str(payload.get("auditStatus") or "") == "done":
+    return True
+  content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  if isinstance(meta.get("auditHistory"), list) and meta["auditHistory"]:
+    return True
+  for field_name in ("title", "description"):
+    field = content.get(field_name) if isinstance(content.get(field_name), dict) else {}
+    if field.get("source") == "audit":
+      return True
+  characteristics = content.get("characteristics") if isinstance(content.get("characteristics"), dict) else {}
+  return any(isinstance(item, dict) and item.get("source") == "audit" for item in characteristics.values())
+
+
+def reset_portal_analysis_cache(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  invalidated_at = utc_now().isoformat()
+  drafts_updated = 0
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    subject_ids = subject_ids_from_cards_snapshot(portal["cards_snapshot_json"])
+    mpstats_deleted = 0
+    if subject_ids:
+      placeholders = ",".join("?" for _ in subject_ids)
+      mpstats_cursor = db.execute(
+        f"""
+        DELETE FROM mpstats_characteristics_cache
+        WHERE report_type = 'subject' AND value IN ({placeholders})
+        """,
+        subject_ids,
+      )
+      mpstats_deleted = mpstats_cursor.rowcount
+    draft_rows = db.execute(
+      """
+      SELECT id, payload_json
+      FROM card_drafts
+      WHERE portal_id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    for row in draft_rows:
+      try:
+        payload = json.loads(row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        payload = normalize_card_draft_payload({})
+      payload = normalize_card_draft_payload(payload)
+      if not draft_has_audit_data(payload):
+        continue
+      meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+      meta = {
+        **meta,
+        "auditHistory": [],
+        "auditInvalidatedAt": invalidated_at,
+        "auditInvalidatedReason": "wb_snapshot_refresh",
+      }
+      payload["auditStatus"] = "stale"
+      payload["meta"] = meta
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, audit_status = 'stale', updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+          json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+          user["login"],
+          row["id"],
+        ),
+      )
+      drafts_updated += 1
+  return {
+    "draftsUpdated": drafts_updated,
+    "mpstatsDeleted": mpstats_deleted,
+    "subjectIDs": subject_ids,
+    "auditInvalidatedAt": invalidated_at,
+  }
+
+
 def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -3093,6 +3183,24 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_id_text = path[len("/api/portals/"):-len("/reset-work-cache")].strip("/")
       try:
         result = reset_portal_work_cache(portal_id_text, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/reset-analysis-cache"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/reset-analysis-cache")].strip("/")
+      try:
+        result = reset_portal_analysis_cache(portal_id_text, user)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return

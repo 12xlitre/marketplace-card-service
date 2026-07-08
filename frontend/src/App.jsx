@@ -2049,11 +2049,75 @@ export default function App() {
     }));
   }
 
+  function resetPortalAuditSummary(portalId) {
+    const normalizedPortalId = String(portalId || "");
+    if (!normalizedPortalId) {
+      return;
+    }
+    setPortalWorkSummaries((current) => {
+      const summary = current[normalizedPortalId] || { draftKeys: [], auditKeys: [], lastActivityAt: "" };
+      return {
+        ...current,
+        [normalizedPortalId]: {
+          ...summary,
+          auditKeys: [],
+          lastActivityAt: new Date().toISOString(),
+        },
+      };
+    });
+  }
+
   function clearLocalDraftsForPortal(portalId) {
     const prefix = `opticards-draft:${portalId}:`;
     Object.keys(localStorage)
       .filter((key) => key.startsWith(prefix))
       .forEach((key) => localStorage.removeItem(key));
+  }
+
+  function localDraftHasAuditData(draft) {
+    if (draft?.auditStatus === "done") {
+      return true;
+    }
+    const content = draft?.content || {};
+    const meta = draft?.meta || {};
+    if (Array.isArray(meta.auditHistory) && meta.auditHistory.length) {
+      return true;
+    }
+    if (content.title?.source === "audit" || content.description?.source === "audit") {
+      return true;
+    }
+    return Object.values(content.characteristics || {}).some((item) => item?.source === "audit");
+  }
+
+  function invalidateLocalDraftAuditsForPortal(portalId) {
+    const prefix = `opticards-draft:${portalId}:`;
+    const invalidatedAt = new Date().toISOString();
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(prefix))
+      .forEach((key) => {
+        try {
+          const draft = JSON.parse(localStorage.getItem(key) || "null");
+          if (!draft || typeof draft !== "object") {
+            return;
+          }
+          if (!localDraftHasAuditData(draft)) {
+            return;
+          }
+          const meta = draft.meta && typeof draft.meta === "object" ? draft.meta : {};
+          localStorage.setItem(key, JSON.stringify({
+            ...draft,
+            auditStatus: "stale",
+            meta: {
+              ...meta,
+              auditHistory: [],
+              auditInvalidatedAt: invalidatedAt,
+              auditInvalidatedReason: "wb_snapshot_refresh",
+            },
+          }));
+        } catch {
+          localStorage.removeItem(key);
+        }
+      });
   }
 
   async function refreshUsers() {
@@ -2187,12 +2251,31 @@ export default function App() {
       return;
     }
     const confirmed = window.confirm(
-      "Загрузить свежие данные WB? Черновики, аудит, задачи согласования и MPStats-кэш останутся без изменений.",
+      "Загрузить свежие данные WB? MPStats-кэш и статус аудита будут сброшены, но черновики и задачи согласования останутся.",
     );
     if (!confirmed) {
       return;
     }
-    await loadPortalCards(portal, { force: true });
+    try {
+      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-analysis-cache`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      invalidateLocalDraftAuditsForPortal(portal.id);
+      resetPortalAuditSummary(portal.id);
+      const portalAfterAnalysisReset = {
+        ...portal,
+        draftSummary: {
+          ...portal.draftSummary,
+          auditCount: 0,
+        },
+      };
+      replaceUserPortal(portalAfterAnalysisReset);
+      await loadPortalCards(portalAfterAnalysisReset, { force: true });
+    } catch {
+      setNotice("Не удалось сбросить аудит и MPStats-кэш. Свежие данные WB не загружены.");
+      return;
+    }
   }
 
   async function loadPortalCards(portal, { force = false, resetWork = false } = {}) {
@@ -3030,6 +3113,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const dimensions = card?.dimensions || rawFields.dimensions || {};
   const auditDone = auditStatus === "done";
   const auditRunning = auditStatus === "loading";
+  const auditStale = auditStatus === "stale";
   const draftTitleLength = draftTitle.length;
   const draftCardKey = cardDraftKey(card);
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
@@ -3060,7 +3144,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     ? "blue"
     : ["empty", "error", "unavailable", "missing-subject"].includes(mpstatsCharacteristicsStatus)
       ? "amber"
-      : auditDone ? "blue" : "green";
+      : auditDone ? "blue" : (auditStale ? "amber" : "green");
   const changedDraftCharacteristicsCount = countChangedDraftCharacteristics(draftCharacteristics, characteristicItems);
   const auditDraftCharacteristicsCount = Object.values(draftCharacteristics).filter((draft) => draft?.source === "audit").length;
   const portalTeam = getPortalTeam(portal || {});
@@ -3609,9 +3693,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <h2>Аудит карточки</h2>
                     <p>Запускает аналитику MPStats, сохраняет результат в кэш и готовит черновик изменений.</p>
                   </div>
-                  <Tag tone={auditRunning ? "blue" : (auditDone ? "green" : "amber")}>{auditRunning ? "идет аудит" : (auditDone ? "аудит готов" : "не запускался")}</Tag>
+                  <Tag tone={auditRunning ? "blue" : (auditDone ? "green" : "amber")}>{auditRunning ? "идет аудит" : (auditDone ? "аудит готов" : (auditStale ? "аудит сброшен" : "не запускался"))}</Tag>
                 </div>
                 <div className="audit-list">
+                  {auditStale ? (
+                    <div className="issue">
+                      <div className="issue-head">
+                        <strong>Аудит сброшен после обновления WB</strong>
+                        <Tag tone="amber">нужен новый запуск</Tag>
+                      </div>
+                      <p>Черновик изменений и задача согласования сохранены, но аналитика MPStats и история аудита очищены, потому что карточки были загружены заново.</p>
+                    </div>
+                  ) : null}
                   <div className="issue">
                     <div className="issue-head">
                       <strong>{issueCount ? card.issue : "Критичных проблем нет"}</strong>
@@ -3661,7 +3754,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         ))}
                       </div>
                     ) : (
-                      <p>После запуска аудита здесь появятся даты и краткий итог. История сохранится вместе с черновиком.</p>
+                      <p>{auditStale ? "История аудита очищена после обновления данных WB. Черновик изменений сохранен." : "После запуска аудита здесь появятся даты и краткий итог. История сохранится вместе с черновиком."}</p>
                     )}
                   </div>
                 </div>
@@ -3726,7 +3819,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="strip-head">
                   <div>
                     <h2>Было / стало</h2>
-                    <p>{auditDone ? "Рекомендации аудита помечены, но любые поля можно править вручную." : "Заполняйте колонку Стало вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
+                    <p>{auditDone
+                      ? "Рекомендации аудита помечены, но любые поля можно править вручную."
+                      : auditStale
+                        ? "Черновик и задача сохранены после обновления WB. Аудит сброшен, поэтому для новых рекомендаций запустите его заново."
+                        : "Заполняйте колонку Стало вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
                   </div>
                   <div className="strip-actions">
                     <button
