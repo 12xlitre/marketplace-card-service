@@ -21,6 +21,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, unquote, urlparse
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
@@ -319,6 +320,29 @@ def wb_token_meta_from_dates(issued_at="", expires_at=""):
   return meta
 
 
+def store_wb_token_meta(portal_id, token_meta):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return
+  issued_at = token_meta.get("issuedAt", "")
+  expires_at = token_meta.get("expiresAt", "")
+  if not issued_at and not expires_at:
+    return
+  with connect_db() as db:
+    db.execute(
+      """
+      UPDATE portal_integrations
+      SET
+        token_issued_at = COALESCE(NULLIF(?, ''), token_issued_at),
+        token_expires_at = COALESCE(NULLIF(?, ''), token_expires_at),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE portal_id = ? AND provider = ?
+      """,
+      (issued_at, expires_at, numeric_portal_id, WB_PROVIDER),
+    )
+
+
 def generate_secret_key():
   return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
 
@@ -558,6 +582,8 @@ def list_portals():
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_nonce END) AS wb_token_nonce,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
@@ -577,6 +603,29 @@ def parse_portal_members(value):
     if separator and role and login:
       members[role] = login
   return members
+
+
+def wb_token_meta_for_portal_row(row):
+  issued_at = row["wb_token_issued_at"] or ""
+  expires_at = row["wb_token_expires_at"] or ""
+  if issued_at and expires_at:
+    return wb_token_meta_from_dates(issued_at, expires_at)
+
+  nonce = row["wb_token_nonce"] or ""
+  ciphertext = row["wb_token_ciphertext"] or ""
+  if nonce and ciphertext:
+    try:
+      token = decrypt_secret(nonce, ciphertext, integration_aad(row["id"], WB_PROVIDER))
+      token_meta = wb_token_meta(token)
+      store_wb_token_meta(row["id"], token_meta)
+      if token_meta.get("issuedAt") or token_meta.get("expiresAt"):
+        return token_meta
+    except (RuntimeError, UnicodeDecodeError):
+      pass
+    except (ValueError, binascii.Error, InvalidTag):
+      pass
+
+  return wb_token_meta_from_dates(issued_at, expires_at)
 
 
 def public_portal_from_row(row):
@@ -603,7 +652,7 @@ def public_portal_from_row(row):
     "realCards": [],
     "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
     "lastSyncAt": row["last_sync_at"] or "",
-    "tokenMeta": wb_token_meta_from_dates(row["wb_token_issued_at"] or "", row["wb_token_expires_at"] or ""),
+    "tokenMeta": wb_token_meta_for_portal_row(row),
     "isDemo": False,
   }
 
@@ -627,6 +676,8 @@ def get_portal_row(portal_id):
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_nonce END) AS wb_token_nonce,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
