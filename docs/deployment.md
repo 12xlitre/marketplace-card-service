@@ -26,6 +26,8 @@ https://opticards.weboptai.ru/healthz
 
 Для реальной авторизации, хранения WB API токенов и будущей загрузки карточек прод должен запускать backend `server.py`. Старый nginx-only контейнер подходит только для интерфейсного прототипа и не может безопасно принимать API-ключи.
 
+Фактическое состояние на 2026-07-08: команда `sudo opticards-deploy` доступна и выкатывает `main`, но серверная prod-обвязка пока root-owned и все еще собирает nginx-static контейнер. Поэтому `index.html` обновляется на `opticards.weboptai.ru`, а backend routes вроде `/api/session` и `/api/wb/cards` не поднимаются до переключения `Dockerfile`/`docker-compose.prod.yml` на `server.py`.
+
 Локально прототип отдается командой:
 
 ```bash

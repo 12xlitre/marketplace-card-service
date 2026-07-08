@@ -86,9 +86,12 @@ npm run prototype
 - добавлен route `GET /api/wb/cards?portal_id=...&limit=...`, он требует backend-сессию и не принимает токен из браузера.
 - добавлена команда `npm run wb-sync -- --portal-id demo-wb --limit 20` для серверной проверки WB без frontend.
 - демо-кабинет в frontend теперь пытается загрузить реальные карточки WB после логина; без токена показывает состояние `API ожидает токен` и остается на демо-строках.
-- зафиксированы эти изменения в последнем коммите: `478d84d`.
+- изменения `f213cd0` запушены в `origin/main`, создан backup tag `backup/pre-wb-readonly-deploy-20260708-084312`.
+- `sudo opticards-deploy` выполнен на сервере: живой `index.html` обновлен, но prod runtime пока остался nginx-static.
+- backend/read-only изменения зафиксированы в коммите `f213cd0`.
 
 Что осталось:
+- переключить root-owned prod-обвязку `/opt/opticards/Dockerfile` и `docker-compose.prod.yml` с nginx-static на backend `server.py`; без этого `/api/session` и `/api/wb/cards` на проде отвечают `404`;
 - добавить реальный WB API ключ и проверить фактический ответ `/api/wb/cards` на кабинете продавца;
 - добавить устойчивый backend-сохраненный состав команды проекта на уровне портала;
 - после подключения API реализовать ограниченный рабочий список карточек.
