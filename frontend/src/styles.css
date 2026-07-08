@@ -585,7 +585,42 @@ a {
 
 .cards-table-wrap th:nth-child(2),
 .cards-table-wrap td:nth-child(2) {
-  width: 30%;
+  width: 34%;
+}
+
+.cards-table-wrap th:nth-child(3),
+.cards-table-wrap td:nth-child(3) {
+  width: 96px;
+}
+
+.cards-table-wrap th:nth-child(4),
+.cards-table-wrap td:nth-child(4) {
+  width: 132px;
+}
+
+.cards-table-wrap th:nth-child(5),
+.cards-table-wrap td:nth-child(5) {
+  width: 190px;
+}
+
+.cards-table-wrap th:nth-child(6),
+.cards-table-wrap td:nth-child(6) {
+  width: 150px;
+}
+
+.cards-table-wrap th:nth-child(7),
+.cards-table-wrap td:nth-child(7) {
+  width: 62px;
+  text-align: center;
+}
+
+.cards-table-wrap .tag {
+  max-width: 100%;
+  min-height: 0;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .select-col {
@@ -608,6 +643,10 @@ tr.selected-row td {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.cards-table-wrap .problem-reasons {
+  align-items: flex-start;
 }
 
 .problem-reasons > span:not(.tag) {
