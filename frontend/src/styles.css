@@ -875,13 +875,12 @@ tr.selected-row td {
 
 .seller-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 310px);
-  gap: 18px;
+  grid-template-columns: 1fr;
+  gap: 0;
   align-items: start;
 }
 
 .seller-main,
-.seller-aside,
 .detail-aside,
 .detail-main {
   display: grid;
@@ -961,6 +960,36 @@ tr.selected-row td {
   gap: 8px;
 }
 
+.seller-context-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+  gap: 14px;
+}
+
+.project-strip,
+.security-strip {
+  box-shadow: none;
+}
+
+.project-strip h2,
+.security-strip h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.project-strip p,
+.security-strip p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.project-team-list.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .project-team-row {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -990,6 +1019,46 @@ tr.selected-row td {
 .team-editor {
   display: grid;
   gap: 10px;
+}
+
+.team-editor.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+}
+
+.team-editor.compact .team-editor-actions {
+  grid-column: 1 / -1;
+}
+
+.security-strip {
+  align-content: start;
+}
+
+.security-inline-list {
+  display: grid;
+  gap: 8px;
+}
+
+.security-inline-list div {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.security-inline-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.security-inline-list strong {
+  text-align: right;
+  font-size: 12px;
 }
 
 .team-editor-row {
@@ -2407,8 +2476,13 @@ tr:last-child td {
 }
 
 @media (max-width: 1320px) {
-  .seller-layout {
+  .seller-layout,
+  .seller-context-grid {
     grid-template-columns: 1fr;
+  }
+
+  .security-inline-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -2503,6 +2577,9 @@ tr:last-child td {
   .filters,
   .cards-work-summary,
   .card-filters,
+  .project-team-list.compact,
+  .team-editor.compact,
+  .security-inline-list,
   .pipeline,
   .approval-analytics-grid,
   .approval-events-head,

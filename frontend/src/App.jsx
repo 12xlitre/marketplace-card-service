@@ -2953,6 +2953,64 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </div>
             </section>
 
+            <div className="seller-context-grid">
+              <section className="workspace-strip project-strip">
+                <div className="panel-title-row">
+                  <div>
+                    <h2>Состав проекта</h2>
+                    <p>Роли команды по этому кабинету.</p>
+                  </div>
+                  {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
+                </div>
+
+                {!teamEditing ? (
+                  <div className="project-team-list compact">
+                    {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                      const user = findUser(team[roleKey]);
+                      return (
+                        <div className="project-team-row" key={roleKey}>
+                          <span>{label}</span>
+                          <strong>{user?.full_name || "Не назначен"}</strong>
+                          <small>{user?.role || "Выберите сотрудника"}</small>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="team-editor compact">
+                    {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                      const users = displayUsers.filter((user) => userCanFillProjectRole(user, roleKey));
+                      return (
+                        <label className="team-editor-row" key={roleKey}>
+                          <span>{label}</span>
+                          <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)}>
+                            <option value="">Не назначен</option>
+                            {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
+                          </select>
+                        </label>
+                      );
+                    })}
+                    <div className="team-editor-actions">
+                      <button className="btn primary" type="button" onClick={saveTeamDraft}>Сохранить состав</button>
+                      <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }}>Отмена</button>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="workspace-strip security-strip">
+                <div>
+                  <h2>Контур безопасности</h2>
+                  <p>Служебные ограничения текущего подключения.</p>
+                </div>
+                <div className="security-inline-list">
+                  <div><span>Wildberries API</span><strong>только чтение</strong></div>
+                  <div><span>Публикация</span><strong>отключена</strong></div>
+                  <div><span>Токен</span><strong>backend + AES-GCM</strong></div>
+                </div>
+              </section>
+            </div>
+
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
@@ -3013,61 +3071,6 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <CardsTable cards={cards} portal={portal} workflow={approvalWorkflow} onOpenCard={onOpenCard} />
             </section>
           </div>
-
-          <aside className="seller-aside">
-            <section className="panel">
-              <div className="panel-title-row">
-                <div>
-                  <h2>Состав проекта</h2>
-                  <p>Роли команды по этому кабинету.</p>
-                </div>
-                {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
-              </div>
-
-              {!teamEditing ? (
-                <div className="project-team-list">
-                  {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
-                    const user = findUser(team[roleKey]);
-                    return (
-                      <div className="project-team-row" key={roleKey}>
-                        <span>{label}</span>
-                        <strong>{user?.full_name || "Не назначен"}</strong>
-                        <small>{user?.role || "Выберите сотрудника"}</small>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="team-editor">
-                  {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
-                    const users = displayUsers.filter((user) => userCanFillProjectRole(user, roleKey));
-                    return (
-                      <label className="team-editor-row" key={roleKey}>
-                        <span>{label}</span>
-                        <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)}>
-                          <option value="">Не назначен</option>
-                          {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
-                        </select>
-                      </label>
-                    );
-                  })}
-                  <div className="team-editor-actions">
-                    <button className="btn primary" type="button" onClick={saveTeamDraft}>Сохранить состав</button>
-                    <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }}>Отмена</button>
-                  </div>
-                </div>
-              )}
-            </section>
-
-            <section className="panel">
-              <h2>Контур безопасности</h2>
-              <div className="panel-list">
-                <div className="list-row"><span>Wildberries API</span><strong>только чтение</strong></div>
-                <div className="list-row"><span>Публикация</span><strong>отключена</strong></div>
-                <div className="list-row"><span>Токен</span><strong>backend + AES-GCM</strong></div>
-              </div>
-            </section>
-          </aside>
         </div>
       </div>
     </section>
