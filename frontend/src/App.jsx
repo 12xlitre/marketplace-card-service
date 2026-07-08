@@ -165,6 +165,17 @@ function valueCount(value) {
   return 1;
 }
 
+function tokenDaysLeftText(tokenMeta) {
+  const daysLeft = tokenMeta?.daysLeft;
+  if (typeof daysLeft !== "number") {
+    return "";
+  }
+  if (tokenMeta?.status === "expired") {
+    return "срок истек";
+  }
+  return `осталось ${daysLeft} ${pluralRu(daysLeft, "день", "дня", "дней")}`;
+}
+
 function pluralRu(value, one, few, many) {
   const number = Math.abs(Number(value) || 0);
   const lastTwo = number % 100;
@@ -332,6 +343,7 @@ function normalizePortal(portal) {
       ? portal.memberLogins
       : [teamRoles.lead, teamRoles.tech, teamRoles.manager]),
     realCards: portal.realCards || [],
+    tokenMeta: portal.tokenMeta || {},
   };
 }
 
@@ -374,6 +386,7 @@ function applyWbSnapshotToPortal(portal, payload) {
     problemCount: stats.problemCount || 0,
     realCards: payload.cards || [],
     lastSyncAt: stats.loadedAt || "",
+    tokenMeta: payload.tokenMeta || portal.tokenMeta || {},
     syncStatus: "loaded",
   });
 }
@@ -394,6 +407,27 @@ function safeHttpsUrl(value) {
   } catch {
     return "";
   }
+}
+
+function bestPhotoUrl(card) {
+  const photos = Array.isArray(card?.photos) ? card.photos : [];
+  const preferredKeys = ["big", "c516x688", "c246x328", "square", "tm"];
+  for (const photo of photos) {
+    if (!photo || typeof photo !== "object") {
+      continue;
+    }
+    for (const key of preferredKeys) {
+      const url = safeHttpsUrl(photo[key]);
+      if (url) {
+        return url;
+      }
+    }
+    const fallback = Object.values(photo).find((value) => safeHttpsUrl(value));
+    if (fallback) {
+      return safeHttpsUrl(fallback);
+    }
+  }
+  return safeHttpsUrl(card?.photoUrl);
 }
 
 function wbCardUrl(card) {
@@ -431,6 +465,26 @@ function titleSuggestions(card) {
     unique.push(base.slice(0, 60));
   }
   return unique.slice(0, 3);
+}
+
+function descriptionSuggestion(card, description) {
+  const current = String(description || "").trim();
+  if (current) {
+    return current;
+  }
+  const subject = String(card?.subjectName || "").trim();
+  const brand = String(card?.brand || "").trim();
+  const title = textOrDash(card?.title);
+  return [title, brand, subject]
+    .filter((value, index, list) => value && value !== "Не указано" && list.indexOf(value) === index)
+    .join(". ");
+}
+
+function characteristicDraftSuggestion(characteristics) {
+  if (isEmptyValue(characteristics)) {
+    return "Проверить обязательные характеристики категории и заполнить отсутствующие значения.";
+  }
+  return "Сверить заполненные характеристики с обязательными полями категории и убрать лишние технические значения.";
 }
 
 function Tag({ children, tone = "amber" }) {
@@ -1196,7 +1250,12 @@ function CardsTable({ cards, portal, onOpenCard }) {
 }
 
 function CardDetailScreen({ card, portal, onBack }) {
-  const photoUrl = safeHttpsUrl(card?.photoUrl);
+  const [activeTab, setActiveTab] = useState("audit");
+  const [auditStatus, setAuditStatus] = useState("idle");
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftDescription, setDraftDescription] = useState("");
+  const [draftCharacteristics, setDraftCharacteristics] = useState("");
+  const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
@@ -1206,6 +1265,26 @@ function CardDetailScreen({ card, portal, onBack }) {
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
+  const auditDone = auditStatus === "done";
+  const draftTitleLength = draftTitle.length;
+
+  useEffect(() => {
+    setActiveTab("audit");
+    setAuditStatus("idle");
+    setDraftTitle("");
+    setDraftDescription("");
+    setDraftCharacteristics("");
+  }, [card?.nmID, card?.vendorCode]);
+
+  function runAuditStub() {
+    const suggestions = titleSuggestions(card);
+    setAuditStatus("done");
+    setDraftTitle(suggestions[1] || suggestions[0] || "");
+    setDraftDescription(descriptionSuggestion(card, description));
+    setDraftCharacteristics(characteristicDraftSuggestion(characteristics));
+    setActiveTab("changes");
+  }
+
   return (
     <section className="screen active">
       <header className="topbar">
@@ -1223,7 +1302,9 @@ function CardDetailScreen({ card, portal, onBack }) {
       <div className="content">
         <div className="detail-layout">
           <aside className="detail-aside">
-            <div className={`photo-preview ${photoUrl ? "has-image" : ""}`} style={photoUrl ? { backgroundImage: `url("${photoUrl}")` } : undefined} />
+            <div className={`photo-preview ${photoUrl ? "has-image" : ""}`}>
+              {photoUrl ? <img src={photoUrl} alt={currentTitle} loading="eager" decoding="async" /> : null}
+            </div>
             <section className="panel">
               <h2>Данные карточки</h2>
               <div className="panel-list">
@@ -1243,99 +1324,125 @@ function CardDetailScreen({ card, portal, onBack }) {
           </aside>
 
           <div className="detail-main">
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Проблемы аудита</h2>
-                  <p>Пока показываем только первичные проверки WB-снимка.</p>
-                </div>
-                <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? `${issueCount} к проверке` : "нет проблем"}</Tag>
-              </div>
-              <div className="audit-list">
-                <div className="issue">
-                  <div className="issue-head">
-                    <strong>{issueCount ? card.issue : "Критичных проблем нет"}</strong>
-                    <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "проверка" : "ок"}</Tag>
+            <nav className="detail-tabs" aria-label="Разделы карточки">
+              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Аудит</button>
+              <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => setActiveTab("card")}>Карточка</button>
+              <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
+            </nav>
+
+            {activeTab === "audit" ? (
+              <section className="workspace-strip">
+                <div className="strip-head">
+                  <div>
+                    <h2>Аудит карточки</h2>
+                    <p>Пока это локальная заглушка для проверки рабочего сценария.</p>
                   </div>
-                  <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
+                  <Tag tone={auditDone ? "green" : "amber"}>{auditDone ? "аудит готов" : "не запускался"}</Tag>
                 </div>
-              </div>
-            </section>
-
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Характеристики</h2>
-                  <p>Значения из карточки WB без технического JSON-формата.</p>
-                </div>
-                <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
-              </div>
-              <CharacteristicsBlock items={characteristics} />
-            </section>
-
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Заголовок</h2>
-                  <p>Сейчас это исходное значение из WB. SEO-варианты появятся после подключения MPStats и правил категории.</p>
-                </div>
-                <Tag tone={titleLength <= 60 ? "green" : "amber"}>лимит WB 60</Tag>
-              </div>
-              <div className="option-list">
-                <div className="option-row">
-                  <div className="option-head">
-                    <strong>{currentTitle}</strong>
-                    <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
+                <div className="audit-list">
+                  <div className="issue">
+                    <div className="issue-head">
+                      <strong>{issueCount ? card.issue : "Критичных проблем нет"}</strong>
+                      <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "проверка" : "ок"}</Tag>
+                    </div>
+                    <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
                   </div>
-                  <p>Это не рекомендация, а текущее название карточки из WB snapshot.</p>
+                  {auditDone ? (
+                    <div className="issue">
+                      <div className="issue-head">
+                        <strong>Предложения подготовлены</strong>
+                        <Tag tone="blue">черновик</Tag>
+                      </div>
+                      <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
+                    </div>
+                  ) : null}
                 </div>
-                <div className="option-row muted-row">
-                  <div className="option-head">
-                    <strong>SEO-варианты не рассчитаны</strong>
-                    <span className="char-counter">MPStats</span>
+                <div className="tab-actions">
+                  <button className="btn primary" type="button" onClick={runAuditStub}><ClipboardList size={17} />Запустить аудит</button>
+                </div>
+              </section>
+            ) : null}
+
+            {activeTab === "card" ? (
+              <>
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Характеристики</h2>
+                      <p>Значения из карточки WB без технического JSON-формата.</p>
+                    </div>
+                    <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
                   </div>
-                  <p>Чтобы предлагать заголовки честно, нужны частотность, конкуренты и правила категории. Сейчас этих данных в системе нет.</p>
-                </div>
-              </div>
-            </section>
+                  <CharacteristicsBlock items={characteristics} />
+                </section>
 
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Было / стало</h2>
-                  <p>Это локальный черновик OptiCards, запись в WB отключена.</p>
-                </div>
-                <Tag tone="blue">ручная проверка</Tag>
-              </div>
-              <div className="before-after">
-                <div className="field-box">
-                  <strong>Было: заголовок</strong>
-                  <p>{currentTitle}</p>
-                </div>
-                <div className="field-box">
-                  <strong>Черновик заголовка</strong>
-                  <textarea className="short" defaultValue={currentTitle} />
-                  <p><span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60 символов</span></p>
-                </div>
-                <div className="field-box">
-                  <strong>Было: описание</strong>
-                  <p>{isEmptyValue(description) ? "Пусто" : description}</p>
-                </div>
-                <div className="field-box">
-                  <strong>Черновик описания</strong>
-                  <textarea placeholder="Здесь будет локальное редактирование описания." defaultValue={description || ""} />
-                  <p>Поле подготовлено под будущий черновик. Сейчас изменения не сохраняются и не отправляются в WB.</p>
-                </div>
-              </div>
-            </section>
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Заголовок</h2>
+                      <p>Сейчас это исходное значение из WB. SEO-варианты появятся после подключения MPStats и правил категории.</p>
+                    </div>
+                    <Tag tone={titleLength <= 60 ? "green" : "amber"}>лимит WB 60</Tag>
+                  </div>
+                  <div className="option-list">
+                    <div className="option-row">
+                      <div className="option-head">
+                        <strong>{currentTitle}</strong>
+                        <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
+                      </div>
+                      <p>Это не рекомендация, а текущее название карточки из WB snapshot.</p>
+                    </div>
+                  </div>
+                </section>
 
-            <details className="workspace-strip technical-fields">
-              <summary>
-                <span>Служебные данные WB</span>
-                <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
-              </summary>
-              <RawFieldsView fields={rawFields} />
-            </details>
+                <details className="workspace-strip technical-fields">
+                  <summary>
+                    <span>Служебные данные WB</span>
+                    <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
+                  </summary>
+                  <RawFieldsView fields={rawFields} />
+                </details>
+              </>
+            ) : null}
+
+            {activeTab === "changes" ? (
+              <section className="workspace-strip">
+                <div className="strip-head">
+                  <div>
+                    <h2>Было / стало</h2>
+                    <p>{auditDone ? "Черновик заполнен предложениями аудита." : "Черновик пустой, потому что аудит еще не запускался."}</p>
+                  </div>
+                  <Tag tone={auditDone ? "blue" : "amber"}>{auditDone ? "есть предложения" : "черновик пуст"}</Tag>
+                </div>
+                <div className="before-after">
+                  <div className="field-box">
+                    <strong>Было: заголовок</strong>
+                    <p>{currentTitle}</p>
+                  </div>
+                  <div className="field-box">
+                    <strong>Стало: заголовок</strong>
+                    <textarea className="short" value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="После аудита здесь появится вариант заголовка." />
+                    <p><span className={`char-counter ${draftTitleLength <= 60 ? "ok" : ""}`}>{draftTitleLength}/60 символов</span></p>
+                  </div>
+                  <div className="field-box">
+                    <strong>Было: описание</strong>
+                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                  </div>
+                  <div className="field-box">
+                    <strong>Стало: описание</strong>
+                    <textarea value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} placeholder="После аудита здесь появится вариант описания." />
+                  </div>
+                  <div className="field-box">
+                    <strong>Было: характеристики</strong>
+                    <p>{valueSummary(characteristics)}</p>
+                  </div>
+                  <div className="field-box">
+                    <strong>Стало: характеристики</strong>
+                    <textarea value={draftCharacteristics} onChange={(event) => setDraftCharacteristics(event.target.value)} placeholder="После аудита здесь появятся рекомендации по характеристикам." />
+                  </div>
+                </div>
+              </section>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1569,8 +1676,10 @@ function UserSelect({ label, value, users, onChange }) {
 
 function sourceFlowRows(portal) {
   if (portal.mode === "api") {
+    const tokenDays = tokenDaysLeftText(portal.tokenMeta);
+    const tokenStatus = portal.apiConnected ? `готово${tokenDays ? `, ${tokenDays}` : ""}` : "ожидает подключения";
     return [
-      ["Проверка WB API ключа", portal.apiConnected ? "готово" : "ожидает подключения"],
+      ["Проверка WB API ключа", tokenStatus],
       ["Карточки из кабинета", portal.apiConnected ? formatNumber(portal.cardCount) : "после подключения"],
       ["MPStats", "витрина/аналитика позже"],
       ["Запись в WB", "отключена"],

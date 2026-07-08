@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import binascii
 import datetime as dt
 import getpass
 import hashlib
@@ -131,6 +132,8 @@ def init_db():
         token_ciphertext TEXT NOT NULL,
         token_digest TEXT NOT NULL,
         external_key TEXT NOT NULL DEFAULT '',
+        token_issued_at TEXT,
+        token_expires_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_checked_at TEXT,
@@ -149,6 +152,10 @@ def init_db():
     integration_columns = {row["name"] for row in db.execute("PRAGMA table_info(portal_integrations)").fetchall()}
     if "external_key" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN external_key TEXT NOT NULL DEFAULT ''")
+    if "token_issued_at" not in integration_columns:
+      db.execute("ALTER TABLE portal_integrations ADD COLUMN token_issued_at TEXT")
+    if "token_expires_at" not in integration_columns:
+      db.execute("ALTER TABLE portal_integrations ADD COLUMN token_expires_at TEXT")
     db.execute(
       """
       CREATE INDEX IF NOT EXISTS idx_portal_integrations_provider_token_digest
@@ -214,6 +221,74 @@ def token_digest(token):
 
 def secret_digest(secret):
   return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def decode_jwt_payload(token):
+  parts = str(token or "").split(".")
+  if len(parts) < 2:
+    return {}
+  payload = parts[1]
+  padding = "=" * (-len(payload) % 4)
+  try:
+    decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+    result = json.loads(decoded.decode("utf-8"))
+  except (ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+    return {}
+  return result if isinstance(result, dict) else {}
+
+
+def wb_token_meta(token):
+  payload = decode_jwt_payload(token)
+  exp = payload.get("exp")
+  iat = payload.get("iat")
+  now = utc_now()
+  meta = {
+    "expiresAt": "",
+    "issuedAt": "",
+    "daysLeft": None,
+    "status": "unknown",
+  }
+  if isinstance(iat, (int, float)):
+    meta["issuedAt"] = dt.datetime.fromtimestamp(iat, dt.timezone.utc).isoformat()
+  if isinstance(exp, (int, float)):
+    expires_at = dt.datetime.fromtimestamp(exp, dt.timezone.utc)
+    seconds_left = (expires_at - now).total_seconds()
+    meta["expiresAt"] = expires_at.isoformat()
+    meta["daysLeft"] = max(0, int((seconds_left + 86399) // 86400))
+    if seconds_left <= 0:
+      meta["status"] = "expired"
+    elif seconds_left <= 30 * 86400:
+      meta["status"] = "expiring"
+    else:
+      meta["status"] = "active"
+  return meta
+
+
+def wb_token_meta_from_dates(issued_at="", expires_at=""):
+  meta = {
+    "expiresAt": expires_at or "",
+    "issuedAt": issued_at or "",
+    "daysLeft": None,
+    "status": "unknown",
+  }
+  if not expires_at:
+    return meta
+  try:
+    normalized = expires_at.replace("Z", "+00:00")
+    expires_dt = dt.datetime.fromisoformat(normalized)
+    if expires_dt.tzinfo is None:
+      expires_dt = expires_dt.replace(tzinfo=dt.timezone.utc)
+  except ValueError:
+    return meta
+  seconds_left = (expires_dt - utc_now()).total_seconds()
+  meta["daysLeft"] = max(0, int((seconds_left + 86399) // 86400))
+  if seconds_left <= 0:
+    meta["status"] = "expired"
+  elif seconds_left <= 30 * 86400:
+    meta["status"] = "expiring"
+  else:
+    meta["status"] = "active"
+  return meta
 
 
 def generate_secret_key():
@@ -294,6 +369,7 @@ def create_portal(name, marketplace, scope, created_by, team):
 def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot):
   init_db()
   stats = snapshot.get("stats") or {}
+  token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
   portal_name = stats.get("portalName") or name
   external_key = wb_snapshot_external_key(snapshot)
   with connect_db() as db:
@@ -334,11 +410,21 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
     db.execute(
       """
       INSERT INTO portal_integrations (
-        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest,
+        external_key, token_issued_at, token_expires_at, last_checked_at
       )
-      VALUES (?, ?, 'connected', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      VALUES (?, ?, 'connected', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       """,
-      (portal_id, WB_PROVIDER, nonce, ciphertext, secret_digest(token), external_key),
+      (
+        portal_id,
+        WB_PROVIDER,
+        nonce,
+        ciphertext,
+        secret_digest(token),
+        external_key,
+        token_meta.get("issuedAt", ""),
+        token_meta.get("expiresAt", ""),
+      ),
     )
     return portal_id
 
@@ -383,6 +469,7 @@ def save_integration_token(portal_id, provider, token):
   init_db()
   aad = integration_aad(portal_id, provider)
   nonce, ciphertext = encrypt_secret(token, aad)
+  token_meta = wb_token_meta(token) if provider == WB_PROVIDER else {}
   with connect_db() as db:
     portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
     if not portal:
@@ -390,18 +477,29 @@ def save_integration_token(portal_id, provider, token):
     db.execute(
       """
       INSERT INTO portal_integrations (
-        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest,
+        external_key, token_issued_at, token_expires_at
       )
-      VALUES (?, ?, 'stored', ?, ?, ?, '')
+      VALUES (?, ?, 'stored', ?, ?, ?, '', ?, ?)
       ON CONFLICT(portal_id, provider) DO UPDATE SET
         status = 'stored',
         token_nonce = excluded.token_nonce,
         token_ciphertext = excluded.token_ciphertext,
         token_digest = excluded.token_digest,
+        token_issued_at = excluded.token_issued_at,
+        token_expires_at = excluded.token_expires_at,
         external_key = '',
         updated_at = CURRENT_TIMESTAMP
       """,
-      (portal_id, provider, nonce, ciphertext, secret_digest(token)),
+      (
+        portal_id,
+        provider,
+        nonce,
+        ciphertext,
+        secret_digest(token),
+        token_meta.get("issuedAt", ""),
+        token_meta.get("expiresAt", ""),
+      ),
     )
     db.execute(
       """
@@ -430,6 +528,8 @@ def list_portals():
         portals.work_count,
         portals.problem_count,
         portals.last_sync_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
@@ -475,6 +575,7 @@ def public_portal_from_row(row):
     "realCards": [],
     "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
     "lastSyncAt": row["last_sync_at"] or "",
+    "tokenMeta": wb_token_meta_from_dates(row["wb_token_issued_at"] or "", row["wb_token_expires_at"] or ""),
     "isDemo": False,
   }
 
@@ -496,6 +597,8 @@ def get_portal_row(portal_id):
         portals.work_count,
         portals.problem_count,
         portals.last_sync_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
+        MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
@@ -554,6 +657,7 @@ def update_portal_sync_stats(portal_id, snapshot):
   except (TypeError, ValueError):
     return
   stats = snapshot.get("stats") or {}
+  token_meta = snapshot.get("tokenMeta") or {}
   external_key = wb_snapshot_external_key(snapshot)
   with connect_db() as db:
     db.execute(
@@ -579,15 +683,24 @@ def update_portal_sync_stats(portal_id, snapshot):
         numeric_portal_id,
       ),
     )
-    if external_key:
-      db.execute(
-        """
-        UPDATE portal_integrations
-        SET external_key = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE portal_id = ? AND provider = ?
-        """,
-        (external_key, numeric_portal_id, WB_PROVIDER),
-      )
+    db.execute(
+      """
+      UPDATE portal_integrations
+      SET
+        external_key = COALESCE(NULLIF(?, ''), external_key),
+        token_issued_at = COALESCE(NULLIF(?, ''), token_issued_at),
+        token_expires_at = COALESCE(NULLIF(?, ''), token_expires_at),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE portal_id = ? AND provider = ?
+      """,
+      (
+        external_key,
+        token_meta.get("issuedAt", ""),
+        token_meta.get("expiresAt", ""),
+        numeric_portal_id,
+        WB_PROVIDER,
+      ),
+    )
 
 
 def create_session(db, user_id, remember=False):
@@ -746,7 +859,15 @@ def first_photo_url(card):
   if not photos:
     return ""
   photo = photos[0] or {}
-  return photo.get("tm") or photo.get("c246x328") or photo.get("square") or photo.get("big") or ""
+  preferred_keys = ("big", "c516x688", "c246x328", "square", "tm")
+  for key in preferred_keys:
+    value = photo.get(key)
+    if value:
+      return value
+  for value in photo.values():
+    if isinstance(value, str) and value.startswith("https://"):
+      return value
+  return ""
 
 
 SENSITIVE_WB_FIELD_PARTS = (
@@ -909,6 +1030,7 @@ def fetch_wb_cards(token, max_cards=100):
     "cards": normalized_cards,
     "raw_count": len(cards),
     "cursor": cursor,
+    "tokenMeta": wb_token_meta(token),
     "stats": {
       "cardCount": len(normalized_cards),
       "workCount": work_count,
@@ -933,6 +1055,7 @@ def clean_portal_team(raw_team):
 def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot=None):
   stats = (snapshot or {}).get("stats") or {}
   cards = (snapshot or {}).get("cards") or []
+  token_meta = (snapshot or {}).get("tokenMeta") or {}
   return {
     "id": str(portal_id),
     "name": stats.get("portalName") or name,
@@ -951,6 +1074,7 @@ def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snaps
     "realCards": cards,
     "syncStatus": "loaded" if mode == "api" else "manual",
     "lastSyncAt": stats.get("loadedAt", ""),
+    "tokenMeta": token_meta,
     "isDemo": False,
   }
 
