@@ -21,9 +21,9 @@ import {
 } from "lucide-react";
 
 const hardcodedDirectoryFallback = [
-  { login: "kristina", full_name: "Кристина Январева", role: "Руководитель отдела", access_level: "all", user_role: "manager" },
-  { login: "anastasia", full_name: "Анастасия Руднева", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" },
-  { login: "svetlana", full_name: "Светлана Дементьева", role: "Аккаунт-менеджер", access_level: "overview", user_role: "manager" },
+  { login: "kristina.manager", full_name: "Кристина Январева", role: "Руководитель отдела", access_level: "overview", user_role: "manager" },
+  { login: "anastasia.tech", full_name: "Анастасия Руднева", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" },
+  { login: "svetlana.manager", full_name: "Светлана Дементьева", role: "Аккаунт-менеджер", access_level: "overview", user_role: "manager" },
 ];
 
 const appViewStorageKey = "opticards-active-view";
@@ -619,9 +619,9 @@ function normalizeUserList(rawUsers) {
 
 function defaultTeamFromUsers(displayUsers) {
   const users = displayUsers.length ? displayUsers : hardcodedDirectoryFallback;
-  const lead = findPreferredUser(users, ["kristina", "kristina.yanvareva"], "admin");
-  const tech = findPreferredUser(users, ["anastasia", "anastasia.rudneva"], "tech");
-  const manager = findPreferredUser(users, ["svetlana", "svetlana.dementyeva"], "manager") || lead;
+  const lead = findPreferredUser(users, ["kristina.manager", "kristina", "kristina.yanvareva"], "admin");
+  const tech = findPreferredUser(users, ["anastasia.tech", "anastasia", "anastasia.rudneva"], "tech");
+  const manager = findPreferredUser(users, ["svetlana.manager", "svetlana", "svetlana.dementyeva"], "manager") || lead;
   return {
     lead: lead?.login || "manager",
     tech: tech?.login || "specialist",
@@ -3573,7 +3573,7 @@ function CardRecoveryScreen({ loading, onBack }) {
 }
 
 const defaultNewUserForm = {
-  login: "svetlana",
+  login: "svetlana.manager",
   fullName: "Светлана Дементьева",
   role: "Аккаунт-менеджер",
   userRole: "manager",
