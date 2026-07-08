@@ -2306,7 +2306,7 @@ function CardDetailScreen({ card, portal, onBack }) {
       portal_id: String(portal.id),
       type: "subject",
       value: String(subjectID),
-      num_top: "100",
+      num_top: "300",
       min_cats: "0",
     });
     if (forceRefresh) {
