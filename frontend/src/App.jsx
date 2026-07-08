@@ -618,6 +618,25 @@ function normalizeCharacteristicMeta(item) {
   };
 }
 
+function characteristicValueLimit(meta) {
+  if (Number(meta?.charcType) === 4) {
+    return 1;
+  }
+  const maxCount = Number(meta?.maxCount || 0);
+  return maxCount > 0 ? maxCount : null;
+}
+
+function characteristicLimitText(meta, filledCount) {
+  const limit = characteristicValueLimit(meta);
+  if (limit) {
+    return `${filledCount} из ${limit}`;
+  }
+  if (Number(meta?.charcType) === 1 && Number(meta?.maxCount || 0) === 0) {
+    return `${filledCount} заполнено`;
+  }
+  return filledCount ? `${filledCount} заполнено` : "не заполнено";
+}
+
 function draftCharacteristicsList(drafts) {
   return Object.values(drafts || {})
     .filter((item) => item?.label)
@@ -629,16 +648,25 @@ function draftCharacteristicsList(drafts) {
     }));
 }
 
-function characteristicValueOptionsByKey(portal, currentRows) {
+function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = []) {
   const options = {};
+  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
   currentRows.forEach((row) => {
-    options[row.key] = characteristicValueTokens(row.value);
+    const meta = metaByKey[row.key] || {};
+    const wbOptions = Array.isArray(meta.valueOptions) ? meta.valueOptions : [];
+    options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions];
   });
   (portal?.realCards || []).forEach((item) => {
     characteristicRows(item?.characteristics || item?.rawFields?.characteristics || []).forEach((row) => {
       const current = options[row.key] || [];
       options[row.key] = [...current, ...characteristicValueTokens(row.value)];
     });
+  });
+  availableCharacteristics.forEach((item) => {
+    const key = characteristicKeyFromMeta(item);
+    const current = options[key] || [];
+    const wbOptions = Array.isArray(item.valueOptions) ? item.valueOptions : [];
+    options[key] = [...current, ...wbOptions];
   });
   return Object.fromEntries(Object.entries(options).map(([key, values]) => [
     key,
@@ -1516,7 +1544,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
-  const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems);
+  const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems, subjectCharacteristics);
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
@@ -1946,6 +1974,7 @@ function CharacteristicsDiffTable({
   onRemoveValue,
 }) {
   const baseKeys = new Set(rows.map((row) => row.key));
+  const characteristicMetaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
   const draftOnlyRows = Object.entries(drafts)
     .filter(([key]) => !baseKeys.has(key))
     .map(([key, draft]) => ({
@@ -1953,9 +1982,16 @@ function CharacteristicsDiffTable({
       label: draft.label,
       value: "",
       charcID: draft.charcID,
+      meta: characteristicMetaByKey[key] || draft,
       draftOnly: true,
     }));
-  const visibleRows = [...rows, ...draftOnlyRows];
+  const visibleRows = [
+    ...rows.map((row) => ({
+      ...row,
+      meta: characteristicMetaByKey[row.key] || drafts[row.key] || row,
+    })),
+    ...draftOnlyRows,
+  ];
   const selectedKeys = new Set(Object.keys(drafts));
   const normalizedSearch = search.trim().toLowerCase();
   const availableOptions = (availableCharacteristics || [])
@@ -1986,6 +2022,7 @@ function CharacteristicsDiffTable({
           <DraftCharacteristicEditor
             draft={drafts[row.key]}
             row={row}
+            meta={row.meta}
             valueOptions={valueOptionsByKey[row.key] || []}
             onAddValue={(value) => onAddValue(row, value)}
             onRemoveValue={(value) => onRemoveValue(row, value)}
@@ -2014,6 +2051,7 @@ function CharacteristicsDiffTable({
               <span>{item.name}</span>
               {item.required ? <Tag tone="amber">обязательная</Tag> : null}
               {!item.required && item.popular ? <Tag tone="blue">популярная</Tag> : null}
+              <small>{characteristicValueLimit(item) ? `до ${characteristicValueLimit(item)}` : "без лимита"}</small>
               {item.unitName ? <small>{item.unitName}</small> : null}
             </button>
           ))}
@@ -2023,10 +2061,12 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, valueOptions, onAddValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
   const isAuditSuggestion = draft?.source === "audit";
   const values = draftCharacteristicValues(draft);
+  const limit = characteristicValueLimit(meta);
+  const isLimitReached = Boolean(limit && values.length >= limit);
   const normalizedQuery = query.trim().toLowerCase();
   const availableValues = valueOptions
     .filter((value) => !values.includes(value))
@@ -2034,6 +2074,9 @@ function DraftCharacteristicEditor({ draft, row, valueOptions, onAddValue, onRem
     .slice(0, 6);
 
   function addValue(value) {
+    if (isLimitReached) {
+      return;
+    }
     onAddValue(value);
     setQuery("");
   }
@@ -2060,19 +2103,23 @@ function DraftCharacteristicEditor({ draft, row, valueOptions, onAddValue, onRem
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Найти значение"
+          disabled={isLimitReached}
+          placeholder={isLimitReached ? "Лимит значений достигнут" : "Найти значение"}
         />
       </label>
       {query ? (
         <div className="draft-value-options">
-          {availableValues.length ? availableValues.map((value) => (
+          {isLimitReached ? <span className="field-empty">Сначала удалите одно значение</span> : null}
+          {!isLimitReached && availableValues.length ? availableValues.map((value) => (
             <button className="characteristic-option" type="button" key={value} onClick={() => addValue(value)}>
               <span>{value}</span>
             </button>
-          )) : <span className="field-empty">Нет готовых значений</span>}
+          )) : null}
+          {!isLimitReached && !availableValues.length ? <span className="field-empty">Нет готовых значений</span> : null}
         </div>
       ) : null}
       <div className="draft-editor-meta">
+        <span>{characteristicLimitText(meta, values.length)}</span>
         {isAuditSuggestion ? <Tag tone="blue">рекомендация аудита</Tag> : null}
         {draft && !isAuditSuggestion ? <span>ручная правка</span> : null}
       </div>

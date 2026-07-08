@@ -60,6 +60,7 @@ WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
 WB_CHARACTERISTICS_CACHE = {}
+WB_DIRECTORY_CACHE = {}
 
 
 def utc_now():
@@ -1232,6 +1233,72 @@ def normalize_wb_characteristic(item):
   }
 
 
+WB_DIRECTORY_MATCHERS = (
+  ("colors", "/content/v2/directory/colors", ("цвет",)),
+  ("kinds", "/content/v2/directory/kinds", ("пол", "гендер")),
+  ("countries", "/content/v2/directory/countries", ("страна производства", "страна изготов")),
+  ("seasons", "/content/v2/directory/seasons", ("сезон",)),
+)
+
+
+def normalized_ru_text(value):
+  return str(value or "").strip().lower().replace("ё", "е")
+
+
+def characteristic_name_matches(normalized_name, alias):
+  if alias == "пол":
+    words = normalized_name.replace("/", " ").replace("-", " ").split()
+    return alias in words
+  return alias in normalized_name
+
+
+def public_directory_value(item):
+  if isinstance(item, str):
+    return item.strip()
+  if isinstance(item, dict):
+    return str(
+      item.get("name")
+      or item.get("value")
+      or item.get("title")
+      or item.get("parentName")
+      or ""
+    ).strip()
+  return ""
+
+
+def fetch_wb_directory_values(token, cache_key, path):
+  cached = WB_DIRECTORY_CACHE.get(cache_key)
+  now = time.time()
+  if cached and now - cached["loaded_at"] < WB_CHARCS_CACHE_TTL_SECONDS:
+    return cached["values"]
+  response = wb_get_json(token, path)
+  items = response.get("data") if isinstance(response, dict) else response
+  if not isinstance(items, list):
+    items = []
+  values = sorted({
+    value
+    for value in (public_directory_value(item) for item in items)
+    if value
+  }, key=lambda value: value.lower())
+  WB_DIRECTORY_CACHE[cache_key] = {
+    "loaded_at": now,
+    "values": values,
+  }
+  return values
+
+
+def attach_wb_directory_values(token, characteristics):
+  for characteristic in characteristics:
+    normalized_name = normalized_ru_text(characteristic.get("name"))
+    for cache_key, path, aliases in WB_DIRECTORY_MATCHERS:
+      if any(characteristic_name_matches(normalized_name, alias) for alias in aliases):
+        try:
+          characteristic["valueOptions"] = fetch_wb_directory_values(token, cache_key, path)
+        except WbApiError:
+          characteristic["valueOptions"] = []
+        break
+
+
 def fetch_wb_subject_characteristics(token, subject_id):
   subject_id = int(subject_id)
   cached = WB_CHARACTERISTICS_CACHE.get(subject_id)
@@ -1242,6 +1309,7 @@ def fetch_wb_subject_characteristics(token, subject_id):
   response = wb_get_json(token, f"/content/v2/object/charcs/{subject_id}")
   items = response.get("data") or []
   characteristics = [normalize_wb_characteristic(item) for item in items if isinstance(item, dict)]
+  attach_wb_directory_values(token, characteristics)
   characteristics.sort(key=lambda item: (
     not item["required"],
     not item["popular"],
