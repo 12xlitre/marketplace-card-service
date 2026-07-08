@@ -894,6 +894,29 @@
       flex-wrap: wrap;
     }
 
+    .member-picker {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      width: 100%;
+    }
+
+    .picker-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .picker-field span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .member-picker .select,
+    .member-picker .btn {
+      width: 100%;
+    }
+
     .list-row {
       display: flex;
       align-items: center;
@@ -1870,17 +1893,23 @@
                   <div class="list-row" data-member-login="manager"><span>Руководитель</span><strong>Проекты и отчеты</strong></div>
                   <div class="list-row" data-member-login="specialist"><span>Специалист</span><strong>Карточки и аудит</strong></div>
                 </div>
-                <div class="panel-actions">
-                  <select class="select" id="member-role-select" aria-label="Роль в проекте">
-                    <option value="lead">Руководитель</option>
-                    <option value="tech">Технический специалист</option>
-                    <option value="manager">Менеджер</option>
-                  </select>
-                  <select class="select" id="member-select" aria-label="Добавить участника">
-                    <option value="admin">Администратор</option>
-                    <option value="manager">Руководитель</option>
-                    <option value="specialist">Специалист</option>
-                  </select>
+                <div class="panel-actions member-picker">
+                  <label class="picker-field">
+                    <span>1. Кого добавляем</span>
+                    <select class="select" id="member-role-select" aria-label="Роль в проекте">
+                      <option value="lead">Руководитель</option>
+                      <option value="tech">Технический специалист</option>
+                      <option value="manager">Менеджер</option>
+                    </select>
+                  </label>
+                  <label class="picker-field">
+                    <span>2. Сотрудник</span>
+                    <select class="select" id="member-select" aria-label="Добавить участника">
+                      <option value="admin">Администратор</option>
+                      <option value="manager">Руководитель</option>
+                      <option value="specialist">Специалист</option>
+                    </select>
+                  </label>
                   <button class="btn" id="add-member-button" type="button">Добавить</button>
                 </div>
               </section>
@@ -2334,6 +2363,7 @@
     const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
+    const staticSessionKey = "opticards-static-user";
     const fallbackUsers = [
       { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all", user_role: "admin" },
       { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview", user_role: "manager" },
@@ -2533,7 +2563,7 @@
         const payload = await apiRequest("/api/users");
         users = payload.users || [];
       } catch (error) {
-        users = users.length ? users : (currentUser ? [currentUser] : []);
+        users = users.length ? users : (currentUser ? staticAuthUsers.map(publicUser) : []);
       }
       fillEmployeeSelects();
       renderProjectMembers();
@@ -2574,6 +2604,7 @@
       memberSelect.value = userOptions.some((user) => user.login === selected)
         ? selected
         : memberSelect.options[0]?.value || "";
+      addMemberButton.disabled = !memberSelect.value;
     }
 
     function initials(name) {
@@ -2595,6 +2626,23 @@
       appShell.classList.remove("is-hidden");
       await loadUsers();
       showScreen("employees");
+    }
+
+    function saveStaticSession(user) {
+      try {
+        sessionStorage.setItem(staticSessionKey, JSON.stringify(publicUser(user)));
+      } catch (error) {
+        // Session storage can be unavailable in strict browser modes.
+      }
+    }
+
+    function readStaticSession() {
+      try {
+        const user = JSON.parse(sessionStorage.getItem(staticSessionKey) || "null");
+        return user?.login ? user : null;
+      } catch (error) {
+        return null;
+      }
     }
 
     function showScreen(screenName) {
@@ -2890,6 +2938,7 @@
         }
         loginError.classList.remove("active");
         passwordInput.value = "";
+        saveStaticSession(user);
         await enterApp(user);
       }
     });
@@ -3020,6 +3069,11 @@
           await enterApp(payload.user);
         }
       } catch (error) {
+        const staticUser = readStaticSession();
+        if (staticUser) {
+          await enterApp(staticUser);
+          return;
+        }
         loginScreen.classList.remove("is-hidden");
         appShell.classList.add("is-hidden");
       }
