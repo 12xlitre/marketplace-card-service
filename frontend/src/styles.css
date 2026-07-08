@@ -1531,6 +1531,17 @@ tr:last-child td {
   line-height: 1.4;
 }
 
+.approval-return-field {
+  display: grid;
+  gap: 5px;
+}
+
+.approval-return-field span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .approval-buttons {
   display: flex;
   flex-wrap: wrap;

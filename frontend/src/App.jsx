@@ -3387,12 +3387,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         if (onDraftSaved) {
           await onDraftSaved(response.draft);
         }
-        return;
+        return "backend";
       } catch {
         setDraftSaveStatus(savedLocally ? "local-fallback" : "error");
+        return savedLocally ? "local-fallback" : "error";
       }
     } else {
       setDraftSaveStatus(savedLocally ? "local" : "error");
+      return savedLocally ? "local" : "error";
     }
   }
 
@@ -3430,10 +3432,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   async function applyApprovalChange(nextApproval, statusMessage) {
+    const previousApproval = approval;
     const normalized = normalizeApprovalState(nextApproval);
     setApproval(normalized);
-    await persistStructuredDraft(buildCurrentStructuredDraft(normalized), { auditDone: auditStatus === "done" });
+    const persistStatus = await persistStructuredDraft(buildCurrentStructuredDraft(normalized), { auditDone: auditStatus === "done" });
+    if (backendDraftEnabled && persistStatus !== "backend") {
+      setApproval(previousApproval);
+      setDraftSaveStatus("approval-save-error");
+      return false;
+    }
     setDraftSaveStatus(statusMessage);
+    return true;
   }
 
   function approvalHistoryItem(action, reason = "") {
@@ -3492,8 +3501,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       returnReason: reason,
       history: [approvalHistoryItem("changes_requested", reason), ...(approval.history || [])],
     });
-    setApprovalComment("");
-    await applyApprovalChange(nextApproval, "approval-returned");
+    const saved = await applyApprovalChange(nextApproval, "approval-returned");
+    if (saved) {
+      setApprovalComment("");
+    }
   }
 
   async function resetDraft() {
@@ -3884,6 +3895,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
                     {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
                     {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
+                    {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
@@ -3984,13 +3996,16 @@ function ApprovalPanel({
       ) : null}
       {canReview ? (
         <div className="approval-review">
-          <textarea
-            value={comment}
-            onChange={(event) => onComment(event.target.value)}
-            placeholder="Причина возврата на доработку"
-          />
+          <div className="approval-return-field">
+            <textarea
+              value={comment}
+              onChange={(event) => onComment(event.target.value)}
+              placeholder="Причина возврата на доработку"
+            />
+            <span>{status === "approval-reason-required" ? "Чтобы вернуть задачу, нужно указать причину." : "Комментарий обязателен только для возврата на доработку."}</span>
+          </div>
           <div className="approval-buttons">
-            <button className="btn" type="button" onClick={onReturn} disabled={busy}><RotateCcw size={17} />На доработку</button>
+            <button className="btn" type="button" onClick={onReturn} disabled={busy || !comment.trim()}><RotateCcw size={17} />На доработку</button>
             <button className="btn primary" type="button" onClick={onApprove} disabled={busy}><CheckSquare size={17} />Принято</button>
           </div>
         </div>
