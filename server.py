@@ -22,7 +22,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("OPTICARDS_DB", ROOT / "var" / "opticards.sqlite3"))
 SESSION_COOKIE = "opticards_session"
-SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+SESSION_TTL_SECONDS = 12 * 60 * 60
+SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 64 * 1024
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
@@ -274,11 +275,12 @@ def list_portals():
   return rows
 
 
-def create_session(db, user_id):
+def create_session(db, user_id, remember=False):
+  ttl = SESSION_TTL_REMEMBER_SECONDS if remember else SESSION_TTL_SECONDS
   token = secrets.token_urlsafe(32)
   db.execute(
     "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
-    (user_id, token_digest(token), iso_now_plus(SESSION_TTL_SECONDS)),
+    (user_id, token_digest(token), iso_now_plus(ttl)),
   )
   db.execute("DELETE FROM sessions WHERE expires_at <= ?", (utc_now().isoformat(),))
   return token
@@ -415,6 +417,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       payload = self.read_json() or {}
       login = str(payload.get("login", "")).strip()
       password = str(payload.get("password", ""))
+      remember = bool(payload.get("remember"))
 
       with connect_db() as db:
         user = db.execute(
@@ -424,12 +427,15 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         if not user or not verify_password(password, user["password_hash"]):
           self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid_credentials"})
           return
-        token = create_session(db, user["id"])
+        token = create_session(db, user["id"], remember=remember)
 
       self.send_json(
         HTTPStatus.OK,
         {"user": public_user(user)},
-        {"Set-Cookie": self.session_cookie_header(token)},
+        {"Set-Cookie": self.session_cookie_header(
+          token,
+          max_age=SESSION_TTL_REMEMBER_SECONDS if remember else SESSION_TTL_SECONDS,
+        )},
       )
       return
 

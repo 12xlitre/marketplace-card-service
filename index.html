@@ -2384,22 +2384,9 @@
     const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
-    const staticSessionKey = "opticards-static-user";
-    const staticSessionStateKey = "opticards-static-auth-state";
-    const fallbackUsers = [
-      { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all", user_role: "admin" },
-      { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview", user_role: "manager" },
-      { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb", user_role: "tech" }
-    ];
-    const legacyRolePlaceholders = new Set(["admin", "manager", "specialist"]);
     const hardcodedDirectoryFallback = [
       { login: "kristina", full_name: "Кристина", role: "Руководитель", access_level: "overview", user_role: "manager" },
       { login: "anastasia", full_name: "Анастасия", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" }
-    ];
-    const staticAuthUsers = [
-      { ...fallbackUsers[0], login_hash: "0bbe3aea024a982e63e8f5bb4bb0fe7d90cb3c451e399d400c51d79c7e22998e", password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
-      { ...fallbackUsers[1], login_hash: "ab38dec250a8262fa226d8f4b4def99251043e506d93435175f6454a4edfa4ba", password_hash: "pbkdf2_sha256$240000$fbf2a62d71c3b03051d63cfdb3ebf60a$bd3d33bc4eb0b06a6a3da022fc6ecc2ea645ac4327c8d12cb486557261177444" },
-      { ...fallbackUsers[2], login_hash: "079d708b2c27d35617c2ce3e9a6e2a7d6d14618f5c51b11214ca876cc7a22f37", password_hash: "pbkdf2_sha256$240000$ffd06404ba2295d304f53eb3f223a9a7$5b4868dbae93b71ee0248baffe0d7fa0aa23447989c0a0cf5fe4edc46b6ff98e" }
     ];
     let users = [];
     let currentUser = null;
@@ -2427,21 +2414,11 @@
     let currentPortal = demoPortal;
     let userPortals = [];
 
-    function isLegacyPlaceholderUser(user) {
-      const login = `${user?.login || ""}`.toLowerCase();
-      if (!legacyRolePlaceholders.has(login)) {
-        return false;
-      }
-      const fullName = `${user?.full_name || ""}`.toLowerCase();
-      return fullName === "администратор" || fullName === "руководитель" || fullName === "специалист";
-    }
-
     function getDisplayUsers() {
       if (!users.length) {
-        return fallbackUsers;
+        return hardcodedDirectoryFallback;
       }
-      const realUsers = users.filter((user) => !isLegacyPlaceholderUser(user));
-      return realUsers.length ? realUsers : fallbackUsers;
+      return users;
     }
 
     function findUser(login) {
@@ -2449,7 +2426,7 @@
       return candidates.find((item) => item.login === login)
         || currentUser
         || candidates[0]
-        || fallbackUsers[0];
+        || hardcodedDirectoryFallback[0];
     }
 
     function formatNumber(value) {
@@ -2496,7 +2473,7 @@
       }, []);
     }
 
-    function ensureUsersLoadedFromSources(apiUsers, directoryUsers, rememberStateUsers) {
+    function ensureUsersLoadedFromSources(apiUsers, directoryUsers) {
       const normalizedDirectory = (directoryUsers || []).map((item) => {
         if (!item || !item.login) {
           return null;
@@ -2507,17 +2484,13 @@
         };
       }).filter(Boolean);
 
-      const normalizedCurrentUser = currentUser ? [publicUser(currentUser)] : [];
-      const normalizedStateUsers = (rememberStateUsers || []).filter((user) => !isLegacyPlaceholderUser(user));
       const merged = dedupeUsers(
         apiUsers,
         normalizedDirectory,
-        normalizedStateUsers,
-        normalizedCurrentUser.filter((user) => !isLegacyPlaceholderUser(user)),
         hardcodedDirectoryFallback
       );
 
-      return merged.length ? merged : dedupeUsers(fallbackUsers);
+      return merged.length ? merged : dedupeUsers(hardcodedDirectoryFallback);
     }
 
     function userCanFillProjectRole(user, projectRole) {
@@ -2594,57 +2567,6 @@
       };
     }
 
-    async function sha256Hex(value) {
-      if (!window.crypto?.subtle) {
-        return "";
-      }
-      const digest = await window.crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(value)
-      );
-      return Array.from(new Uint8Array(digest))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("");
-    }
-
-    async function verifyStaticPassword(password, passwordHash) {
-      const [algorithm, iterations, saltHex, expectedHex] = passwordHash.split("$");
-      if (algorithm !== "pbkdf2_sha256" || !window.crypto?.subtle) {
-        return false;
-      }
-      const passwordKey = await window.crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(password),
-        "PBKDF2",
-        false,
-        ["deriveBits"]
-      );
-      const saltBytes = new Uint8Array(saltHex.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
-      const derivedBits = await window.crypto.subtle.deriveBits(
-        {
-          name: "PBKDF2",
-          hash: "SHA-256",
-          salt: saltBytes,
-          iterations: Number(iterations)
-        },
-        passwordKey,
-        256
-      );
-      const digestHex = Array.from(new Uint8Array(derivedBits))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("");
-      return digestHex === expectedHex;
-    }
-
-    async function staticLogin(login, password) {
-      const loginHash = await sha256Hex(login);
-      const user = staticAuthUsers.find((item) => item.login_hash === loginHash);
-      if (!user || !(await verifyStaticPassword(password, user.password_hash))) {
-        return null;
-      }
-      return publicUser(user);
-    }
-
     async function loadLocalEmployeeDirectory() {
       if (employeeDirectory.length) {
         return employeeDirectory;
@@ -2689,7 +2611,6 @@
     async function loadUsers() {
       let apiUsers = [];
       let directoryUsers = [];
-      let staticStateUsers = [];
       try {
         const payload = await apiRequest("/api/users");
         apiUsers = normalizeUserList(payload.users || []);
@@ -2698,15 +2619,9 @@
       }
 
       directoryUsers = apiUsers.length ? [] : await loadLocalEmployeeDirectory();
-      const staticState = readStaticSession();
-      staticStateUsers = staticState.users;
+      users = ensureUsersLoadedFromSources(apiUsers, directoryUsers);
 
-      users = ensureUsersLoadedFromSources(apiUsers, directoryUsers, staticStateUsers);
-
-      if (currentUser) {
-        saveStaticSession(currentUser, users, rememberSessionEnabled());
-      }
-
+      syncDemoPortalTeamFromUsers();
       fillEmployeeSelects();
       renderProjectMembers();
     }
@@ -2787,91 +2702,6 @@
         .filter(Boolean);
     }
 
-    function rememberSessionEnabled() {
-      return Boolean(rememberSessionInput?.checked);
-    }
-
-    function persistStaticSession(state) {
-      try {
-        sessionStorage.setItem(staticSessionStateKey, JSON.stringify(state));
-      } catch (error) {
-        // Session storage can be unavailable in strict browser modes.
-      }
-      if (state.remember) {
-        try {
-          localStorage.setItem(staticSessionStateKey, JSON.stringify(state));
-        } catch (error) {
-          // Local storage can be unavailable in strict browser modes.
-        }
-      } else {
-        try {
-          localStorage.removeItem(staticSessionStateKey);
-        } catch (error) {
-          // Ignore storage errors.
-        }
-      }
-    }
-
-    function saveStaticSession(user, userList, remember = null) {
-      const state = {
-        user: publicUser(user),
-        users: normalizeUserList(userList),
-        remember: remember ?? rememberSessionEnabled()
-      };
-      persistStaticSession(state);
-      try {
-        sessionStorage.setItem(staticSessionKey, JSON.stringify(state.user));
-      } catch (error) {
-        // Session storage can be unavailable in strict browser modes.
-      }
-    }
-
-    function readStaticSession() {
-      try {
-        const fromSession = sessionStorage.getItem(staticSessionStateKey);
-        if (fromSession) {
-          const parsed = JSON.parse(fromSession);
-          return {
-            user: parsed?.user || null,
-            users: normalizeUserList(parsed?.users),
-            remember: Boolean(parsed?.remember)
-          };
-        }
-      } catch (error) {
-        // Ignore parse errors and try local fallback.
-      }
-      try {
-        const fromLocal = localStorage.getItem(staticSessionStateKey);
-        if (fromLocal) {
-          const parsed = JSON.parse(fromLocal);
-          return {
-            user: parsed?.user || null,
-            users: normalizeUserList(parsed?.users),
-            remember: Boolean(parsed?.remember)
-          };
-        }
-      } catch (error) {
-        // Session storage can be unavailable in strict browser modes.
-        // Ignore parse errors.
-      }
-      return {
-        user: null,
-        users: [],
-        remember: false
-      };
-    }
-
-    function getStaticSessionUser() {
-      const state = readStaticSession();
-      return state.user?.login ? state.user : null;
-    }
-
-    function syncRememberMeFromState(state) {
-      if (rememberSessionInput) {
-        rememberSessionInput.checked = Boolean(state.remember);
-      }
-    }
-
     function showScreen(screenName) {
       const screens = {
         employees: employeesScreen,
@@ -2936,6 +2766,28 @@
           ? portal.memberLogins
           : [teamRoles.lead, teamRoles.tech, teamRoles.manager])
       };
+    }
+
+    function syncDemoPortalTeamFromUsers() {
+      const displayUsers = getDisplayUsers();
+      if (!displayUsers.length) {
+        return;
+      }
+
+      const lead = displayUsers.find((user) => userCanFillProjectRole(user, "lead")) || displayUsers[0];
+      const tech = displayUsers.find((user) => userCanFillProjectRole(user, "tech")) || displayUsers[0];
+      const manager = displayUsers.find((user) => userCanFillProjectRole(user, "manager")) || lead;
+
+      demoPortal.teamRoles = {
+        lead: lead.login,
+        tech: tech.login,
+        manager: manager.login
+      };
+      demoPortal.ownerLogin = demoPortal.teamRoles.lead;
+      demoPortal.memberLogins = uniqueLogins([demoPortal.teamRoles.lead, demoPortal.teamRoles.tech, demoPortal.teamRoles.manager]);
+      if (currentPortal.id === demoPortal.id) {
+        currentPortal = demoPortal;
+      }
     }
 
     function loadUserPortals() {
@@ -3146,28 +2998,16 @@
           method: "POST",
           body: JSON.stringify({
             login,
-            password
+            password,
+            remember: rememberSessionInput.checked
           })
         });
         loginError.classList.remove("active");
         passwordInput.value = "";
-        saveStaticSession(payload.user, []);
         await enterApp(payload.user);
       } catch (error) {
-        if (error.message === "invalid_credentials") {
-          loginError.classList.add("active");
-          return;
-        }
-
-        const user = await staticLogin(login, password);
-        if (!user) {
-          loginError.classList.add("active");
-          return;
-        }
-        loginError.classList.remove("active");
-        passwordInput.value = "";
-        saveStaticSession(user, []);
-        await enterApp(user);
+        loginError.classList.add("active");
+        return;
       }
     });
 
@@ -3297,13 +3137,6 @@
           await enterApp(payload.user);
         }
       } catch (error) {
-        const staticState = readStaticSession();
-        const staticUser = staticState.user;
-        syncRememberMeFromState(staticState);
-        if (staticUser) {
-          await enterApp(staticUser);
-          return;
-        }
         loginScreen.classList.remove("is-hidden");
         appShell.classList.add("is-hidden");
       }
