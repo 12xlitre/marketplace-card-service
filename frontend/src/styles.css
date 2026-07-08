@@ -1358,6 +1358,14 @@ tr:last-child td {
   line-height: 1.25;
 }
 
+.characteristic-diff-title {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .draft-chip-list {
   display: flex;
   flex-wrap: wrap;
@@ -1440,6 +1448,13 @@ tr:last-child td {
 .draft-editor-nearby {
   color: var(--amber);
   font-weight: 700;
+}
+
+.market-compare {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .draft-source-manual {
@@ -1589,6 +1604,31 @@ tr:last-child td {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.audit-history-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.audit-history-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.audit-history-row span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.audit-history-row em {
+  font-style: normal;
 }
 
 .draft-source-line {

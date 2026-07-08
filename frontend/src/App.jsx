@@ -739,9 +739,30 @@ function descriptionAuditReason(description) {
   return "В WB нет описания, поэтому аудит собрал базовый черновик из названия, бренда и категории.";
 }
 
-function characteristicAuditReason(row, mpstatsValues = []) {
-  if (mpstatsValues.length) {
-    return `MPStats нашел ${mpstatsValues.length} популярных значений для этой характеристики; текущее значение сохранено для ручного сравнения.`;
+function formatMarketShare(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  if (value >= 10) {
+    return `${Math.round(value)}%`;
+  }
+  return `${Math.round(value * 10) / 10}%`;
+}
+
+function mpstatsValueLabel(item) {
+  const share = formatMarketShare(item?.share);
+  return `${item?.value || ""}${share ? ` ${share}` : ""}`.trim();
+}
+
+function characteristicAuditReason(row, mpstatsStats = [], nextValues = [], currentValues = []) {
+  if (mpstatsStats.length) {
+    const marketValues = mpstatsStats.slice(0, 3).map(mpstatsValueLabel).filter(Boolean).join(", ");
+    const currentSet = new Set(currentValues.map(normalizedCharacteristicOption));
+    const changedByMarket = nextValues.some((value) => !currentSet.has(normalizedCharacteristicOption(value)));
+    if (changedByMarket) {
+      return `В топе категории чаще встречается: ${marketValues}. Аудит предложил значения из MPStats для сравнения с текущим заполнением.`;
+    }
+    return `Текущее значение совпадает с частыми вариантами в топе категории: ${marketValues}.`;
   }
   if (isEmptyValue(row.value)) {
     return "Характеристика пустая в WB, ее нужно проверить перед публикацией.";
@@ -819,15 +840,37 @@ function draftCharacteristicValues(draft) {
   return characteristicValueTokens(draft.value);
 }
 
-function characteristicDraftsFromRows(rows, source = "audit", mpstatsCharacteristics = []) {
-  return Object.fromEntries(rows.map((row) => [row.key, {
-    charcID: row.charcID,
-    label: row.label,
-    value: editableCharacteristicValue(row.value),
-    values: characteristicValueTokens(row.value),
-    source,
-    reason: source === "audit" ? characteristicAuditReason(row, mpstatsValuesForCharacteristic(row, mpstatsCharacteristics)) : "",
-  }]));
+function characteristicDraftValuesFromMarket(row, meta, mpstatsCharacteristics = []) {
+  const currentValues = characteristicValueTokens(row.value);
+  const stats = mpstatsValueStatsForCharacteristic(meta || row, mpstatsCharacteristics);
+  if (!stats.length) {
+    return { values: currentValues, stats };
+  }
+  const limit = characteristicValueLimit(meta || row);
+  const maxValues = limit || Math.max(currentValues.length, 3);
+  const values = stats.slice(0, maxValues).map((item) => item.value).filter(Boolean);
+  return { values: values.length ? values : currentValues, stats };
+}
+
+function characteristicDraftsFromRows(rows, source = "audit", mpstatsCharacteristics = [], availableCharacteristics = []) {
+  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  return Object.fromEntries(rows.map((row) => {
+    const meta = metaByKey[row.key] || row;
+    const marketDraft = source === "audit"
+      ? characteristicDraftValuesFromMarket(row, meta, mpstatsCharacteristics)
+      : null;
+    const values = marketDraft ? marketDraft.values : characteristicValueTokens(row.value);
+    return [row.key, {
+      charcID: row.charcID,
+      label: row.label,
+      value: values.length ? values.join(", ") : editableCharacteristicValue(row.value),
+      values,
+      source,
+      reason: source === "audit"
+        ? characteristicAuditReason(row, marketDraft.stats, values, characteristicValueTokens(row.value))
+        : "",
+    }];
+  }));
 }
 
 function normalizeDraftCharacteristics(drafts) {
@@ -1019,6 +1062,15 @@ function matchingMpstatsCharacteristics(meta, mpstatsCharacteristics = []) {
     .sort((left, right) => right.score - left.score);
 }
 
+function characteristicIsPromotionRelevant(meta, mpstatsCharacteristics = []) {
+  return Boolean(
+    meta?.required
+    || meta?.popular
+    || meta?.hasFilter
+    || matchingMpstatsCharacteristics(meta, mpstatsCharacteristics).some((match) => match.item?.promotionRelevant)
+  );
+}
+
 function scoredMpstatsCharacteristics(label, mpstatsCharacteristics = []) {
   return (mpstatsCharacteristics || [])
     .map((item) => ({
@@ -1149,12 +1201,49 @@ function mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics = []) {
   );
 }
 
+function mpstatsValueStatsForCharacteristic(meta, mpstatsCharacteristics = []) {
+  const byValue = new Map();
+  matchingMpstatsCharacteristics(meta, mpstatsCharacteristics)
+    .flatMap((match) => match.item?.values || [])
+    .forEach((item) => {
+      const value = String(item?.value || item || "").trim();
+      if (!value) {
+        return;
+      }
+      const key = normalizedCharacteristicOption(value);
+      const score = Number(item?.score);
+      const current = byValue.get(key) || { value, score: 0, hasScore: false };
+      if (Number.isFinite(score)) {
+        current.score += Math.max(0, score);
+        current.hasScore = true;
+      }
+      byValue.set(key, current);
+    });
+  const values = [...byValue.values()].sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    return left.value.localeCompare(right.value, "ru");
+  });
+  const total = values.reduce((sum, item) => sum + (item.hasScore ? item.score : 0), 0);
+  return values.map((item) => ({
+    value: item.value,
+    score: item.hasScore ? item.score : null,
+    share: item.hasScore && total > 0 ? (item.score / total) * 100 : null,
+  }));
+}
+
 function countMpstatsMatches(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
   const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
   return rows.filter((row) => {
     const meta = metaByKey[row.key] || row;
     return mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics).length > 0;
   }).length;
+}
+
+function countPromotionRelevantCharacteristics(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
+  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  return rows.filter((row) => characteristicIsPromotionRelevant(metaByKey[row.key] || row, mpstatsCharacteristics)).length;
 }
 
 function requestDurationText(milliseconds) {
@@ -1231,6 +1320,7 @@ function cardDraftKey(card) {
 
 function buildStructuredCardDraft({
   auditStatus,
+  auditHistory,
   title,
   titleSource,
   titleReason,
@@ -1259,6 +1349,7 @@ function buildStructuredCardDraft({
     prices: {},
     stocks: {},
     meta: {
+      auditHistory: Array.isArray(auditHistory) ? auditHistory.slice(0, 20) : [],
       card: {
         nmID: card?.nmID || "",
         vendorCode: card?.vendorCode || "",
@@ -1275,6 +1366,7 @@ function contentFromStoredDraft(storedDraft) {
   const content = payload.content || payload;
   const title = content.title || {};
   const description = content.description || {};
+  const meta = payload.meta || {};
   return {
     auditStatus: payload.auditStatus || storedDraft?.auditStatus || "idle",
     title: typeof title === "object" ? title.value || "" : payload.title || "",
@@ -1284,6 +1376,7 @@ function contentFromStoredDraft(storedDraft) {
     titleReason: typeof title === "object" ? title.reason || "" : payload.titleReason || "",
     descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
+    auditHistory: Array.isArray(meta.auditHistory) ? meta.auditHistory : [],
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
 }
@@ -2247,6 +2340,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [draftTitleReason, setDraftTitleReason] = useState("");
   const [draftDescriptionReason, setDraftDescriptionReason] = useState("");
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
+  const [auditHistory, setAuditHistory] = useState([]);
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
   const [mpstatsCharacteristics, setMpstatsCharacteristics] = useState([]);
@@ -2276,6 +2370,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
   const mpstatsMatches = countMpstatsMatches(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
+  const promotionRelevantCount = countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
   const mpstatsDuration = requestDurationText(mpstatsCharacteristicsMs);
   const mpstatsSourceLabel = mpstatsCharacteristicsMeta.cached ? "кэш" : (mpstatsCharacteristicsMeta.cachedAt ? "сейчас" : "");
   const mpstatsUpdatedAt = mpstatsCharacteristicsMeta.cachedAt
@@ -2309,6 +2404,7 @@ function CardDetailScreen({ card, portal, onBack }) {
     setDraftTitleReason("");
     setDraftDescriptionReason("");
     setDraftCharacteristics({});
+    setAuditHistory([]);
     setMpstatsCharacteristics([]);
     setMpstatsCharacteristicsStatus("idle");
     setMpstatsCharacteristicsMs(null);
@@ -2325,6 +2421,7 @@ function CardDetailScreen({ card, portal, onBack }) {
       setDraftTitleReason(normalized.titleReason);
       setDraftDescriptionReason(normalized.descriptionReason);
       setDraftCharacteristics(normalized.characteristics);
+      setAuditHistory(normalized.auditHistory);
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
       setActiveTab("changes");
@@ -2465,13 +2562,32 @@ function CardDetailScreen({ card, portal, onBack }) {
     const suggestions = titleSuggestions(card);
     const nextTitle = suggestions[1] || suggestions[0] || "";
     const nextDescription = descriptionSuggestion(card, description);
+    const nextDraftCharacteristics = characteristicDraftsFromRows(characteristicItems, "audit", auditMpstatsCharacteristics, subjectCharacteristics);
+    const changedCharacteristics = Object.entries(nextDraftCharacteristics)
+      .filter(([key, draft]) => {
+        const currentRow = characteristicItems.find((row) => row.key === key);
+        const currentValues = characteristicValueTokens(currentRow?.value);
+        const currentSet = new Set(currentValues.map(normalizedCharacteristicOption));
+        return draftCharacteristicValues(draft).some((value) => !currentSet.has(normalizedCharacteristicOption(value)));
+      })
+      .length;
+    const auditEntry = {
+      id: `audit-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      mpstatsGroups: auditMpstatsCharacteristics.length,
+      mpstatsMatches: countMpstatsMatches(characteristicItems, subjectCharacteristics, auditMpstatsCharacteristics),
+      promotionRelevantCount: countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, auditMpstatsCharacteristics),
+      changedCharacteristics,
+      status: mpstatsPayload ? "done" : "partial",
+    };
     setDraftTitle(nextTitle);
     setDraftDescription(nextDescription);
     setDraftTitleSource("audit");
     setDraftDescriptionSource("audit");
     setDraftTitleReason(titleAuditReason(card, currentTitle, nextTitle));
     setDraftDescriptionReason(descriptionAuditReason(description));
-    setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "audit", auditMpstatsCharacteristics));
+    setDraftCharacteristics(nextDraftCharacteristics);
+    setAuditHistory((current) => [auditEntry, ...current].slice(0, 20));
     setAuditStatus("done");
     setActiveTab("changes");
   }
@@ -2529,6 +2645,7 @@ function CardDetailScreen({ card, portal, onBack }) {
     const savedAt = new Date().toISOString();
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
+      auditHistory,
       title: draftTitle,
       description: draftDescription,
       titleSource: draftTitleSource,
@@ -2648,6 +2765,13 @@ function CardDetailScreen({ card, portal, onBack }) {
                         ? "Запрашиваем отчет MPStats. Это расходует запрос аналитики и может занять несколько секунд."
                         : "Будет запрошена при запуске аудита. После этого результат сохранится в кэше и будет использоваться в ручных правках."}</p>
                   </div>
+                  <div className="issue">
+                    <div className="issue-head">
+                      <strong>Характеристики для продвижения</strong>
+                      <Tag tone={promotionRelevantCount ? "amber" : "green"}>{promotionRelevantCount || "нет"} в фокусе</Tag>
+                    </div>
+                    <p>В фокус попадают обязательные, популярные и фильтруемые поля WB. Если MPStats отдаст отдельный признак влияния на продвижение, он тоже будет учтен.</p>
+                  </div>
                   {auditDone ? (
                     <div className="issue">
                       <div className="issue-head">
@@ -2657,6 +2781,24 @@ function CardDetailScreen({ card, portal, onBack }) {
                       <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
                     </div>
                   ) : null}
+                  <div className="issue audit-history">
+                    <div className="issue-head">
+                      <strong>История аудитов</strong>
+                      <Tag tone={auditHistory.length ? "blue" : "green"}>{auditHistory.length || "пусто"}</Tag>
+                    </div>
+                    {auditHistory.length ? (
+                      <div className="audit-history-list">
+                        {auditHistory.slice(0, 5).map((item) => (
+                          <div className="audit-history-row" key={item.id || item.createdAt}>
+                            <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"}</span>
+                            <em>{item.mpstatsGroups || 0} MPStats · {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено</em>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p>После запуска аудита здесь появятся даты и краткий итог. История сохранится вместе с черновиком.</p>
+                    )}
+                  </div>
                 </div>
                 <div className="tab-actions">
                   <button className="btn primary" type="button" onClick={runAuditStub} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
@@ -2929,7 +3071,10 @@ function CharacteristicsDiffTable({
       {!visibleRows.length ? <div className="empty-state"><span>Характеристики не заполнены</span></div> : null}
       {visibleRows.map((row) => (
         <div className="characteristics-diff-row" key={row.key}>
-          <strong>{row.label}</strong>
+          <div className="characteristic-diff-title">
+            <strong>{row.label}</strong>
+            {characteristicIsPromotionRelevant(row.meta, mpstatsCharacteristics) ? <Tag tone="amber">важно</Tag> : null}
+          </div>
           {row.draftOnly ? <span className="raw-field-value field-empty">Добавлено в черновик</span> : <RawFieldValue value={row.value} />}
           <DraftCharacteristicEditor
             draft={drafts[row.key]}
@@ -2937,6 +3082,7 @@ function CharacteristicsDiffTable({
             meta={row.meta}
             valueOptions={valueOptionsByKey[row.key] || []}
             mpstatsValues={mpstatsValuesForCharacteristic(row.meta, mpstatsCharacteristics)}
+            mpstatsStats={mpstatsValueStatsForCharacteristic(row.meta, mpstatsCharacteristics)}
             mpstatsNearbyNames={nearbyMpstatsCharacteristicNames(row.meta, mpstatsCharacteristics)}
             onAddValue={(value) => onAddValue(row, value)}
             onRemoveValue={(value) => onRemoveValue(row, value)}
@@ -2975,7 +3121,7 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsNearbyNames = [], onAddValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsStats = [], mpstatsNearbyNames = [], onAddValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
@@ -2989,6 +3135,8 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
   const availableValues = valueOptions
     .filter((value) => !selectedValues.has(normalizedCharacteristicOption(value)))
     .filter((value) => !normalizedQuery || normalizedCharacteristicOption(value).includes(normalizedQuery));
+  const mpstatsStatsByValue = Object.fromEntries(mpstatsStats.map((item) => [normalizedCharacteristicOption(item.value), item]));
+  const topMarketValues = mpstatsStats.slice(0, 3).map(mpstatsValueLabel).filter(Boolean);
   const hasKnownOptions = valueOptions.length > 0;
   const canAddCustomValue = Boolean(
     customValue
@@ -3052,6 +3200,9 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
           {!isLimitReached && availableValues.length ? availableValues.map((value) => (
             <button className="characteristic-option" type="button" key={value} onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(value)}>
               <span>{value}</span>
+              {formatMarketShare(mpstatsStatsByValue[normalizedCharacteristicOption(value)]?.share) ? (
+                <small>топ {formatMarketShare(mpstatsStatsByValue[normalizedCharacteristicOption(value)]?.share)}</small>
+              ) : null}
             </button>
           )) : null}
           {!isLimitReached && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
@@ -3064,6 +3215,7 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
         {!mpstatsValues.length && mpstatsNearbyNames.length ? <span className="draft-editor-nearby" title={`Похожие поля MPStats: ${mpstatsNearbyNames.join(", ")}`}>MPStats рядом</span> : null}
         {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
+      {topMarketValues.length ? <p className="market-compare">Топ категории: {topMarketValues.join(", ")}</p> : null}
       <DraftReason reason={draft?.reason || ""} compact />
     </div>
   );

@@ -957,10 +957,12 @@ def normalize_card_draft_payload(payload):
       "title": {
         "value": str(title.get("value") or payload.get("title") or ""),
         "source": str(title.get("source") or payload.get("titleSource") or ""),
+        "reason": str(title.get("reason") or payload.get("titleReason") or ""),
       },
       "description": {
         "value": str(description.get("value") or payload.get("description") or ""),
         "source": str(description.get("source") or payload.get("descriptionSource") or ""),
+        "reason": str(description.get("reason") or payload.get("descriptionReason") or ""),
       },
       "characteristics": characteristics,
     },
@@ -1501,6 +1503,18 @@ def normalize_mpstats_characteristics(payload):
     data = table.get("data")
     if not isinstance(data, list):
       continue
+    promotion_relevant = any(bool(table.get(key)) for key in (
+      "promotion",
+      "promotionRelevant",
+      "isPromotion",
+      "isPromotionRelevant",
+      "important",
+      "isImportant",
+      "seo",
+      "isSeo",
+      "rank",
+      "ranking",
+    ))
     values = []
     for item in data[:30]:
       if not isinstance(item, list) or not item:
@@ -1511,7 +1525,11 @@ def normalize_mpstats_characteristics(payload):
       score = item[1] if len(item) > 1 and isinstance(item[1], (int, float)) else None
       values.append({"value": value, "score": score})
     if values:
-      rows.append({"name": str(name).strip(), "values": values})
+      rows.append({
+        "name": str(name).strip(),
+        "values": values,
+        "promotionRelevant": promotion_relevant,
+      })
   return rows
 
 
