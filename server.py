@@ -451,7 +451,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     path = unquote(request_path)
     if path in ("", "/"):
       path = "/index.html"
-    if path != "/index.html":
+
+    if path != "/index.html" and not path.startswith("/document/"):
       self.send_error(HTTPStatus.NOT_FOUND)
       return
 
