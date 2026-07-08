@@ -3172,8 +3172,8 @@ def audit_market_data(nm_id, subject_id, period, warnings):
     "nicheItems": sorted(niche_items, key=lambda item: audit_number(item.get("revenue"), 0) or 0, reverse=True)[:80],
     "nichePathMissing": niche_path_missing,
     "brands": audit_extract_list(brands_payload)[:30],
-    "priceSegmentation": price_payload if isinstance(price_payload, dict) else {},
-    "season": season_payload if isinstance(season_payload, dict) else {},
+    "priceSegmentation": price_payload if isinstance(price_payload, dict) else audit_extract_list(price_payload),
+    "season": season_payload if isinstance(season_payload, dict) else audit_extract_list(season_payload),
   }
 
 
