@@ -514,27 +514,37 @@ a {
   gap: 12px;
 }
 
-.cards-work-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 10px;
-}
-
-.work-summary-item,
-.work-summary-note {
-  min-height: 74px;
+.cards-control-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
   padding: 12px;
   display: grid;
+  gap: 12px;
+}
+
+.cards-work-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.work-summary-item,
+.work-summary-note {
+  min-height: 62px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: grid;
   align-content: space-between;
-  gap: 7px;
+  gap: 6px;
 }
 
 .work-summary-item.active {
   background: var(--blue-soft);
-  border-color: #bfd6ed;
 }
 
 .work-summary-item span,
@@ -546,7 +556,7 @@ a {
 }
 
 .work-summary-item strong {
-  font-size: 22px;
+  font-size: 20px;
   line-height: 1;
 }
 

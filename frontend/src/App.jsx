@@ -860,11 +860,57 @@ function cardCompleteness(card) {
   return { label: "Есть пробелы", tone: "red" };
 }
 
-function cardWorkState(card, selectedSet) {
+function cardWorkStateForTask(card, selectedSet, task) {
+  if (task) {
+    return {
+      label: approvalStatusLabel(task.status),
+      tone: approvalStatusTone(task.status),
+    };
+  }
   if (selectedSet.has(cardStableKey(card))) {
     return { label: "В наборе", tone: "blue" };
   }
   return { label: "Нет задачи", tone: "green" };
+}
+
+function cardTaskLookupKeys(card) {
+  return [
+    cardStableKey(card),
+    card?.nmID ? `nm:${card.nmID}` : "",
+    card?.vendorCode ? `vendor:${card.vendorCode}` : "",
+  ].filter(Boolean).map(String);
+}
+
+function approvalTaskLookupKeys(task) {
+  return [
+    task?.cardKey,
+    task?.nmID ? `nm:${task.nmID}` : "",
+    task?.vendorCode ? `vendor:${task.vendorCode}` : "",
+  ].filter(Boolean).map(String);
+}
+
+function buildApprovalTaskLookup(tasks) {
+  const lookup = new Map();
+  const priority = { submitted: 4, changes_requested: 3, approved: 2, exported: 1, draft: 0 };
+  (tasks || []).forEach((task) => {
+    approvalTaskLookupKeys(task).forEach((key) => {
+      const current = lookup.get(key);
+      if (!current || (priority[task.status] || 0) > (priority[current.status] || 0)) {
+        lookup.set(key, task);
+      }
+    });
+  });
+  return lookup;
+}
+
+function approvalTaskForCard(card, lookup) {
+  for (const key of cardTaskLookupKeys(card)) {
+    const task = lookup.get(key);
+    if (task) {
+      return task;
+    }
+  }
+  return null;
 }
 
 function normalizedCardSearchText(card) {
@@ -2964,7 +3010,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
-              <CardsTable cards={cards} portal={portal} onOpenCard={onOpenCard} />
+              <CardsTable cards={cards} portal={portal} workflow={approvalWorkflow} onOpenCard={onOpenCard} />
             </section>
           </div>
 
@@ -3028,7 +3074,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   );
 }
 
-function CardsTable({ cards, portal, onOpenCard }) {
+function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpenCard }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
@@ -3063,14 +3109,17 @@ function CardsTable({ cards, portal, onOpenCard }) {
   const categories = [...new Set(cards.map((card) => String(card.subjectName || "категория не указана").trim()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "ru"));
   const selectedSet = new Set(selectedKeys);
+  const approvalTaskLookup = buildApprovalTaskLookup(workflow.tasks || []);
   const problemCards = cards.filter((card) => cardProblemReasons(card).length);
   const signalCards = cards.filter((card) => cardDataSignals(card).length);
   const signalOnlyCards = signalCards.filter((card) => !cardProblemReasons(card).length);
   const cleanCards = cards.length - problemCards.length;
   const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
+  const taskCards = cards.filter((card) => approvalTaskForCard(card, approvalTaskLookup));
   const visibleCards = cards.filter((card) => {
     const key = cardStableKey(card);
     const hasProblems = cardProblemReasons(card).length > 0;
+    const hasTask = Boolean(approvalTaskForCard(card, approvalTaskLookup));
     if (issueFilter === "problems" && !hasProblems) {
       return false;
     }
@@ -3083,10 +3132,13 @@ function CardsTable({ cards, portal, onOpenCard }) {
     if (issueFilter === "signals" && !cardDataSignals(card).length) {
       return false;
     }
+    if (workFilter === "tasks" && !hasTask) {
+      return false;
+    }
     if (workFilter === "selected" && !selectedSet.has(key)) {
       return false;
     }
-    if (workFilter === "none" && selectedSet.has(key)) {
+    if (workFilter === "none" && (selectedSet.has(key) || hasTask)) {
       return false;
     }
     if (categoryFilter !== "all" && String(card.subjectName || "категория не указана") !== categoryFilter) {
@@ -3134,60 +3186,67 @@ function CardsTable({ cards, portal, onOpenCard }) {
 
   return (
     <div className="cards-workspace">
-      <div className="cards-work-summary">
-        <div className="work-summary-item">
-          <span>Требуют внимания</span>
-          <strong>{formatNumber(problemCards.length)}</strong>
+      <div className="cards-control-panel">
+        <div className="cards-work-summary">
+          <div className="work-summary-item">
+            <span>Требуют внимания</span>
+            <strong>{formatNumber(problemCards.length)}</strong>
+          </div>
+          <div className="work-summary-item">
+            <span>Только сигналы WB</span>
+            <strong>{formatNumber(signalOnlyCards.length)}</strong>
+          </div>
+          <div className="work-summary-item">
+            <span>Без пробелов</span>
+            <strong>{formatNumber(cleanCards)}</strong>
+          </div>
+          <div className="work-summary-item active">
+            <span>В задачах</span>
+            <strong>{formatNumber(taskCards.length)}</strong>
+          </div>
+          <div className="work-summary-item">
+            <span>В рабочем наборе</span>
+            <strong>{formatNumber(selectedCards.length)}</strong>
+          </div>
+          <div className="work-summary-note">
+            <strong>{selectedCards.length ? `${selectedProblemCount} с проблемами` : "Набор пуст"}</strong>
+            <span>{selectedCards.length ? `первая категория: ${dominantCategory}` : "выберите видимые строки или отдельные карточки"}</span>
+          </div>
         </div>
-        <div className="work-summary-item">
-          <span>Только сигналы WB</span>
-          <strong>{formatNumber(signalOnlyCards.length)}</strong>
-        </div>
-        <div className="work-summary-item">
-          <span>Без пробелов</span>
-          <strong>{formatNumber(cleanCards)}</strong>
-        </div>
-        <div className="work-summary-item active">
-          <span>В рабочем наборе</span>
-          <strong>{formatNumber(selectedCards.length)}</strong>
-        </div>
-        <div className="work-summary-note">
-          <strong>{selectedCards.length ? `${selectedProblemCount} с проблемами` : "Набор пуст"}</strong>
-          <span>{selectedCards.length ? `первая категория: ${dominantCategory}` : "выберите видимые строки или отдельные карточки"}</span>
-        </div>
-      </div>
 
-      <div className="card-filters">
-        <label className="search-field card-search">
-          <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, nmID, артикулу, бренду" />
-        </label>
-        <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
-          <option value="all">Все карточки</option>
-          <option value="problems">Требуют внимания</option>
-          <option value="signals">Есть сигналы WB</option>
-          <option value="clean">Без пробелов</option>
-          <option value="selected">Рабочий набор</option>
-        </select>
-        <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>
-          <option value="all">Любая работа</option>
-          <option value="selected">В рабочем наборе</option>
-          <option value="none">Нет задачи</option>
-        </select>
-        <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-          <option value="all">Все категории</option>
-          {categories.map((category) => <option value={category} key={category}>{category}</option>)}
-        </select>
-      </div>
+        <div className="card-filters">
+          <label className="search-field card-search">
+            <Search size={16} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, nmID, артикулу, бренду" />
+          </label>
+          <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
+            <option value="all">Все карточки</option>
+            <option value="problems">Требуют внимания</option>
+            <option value="signals">Есть сигналы WB</option>
+            <option value="clean">Без пробелов</option>
+            <option value="selected">Рабочий набор</option>
+          </select>
+          <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>
+            <option value="all">Любая работа</option>
+            <option value="tasks">Есть задача</option>
+            <option value="selected">В рабочем наборе</option>
+            <option value="none">Нет задачи</option>
+          </select>
+          <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+            <option value="all">Все категории</option>
+            {categories.map((category) => <option value={category} key={category}>{category}</option>)}
+          </select>
+        </div>
 
-      <div className="cards-toolbar">
-        <span>Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}</span>
-        <div className="toolbar">
-          <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
-            <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
-          </button>
-          <button className="btn" type="button" onClick={() => setSelectedKeys([])} disabled={!selectedKeys.length}>Очистить набор</button>
-          <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
+        <div className="cards-toolbar">
+          <span>Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}</span>
+          <div className="toolbar">
+            <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
+              <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
+            </button>
+            <button className="btn" type="button" onClick={() => setSelectedKeys([])} disabled={!selectedKeys.length}>Очистить набор</button>
+            <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
+          </div>
         </div>
       </div>
 
@@ -3213,7 +3272,8 @@ function CardsTable({ cards, portal, onOpenCard }) {
                 const reasons = cardProblemReasons(card);
                 const signals = cardDataSignals(card);
                 const completeness = cardCompleteness(card);
-                const workState = cardWorkState(card, selectedSet);
+                const task = approvalTaskForCard(card, approvalTaskLookup);
+                const workState = cardWorkStateForTask(card, selectedSet, task);
                 return (
                   <tr key={key || `${card.nmID || index}-${card.title}`} className={selectedSet.has(key) ? "selected-row" : ""}>
                     <td className="select-col">
