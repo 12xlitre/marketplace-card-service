@@ -1706,6 +1706,7 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0, f
       "numTop": num_top,
       "minCats": min_cats,
     },
+    attempts=1,
   )
   report_hash = create_payload.get("result") if isinstance(create_payload, dict) else ""
   if not report_hash:
@@ -1713,7 +1714,7 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0, f
 
   report_payload = {}
   for attempt in range(3):
-    report_payload = mpstats_get_json(token, f"/analytics/v1/wb/characteristics-analysis/{report_hash}")
+    report_payload = mpstats_get_json(token, f"/analytics/v1/wb/characteristics-analysis/{report_hash}", attempts=1)
     if isinstance(report_payload, dict) and isinstance(report_payload.get("output"), dict):
       break
     if attempt < 2:
@@ -2303,6 +2304,30 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       except MpstatsApiError as exc:
+        if force_refresh:
+          try:
+            fallback_payload = fetch_mpstats_characteristics(
+              report_type,
+              value,
+              num_top=num_top,
+              min_cats=min_cats,
+              force_refresh=False,
+              cache_only=True,
+            )
+          except (ValueError, RuntimeError, MpstatsApiError):
+            fallback_payload = None
+          if fallback_payload and fallback_payload.get("cached") and fallback_payload.get("characteristics"):
+            fallback_payload = {
+              **fallback_payload,
+              "status": "stale",
+              "refreshError": {
+                "status": exc.status,
+                "message": exc.message,
+                "retryable": exc.retryable,
+              },
+            }
+            self.send_json(HTTPStatus.OK, fallback_payload)
+            return
         status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
         if status < 400 or status >= 600:
           status = HTTPStatus.BAD_GATEWAY

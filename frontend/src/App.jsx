@@ -2424,16 +2424,19 @@ function CardDetailScreen({ card, portal, onBack }) {
   const mpstatsUpdatedAt = mpstatsCharacteristicsMeta.cachedAt
     ? new Date(mpstatsCharacteristicsMeta.cachedAt).toLocaleString("ru-RU")
     : "";
+  const mpstatsRefreshFailed = Boolean(mpstatsCharacteristicsMeta.refreshError);
   const mpstatsHintsLabel = {
-    loaded: `${mpstatsCharacteristics.length} MPStats · ${mpstatsMatches} совпало${mpstatsSourceLabel ? ` · ${mpstatsSourceLabel}` : ""}${!mpstatsCharacteristicsMeta.cached && mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
+    loaded: `${mpstatsCharacteristics.length} MPStats · ${mpstatsMatches} совпало${mpstatsRefreshFailed ? " · кэш, ошибка обновления" : (mpstatsSourceLabel ? ` · ${mpstatsSourceLabel}` : "")}${!mpstatsCharacteristicsMeta.cached && mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     loading: "загрузка",
     empty: `MPStats пусто${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     error: `MPStats ошибка${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     unavailable: `MPStats недоступен${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     "missing-subject": "нет subjectID",
   }[mpstatsCharacteristicsStatus] || (auditDone ? "есть рекомендации" : "ручной черновик");
-  const mpstatsHintsTitle = mpstatsUpdatedAt
-    ? `MPStats обновлен ${mpstatsUpdatedAt}${mpstatsCharacteristicsMeta.cached ? ". Загружено из backend-кэша." : "."}`
+  const mpstatsHintsTitle = mpstatsRefreshFailed
+    ? `MPStats не обновился: ${mpstatsCharacteristicsMeta.refreshError?.message || "ошибка запроса"}. Показан кэш от ${mpstatsUpdatedAt || "предыдущего запроса"}.`
+    : mpstatsUpdatedAt
+      ? `MPStats обновлен ${mpstatsUpdatedAt}${mpstatsCharacteristicsMeta.cached ? ". Загружено из backend-кэша." : "."}`
     : "Подтянуть популярные значения характеристик из MPStats";
   const mpstatsHintsTone = ["loaded", "loading"].includes(mpstatsCharacteristicsStatus)
     ? "blue"
@@ -2553,6 +2556,7 @@ function CardDetailScreen({ card, portal, onBack }) {
       cached: Boolean(payload.cached),
       cachedAt: payload.cachedAt || "",
       expiresAt: payload.expiresAt || "",
+      refreshError: payload.refreshError || null,
     });
     setMpstatsCharacteristicsStatus(characteristics.length ? "loaded" : "empty");
   }
