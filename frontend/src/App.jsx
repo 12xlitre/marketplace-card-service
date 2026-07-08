@@ -1216,7 +1216,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, displayUsers, findUser, onBack, onOpenCard, onOpenModal, onUpdateTeam }) {
+function SellerScreen({ portal, cards, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onUpdateTeam }) {
   const owner = findUser(portal.ownerLogin);
   const isApi = portal.mode === "api";
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
@@ -1335,7 +1335,7 @@ function SellerScreen({ portal, cards, displayUsers, findUser, onBack, onOpenCar
                   <h2>Состав проекта</h2>
                   <p>Роли команды по этому кабинету.</p>
                 </div>
-                {!teamEditing ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
+                {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
               </div>
 
               {!teamEditing ? (

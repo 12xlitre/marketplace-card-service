@@ -219,6 +219,65 @@ def user_can_manage_portals(row):
   return any(part in marker for part in ("admin", "manager", "all", "полный", "админ", "руковод", "менедж"))
 
 
+def user_has_global_portal_access(row):
+  if not row:
+    return False
+  marker = f"{row['user_role']} {row['access_level']} {row['role']}".lower()
+  return any(part in marker for part in ("admin", "all", "полный", "админ", "руковод"))
+
+
+def user_can_access_portal(user, portal_id):
+  if str(portal_id) == "demo-wb":
+    return True
+  if not user:
+    return False
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return False
+  if user_has_global_portal_access(user):
+    return True
+  login = user["login"]
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT portals.id
+      FROM portals
+      WHERE portals.id = ?
+        AND (
+          portals.created_by = ?
+          OR EXISTS (
+            SELECT 1
+            FROM portal_members
+            WHERE portal_members.portal_id = portals.id
+              AND portal_members.user_login = ?
+          )
+        )
+      LIMIT 1
+      """,
+      (numeric_portal_id, login, login),
+    ).fetchone()
+  return bool(row)
+
+
+def user_can_edit_portal(user, portal_id):
+  return user_can_manage_portals(user) and user_can_access_portal(user, portal_id)
+
+
+def portal_conflict_payload(existing_portal, user):
+  payload = {
+    "error": "portal_already_connected" if existing_portal["is_active"] else "portal_already_archived",
+  }
+  if user_can_access_portal(user, existing_portal["id"]):
+    payload["portal"] = {
+      "id": str(existing_portal["id"]),
+      "name": existing_portal["name"],
+      "isActive": bool(existing_portal["is_active"]),
+      "status": existing_portal["status"],
+    }
+  return payload
+
+
 def token_digest(token):
   return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -563,11 +622,24 @@ def save_integration_token(portal_id, provider, token):
     )
 
 
-def list_portals():
+def list_portals(user=None):
   init_db()
+  params = []
+  access_filter = ""
+  if user is not None and not user_has_global_portal_access(user):
+    access_filter = """
+      WHERE portals.created_by = ?
+        OR EXISTS (
+          SELECT 1
+          FROM portal_members AS access_members
+          WHERE access_members.portal_id = portals.id
+            AND access_members.user_login = ?
+        )
+    """
+    params = [user["login"], user["login"]]
   with connect_db() as db:
     rows = db.execute(
-      """
+      f"""
       SELECT
         portals.id,
         portals.name,
@@ -589,9 +661,11 @@ def list_portals():
       FROM portals
       LEFT JOIN portal_members ON portal_members.portal_id = portals.id
       LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
+      {access_filter}
       GROUP BY portals.id
       ORDER BY portals.id
-      """
+      """,
+      params,
     ).fetchall()
   return rows
 
@@ -657,11 +731,26 @@ def public_portal_from_row(row):
   }
 
 
-def get_portal_row(portal_id):
+def get_portal_row(portal_id, user=None):
   init_db()
+  params = [portal_id]
+  access_filter = ""
+  if user is not None and not user_has_global_portal_access(user):
+    access_filter = """
+        AND (
+          portals.created_by = ?
+          OR EXISTS (
+            SELECT 1
+            FROM portal_members AS access_members
+            WHERE access_members.portal_id = portals.id
+              AND access_members.user_login = ?
+          )
+        )
+    """
+    params.extend([user["login"], user["login"]])
   with connect_db() as db:
     return db.execute(
-      """
+      f"""
       SELECT
         portals.id,
         portals.name,
@@ -684,9 +773,10 @@ def get_portal_row(portal_id):
       LEFT JOIN portal_members ON portal_members.portal_id = portals.id
       LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
       WHERE portals.id = ?
+      {access_filter}
       GROUP BY portals.id
       """,
-      (portal_id,),
+      params,
     ).fetchone()
 
 
@@ -808,6 +898,43 @@ def find_session_user(db, token):
     (token_digest(token), utc_now().isoformat()),
   ).fetchone()
   return row
+
+
+def list_visible_users(user):
+  if not user:
+    return []
+  init_db()
+  with connect_db() as db:
+    if user_can_manage_portals(user):
+      return db.execute(
+        """
+        SELECT login, full_name, role, user_role, access_level
+        FROM users
+        WHERE is_active = 1
+        ORDER BY id
+        """
+      ).fetchall()
+    return db.execute(
+      """
+      SELECT DISTINCT users.login, users.full_name, users.role, users.user_role, users.access_level
+      FROM users
+      LEFT JOIN portal_members AS own_members
+        ON own_members.user_login = ?
+      LEFT JOIN portals AS own_portals
+        ON own_portals.id = own_members.portal_id
+        OR own_portals.created_by = ?
+      LEFT JOIN portal_members AS visible_members
+        ON visible_members.portal_id = own_portals.id
+      WHERE users.is_active = 1
+        AND (
+          users.login = ?
+          OR users.login = visible_members.user_login
+          OR users.login = own_portals.created_by
+        )
+      ORDER BY users.login
+      """,
+      (user["login"], user["login"], user["login"]),
+    ).fetchall()
 
 
 def upsert_user(login, password, full_name, role, access_level, user_role):
@@ -1322,34 +1449,32 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/users":
-      if not self.require_user():
+      user = self.require_user()
+      if not user:
         return
-      with connect_db() as db:
-        rows = db.execute(
-          """
-          SELECT login, full_name, role, user_role, access_level
-          FROM users
-          WHERE is_active = 1
-          ORDER BY id
-          """
-        ).fetchall()
+      rows = list_visible_users(user)
       self.send_json(HTTPStatus.OK, {"users": [public_user(row) for row in rows]})
       return
 
     if path == "/api/portals":
-      if not self.require_user():
+      user = self.require_user()
+      if not user:
         return
       self.send_json(
         HTTPStatus.OK,
-        {"portals": [public_portal_from_row(row) for row in list_portals()]},
+        {"portals": [public_portal_from_row(row) for row in list_portals(user)]},
       )
       return
 
     if path == "/api/wb/characteristics":
-      if not self.require_user():
+      user = self.require_user()
+      if not user:
         return
       query = parse_qs(parsed.query)
       portal_id = query.get("portal_id", ["demo-wb"])[0]
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
       try:
         subject_id = int(query.get("subject_id", ["0"])[0])
       except ValueError:
@@ -1388,10 +1513,14 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/wb/cards":
-      if not self.require_user():
+      user = self.require_user()
+      if not user:
         return
       query = parse_qs(parsed.query)
       portal_id = query.get("portal_id", ["demo-wb"])[0]
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
       try:
         limit = int(query.get("limit", ["100"])[0])
       except ValueError:
@@ -1497,19 +1626,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           return
         existing_portal = find_portal_by_integration_token(WB_PROVIDER, api_key)
         if existing_portal:
-          error_code = "portal_already_connected" if existing_portal["is_active"] else "portal_already_archived"
-          self.send_json(
-            HTTPStatus.CONFLICT,
-            {
-              "error": error_code,
-              "portal": {
-                "id": str(existing_portal["id"]),
-                "name": existing_portal["name"],
-                "isActive": bool(existing_portal["is_active"]),
-                "status": existing_portal["status"],
-              },
-            },
-          )
+          self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
           return
         try:
           snapshot = fetch_wb_cards(api_key, max_cards=100)
@@ -1518,19 +1635,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
             wb_snapshot_external_key(snapshot),
           )
           if existing_portal:
-            error_code = "portal_already_connected" if existing_portal["is_active"] else "portal_already_archived"
-            self.send_json(
-              HTTPStatus.CONFLICT,
-              {
-                "error": error_code,
-                "portal": {
-                  "id": str(existing_portal["id"]),
-                  "name": existing_portal["name"],
-                  "isActive": bool(existing_portal["is_active"]),
-                  "status": existing_portal["status"],
-                },
-              },
-            )
+            self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
             return
           portal_id = create_connected_wb_portal(
             name,
@@ -1595,9 +1700,6 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       user = self.require_user()
       if not user:
         return
-      if not user_can_manage_portals(user):
-        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
-        return
 
       action = "restore" if path.endswith("/restore") else "archive"
       suffix = f"/{action}"
@@ -1606,6 +1708,9 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         portal_id = int(portal_id_text)
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
 
       row = set_portal_active(portal_id, action == "restore")
@@ -1616,13 +1721,17 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return
 
     if path.startswith("/api/portals/") and path.endswith("/team"):
-      if not self.require_user():
+      user = self.require_user()
+      if not user:
         return
       portal_id_text = path[len("/api/portals/"):-len("/team")].strip("/")
       try:
         portal_id = int(portal_id_text)
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
       payload = self.read_json() or {}
       team = clean_portal_team(payload.get("teamRoles"))
