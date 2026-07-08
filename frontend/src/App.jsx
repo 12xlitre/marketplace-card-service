@@ -599,6 +599,11 @@ function normalizePortal(portal) {
       : [teamRoles.lead, teamRoles.tech, teamRoles.manager]),
     realCards: portal.realCards || [],
     tokenMeta: portal.tokenMeta || {},
+    draftSummary: {
+      draftCount: Number(portal.draftSummary?.draftCount || 0),
+      auditCount: Number(portal.draftSummary?.auditCount || 0),
+      lastDraftAt: portal.draftSummary?.lastDraftAt || "",
+    },
   };
 }
 
@@ -1625,6 +1630,18 @@ export default function App() {
     await loadWbDemoSnapshot();
   }
 
+  async function refreshPortals() {
+    const payload = await apiRequest("/api/portals");
+    setUserPortals((current) => {
+      const currentById = Object.fromEntries(current.map((portal) => [String(portal.id), portal]));
+      return (payload.portals || []).map((portal) => {
+        const normalized = normalizePortal(portal);
+        const existing = currentById[String(normalized.id)];
+        return existing ? { ...normalized, realCards: existing.realCards || [] } : normalized;
+      });
+    });
+  }
+
   async function refreshUsers() {
     const payload = await apiRequest("/api/users");
     const nextUsers = normalizeUserList(payload.users || []);
@@ -1900,6 +1917,7 @@ export default function App() {
             card={selectedCardFromPortal}
             portal={currentPortal}
             onBack={() => setScreen("seller")}
+            onDraftSaved={refreshPortals}
           />
         ) : null}
 
@@ -2211,7 +2229,7 @@ function SellerScreen({ portal, cards, displayUsers, findUser, canManage = false
               <div className="summary-grid">
                 <Metric label="Карточек в кабинете" value={formatNumber(portal.cardCount)} />
                 <Metric label="К проверке" value={formatNumber(portal.problemCount)} />
-                <Metric label="Черновики правок" value="0" />
+                <Metric label="Черновики правок" value={formatNumber(portal.draftSummary?.draftCount || 0)} />
                 <Metric label="Участников проекта" value={formatNumber(uniqueLogins(Object.values(team)).length)} />
               </div>
             </section>
@@ -2378,7 +2396,7 @@ function CardsTable({ cards, portal, onOpenCard }) {
   );
 }
 
-function CardDetailScreen({ card, portal, onBack }) {
+function CardDetailScreen({ card, portal, onBack, onDraftSaved }) {
   const [activeTab, setActiveTab] = useState("audit");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
@@ -2722,6 +2740,9 @@ function CardDetailScreen({ card, portal, onBack }) {
         });
         setDraftSavedAt(response.draft?.updatedAt || savedAt);
         setDraftSaveStatus("backend");
+        if (onDraftSaved) {
+          await onDraftSaved(response.draft);
+        }
         return;
       } catch {
         setDraftSaveStatus("local-fallback");
@@ -3482,10 +3503,26 @@ function sourceFlowRows(portal) {
 
 function workRouteRows(portal) {
   const hasCards = Number(portal.cardCount || 0) > 0 || Boolean(portal.realCards?.length);
+  const draftCount = Number(portal.draftSummary?.draftCount || 0);
+  const auditCount = Number(portal.draftSummary?.auditCount || 0);
+  const hasAudit = auditCount > 0;
+  const hasDrafts = draftCount > 0;
   const rows = [
     { title: "Загрузка", status: hasCards ? "данные получены" : "ожидает загрузку", className: hasCards ? "active" : "paused" },
-    { title: "Аудит", status: "MPStats не подключен", className: "paused" },
-    { title: "Правки", status: "0 черновиков", className: "off" },
+    {
+      title: "Аудит",
+      status: hasAudit
+        ? `${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}`
+        : (hasCards ? "по карточкам не запускался" : "ожидает карточки"),
+      className: hasAudit ? "active" : "paused",
+    },
+    {
+      title: "Правки",
+      status: hasDrafts
+        ? `${draftCount} ${pluralRu(draftCount, "черновик", "черновика", "черновиков")}`
+        : "0 черновиков",
+      className: hasDrafts ? "active" : "off",
+    },
     { title: "Согласование", status: "нет правок", className: "off" },
     { title: "Публикация", status: "запись в WB отключена", className: "off" },
   ];
@@ -3493,9 +3530,11 @@ function workRouteRows(portal) {
   return {
     rows,
     done,
-    copy: hasCards
-      ? "Данные WB загружены. Аудит MPStats, черновики правок, согласование и запись в WB пока не подключены."
-      : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.",
+    copy: hasDrafts
+      ? `Данные WB загружены. Найдено ${draftCount} ${pluralRu(draftCount, "черновик правок", "черновика правок", "черновиков правок")}${hasAudit ? ` и ${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}` : ""}.`
+      : hasCards
+        ? "Данные WB загружены. Аудит по карточкам и черновики правок появятся здесь после сохранения изменений."
+        : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.",
   };
 }
 

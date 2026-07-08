@@ -727,11 +727,23 @@ def list_portals(user=None):
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_nonce END) AS wb_token_nonce,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
+        COALESCE(MAX(draft_stats.draft_count), 0) AS draft_count,
+        COALESCE(MAX(draft_stats.audit_count), 0) AS audit_count,
+        MAX(draft_stats.last_draft_at) AS last_draft_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
       LEFT JOIN portal_members ON portal_members.portal_id = portals.id
       LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
+      LEFT JOIN (
+        SELECT
+          portal_id,
+          COUNT(*) AS draft_count,
+          SUM(CASE WHEN audit_status = 'done' THEN 1 ELSE 0 END) AS audit_count,
+          MAX(updated_at) AS last_draft_at
+        FROM card_drafts
+        GROUP BY portal_id
+      ) AS draft_stats ON draft_stats.portal_id = portals.id
       {access_filter}
       GROUP BY portals.id
       ORDER BY portals.id
@@ -798,6 +810,11 @@ def public_portal_from_row(row):
     "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
     "lastSyncAt": row["last_sync_at"] or "",
     "tokenMeta": wb_token_meta_for_portal_row(row),
+    "draftSummary": {
+      "draftCount": int(row["draft_count"] or 0),
+      "auditCount": int(row["audit_count"] or 0),
+      "lastDraftAt": row["last_draft_at"] or "",
+    },
     "isDemo": False,
   }
 
@@ -838,11 +855,23 @@ def get_portal_row(portal_id, user=None):
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_nonce END) AS wb_token_nonce,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
+        COALESCE(MAX(draft_stats.draft_count), 0) AS draft_count,
+        COALESCE(MAX(draft_stats.audit_count), 0) AS audit_count,
+        MAX(draft_stats.last_draft_at) AS last_draft_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
       FROM portals
       LEFT JOIN portal_members ON portal_members.portal_id = portals.id
       LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
+      LEFT JOIN (
+        SELECT
+          portal_id,
+          COUNT(*) AS draft_count,
+          SUM(CASE WHEN audit_status = 'done' THEN 1 ELSE 0 END) AS audit_count,
+          MAX(updated_at) AS last_draft_at
+        FROM card_drafts
+        GROUP BY portal_id
+      ) AS draft_stats ON draft_stats.portal_id = portals.id
       WHERE portals.id = ?
       {access_filter}
       GROUP BY portals.id
