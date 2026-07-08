@@ -5,9 +5,10 @@
 Решение:
 - WB API подключается только через backend `server.py`, frontend не принимает и не хранит API-ключ;
 - список карточек загружается через официальный метод `POST /content/v2/get/cards/list` в режиме чтения;
+- основной UI-сценарий: `Добавить портал` -> `Через API` -> `POST /api/portals`; backend проверяет ключ read-only запросом, создает портал и сохраняет токен AES-GCM;
 - backend route для интерфейса: `GET /api/wb/cards?portal_id=...&limit=...`;
 - для встроенного первого кабинета `demo-wb` в живом рабочем контуре допустим env fallback `WB_API_TOKEN` из `.env.local`;
-- для числовых порталов env fallback запрещен, нужен encrypted token через `npm run set-wb-token`;
+- для числовых порталов env fallback запрещен, нужен encrypted token через UI или админскую команду `npm run set-wb-token`;
 - write-операции WB не реализованы и запрещены до отдельного решения.
 
 Технические правила:

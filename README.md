@@ -34,7 +34,15 @@ npm run prototype
 npm run create-user -- dmitriy.admin "Сафиуллин Дмитрий" "Администратор" --user-role admin --access-level all
 ```
 
-Подготовка серверного хранения WB API:
+Подключение WB API из интерфейса:
+
+- пользователь нажимает `Добавить портал` -> `Через API`;
+- вводит WB API ключ в модальном окне;
+- frontend отправляет ключ только в `POST /api/portals`;
+- backend проверяет ключ read-only запросом WB, создает портал и сохраняет токен зашифрованно в SQLite;
+- в браузере и `localStorage` ключ не хранится.
+
+Админский fallback для серверной проверки:
 
 ```bash
 npm run generate-secret-key
@@ -45,11 +53,12 @@ npm run list-portals
 npm run wb-sync -- --portal-id 1 --limit 20
 ```
 
-WB API ключ не вводится в браузере и не хранится в `index.html`. Для текущего живого рабочего контура можно положить `WB_API_TOKEN` в `.env.local`; для отдельного портала используйте `set-wb-token`, чтобы сохранить токен зашифрованно в SQLite.
+WB API ключ не хранится в `index.html` и не пишется в браузерное хранилище.
 
-Read-only загрузка карточек идет через авторизованный backend route:
+Read-only маршруты backend:
 
 ```text
+POST /api/portals
 GET /api/wb/cards?portal_id=demo-wb&limit=100
 ```
 

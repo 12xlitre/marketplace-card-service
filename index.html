@@ -2292,9 +2292,9 @@
         <div id="api-fields">
           <label class="field-label">
             WB API ключ
-            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Добавляется через .env.local или серверную команду" disabled>
+            <input id="portal-api-key" name="portal-api-key" type="password" autocomplete="off" placeholder="Ключ будет проверен и сохранен на backend">
           </label>
-          <div class="form-note">Реальный ключ WB не вводим в браузере. Для проверки read-only загрузки добавьте WB_API_TOKEN в .env.local или сохраните токен через серверную команду.</div>
+          <div class="form-note">Ключ отправляется только на backend по HTTPS, проверяется read-only запросом WB и сохраняется зашифрованно. В браузере и localStorage он не хранится.</div>
           <div class="source-flow" aria-label="Что произойдет после подключения API">
             <div class="list-row"><span>1. Проверка токена WB</span><strong>без изменений</strong></div>
             <div class="list-row"><span>2. Определение кабинета и брендов</span><strong>WB API</strong></div>
@@ -2314,11 +2314,12 @@
           </label>
           <div class="form-note">Ссылка помогает человеку сверить магазин, но сама по себе не дает полный список карточек. Для автоматической загрузки нужен API-ключ WB.</div>
         </div>
+        <div class="login-error" id="portal-error"></div>
       </div>
 
       <div class="modal-actions">
         <button class="btn ghost" type="button" data-close-portal-modal>Отмена</button>
-        <button class="btn primary" type="submit">Добавить портал</button>
+        <button class="btn primary" type="submit" id="portal-submit">Добавить портал</button>
       </div>
     </form>
   </div>
@@ -2380,6 +2381,8 @@
     const portalManager = document.querySelector("#portal-manager");
     const portalScope = document.querySelector("#portal-scope");
     const portalApiKey = document.querySelector("#portal-api-key");
+    const portalError = document.querySelector("#portal-error");
+    const portalSubmit = document.querySelector("#portal-submit");
     const portalStoreUrl = document.querySelector("#portal-store-url");
     const portalManualSource = document.querySelector("#portal-manual-source");
     const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
@@ -2590,7 +2593,10 @@
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(payload.error || "request_failed");
+        const error = new Error(payload.error || "request_failed");
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
       }
       return payload;
     }
@@ -2772,7 +2778,7 @@
       if (id === demoPortal.id) {
         return demoPortal;
       }
-      return userPortals.find((portal) => portal.id === id) || demoPortal;
+      return userPortals.find((portal) => String(portal.id) === String(id)) || demoPortal;
     }
 
     function showSeller(portal = currentPortal) {
@@ -3172,11 +3178,16 @@
       });
       apiFields.hidden = mode !== "api";
       manualFields.hidden = mode !== "manual";
-      portalApiKey.required = false;
+      portalApiKey.required = mode === "api";
+      portalApiKey.disabled = mode !== "api";
+      portalApiKey.value = mode === "api" ? portalApiKey.value : "";
+      portalError.classList.remove("active");
     }
 
     function openPortalModal(mode = "api") {
       portalForm.reset();
+      portalError.classList.remove("active");
+      portalError.textContent = "";
       setConnectMode(mode);
       portalModal.classList.remove("is-hidden");
       portalName.focus();
@@ -3224,40 +3235,79 @@
         : "Для ограниченной задачи можно импортировать список nmID, SKU или артикулов.";
     }
 
-    portalForm.addEventListener("submit", (event) => {
+    function portalErrorText(error) {
+      if (error.message === "wb_token_required") {
+        return "Введите WB API ключ для подключения кабинета.";
+      }
+      if (error.message === "wb_api_error") {
+        const message = error.payload?.message || "WB отклонил запрос.";
+        return `WB API не подключился: ${message}`;
+      }
+      if (error.message === "secret_storage_unavailable") {
+        return "На backend не настроен ключ шифрования. Нужно добавить OPTICARDS_SECRET_KEY и повторить подключение.";
+      }
+      if (error.status === 401) {
+        return "Сессия истекла. Войдите заново и повторите подключение.";
+      }
+      if (error.status === 404) {
+        return "Backend для подключения кабинетов еще не включен на этом контуре.";
+      }
+      return "Не удалось добавить кабинет. Проверьте подключение и попробуйте еще раз.";
+    }
+
+    portalForm.addEventListener("submit", async (event) => {
       event.preventDefault();
 
       portalApiKey.setCustomValidity("");
+      portalError.classList.remove("active");
+      portalError.textContent = "";
       const teamRoles = {
         lead: portalOwner.value,
         tech: portalTech.value,
         manager: portalManager.value
       };
-      const portal = {
-        id: `portal-${Date.now()}`,
+      const payload = {
         name: portalName.value.trim(),
         marketplace: portalMarketplace.value,
         mode: connectMode,
         scope: portalScope.value,
-        status: connectMode === "api" ? "API ожидает подключения" : "Ручной режим",
-        ownerLogin: teamRoles.lead,
-        cardCount: 0,
-        workCount: 0,
-        problemCount: 0,
-        apiConnected: false,
         teamRoles,
-        memberLogins: uniqueLogins([teamRoles.lead, teamRoles.tech, teamRoles.manager]),
+        apiKey: connectMode === "api" ? portalApiKey.value.trim() : "",
         storeUrl: connectMode === "manual" ? portalStoreUrl.value.trim() : "",
-        manualSource: connectMode === "manual" ? portalManualSource.value.trim() : "",
-        isDemo: false
+        manualSource: connectMode === "manual" ? portalManualSource.value.trim() : ""
       };
 
-      userPortals.push(portal);
-      saveUserPortals();
-      renderUserPortals();
-      updateDashboardMetrics();
-      closePortalModal();
-      showSeller(portal);
+      if (connectMode === "api" && !payload.apiKey) {
+        portalApiKey.setCustomValidity("Введите WB API ключ.");
+        portalApiKey.reportValidity();
+        return;
+      }
+
+      const originalSubmitText = portalSubmit.textContent;
+      portalSubmit.disabled = true;
+      portalSubmit.textContent = connectMode === "api" ? "Проверяем WB..." : "Создаем...";
+      try {
+        const response = await apiRequest("/api/portals", {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        const portal = normalizePortal(response.portal);
+        delete portal.apiKey;
+        userPortals.push(portal);
+        saveUserPortals();
+        renderUserPortals();
+        updateDashboardMetrics();
+        closePortalModal();
+        portalApiKey.value = "";
+        showSeller(portal);
+      } catch (error) {
+        portalError.textContent = portalErrorText(error);
+        portalError.classList.add("active");
+      } finally {
+        payload.apiKey = "";
+        portalSubmit.disabled = false;
+        portalSubmit.textContent = originalSubmitText;
+      }
     });
 
     document.addEventListener("click", (event) => {

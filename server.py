@@ -245,6 +245,47 @@ def create_portal(name, marketplace, scope, created_by, team):
     return portal_id
 
 
+def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot):
+  init_db()
+  stats = snapshot.get("stats") or {}
+  portal_name = stats.get("portalName") or name
+  with connect_db() as db:
+    cursor = db.execute(
+      """
+      INSERT INTO portals (
+        name, marketplace, scope, status, api_connected, created_by, last_sync_at
+      )
+      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?)
+      """,
+      (portal_name, marketplace, scope, created_by, stats.get("loadedAt")),
+    )
+    portal_id = cursor.lastrowid
+    for project_role, user_login in team.items():
+      if user_login:
+        db.execute(
+          """
+          INSERT INTO portal_members (portal_id, user_login, project_role)
+          VALUES (?, ?, ?)
+          ON CONFLICT(portal_id, project_role) DO UPDATE SET
+            user_login = excluded.user_login
+          """,
+          (portal_id, user_login, project_role),
+        )
+
+    aad = integration_aad(portal_id, WB_PROVIDER)
+    nonce, ciphertext = encrypt_secret(token, aad)
+    db.execute(
+      """
+      INSERT INTO portal_integrations (
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, last_checked_at
+      )
+      VALUES (?, ?, 'connected', ?, ?, ?, CURRENT_TIMESTAMP)
+      """,
+      (portal_id, WB_PROVIDER, nonce, ciphertext, secret_digest(token)),
+    )
+    return portal_id
+
+
 def save_integration_token(portal_id, provider, token):
   init_db()
   aad = integration_aad(portal_id, provider)
@@ -565,6 +606,40 @@ def fetch_wb_cards(token, max_cards=100):
   }
 
 
+def clean_portal_team(raw_team):
+  if not isinstance(raw_team, dict):
+    return {}
+  return {
+    role: str(raw_team.get(role, "")).strip()
+    for role in ("lead", "tech", "manager")
+    if str(raw_team.get(role, "")).strip()
+  }
+
+
+def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot=None):
+  stats = (snapshot or {}).get("stats") or {}
+  cards = (snapshot or {}).get("cards") or []
+  return {
+    "id": str(portal_id),
+    "name": stats.get("portalName") or name,
+    "marketplace": marketplace,
+    "mode": mode,
+    "scope": scope,
+    "status": "WB read-only" if mode == "api" else "Ручной режим",
+    "ownerLogin": team.get("lead", ""),
+    "cardCount": stats.get("cardCount", 0),
+    "workCount": stats.get("workCount", 0),
+    "problemCount": stats.get("problemCount", 0),
+    "apiConnected": mode == "api",
+    "teamRoles": team,
+    "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
+    "realCards": cards,
+    "syncStatus": "loaded" if mode == "api" else "manual",
+    "lastSyncAt": stats.get("loadedAt", ""),
+    "isDemo": False,
+  }
+
+
 class OpticardsHandler(BaseHTTPRequestHandler):
   server_version = "OpticardsServer/0.1"
 
@@ -723,6 +798,83 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           token,
           max_age=SESSION_TTL_REMEMBER_SECONDS if remember else SESSION_TTL_SECONDS,
         )},
+      )
+      return
+
+    if path == "/api/portals":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      mode = str(payload.get("mode", "manual")).strip()
+      marketplace = str(payload.get("marketplace", "Wildberries")).strip() or "Wildberries"
+      scope = str(payload.get("scope", "full")).strip()
+      if scope not in ("full", "selected"):
+        scope = "full"
+      if mode not in ("api", "manual"):
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mode"})
+        return
+
+      team = clean_portal_team(payload.get("teamRoles"))
+      name = str(payload.get("name", "")).strip() or "Кабинет WB"
+      if len(name) > 120:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "portal_name_too_long"})
+        return
+
+      if mode == "api":
+        if marketplace != "Wildberries":
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "unsupported_marketplace"})
+          return
+        api_key = str(payload.get("apiKey", "")).strip()
+        if len(api_key) < 20:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "wb_token_required"})
+          return
+        try:
+          snapshot = fetch_wb_cards(api_key, max_cards=100)
+          portal_id = create_connected_wb_portal(
+            name,
+            marketplace,
+            scope,
+            user["login"],
+            team,
+            api_key,
+            snapshot,
+          )
+        except WbApiError as exc:
+          status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+          if status < 400 or status >= 600:
+            status = HTTPStatus.BAD_GATEWAY
+          self.send_json(
+            status,
+            {
+              "error": "wb_api_error",
+              "status": exc.status,
+              "message": exc.message,
+              "retryable": exc.retryable,
+            },
+          )
+          return
+        except RuntimeError:
+          self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+          return
+        except sqlite3.IntegrityError:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
+          return
+
+        self.send_json(
+          HTTPStatus.CREATED,
+          {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot)},
+        )
+        return
+
+      try:
+        portal_id = create_portal(name, marketplace, scope, user["login"], team)
+      except sqlite3.IntegrityError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
+        return
+      self.send_json(
+        HTTPStatus.CREATED,
+        {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team)},
       )
       return
 
