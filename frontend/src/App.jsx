@@ -3433,12 +3433,12 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
             Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}
             {worksetStatus === "saving" ? " · сохраняем набор" : ""}
             {worksetStatus === "local-fallback" ? " · набор только в браузере" : ""}
-            {batchStatus === "created" ? " · пакет создан" : ""}
-            {batchStatus === "error" ? " · пакет не создан" : ""}
+            {batchStatus === "created" ? " · взято в работу" : ""}
+            {batchStatus === "error" ? " · не удалось взять в работу" : ""}
           </span>
           <div className="toolbar">
             <button className="btn primary" type="button" onClick={createWorkPackage} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"}>
-              <Plus size={16} />{batchStatus === "saving" ? "Создаем пакет" : "Создать пакет"}
+              <Plus size={16} />{batchStatus === "saving" ? "Берем в работу" : "Взять в работу"}
             </button>
             <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
               <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
