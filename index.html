@@ -1572,9 +1572,9 @@
               <h2>Пользователи</h2>
               <p>В backend-режиме пользователи хранятся в SQLite-базе, а пароли сохраняются только как PBKDF2-хеши.</p>
               <div class="panel-list">
-                <div class="list-row"><span>Сафиуллин Дмитрий</span><strong>Администратор</strong></div>
-                <div class="list-row"><span>Кристина Январева</span><strong>Руководитель</strong></div>
-                <div class="list-row"><span>Анастсия Руднева</span><strong>Технический специалист</strong></div>
+                <div class="list-row"><span>Администратор</span><strong>Полный доступ</strong></div>
+                <div class="list-row"><span>Руководитель</span><strong>Проекты и отчеты</strong></div>
+                <div class="list-row"><span>Специалист</span><strong>Карточки и аудит</strong></div>
               </div>
             </section>
 
@@ -1826,15 +1826,15 @@
                 <h2>Состав проекта</h2>
                 <p>Участники выбираются из учетных записей сотрудников.</p>
                 <div class="panel-list" id="project-members">
-                  <div class="list-row" data-member-login="dmitriy.admin"><span>Сафиуллин Дмитрий</span><strong>Администратор</strong></div>
-                  <div class="list-row" data-member-login="kristina.manager"><span>Кристина Январева</span><strong>Руководитель</strong></div>
-                  <div class="list-row" data-member-login="anastasia.tech"><span>Анастсия Руднева</span><strong>Технический специалист</strong></div>
+                  <div class="list-row" data-member-login="admin"><span>Администратор</span><strong>Полный доступ</strong></div>
+                  <div class="list-row" data-member-login="manager"><span>Руководитель</span><strong>Проекты и отчеты</strong></div>
+                  <div class="list-row" data-member-login="specialist"><span>Специалист</span><strong>Карточки и аудит</strong></div>
                 </div>
                 <div class="panel-actions">
                   <select class="select" id="member-select" aria-label="Добавить участника">
-                    <option value="dmitriy.admin">Сафиуллин Дмитрий</option>
-                    <option value="kristina.manager">Кристина Январева</option>
-                    <option value="anastasia.tech">Анастсия Руднева</option>
+                    <option value="admin">Администратор</option>
+                    <option value="manager">Руководитель</option>
+                    <option value="specialist">Специалист</option>
                   </select>
                   <button class="btn" id="add-member-button" type="button">Добавить</button>
                 </div>
@@ -2162,9 +2162,9 @@
           <label class="field-label">
             Ответственный
             <select id="portal-owner" name="portal-owner">
-              <option value="anastasia.tech">Анастсия Руднева</option>
-              <option value="kristina.manager">Кристина Январева</option>
-              <option value="dmitriy.admin">Сафиуллин Дмитрий</option>
+              <option value="specialist">Специалист</option>
+              <option value="manager">Руководитель</option>
+              <option value="admin">Администратор</option>
             </select>
           </label>
           <label class="field-label">
@@ -2268,9 +2268,9 @@
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
     const fallbackUsers = [
-      { login: "dmitriy.admin", full_name: "Сафиуллин Дмитрий", role: "Администратор", access_level: "all" },
-      { login: "kristina.manager", full_name: "Кристина Январева", role: "Руководитель", access_level: "overview" },
-      { login: "anastasia.tech", full_name: "Анастсия Руднева", role: "Технический специалист", access_level: "readonly_wb" }
+      { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all" },
+      { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview" },
+      { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb" }
     ];
     const staticAuthUsers = [
       { ...fallbackUsers[0], password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
@@ -2287,11 +2287,11 @@
       mode: "api",
       scope: "full",
       status: "API подключен",
-      ownerLogin: "anastasia.tech",
+      ownerLogin: "specialist",
       cardCount: 1284,
       workCount: 211,
       problemCount: 38,
-      memberLogins: ["dmitriy.admin", "kristina.manager", "anastasia.tech"],
+      memberLogins: ["admin", "manager", "specialist"],
       isDemo: true
     };
     let currentPortal = demoPortal;
