@@ -1141,6 +1141,14 @@ class OpticardsHandler(BaseHTTPRequestHandler):
   def do_GET(self):
     parsed = urlparse(self.path)
     path = parsed.path
+    if path == "/healthz":
+      self.send_response(HTTPStatus.OK)
+      self.send_header("Content-Type", "text/plain; charset=utf-8")
+      self.send_header("Cache-Control", "no-store")
+      self.end_headers()
+      self.wfile.write(b"ok")
+      return
+
     if path == "/api/session":
       user = self.current_user()
       self.send_json(HTTPStatus.OK, {"user": public_user(user) if user else None})
