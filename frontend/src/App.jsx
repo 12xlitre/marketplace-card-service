@@ -1666,6 +1666,13 @@ export default function App() {
     return payload;
   }
 
+  async function resetUserPassword(login) {
+    return apiRequest("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ action: "reset_password", login }),
+    });
+  }
+
   async function logout() {
     try {
       await apiRequest("/api/logout", { method: "POST", body: JSON.stringify({}) });
@@ -1907,6 +1914,7 @@ export default function App() {
             canManage={canManagePortals}
             canManageUsers={canManageUsers}
             onCreateUser={createUserAccount}
+            onResetPassword={resetUserPassword}
           />
         ) : null}
       </main>
@@ -3580,7 +3588,7 @@ const defaultNewUserForm = {
   accessLevel: "overview",
 };
 
-function SettingsScreen({ users, canManage = false, canManageUsers = false, onCreateUser }) {
+function SettingsScreen({ users, canManage = false, canManageUsers = false, onCreateUser, onResetPassword }) {
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
@@ -3588,6 +3596,9 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
   const [newUserStatus, setNewUserStatus] = useState("idle");
   const [newUserResult, setNewUserResult] = useState(null);
   const [newUserError, setNewUserError] = useState("");
+  const [passwordResetStatus, setPasswordResetStatus] = useState("");
+  const [passwordResetResult, setPasswordResetResult] = useState(null);
+  const [passwordResetError, setPasswordResetError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -3674,6 +3685,29 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
     setNewUserStatus("idle");
   }
 
+  async function resetPassword(login) {
+    if (!canManageUsers || !onResetPassword) {
+      return;
+    }
+    setPasswordResetStatus(login);
+    setPasswordResetResult(null);
+    setPasswordResetError("");
+    try {
+      const payload = await onResetPassword(login);
+      setPasswordResetResult(payload);
+      setPasswordResetStatus("");
+    } catch (error) {
+      setPasswordResetStatus("");
+      if (error.message === "forbidden") {
+        setPasswordResetError("Недостаточно прав для сброса пароля этого сотрудника.");
+      } else if (error.message === "user_not_found") {
+        setPasswordResetError("Сотрудник не найден или отключен.");
+      } else {
+        setPasswordResetError("Не удалось сбросить пароль. Попробуйте еще раз.");
+      }
+    }
+  }
+
   const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
   const mpstatsVerified = mpstatsIntegration?.status === "verified";
   const mpstatsUpdatedAt = mpstatsIntegration?.updatedAt
@@ -3705,12 +3739,31 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
             <h2>Пользователи</h2>
             <div className="panel-list">
               {users.map((user) => (
-                <div className="list-row" key={user.login}>
+                <div className="list-row user-list-row" key={user.login}>
                   <span>{user.full_name}</span>
                   <strong>{user.role}</strong>
+                  {canManageUsers ? (
+                    <button
+                      className="btn mini"
+                      type="button"
+                      onClick={() => resetPassword(user.login)}
+                      disabled={passwordResetStatus === user.login}
+                    >
+                      {passwordResetStatus === user.login ? "Сбрасываем" : "Сбросить пароль"}
+                    </button>
+                  ) : null}
                 </div>
               ))}
             </div>
+            {passwordResetError ? <div className="form-error">{passwordResetError}</div> : null}
+            {passwordResetResult?.user ? (
+              <div className="created-user-secret">
+                <span>Новый пароль</span>
+                <strong>Логин: {passwordResetResult.user.login}</strong>
+                <strong>Пароль: {passwordResetResult.password}</strong>
+                <em>Сохраните пароль сейчас. Повторно он не показывается.</em>
+              </div>
+            ) : null}
             <form className="integration-form user-create-form" onSubmit={createUser}>
               <div>
                 <strong>Добавить сотрудника</strong>

@@ -384,6 +384,12 @@ a {
   box-shadow: none;
 }
 
+.btn.mini {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .btn.ghost.rail-logout {
   width: 100%;
   justify-content: flex-start;
@@ -769,6 +775,15 @@ a {
 .list-row strong {
   color: var(--ink);
   text-align: right;
+}
+
+.user-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.user-list-row span {
+  min-width: 0;
 }
 
 .project-member-row {

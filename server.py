@@ -1285,6 +1285,34 @@ def create_user_account(payload, current_user):
   return public_user(row), password
 
 
+def reset_user_password(payload, current_user):
+  if not user_can_manage_users(current_user):
+    raise PermissionError("forbidden")
+  login = normalize_new_user_login(payload.get("login"))
+  if not login:
+    raise ValueError("invalid_user")
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT login, full_name, role, user_role, access_level FROM users WHERE login = ? AND is_active = 1",
+      (login,),
+    ).fetchone()
+    if not row:
+      raise ValueError("user_not_found")
+    if row["user_role"] == "admin" and current_user["user_role"] != "admin":
+      raise PermissionError("forbidden")
+    password = generate_initial_password()
+    db.execute(
+      """
+      UPDATE users
+      SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE login = ? AND is_active = 1
+      """,
+      (hash_password(password), login),
+    )
+  return public_user(row), password
+
+
 class WbApiError(Exception):
   def __init__(self, status, message, retryable=False):
     super().__init__(message)
@@ -2469,7 +2497,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       payload = self.read_json() or {}
       try:
-        created_user, password = create_user_account(payload, user)
+        if payload.get("action") == "reset_password":
+          created_user, password = reset_user_password(payload, user)
+        else:
+          created_user, password = create_user_account(payload, user)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
