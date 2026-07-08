@@ -3,7 +3,6 @@ import {
   Archive,
   ArrowLeft,
   CheckSquare,
-  ChevronDown,
   ClipboardList,
   FileText,
   Download,
@@ -810,6 +809,72 @@ function issueCopy(issue) {
     "Габариты требуют проверки": "WB пометил габариты как требующие проверки. Перед публикацией нужно сверить размеры.",
   };
   return copies[issue] || "Карточка требует ручной проверки по данным из WB API.";
+}
+
+function cardProblemReasons(card) {
+  if (Number(card?.issueCount || 0) === 0 || card?.issue === "Нет критичных") {
+    return [];
+  }
+  const reasons = [];
+  const title = String(card?.title || "").trim();
+  if (!title || title === "Карточка WB") {
+    reasons.push("нет названия");
+  } else if (title.length > 60) {
+    reasons.push("название длиннее 60");
+  }
+  if (!String(card?.description || "").trim()) {
+    reasons.push("нет описания");
+  }
+  if (!String(card?.brand || "").trim()) {
+    reasons.push("нет бренда");
+  }
+  if (!rawCharacteristicItems(card).length) {
+    reasons.push("пустые характеристики");
+  }
+  const photos = Array.isArray(card?.photos) ? card.photos : [];
+  if (!photos.length && !card?.photoUrl) {
+    reasons.push("нет фото");
+  }
+  if (card?.dimensions?.isValid === false) {
+    reasons.push("габариты требуют проверки");
+  }
+  if (!reasons.length && Number(card?.issueCount || 0) > 0 && card?.issue && card.issue !== "Нет критичных") {
+    reasons.push(String(card.issue).toLowerCase());
+  }
+  return [...new Set(reasons)];
+}
+
+function normalizedCardSearchText(card) {
+  return [
+    card?.title,
+    card?.nmID,
+    card?.vendorCode,
+    card?.brand,
+    card?.subjectName,
+    card?.status,
+    card?.issue,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
+function cardStableKey(card) {
+  return cardDraftKey(card);
+}
+
+function readCardWorkset(storageKey) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey) || "[]");
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCardWorkset(storageKey, keys) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify([...new Set(keys.map(String).filter(Boolean))]));
+  } catch {
+    // Local persistence is a convenience layer only.
+  }
 }
 
 function titleSuggestions(card) {
@@ -2871,12 +2936,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <div className="strip-head">
                 <div>
                   <h2>Карточки</h2>
-                  <p>Таблица для первичной проверки и перехода в детальную карточку.</p>
+                  <p>Фильтрация реальных карточек, причины проверки и ограниченный рабочий набор специалиста.</p>
                 </div>
-                <div className="toolbar">
-                  <button className="btn"><ChevronDown size={16} />Фильтр</button>
-                  <button className="btn primary" disabled>Массовая правка</button>
-                </div>
+                <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
               <CardsTable cards={cards} portal={portal} onOpenCard={onOpenCard} />
             </section>
@@ -2943,6 +3005,27 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 }
 
 function CardsTable({ cards, portal, onOpenCard }) {
+  const storageKey = `opticards-workset:${portal?.id || "portal"}`;
+  const [query, setQuery] = useState("");
+  const [issueFilter, setIssueFilter] = useState("problems");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
+  const cardKeySignature = cards.map(cardStableKey).join("|");
+
+  useEffect(() => {
+    setSelectedKeys(readCardWorkset(storageKey));
+  }, [storageKey]);
+
+  useEffect(() => {
+    const validKeys = new Set(cards.map(cardStableKey));
+    setSelectedKeys((current) => current.filter((key) => validKeys.has(key)));
+  }, [cardKeySignature]);
+
+  useEffect(() => {
+    writeCardWorkset(storageKey, selectedKeys);
+  }, [storageKey, selectedKeys]);
+
   if (!cards.length) {
     return (
       <div className="empty-state">
@@ -2952,40 +3035,182 @@ function CardsTable({ cards, portal, onOpenCard }) {
     );
   }
 
+  const normalizedQuery = query.trim().toLowerCase();
+  const categories = [...new Set(cards.map((card) => String(card.subjectName || "категория не указана").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  const statuses = [...new Set(cards.map((card) => String(card.status || "Статус не указан").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  const selectedSet = new Set(selectedKeys);
+  const problemCards = cards.filter((card) => cardProblemReasons(card).length);
+  const cleanCards = cards.length - problemCards.length;
+  const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
+  const visibleCards = cards.filter((card) => {
+    const key = cardStableKey(card);
+    const hasProblems = cardProblemReasons(card).length > 0;
+    if (issueFilter === "problems" && !hasProblems) {
+      return false;
+    }
+    if (issueFilter === "clean" && hasProblems) {
+      return false;
+    }
+    if (issueFilter === "selected" && !selectedSet.has(key)) {
+      return false;
+    }
+    if (statusFilter !== "all" && String(card.status || "Статус не указан") !== statusFilter) {
+      return false;
+    }
+    if (categoryFilter !== "all" && String(card.subjectName || "категория не указана") !== categoryFilter) {
+      return false;
+    }
+    if (normalizedQuery && !normalizedCardSearchText(card).includes(normalizedQuery)) {
+      return false;
+    }
+    return true;
+  });
+  const visibleKeys = visibleCards.map(cardStableKey);
+  const allVisibleSelected = Boolean(visibleKeys.length) && visibleKeys.every((key) => selectedSet.has(key));
+  const selectedProblemCount = selectedCards.filter((card) => cardProblemReasons(card).length).length;
+  const dominantCategory = selectedCards.length
+    ? [...new Set(selectedCards.map((card) => card.subjectName || "категория не указана"))][0]
+    : "не выбран";
+
+  function toggleCard(card) {
+    const key = cardStableKey(card);
+    setSelectedKeys((current) => (
+      current.includes(key)
+        ? current.filter((item) => item !== key)
+        : [...current, key]
+    ));
+  }
+
+  function toggleVisible() {
+    setSelectedKeys((current) => {
+      const currentSet = new Set(current);
+      if (allVisibleSelected) {
+        visibleKeys.forEach((key) => currentSet.delete(key));
+      } else {
+        visibleKeys.forEach((key) => currentSet.add(key));
+      }
+      return [...currentSet];
+    });
+  }
+
+  function resetFilters() {
+    setQuery("");
+    setIssueFilter("problems");
+    setStatusFilter("all");
+    setCategoryFilter("all");
+  }
+
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Карточка</th>
-            <th>nmID</th>
-            <th>Качество</th>
-            <th>Проблема</th>
-            <th>Статус</th>
-            <th>Детали</th>
-          </tr>
-        </thead>
-        <tbody>
-          {cards.slice(0, 20).map((card, index) => (
-            <tr key={`${card.nmID || index}-${card.title}`}>
-              <td>
-                <div className="product-cell">
-                  <Thumb url={card.photoUrl} alt={index % 2 === 1} />
-                  <div className="product-name">
-                    <strong>{card.title || "Карточка WB"}</strong>
-                    <span>категория: {card.subjectName || "не указана"}</span>
-                  </div>
-                </div>
-              </td>
-              <td>{card.nmID || "Не указано"}</td>
-              <td><Tag tone={card.qualityClass || "amber"}>{card.quality || "Средняя"}</Tag></td>
-              <td>{card.issue || "Нет критичных"}</td>
-              <td><Tag tone={card.statusClass || "amber"}>{card.status || "Нужна проверка"}</Tag></td>
-              <td><IconButton icon={Eye} label="Открыть детальную карточку" onClick={() => onOpenCard(card)} /></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="cards-workspace">
+      <div className="cards-work-summary">
+        <div className="work-summary-item">
+          <span>Найдено проблем</span>
+          <strong>{formatNumber(problemCards.length)}</strong>
+        </div>
+        <div className="work-summary-item">
+          <span>Можно оставить</span>
+          <strong>{formatNumber(cleanCards)}</strong>
+        </div>
+        <div className="work-summary-item active">
+          <span>В рабочем наборе</span>
+          <strong>{formatNumber(selectedCards.length)}</strong>
+        </div>
+        <div className="work-summary-note">
+          <strong>{selectedCards.length ? `${selectedProblemCount} с проблемами` : "Набор пуст"}</strong>
+          <span>{selectedCards.length ? `первая категория: ${dominantCategory}` : "выберите видимые строки или отдельные карточки"}</span>
+        </div>
+      </div>
+
+      <div className="card-filters">
+        <label className="search-field card-search">
+          <Search size={16} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, nmID, артикулу, бренду" />
+        </label>
+        <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
+          <option value="problems">Только с проблемами</option>
+          <option value="all">Все карточки</option>
+          <option value="clean">Без критичных проблем</option>
+          <option value="selected">Рабочий набор</option>
+        </select>
+        <select className="select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+          <option value="all">Все статусы</option>
+          {statuses.map((status) => <option value={status} key={status}>{status}</option>)}
+        </select>
+        <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+          <option value="all">Все категории</option>
+          {categories.map((category) => <option value={category} key={category}>{category}</option>)}
+        </select>
+      </div>
+
+      <div className="cards-toolbar">
+        <span>Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}</span>
+        <div className="toolbar">
+          <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
+            <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
+          </button>
+          <button className="btn" type="button" onClick={() => setSelectedKeys([])} disabled={!selectedKeys.length}>Очистить набор</button>
+          <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
+        </div>
+      </div>
+
+      {visibleCards.length ? (
+        <div className="table-wrap cards-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th className="select-col">
+                  <input type="checkbox" aria-label="Выбрать видимые карточки" checked={allVisibleSelected} onChange={toggleVisible} />
+                </th>
+                <th>Карточка</th>
+                <th>nmID</th>
+                <th>Качество</th>
+                <th>Причины проверки</th>
+                <th>Статус</th>
+                <th>Детали</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleCards.map((card, index) => {
+                const key = cardStableKey(card);
+                const reasons = cardProblemReasons(card);
+                return (
+                  <tr key={key || `${card.nmID || index}-${card.title}`} className={selectedSet.has(key) ? "selected-row" : ""}>
+                    <td className="select-col">
+                      <input type="checkbox" aria-label="Добавить карточку в рабочий набор" checked={selectedSet.has(key)} onChange={() => toggleCard(card)} />
+                    </td>
+                    <td>
+                      <div className="product-cell">
+                        <Thumb url={card.photoUrl} alt={index % 2 === 1} />
+                        <div className="product-name">
+                          <strong>{card.title || "Карточка WB"}</strong>
+                          <span>категория: {card.subjectName || "не указана"} · артикул {textOrDash(card.vendorCode)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>{card.nmID || "Не указано"}</td>
+                    <td><Tag tone={card.qualityClass || "amber"}>{card.quality || "Средняя"}</Tag></td>
+                    <td>
+                      <div className="problem-reasons">
+                        {reasons.length ? reasons.slice(0, 3).map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>) : <Tag tone="green">нет критичных</Tag>}
+                        {reasons.length > 3 ? <span>+{reasons.length - 3}</span> : null}
+                      </div>
+                    </td>
+                    <td><Tag tone={card.statusClass || "amber"}>{card.status || "Нужна проверка"}</Tag></td>
+                    <td><IconButton icon={Eye} label="Открыть детальную карточку" onClick={() => onOpenCard(card)} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-state">
+          <strong>По текущим фильтрам карточек нет</strong>
+          <span>Измените поиск, статус или категорию.</span>
+        </div>
+      )}
     </div>
   );
 }
