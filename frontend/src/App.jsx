@@ -2954,16 +2954,45 @@ function SettingsScreen({ users, canManage = false }) {
       });
       setMpstatsIntegration(payload.integration || null);
       setMpstatsKey("");
-      setMpstatsStatus("saved");
+      setMpstatsStatus(payload.ok ? "saved" : payload.status || "error");
+    } catch {
+      setMpstatsStatus("error");
+    }
+  }
+
+  async function checkMpstatsConnection() {
+    if (!canManage || !mpstatsConnected) {
+      return;
+    }
+    setMpstatsStatus("checking");
+    try {
+      const payload = await apiRequest("/api/integrations/mpstats", {
+        method: "POST",
+        body: JSON.stringify({ action: "check" }),
+      });
+      setMpstatsIntegration(payload.integration || null);
+      setMpstatsStatus(payload.ok ? "verified" : payload.status || "error");
     } catch {
       setMpstatsStatus("error");
     }
   }
 
   const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
+  const mpstatsVerified = mpstatsIntegration?.status === "verified";
   const mpstatsUpdatedAt = mpstatsIntegration?.updatedAt
     ? new Date(mpstatsIntegration.updatedAt).toLocaleString("ru-RU")
     : "";
+  const mpstatsLastCheckedAt = mpstatsIntegration?.lastCheckedAt
+    ? new Date(mpstatsIntegration.lastCheckedAt).toLocaleString("ru-RU")
+    : "";
+  const mpstatsStatusLabel = {
+    verified: "подключение проверено",
+    stored: "ключ сохранен",
+    auth_error: "ошибка авторизации",
+    rate_limited: "лимит MPStats",
+    error: "ошибка проверки",
+    missing: "не подключен",
+  }[mpstatsIntegration?.status] || (mpstatsConnected ? "ключ сохранен" : "не подключен");
 
   return (
     <section className="screen active">
@@ -2990,7 +3019,7 @@ function SettingsScreen({ users, canManage = false }) {
             <h2>Интеграции</h2>
             <div className="panel-list">
               <div className="list-row"><span>Wildberries</span><strong>read-only API</strong></div>
-              <div className="list-row"><span>MPStats</span><strong>{mpstatsConnected ? "ключ сохранен" : "не подключен"}</strong></div>
+              <div className="list-row"><span>MPStats</span><strong>{mpstatsStatusLabel}</strong></div>
               <div className="list-row"><span>Токены</span><strong>AES-GCM в SQLite</strong></div>
             </div>
             <form className="integration-form" onSubmit={saveMpstatsKey}>
@@ -3016,17 +3045,22 @@ function SettingsScreen({ users, canManage = false }) {
                   <span>Сохраненный ключ</span>
                   <strong>••••••••••••</strong>
                   <em>{mpstatsUpdatedAt ? `обновлен ${mpstatsUpdatedAt}` : "хранится на backend"}</em>
+                  {mpstatsLastCheckedAt ? <em>проверен {mpstatsLastCheckedAt}</em> : null}
                 </div>
               ) : null}
               <div className="panel-actions">
                 <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
-                <button className="btn" type="button" disabled title="Проверку включим после получения документации MPStats">Проверить подключение</button>
+                <button className="btn" type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection}>Проверить подключение</button>
               </div>
               <div className="integration-status">
                 {mpstatsStatus === "saving" ? "Сохраняем..." : null}
-                {mpstatsStatus === "saved" ? "Ключ сохранен. Поле очищено специально: сам ключ не показываем повторно." : null}
+                {mpstatsStatus === "checking" ? "Проверяем соединение с MPStats..." : null}
+                {mpstatsStatus === "saved" ? (mpstatsVerified ? "Ключ сохранен и соединение проверено." : "Ключ сохранен. Поле очищено специально: сам ключ не показываем повторно.") : null}
+                {mpstatsStatus === "verified" ? "Соединение с MPStats работает." : null}
+                {mpstatsStatus === "auth_error" ? "MPStats отклонил ключ. Проверьте токен в аккаунте MPStats." : null}
+                {mpstatsStatus === "rate_limited" ? "MPStats ответил лимитом запросов. Ключ сохранен, проверку можно повторить позже." : null}
                 {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
-                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? "MPStats ключ сохранен и будет использоваться для всех кабинетов." : "MPStats пока не настроен.") : null}
+                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? (mpstatsVerified ? "MPStats подключен и проверен." : "MPStats ключ сохранен, но соединение еще не проверено.") : "MPStats пока не настроен.") : null}
               </div>
             </form>
           </section>

@@ -53,10 +53,14 @@ MAX_JSON_BYTES = 64 * 1024
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
 WB_PROVIDER = "wb"
 MPSTATS_PROVIDER = "mpstats"
+MPSTATS_API_BASE = os.environ.get("MPSTATS_API_BASE", "https://mpstats.io/api")
+MPSTATS_CHECK_ITEM_ID = os.environ.get("MPSTATS_CHECK_ITEM_ID", "265906486")
 WB_ENV_TOKEN = "WB_API_TOKEN"
 WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api.wildberries.ru")
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
+MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
+MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
@@ -1064,6 +1068,36 @@ def get_service_integration(provider):
   return public_service_integration(row)
 
 
+def get_service_integration_secret(provider):
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT provider, token_nonce, token_ciphertext
+      FROM service_integrations
+      WHERE provider = ?
+      """,
+      (provider,),
+    ).fetchone()
+  if not row:
+    return ""
+  return decrypt_secret(row["token_nonce"], row["token_ciphertext"], service_integration_aad(provider))
+
+
+def update_service_integration_check(provider, status):
+  init_db()
+  with connect_db() as db:
+    db.execute(
+      """
+      UPDATE service_integrations
+      SET status = ?, last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE provider = ?
+      """,
+      (status, provider),
+    )
+  return get_service_integration(provider)
+
+
 def save_service_integration(provider, token, user):
   if provider != MPSTATS_PROVIDER:
     raise ValueError("unsupported_provider")
@@ -1299,6 +1333,100 @@ def wb_get_json(token, path, locale="ru", attempts=3):
       raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_invalid_json", retryable=False) from exc
 
   raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
+
+
+class MpstatsApiError(Exception):
+  def __init__(self, status, message, retryable=False):
+    super().__init__(message)
+    self.status = status
+    self.message = message
+    self.retryable = retryable
+
+
+def mpstats_error_message(response_body, fallback):
+  if not response_body:
+    return fallback
+  try:
+    payload = json.loads(response_body)
+  except json.JSONDecodeError:
+    return fallback
+  if isinstance(payload, dict):
+    return str(payload.get("message") or payload.get("error") or payload.get("detail") or fallback)
+  return fallback
+
+
+def mpstats_get_json(token, path, attempts=3):
+  token = str(token or "").strip()
+  if not token:
+    raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
+  url = f"{MPSTATS_API_BASE.rstrip('/')}{path}"
+  headers = {
+    "X-Mpstats-TOKEN": token,
+    "Accept": "application/json",
+    "User-Agent": "OptiCards/0.1 mpstats-check",
+  }
+
+  for attempt in range(attempts):
+    request = urlrequest.Request(url, headers=headers, method="GET")
+    try:
+      with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
+        response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+    except urlerror.HTTPError as exc:
+      response_body = exc.read().decode("utf-8", errors="replace")
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      retryable = exc.code == 429 or 500 <= exc.code < 600
+      if retryable and attempt < attempts - 1:
+        time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(
+        exc.code,
+        mpstats_error_message(response_body, HTTPStatus(exc.code).phrase),
+        retryable=retryable,
+      ) from exc
+    except (TimeoutError, urlerror.URLError) as exc:
+      if attempt < attempts - 1:
+        time.sleep(0.5 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(HTTPStatus.GATEWAY_TIMEOUT, "mpstats_request_timeout", retryable=True) from exc
+    except json.JSONDecodeError as exc:
+      raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_invalid_json", retryable=False) from exc
+
+  raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_request_failed", retryable=True)
+
+
+def check_mpstats_connection():
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    return {
+      "ok": False,
+      "status": "missing",
+      "message": "mpstats_key_missing",
+      "integration": get_service_integration(MPSTATS_PROVIDER),
+    }
+  try:
+    payload = mpstats_get_json(token, f"/analytics/v1/wb/items/{MPSTATS_CHECK_ITEM_ID}")
+  except MpstatsApiError as exc:
+    status = "auth_error" if exc.status == HTTPStatus.UNAUTHORIZED else "rate_limited" if exc.status == 429 else "error"
+    integration = update_service_integration_check(MPSTATS_PROVIDER, status)
+    return {
+      "ok": False,
+      "status": status,
+      "httpStatus": int(exc.status),
+      "retryable": bool(exc.retryable),
+      "message": exc.message,
+      "integration": integration,
+    }
+  integration = update_service_integration_check(MPSTATS_PROVIDER, "verified")
+  return {
+    "ok": True,
+    "status": "verified",
+    "sampleItem": {
+      "id": payload.get("id") if isinstance(payload, dict) else "",
+      "name": payload.get("name") if isinstance(payload, dict) else "",
+    },
+    "integration": integration,
+  }
 
 
 def get_wb_token_for_portal(portal_id):
@@ -2019,16 +2147,25 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
       payload = self.read_json() or {}
+      if payload.get("action") == "check":
+        try:
+          result = check_mpstats_connection()
+        except RuntimeError:
+          self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+          return
+        self.send_json(HTTPStatus.OK, result)
+        return
       api_key = str(payload.get("apiKey", "")).strip()
       try:
-        integration = save_service_integration(MPSTATS_PROVIDER, api_key, user)
+        save_service_integration(MPSTATS_PROVIDER, api_key, user)
+        result = check_mpstats_connection()
       except RuntimeError:
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_key"})
         return
-      self.send_json(HTTPStatus.OK, {"integration": integration})
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path == "/api/card-drafts":
