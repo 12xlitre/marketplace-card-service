@@ -23,6 +23,10 @@ npm run prototype
 - разделы левого меню `Кабинеты`, `Аудит`, `Настройки`;
 - кабинет селлера с обзором, источником данных, составом проекта и режимами охвата;
 - детальную карточку с аудитом, вариантами заголовка и блоком `Было / стало`.
+- сессии:
+  - авторизация через `POST /api/login`, восстановление через `GET /api/session`, выход через `POST /api/logout`;
+  - remember-me задает TTL cookie: 7 дней, иначе 12 часов;
+  - сессия хранится в HttpOnly cookie, пароль не кешируется в браузере.
 
 Создание или обновление пользователя:
 
@@ -38,9 +42,18 @@ export OPTICARDS_SECRET_KEY="..."
 npm run create-portal -- "Wildberries кабинет" --lead manager-login --tech tech-login --manager manager-login
 WB_API_TOKEN="..." npm run set-wb-token -- 1
 npm run list-portals
+npm run wb-sync -- --portal-id 1 --limit 20
 ```
 
-WB API ключ не вводится в браузере и не хранится в `index.html`. Для реального подключения прод должен запускать backend `server.py`, а не только статическую раздачу.
+WB API ключ не вводится в браузере и не хранится в `index.html`. Для текущего живого рабочего контура можно положить `WB_API_TOKEN` в `.env.local`; для отдельного портала используйте `set-wb-token`, чтобы сохранить токен зашифрованно в SQLite.
+
+Read-only загрузка карточек идет через авторизованный backend route:
+
+```text
+GET /api/wb/cards?portal_id=demo-wb&limit=100
+```
+
+Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
 
 ## Прод
 

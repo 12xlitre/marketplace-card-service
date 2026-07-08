@@ -10,16 +10,38 @@ import mimetypes
 import os
 import secrets
 import sqlite3
+import time
+from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib import error as urlerror
+from urllib import request as urlrequest
+from urllib.parse import parse_qs, unquote, urlparse
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def load_env_file(path):
+  if not path.is_file():
+    return
+  for raw_line in path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+      continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    value = value.strip().strip("'\"")
+    if key and key not in os.environ:
+      os.environ[key] = value
+
+
+load_env_file(ROOT / ".env.local")
+
 DB_PATH = Path(os.environ.get("OPTICARDS_DB", ROOT / "var" / "opticards.sqlite3"))
 SESSION_COOKIE = "opticards_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
@@ -27,6 +49,12 @@ SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 64 * 1024
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
+WB_PROVIDER = "wb"
+WB_ENV_TOKEN = "WB_API_TOKEN"
+WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api.wildberries.ru")
+WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
+WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
+WB_MAX_CARDS_PER_SYNC = 1000
 
 
 def utc_now():
@@ -324,6 +352,219 @@ def upsert_user(login, password, full_name, role, access_level, user_role):
     )
 
 
+class WbApiError(Exception):
+  def __init__(self, status, message, retryable=False):
+    super().__init__(message)
+    self.status = status
+    self.message = message
+    self.retryable = retryable
+
+
+def parse_retry_after(value):
+  if not value:
+    return None
+  try:
+    return max(0, int(value))
+  except ValueError:
+    pass
+  try:
+    retry_at = parsedate_to_datetime(value)
+    return max(0, (retry_at - utc_now()).total_seconds())
+  except (TypeError, ValueError):
+    return None
+
+
+def wb_request_json(token, path, payload, locale="ru", attempts=3):
+  url = f"{WB_CONTENT_API_BASE.rstrip('/')}{path}?locale={locale}"
+  body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+  headers = {
+    "Authorization": token,
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "OptiCards/0.1 read-only",
+  }
+
+  for attempt in range(attempts):
+    request = urlrequest.Request(url, data=body, headers=headers, method="POST")
+    try:
+      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+    except urlerror.HTTPError as exc:
+      response_body = exc.read().decode("utf-8", errors="replace")
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      retryable = exc.code == 429 or 500 <= exc.code < 600
+      if retryable and attempt < attempts - 1:
+        time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
+        continue
+      message = response_body
+      try:
+        error_payload = json.loads(response_body)
+        message = (
+          error_payload.get("errorText")
+          or error_payload.get("detail")
+          or error_payload.get("title")
+          or error_payload.get("message")
+          or response_body
+        )
+      except json.JSONDecodeError:
+        pass
+      raise WbApiError(exc.code, message or HTTPStatus(exc.code).phrase, retryable=retryable) from exc
+    except (TimeoutError, urlerror.URLError) as exc:
+      if attempt < attempts - 1:
+        time.sleep(0.5 * (2 ** attempt))
+        continue
+      raise WbApiError(HTTPStatus.GATEWAY_TIMEOUT, "wb_request_timeout", retryable=True) from exc
+    except json.JSONDecodeError as exc:
+      raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_invalid_json", retryable=False) from exc
+
+  raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
+
+
+def get_wb_token_for_portal(portal_id):
+  if str(portal_id) == "demo-wb":
+    token = os.environ.get(WB_ENV_TOKEN, "").strip()
+    if token:
+      return token, "env"
+
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    numeric_portal_id = None
+
+  if numeric_portal_id is not None:
+    init_db()
+    with connect_db() as db:
+      row = db.execute(
+        """
+        SELECT token_nonce, token_ciphertext
+        FROM portal_integrations
+        WHERE portal_id = ? AND provider = ?
+        """,
+        (numeric_portal_id, WB_PROVIDER),
+      ).fetchone()
+    if row:
+      token = decrypt_secret(
+        row["token_nonce"],
+        row["token_ciphertext"],
+        integration_aad(numeric_portal_id, WB_PROVIDER),
+      )
+      return token, "encrypted"
+
+  return "", "missing"
+
+
+def first_photo_url(card):
+  photos = card.get("photos") or []
+  if not photos:
+    return ""
+  photo = photos[0] or {}
+  return photo.get("tm") or photo.get("c246x328") or photo.get("square") or photo.get("big") or ""
+
+
+def card_issue(card):
+  issues = []
+  title = str(card.get("title") or "").strip()
+  if not title:
+    issues.append("Нет названия")
+  elif len(title) > 60:
+    issues.append("Название длиннее 60")
+  if not str(card.get("description") or "").strip():
+    issues.append("Нет описания")
+  if not card.get("brand"):
+    issues.append("Нет бренда")
+  if not card.get("characteristics"):
+    issues.append("Пустые характеристики")
+  if not card.get("photos"):
+    issues.append("Нет фото")
+  dimensions = card.get("dimensions") or {}
+  if dimensions and dimensions.get("isValid") is False:
+    issues.append("Габариты требуют проверки")
+  return issues
+
+
+def normalize_wb_card(card):
+  issues = card_issue(card)
+  quality = "Хорошая"
+  quality_class = "green"
+  if len(issues) == 1:
+    quality = "Средняя"
+    quality_class = "amber"
+  elif len(issues) > 1:
+    quality = "Низкая"
+    quality_class = "red"
+
+  status = "Можно оставить" if not issues else "Нужна проверка"
+  status_class = "green" if not issues else "amber"
+  title = str(card.get("title") or "").strip() or str(card.get("vendorCode") or "Карточка WB")
+  return {
+    "nmID": card.get("nmID"),
+    "imtID": card.get("imtID"),
+    "vendorCode": card.get("vendorCode") or "",
+    "title": title,
+    "brand": card.get("brand") or "",
+    "subjectName": card.get("subjectName") or "категория не указана",
+    "photoUrl": first_photo_url(card),
+    "quality": quality,
+    "qualityClass": quality_class,
+    "issue": issues[0] if issues else "Нет критичных",
+    "issueCount": len(issues),
+    "status": status,
+    "statusClass": status_class,
+    "updatedAt": card.get("updatedAt") or "",
+  }
+
+
+def fetch_wb_cards(token, max_cards=100):
+  max_cards = max(1, min(int(max_cards), WB_MAX_CARDS_PER_SYNC))
+  cards = []
+  cursor = {"limit": min(100, max_cards)}
+
+  while len(cards) < max_cards:
+    cursor["limit"] = min(100, max_cards - len(cards))
+    payload = {
+      "settings": {
+        "sort": {"ascending": True},
+        "cursor": cursor,
+        "filter": {"withPhoto": -1},
+      }
+    }
+    response = wb_request_json(token, "/content/v2/get/cards/list", payload)
+    batch = response.get("cards") or []
+    cards.extend(batch)
+    response_cursor = response.get("cursor") or {}
+    total = int(response_cursor.get("total") or len(batch))
+    updated_at = response_cursor.get("updatedAt")
+    nm_id = response_cursor.get("nmID")
+    if not batch or total < cursor["limit"] or not updated_at or not nm_id:
+      cursor = response_cursor
+      break
+    cursor = {
+      "limit": min(100, max_cards - len(cards)),
+      "updatedAt": updated_at,
+      "nmID": nm_id,
+    }
+
+  normalized_cards = [normalize_wb_card(card) for card in cards[:max_cards]]
+  problem_count = sum(1 for card in normalized_cards if card["issueCount"] > 0)
+  work_count = problem_count
+  brands = [card["brand"] for card in normalized_cards if card["brand"]]
+  portal_name = f"{brands[0]} WB" if brands else "Кабинет WB"
+  return {
+    "cards": normalized_cards,
+    "raw_count": len(cards),
+    "cursor": cursor,
+    "stats": {
+      "cardCount": len(normalized_cards),
+      "workCount": work_count,
+      "problemCount": problem_count,
+      "sampleLimit": max_cards,
+      "loadedAt": utc_now().isoformat(),
+      "portalName": portal_name,
+    },
+  }
+
+
 class OpticardsHandler(BaseHTTPRequestHandler):
   server_version = "OpticardsServer/0.1"
 
@@ -384,7 +625,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     return user
 
   def do_GET(self):
-    path = urlparse(self.path).path
+    parsed = urlparse(self.path)
+    path = parsed.path
     if path == "/api/session":
       user = self.current_user()
       self.send_json(HTTPStatus.OK, {"user": public_user(user) if user else None})
@@ -403,6 +645,51 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           """
         ).fetchall()
       self.send_json(HTTPStatus.OK, {"users": [public_user(row) for row in rows]})
+      return
+
+    if path == "/api/wb/cards":
+      if not self.require_user():
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", ["demo-wb"])[0]
+      try:
+        limit = int(query.get("limit", ["100"])[0])
+      except ValueError:
+        limit = 100
+      token, token_source = get_wb_token_for_portal(portal_id)
+      if not token:
+        missing_message = (
+          f"Set {WB_ENV_TOKEN} in .env.local for the demo portal."
+          if str(portal_id) == "demo-wb"
+          else "Store an encrypted WB token for this portal with set-wb-token."
+        )
+        self.send_json(
+          HTTPStatus.CONFLICT,
+          {
+            "error": "wb_token_missing",
+            "message": missing_message,
+          },
+        )
+        return
+      try:
+        snapshot = fetch_wb_cards(token, max_cards=limit)
+      except WbApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "wb_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      snapshot["portalId"] = portal_id
+      snapshot["tokenSource"] = token_source
+      self.send_json(HTTPStatus.OK, snapshot)
       return
 
     if path.startswith("/api/"):
@@ -458,7 +745,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     if path in ("", "/"):
       path = "/index.html"
 
-    if path != "/index.html" and not path.startswith("/document/"):
+    if path != "/index.html":
       self.send_error(HTTPStatus.NOT_FOUND)
       return
 
@@ -518,6 +805,10 @@ def main():
   set_wb_token.add_argument("--token", default="")
   set_wb_token.add_argument("--env", default="WB_API_TOKEN")
 
+  wb_sync = subparsers.add_parser("wb-sync", help="fetch a read-only WB cards sample")
+  wb_sync.add_argument("--portal-id", default="demo-wb")
+  wb_sync.add_argument("--limit", type=int, default=20)
+
   subparsers.add_parser("list-portals", help="list portals and integration status")
 
   args = parser.parse_args()
@@ -556,6 +847,23 @@ def main():
       raise SystemExit("WB API token looks too short.")
     save_integration_token(args.portal_id, "wb", token)
     print(f"WB token stored for portal {args.portal_id}.")
+  elif args.command == "wb-sync":
+    token, token_source = get_wb_token_for_portal(args.portal_id)
+    if not token:
+      if str(args.portal_id) == "demo-wb":
+        raise SystemExit(f"WB token is missing. Set {WB_ENV_TOKEN} in .env.local.")
+      raise SystemExit("WB token is missing. Run set-wb-token for this portal.")
+    try:
+      snapshot = fetch_wb_cards(token, max_cards=args.limit)
+    except WbApiError as exc:
+      raise SystemExit(f"WB API error {exc.status}: {exc.message}") from exc
+    stats = snapshot["stats"]
+    print(
+      f"Fetched {stats['cardCount']} cards from WB ({token_source}); "
+      f"problems: {stats['problemCount']}; loaded_at: {stats['loadedAt']}"
+    )
+    for card in snapshot["cards"][:5]:
+      print(f"{card['nmID']}\t{card['vendorCode']}\t{card['title']}\t{card['issue']}")
   elif args.command == "list-portals":
     for row in list_portals():
       api_state = "api" if row["api_connected"] else "no-api"

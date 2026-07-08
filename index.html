@@ -1834,7 +1834,7 @@
                         <th style="width: 8%;">Детали</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody id="cards-table-body">
                       <tr>
                         <td>
                           <div class="product-cell">
@@ -2230,7 +2230,7 @@
         <div class="connect-mode" aria-label="Способ подключения">
           <button class="active" type="button" data-connect-mode="api">
             <strong>Через API</strong>
-            <span>Подготовка кабинета под подключение WB API после настройки сервера.</span>
+            <span>Ключ хранится на backend, браузер получает только read-only данные.</span>
           </button>
           <button type="button" data-connect-mode="manual">
             <strong>Вручную</strong>
@@ -2292,9 +2292,9 @@
         <div id="api-fields">
           <label class="field-label">
             WB API ключ
-            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Подключение будет доступно после настройки сервера" disabled>
+            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Добавляется через .env.local или серверную команду" disabled>
           </label>
-          <div class="form-note">Реальный ключ WB пока не вводим: серверное подключение API еще не включено. Сейчас можно создать кабинет, назначить команду и добавить данные вручную или таблицей.</div>
+          <div class="form-note">Реальный ключ WB не вводим в браузере. Для проверки read-only загрузки добавьте WB_API_TOKEN в .env.local или сохраните токен через серверную команду.</div>
           <div class="source-flow" aria-label="Что произойдет после подключения API">
             <div class="list-row"><span>1. Проверка токена WB</span><strong>без изменений</strong></div>
             <div class="list-row"><span>2. Определение кабинета и брендов</span><strong>WB API</strong></div>
@@ -2366,6 +2366,7 @@
     const sellerSourceCopy = document.querySelector("#seller-source-copy");
     const sellerSourceTag = document.querySelector("#seller-source-tag");
     const sellerSourceFlow = document.querySelector("#seller-source-flow");
+    const cardsTableBody = document.querySelector("#cards-table-body");
     const projectMembers = document.querySelector("#project-members");
     const memberRoleSelect = document.querySelector("#member-role-select");
     const memberSelect = document.querySelector("#member-select");
@@ -2409,8 +2410,45 @@
         manager: "manager"
       },
       memberLogins: ["admin", "manager", "specialist"],
-      isDemo: true
+      isDemo: true,
+      realCards: [],
+      syncStatus: "demo"
     };
+    const demoCards = [
+      {
+        title: "Плед микрофибра 200х220",
+        subjectName: "покрывала и пледы",
+        nmID: 18492031,
+        quality: "Средняя",
+        qualityClass: "amber",
+        issue: "Название без ключей",
+        status: "Правка готова",
+        statusClass: "blue",
+        photoUrl: ""
+      },
+      {
+        title: "Комплект полотенец хлопок",
+        subjectName: "полотенца",
+        nmID: 19300482,
+        quality: "Низкая",
+        qualityClass: "red",
+        issue: "Пустые характеристики",
+        status: "Нужна проверка",
+        statusClass: "amber",
+        photoUrl: ""
+      },
+      {
+        title: "Наволочка декоративная",
+        subjectName: "наволочки",
+        nmID: 20138477,
+        quality: "Хорошая",
+        qualityClass: "green",
+        issue: "Нет критичных",
+        status: "Можно оставить",
+        statusClass: "green",
+        photoUrl: ""
+      }
+    ];
     let currentPortal = demoPortal;
     let userPortals = [];
 
@@ -2685,6 +2723,7 @@
       loginScreen.classList.add("is-hidden");
       appShell.classList.remove("is-hidden");
       await loadUsers();
+      await loadWbDemoSnapshot();
       showScreen("employees");
     }
 
@@ -2877,13 +2916,40 @@
     }
 
     function updateDemoPortalCard() {
-      const existing = document.querySelector("[data-demo-team-summary]");
-      if (!existing) {
+      const card = document.querySelector("[data-demo-card]");
+      if (!card) {
         return;
       }
+      const title = card.querySelector(".seller h2");
+      const copy = card.querySelector(".seller p");
+      const headTag = card.querySelector(".card-head .tag");
+      const actionTag = card.querySelector(".card-actions .tag");
+      const stats = card.querySelectorAll(".mini-stat strong");
+      if (title) {
+        title.textContent = demoPortal.name;
+      }
+      if (copy) {
+        copy.textContent = `${demoPortal.marketplace} · кабинет продавца · ${demoPortal.syncStatus === "loaded" ? "WB API read-only" : "просмотр данных"}`;
+      }
+      if (headTag) {
+        headTag.className = demoPortal.apiConnected ? "tag blue" : "tag amber";
+        headTag.textContent = demoPortal.status;
+      }
+      if (actionTag) {
+        actionTag.className = demoPortal.apiConnected ? "tag blue" : "tag amber";
+        actionTag.textContent = demoPortal.apiConnected ? "Просмотр данных" : "Ожидает токен";
+      }
+      [demoPortal.cardCount, demoPortal.workCount, demoPortal.problemCount].forEach((value, index) => {
+        if (stats[index]) {
+          stats[index].textContent = formatNumber(value);
+        }
+      });
+      const existing = card.querySelector("[data-demo-team-summary]");
       const summary = createTeamSummary(demoPortal);
       summary.dataset.demoTeamSummary = "true";
-      existing.replaceWith(summary);
+      if (existing) {
+        existing.replaceWith(summary);
+      }
     }
 
     function updateDashboardMetrics() {
@@ -2924,6 +2990,129 @@
       });
     }
 
+    function createTag(label, className) {
+      const tag = document.createElement("span");
+      tag.className = `tag ${className || "amber"}`;
+      tag.textContent = label;
+      return tag;
+    }
+
+    function createIconButton() {
+      const button = document.createElement("button");
+      button.className = "icon-btn";
+      button.type = "button";
+      button.dataset.openCard = "true";
+      button.setAttribute("aria-label", "Открыть детальную карточку");
+      button.title = "Открыть детальную карточку";
+      button.innerHTML = '<svg class="ico" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+      return button;
+    }
+
+    function createCardTableRow(card, index) {
+      const row = document.createElement("tr");
+
+      const productCell = document.createElement("td");
+      const product = document.createElement("div");
+      product.className = "product-cell";
+      const thumb = document.createElement("div");
+      thumb.className = index % 2 ? "thumb alt" : "thumb";
+      if (card.photoUrl) {
+        try {
+          const photoUrl = new URL(card.photoUrl);
+          if (photoUrl.protocol === "https:") {
+            thumb.style.backgroundImage = `url("${photoUrl.href}")`;
+            thumb.style.backgroundSize = "cover";
+            thumb.style.backgroundPosition = "center";
+          }
+        } catch (error) {
+          // Keep the generated placeholder when WB sends an unexpected photo URL.
+        }
+      }
+      const productName = document.createElement("div");
+      productName.className = "product-name";
+      const title = document.createElement("strong");
+      title.textContent = card.title || "Карточка WB";
+      const subject = document.createElement("span");
+      subject.textContent = `категория: ${card.subjectName || "не указана"}`;
+      productName.append(title, subject);
+      product.append(thumb, productName);
+      productCell.append(product);
+
+      const nmCell = document.createElement("td");
+      nmCell.textContent = card.nmID || "—";
+
+      const qualityCell = document.createElement("td");
+      qualityCell.append(createTag(card.quality || "Средняя", card.qualityClass || "amber"));
+
+      const issueCell = document.createElement("td");
+      issueCell.textContent = card.issue || "Нет критичных";
+
+      const statusCell = document.createElement("td");
+      statusCell.append(createTag(card.status || "Нужна проверка", card.statusClass || "amber"));
+
+      const selectCell = document.createElement("td");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = (card.issue || "") !== "Нет критичных";
+      checkbox.setAttribute("aria-label", "Выбрать карточку");
+      selectCell.append(checkbox);
+
+      const detailsCell = document.createElement("td");
+      detailsCell.append(createIconButton());
+
+      row.append(productCell, nmCell, qualityCell, issueCell, statusCell, selectCell, detailsCell);
+      return row;
+    }
+
+    function renderCardsTable(portal) {
+      if (!cardsTableBody) {
+        return;
+      }
+      const cards = portal.realCards?.length ? portal.realCards : demoCards;
+      cardsTableBody.innerHTML = "";
+      cards.slice(0, 20).forEach((card, index) => {
+        cardsTableBody.append(createCardTableRow(card, index));
+      });
+    }
+
+    function applyWbSnapshotToPortal(portal, payload) {
+      const stats = payload.stats || {};
+      portal.name = stats.portalName || portal.name;
+      portal.status = "WB read-only";
+      portal.apiConnected = true;
+      portal.cardCount = stats.cardCount || 0;
+      portal.workCount = stats.workCount || 0;
+      portal.problemCount = stats.problemCount || 0;
+      portal.realCards = payload.cards || [];
+      portal.lastSyncAt = stats.loadedAt || "";
+      portal.syncStatus = "loaded";
+    }
+
+    async function loadWbDemoSnapshot() {
+      try {
+        const payload = await apiRequest("/api/wb/cards?portal_id=demo-wb&limit=100");
+        applyWbSnapshotToPortal(demoPortal, payload);
+      } catch (error) {
+        if (error.message === "wb_token_missing") {
+          demoPortal.status = "API ожидает токен";
+          demoPortal.apiConnected = false;
+          demoPortal.cardCount = demoCards.length;
+          demoPortal.workCount = demoCards.filter((card) => card.issue !== "Нет критичных").length;
+          demoPortal.problemCount = demoPortal.workCount;
+          demoPortal.syncStatus = "missing-token";
+        } else {
+          demoPortal.status = "WB API недоступен";
+          demoPortal.syncStatus = "error";
+        }
+      }
+      if (currentPortal.id === demoPortal.id) {
+        currentPortal = demoPortal;
+      }
+      renderUserPortals();
+      updateDashboardMetrics();
+      updateSellerView();
+    }
+
     function updateSellerView() {
       const owner = findUser(currentPortal.ownerLogin);
       const isApi = currentPortal.mode === "api";
@@ -2943,7 +3132,15 @@
             ? "После проверки доступа система определит кабинет WB и загрузит список карточек без внесения изменений на маркетплейсе."
             : "Кабинет создан, но реальный ключ WB пока не подключается. Добавьте данные вручную или таблицей, а API подключим после включения серверной интеграции.")
         : "Портал создан без API: ссылка на магазин нужна только для ручной сверки, а карточки добавляются через Excel, nmID, SKU, артикулы продавца или ссылки. API можно подключить позже.";
+      if (currentPortal.syncStatus === "loaded") {
+        sellerSubtitle.textContent = `${currentPortal.marketplace} · ${scopeLabel} · read-only WB API · карточки загружены`;
+        sellerSourceCopy.textContent = "Список карточек загружен из WB API через backend. Создание, обновление, удаление и публикация изменений отключены.";
+      }
+      if (currentPortal.syncStatus === "missing-token") {
+        sellerSourceCopy.textContent = "Backend готов к read-only WB API. Добавьте WB_API_TOKEN в .env.local или сохраните токен через серверную команду, затем перезапустите прототип.";
+      }
       renderSourceFlow(currentPortal);
+      renderCardsTable(currentPortal);
       renderProjectMembers();
       setScope(currentPortal.scope);
     }
@@ -3079,6 +3276,11 @@
       if (openSellerButton) {
         const card = openSellerButton.closest(".workspace-card");
         showSeller(getPortalById(card?.dataset.portalId || "demo-wb"));
+        return;
+      }
+
+      if (event.target.closest("[data-open-card]")) {
+        showCard();
       }
     });
 
@@ -3092,7 +3294,6 @@
       button.addEventListener("click", () => setConnectMode(button.dataset.connectMode));
     });
 
-    openCardButtons.forEach((button) => button.addEventListener("click", showCard));
     backButton.addEventListener("click", showEmployees);
     backSellerButton.addEventListener("click", () => showSeller(currentPortal));
     navButtons.forEach((button) => {
