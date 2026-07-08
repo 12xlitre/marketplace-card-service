@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -1529,20 +1529,35 @@ export default function App() {
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [notice, setNotice] = useState("");
+  const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
   const canManageUsers = currentUser ? userCanManageUsers(currentUser) : false;
   const activeDemoPortal = { ...demoPortal, isActive: !demoPortalArchived };
-  const allPortals = [activeDemoPortal, ...userPortals];
+  const allPortals = [activeDemoPortal, ...userPortals].map(mergePortalWorkSummary);
   const activePortals = allPortals.filter((portal) => portal.isActive !== false);
 
-  const currentPortal = useMemo(() => {
-    if (selectedPortalId === "demo-wb") {
-      return activeDemoPortal;
+  const currentPortal = allPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || allPortals[0];
+
+  function mergePortalWorkSummary(portal) {
+    const localSummary = portalWorkSummaries[String(portal?.id || "")];
+    if (!localSummary) {
+      return portal;
     }
-    return userPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || activeDemoPortal;
-  }, [activeDemoPortal, selectedPortalId, userPortals]);
+    const backendSummary = portal.draftSummary || {};
+    const draftCount = Math.max(Number(backendSummary.draftCount || 0), localSummary.draftKeys?.length || 0);
+    const auditCount = Math.max(Number(backendSummary.auditCount || 0), localSummary.auditKeys?.length || 0);
+    return {
+      ...portal,
+      draftSummary: {
+        ...backendSummary,
+        draftCount,
+        auditCount,
+        lastDraftAt: localSummary.lastActivityAt || backendSummary.lastDraftAt || "",
+      },
+    };
+  }
 
   useEffect(() => {
     restoreSession();
@@ -1639,6 +1654,27 @@ export default function App() {
         const existing = currentById[String(normalized.id)];
         return existing ? { ...normalized, realCards: existing.realCards || [] } : normalized;
       });
+    });
+  }
+
+  function markPortalWorkActivity(portalId, cardKey, { audit = false, draft = false } = {}) {
+    const normalizedPortalId = String(portalId || "");
+    const normalizedCardKey = String(cardKey || "");
+    if (!normalizedPortalId || !normalizedCardKey) {
+      return;
+    }
+    setPortalWorkSummaries((current) => {
+      const summary = current[normalizedPortalId] || { draftKeys: [], auditKeys: [], lastActivityAt: "" };
+      const draftKeys = draft ? [...new Set([...summary.draftKeys, normalizedCardKey])] : summary.draftKeys;
+      const auditKeys = audit ? [...new Set([...summary.auditKeys, normalizedCardKey])] : summary.auditKeys;
+      return {
+        ...current,
+        [normalizedPortalId]: {
+          draftKeys,
+          auditKeys,
+          lastActivityAt: new Date().toISOString(),
+        },
+      };
     });
   }
 
@@ -1918,6 +1954,7 @@ export default function App() {
             portal={currentPortal}
             onBack={() => setScreen("seller")}
             onDraftSaved={refreshPortals}
+            onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
           />
         ) : null}
 
@@ -2396,7 +2433,7 @@ function CardsTable({ cards, portal, onOpenCard }) {
   );
 }
 
-function CardDetailScreen({ card, portal, onBack, onDraftSaved }) {
+function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity }) {
   const [activeTab, setActiveTab] = useState("audit");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
@@ -2659,6 +2696,9 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved }) {
     setDraftCharacteristics(nextDraftCharacteristics);
     setAuditHistory((current) => [auditEntry, ...current].slice(0, 20));
     setAuditStatus("done");
+    if (onDraftActivity) {
+      onDraftActivity({ audit: true, draft: true });
+    }
     setActiveTab("changes");
   }
 
@@ -2668,6 +2708,9 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved }) {
       delete next[key];
       return next;
     });
+    if (source === "manual" && onDraftActivity) {
+      onDraftActivity({ draft: true });
+    }
   }
 
   function setDraftCharacteristicValues(row, values, source = "manual") {
@@ -2740,6 +2783,9 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved }) {
         });
         setDraftSavedAt(response.draft?.updatedAt || savedAt);
         setDraftSaveStatus("backend");
+        if (onDraftActivity) {
+          onDraftActivity({ audit: auditStatus === "done", draft: true });
+        }
         if (onDraftSaved) {
           await onDraftSaved(response.draft);
         }
