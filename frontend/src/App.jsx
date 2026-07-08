@@ -2638,7 +2638,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
     };
   }, [card?.subjectID, rawFields.subjectID, portal?.id]);
 
-  async function loadMpstatsCharacteristicHints({ forceRefresh = true } = {}) {
+  async function loadMpstatsCharacteristicHints({ forceRefresh = false } = {}) {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
     if (!subjectID || !portal?.id) {
       setMpstatsCharacteristicsStatus("missing-subject");
@@ -2664,11 +2664,13 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
 
   async function runAuditStub() {
     setAuditStatus("loading");
-    const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: true });
+    const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: false });
     const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
     const suggestions = titleSuggestions(card);
     const nextTitle = suggestions[1] || suggestions[0] || "";
     const nextDescription = descriptionSuggestion(card, description);
+    const nextTitleReason = titleAuditReason(card, currentTitle, nextTitle);
+    const nextDescriptionReason = descriptionAuditReason(description);
     const nextDraftCharacteristics = characteristicDraftsFromRows(characteristicItems, "audit", auditMpstatsCharacteristics, subjectCharacteristics);
     const changedCharacteristics = Object.entries(nextDraftCharacteristics)
       .filter(([key, draft]) => {
@@ -2687,19 +2689,33 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
       changedCharacteristics,
       status: mpstatsPayload ? "done" : "partial",
     };
+    const nextAuditHistory = [auditEntry, ...auditHistory].slice(0, 20);
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus: "done",
+      auditHistory: nextAuditHistory,
+      title: nextTitle,
+      description: nextDescription,
+      titleSource: "audit",
+      descriptionSource: "audit",
+      titleReason: nextTitleReason,
+      descriptionReason: nextDescriptionReason,
+      characteristics: nextDraftCharacteristics,
+      card,
+    });
     setDraftTitle(nextTitle);
     setDraftDescription(nextDescription);
     setDraftTitleSource("audit");
     setDraftDescriptionSource("audit");
-    setDraftTitleReason(titleAuditReason(card, currentTitle, nextTitle));
-    setDraftDescriptionReason(descriptionAuditReason(description));
+    setDraftTitleReason(nextTitleReason);
+    setDraftDescriptionReason(nextDescriptionReason);
     setDraftCharacteristics(nextDraftCharacteristics);
-    setAuditHistory((current) => [auditEntry, ...current].slice(0, 20));
+    setAuditHistory(nextAuditHistory);
     setAuditStatus("done");
     if (onDraftActivity) {
       onDraftActivity({ audit: true, draft: true });
     }
     setActiveTab("changes");
+    await persistStructuredDraft(structuredDraft, { auditDone: true });
   }
 
   function removeDraftCharacteristic(key) {
@@ -2708,9 +2724,6 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
       delete next[key];
       return next;
     });
-    if (source === "manual" && onDraftActivity) {
-      onDraftActivity({ draft: true });
-    }
   }
 
   function setDraftCharacteristicValues(row, values, source = "manual") {
@@ -2754,20 +2767,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
     setCharacteristicSearch("");
   }
 
-  async function saveDraft() {
+  async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
-    const structuredDraft = buildStructuredCardDraft({
-      auditStatus,
-      auditHistory,
-      title: draftTitle,
-      description: draftDescription,
-      titleSource: draftTitleSource,
-      descriptionSource: draftDescriptionSource,
-      titleReason: draftTitleReason,
-      descriptionReason: draftDescriptionReason,
-      characteristics: draftCharacteristics,
-      card,
-    });
     localStorage.setItem(draftStorageKey, JSON.stringify({ ...structuredDraft, savedAt }));
     if (backendDraftEnabled) {
       try {
@@ -2784,7 +2785,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
         setDraftSavedAt(response.draft?.updatedAt || savedAt);
         setDraftSaveStatus("backend");
         if (onDraftActivity) {
-          onDraftActivity({ audit: auditStatus === "done", draft: true });
+          onDraftActivity({ audit: auditDone, draft: true });
         }
         if (onDraftSaved) {
           await onDraftSaved(response.draft);
@@ -2797,6 +2798,22 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
       setDraftSaveStatus("local");
     }
     setDraftSavedAt(savedAt);
+  }
+
+  async function saveDraft() {
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      title: draftTitle,
+      description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
+      characteristics: draftCharacteristics,
+      card,
+    });
+    await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
   }
 
   function downloadDraftTable(type) {
