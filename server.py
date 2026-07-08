@@ -168,6 +168,21 @@ def init_db():
         UNIQUE (portal_id, card_key)
       );
 
+      CREATE TABLE IF NOT EXISTS card_approval_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        nm_id TEXT NOT NULL DEFAULT '',
+        vendor_code TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor_login TEXT NOT NULL DEFAULT '',
+        assignee_login TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS service_integrations (
         provider TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT 'stored',
@@ -227,6 +242,18 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_drafts_portal_card
       ON card_drafts(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_card_approval_events_portal_event
+      ON card_approval_events(portal_id, event_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_card_approval_events_portal_card
+      ON card_approval_events(portal_id, card_key)
       """
     )
     db.execute(
@@ -1143,6 +1170,54 @@ def approval_status_from_payload(payload):
   return str(approval.get("status") or "draft").strip()
 
 
+def approval_event_from_payload(payload, user, nm_id="", vendor_code=""):
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  history = approval.get("history") if isinstance(approval.get("history"), list) else []
+  latest = history[0] if history and isinstance(history[0], dict) else {}
+  status = str(approval.get("status") or "draft").strip() or "draft"
+  event_at = (
+    latest.get("createdAt")
+    or (approval.get("reviewedAt") if status in {"approved", "changes_requested"} else "")
+    or approval.get("submittedAt")
+    or dt.datetime.now(dt.timezone.utc).isoformat()
+  )
+  return {
+    "status": status[:40],
+    "action": str(latest.get("action") or status)[:40],
+    "actorLogin": str(latest.get("userLogin") or user.get("login") or "")[:120],
+    "assigneeLogin": str(approval.get("assigneeLogin") or "")[:120],
+    "reason": str(latest.get("reason") or approval.get("returnReason") or "")[:1000],
+    "eventAt": str(event_at)[:80],
+    "nmID": str(nm_id or "")[:80],
+    "vendorCode": str(vendor_code or "")[:120],
+  }
+
+
+def insert_card_approval_event(db, portal_id, card_key, event):
+  db.execute(
+    """
+    INSERT INTO card_approval_events (
+      portal_id, card_key, nm_id, vendor_code, status, action,
+      actor_login, assignee_login, reason, event_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+    (
+      portal_id,
+      card_key,
+      event["nmID"],
+      event["vendorCode"],
+      event["status"],
+      event["action"],
+      event["actorLogin"],
+      event["assigneeLogin"],
+      event["reason"],
+      event["eventAt"],
+    ),
+  )
+
+
 def subject_ids_from_cards_snapshot(snapshot_json):
   try:
     cards = json.loads(snapshot_json or "[]")
@@ -1216,6 +1291,21 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
     raise PermissionError("approval_forbidden")
   payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
   with connect_db() as db:
+    previous = db.execute(
+      """
+      SELECT payload_json
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    previous_status = "draft"
+    if previous:
+      try:
+        previous_payload = json.loads(previous["payload_json"])
+        previous_status = approval_status_from_payload(previous_payload)
+      except (TypeError, json.JSONDecodeError):
+        previous_status = "draft"
     db.execute(
       """
       INSERT INTO card_drafts (
@@ -1242,6 +1332,13 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
         user["login"],
       ),
     )
+    if approval_status != "draft" and approval_status != previous_status:
+      insert_card_approval_event(
+        db,
+        numeric_portal_id,
+        card_key,
+        approval_event_from_payload(normalized_payload, user, nm_id, vendor_code),
+      )
   return get_card_draft(numeric_portal_id, card_key, user)
 
 
