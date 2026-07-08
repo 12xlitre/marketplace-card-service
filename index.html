@@ -2526,12 +2526,11 @@
         };
       }).filter(Boolean);
 
-      const merged = dedupeUsers(
-        apiUsers,
-        normalizedDirectory,
-        hardcodedDirectoryFallback
-      );
+      if (apiUsers.length) {
+        return dedupeUsers(apiUsers);
+      }
 
+      const merged = dedupeUsers(normalizedDirectory);
       return merged.length ? merged : dedupeUsers(hardcodedDirectoryFallback);
     }
 
