@@ -52,6 +52,7 @@ PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 64 * 1024
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
 WB_PROVIDER = "wb"
+MPSTATS_PROVIDER = "mpstats"
 WB_ENV_TOKEN = "WB_API_TOKEN"
 WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api.wildberries.ru")
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
@@ -144,6 +145,34 @@ def init_db():
         last_checked_at TEXT,
         UNIQUE (portal_id, provider)
       );
+
+      CREATE TABLE IF NOT EXISTS card_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        nm_id TEXT NOT NULL DEFAULT '',
+        vendor_code TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        audit_status TEXT NOT NULL DEFAULT 'idle',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, card_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS service_integrations (
+        provider TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'stored',
+        token_nonce TEXT NOT NULL,
+        token_ciphertext TEXT NOT NULL,
+        token_digest TEXT NOT NULL,
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_checked_at TEXT
+      );
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "user_role" not in columns:
@@ -171,6 +200,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_portal_integrations_provider_external_key
       ON portal_integrations(provider, external_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_card_drafts_portal_card
+      ON card_drafts(portal_id, card_key)
       """
     )
 
@@ -438,6 +473,10 @@ def decrypt_secret(nonce_b64, ciphertext_b64, aad):
 
 def integration_aad(portal_id, provider):
   return f"portal:{portal_id}:integration:{provider}"
+
+
+def service_integration_aad(provider):
+  return f"service:integration:{provider}"
 
 
 def wb_snapshot_external_key(snapshot):
@@ -871,6 +910,194 @@ def update_portal_sync_stats(portal_id, snapshot):
         WB_PROVIDER,
       ),
     )
+
+
+def draft_card_key(value):
+  return str(value or "").strip()[:120]
+
+
+def normalize_card_draft_payload(payload):
+  if not isinstance(payload, dict):
+    payload = {}
+  content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+  title = content.get("title") if isinstance(content.get("title"), dict) else {}
+  description = content.get("description") if isinstance(content.get("description"), dict) else {}
+  characteristics = content.get("characteristics") if isinstance(content.get("characteristics"), dict) else {}
+  prices = payload.get("prices") if isinstance(payload.get("prices"), dict) else {}
+  stocks = payload.get("stocks") if isinstance(payload.get("stocks"), dict) else {}
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  audit_status = str(payload.get("auditStatus") or payload.get("audit_status") or "idle").strip() or "idle"
+  return {
+    "version": 2,
+    "auditStatus": audit_status[:40],
+    "content": {
+      "title": {
+        "value": str(title.get("value") or payload.get("title") or ""),
+        "source": str(title.get("source") or payload.get("titleSource") or ""),
+      },
+      "description": {
+        "value": str(description.get("value") or payload.get("description") or ""),
+        "source": str(description.get("source") or payload.get("descriptionSource") or ""),
+      },
+      "characteristics": characteristics,
+    },
+    "prices": prices,
+    "stocks": stocks,
+    "meta": meta,
+  }
+
+
+def public_card_draft(row):
+  try:
+    payload = json.loads(row["payload_json"])
+  except (TypeError, json.JSONDecodeError):
+    payload = normalize_card_draft_payload({})
+  return {
+    "id": row["id"],
+    "portalId": str(row["portal_id"]),
+    "cardKey": row["card_key"],
+    "nmID": row["nm_id"],
+    "vendorCode": row["vendor_code"],
+    "auditStatus": row["audit_status"],
+    "draft": payload,
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def get_card_draft(portal_id, card_key, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return None
+  card_key = draft_card_key(card_key)
+  if not card_key or not user_can_access_portal(user, numeric_portal_id):
+    return None
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+  return public_card_draft(row) if row else None
+
+
+def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  normalized_payload = normalize_card_draft_payload(payload)
+  payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
+  with connect_db() as db:
+    db.execute(
+      """
+      INSERT INTO card_drafts (
+        portal_id, card_key, nm_id, vendor_code, payload_json,
+        audit_status, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(portal_id, card_key) DO UPDATE SET
+        nm_id = excluded.nm_id,
+        vendor_code = excluded.vendor_code,
+        payload_json = excluded.payload_json,
+        audit_status = excluded.audit_status,
+        updated_by = excluded.updated_by,
+        updated_at = CURRENT_TIMESTAMP
+      """,
+      (
+        numeric_portal_id,
+        card_key,
+        str(nm_id or "")[:80],
+        str(vendor_code or "")[:120],
+        payload_json,
+        normalized_payload["auditStatus"],
+        user["login"],
+        user["login"],
+      ),
+    )
+  return get_card_draft(numeric_portal_id, card_key, user)
+
+
+def public_service_integration(row):
+  if not row:
+    return {
+      "provider": MPSTATS_PROVIDER,
+      "connected": False,
+      "status": "missing",
+      "lastCheckedAt": "",
+      "updatedAt": "",
+      "updatedBy": "",
+    }
+  return {
+    "provider": row["provider"],
+    "connected": True,
+    "status": row["status"],
+    "lastCheckedAt": row["last_checked_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+    "updatedBy": row["updated_by"] or "",
+  }
+
+
+def get_service_integration(provider):
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT provider, status, updated_by, updated_at, last_checked_at
+      FROM service_integrations
+      WHERE provider = ?
+      """,
+      (provider,),
+    ).fetchone()
+  return public_service_integration(row)
+
+
+def save_service_integration(provider, token, user):
+  if provider != MPSTATS_PROVIDER:
+    raise ValueError("unsupported_provider")
+  token = str(token or "").strip()
+  if len(token) < 8:
+    raise ValueError("invalid_token")
+  nonce, ciphertext = encrypt_secret(token, service_integration_aad(provider))
+  with connect_db() as db:
+    db.execute(
+      """
+      INSERT INTO service_integrations (
+        provider, status, token_nonce, token_ciphertext, token_digest,
+        created_by, updated_by, last_checked_at
+      )
+      VALUES (?, 'stored', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(provider) DO UPDATE SET
+        status = 'stored',
+        token_nonce = excluded.token_nonce,
+        token_ciphertext = excluded.token_ciphertext,
+        token_digest = excluded.token_digest,
+        updated_by = excluded.updated_by,
+        updated_at = CURRENT_TIMESTAMP,
+        last_checked_at = CURRENT_TIMESTAMP
+      """,
+      (
+        provider,
+        nonce,
+        ciphertext,
+        secret_digest(token),
+        user["login"],
+        user["login"],
+      ),
+    )
+  return get_service_integration(provider)
 
 
 def create_session(db, user_id, remember=False):
@@ -1546,6 +1773,26 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       )
       return
 
+    if path == "/api/integrations/mpstats":
+      if not self.require_user():
+        return
+      self.send_json(HTTPStatus.OK, {"integration": get_service_integration(MPSTATS_PROVIDER)})
+      return
+
+    if path == "/api/card-drafts":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      card_key = query.get("card_key", [""])[0]
+      if not portal_id or not card_key:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_draft_request"})
+        return
+      draft = get_card_draft(portal_id, card_key, user)
+      self.send_json(HTTPStatus.OK, {"draft": draft})
+      return
+
     if path == "/api/wb/characteristics":
       user = self.require_user()
       if not user:
@@ -1762,6 +2009,49 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         HTTPStatus.CREATED,
         {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team)},
       )
+      return
+
+    if path == "/api/integrations/mpstats":
+      user = self.require_user()
+      if not user:
+        return
+      if not user_can_manage_portals(user):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      api_key = str(payload.get("apiKey", "")).strip()
+      try:
+        integration = save_service_integration(MPSTATS_PROVIDER, api_key, user)
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_key"})
+        return
+      self.send_json(HTTPStatus.OK, {"integration": integration})
+      return
+
+    if path == "/api/card-drafts":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        draft = save_card_draft(
+          payload.get("portalId"),
+          payload.get("cardKey"),
+          payload.get("nmID"),
+          payload.get("vendorCode"),
+          payload.get("draft"),
+          user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
+        return
+      self.send_json(HTTPStatus.OK, {"draft": draft})
       return
 
     if path == "/api/logout":

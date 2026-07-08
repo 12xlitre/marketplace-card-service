@@ -764,6 +764,63 @@ function buildContentExportRows(card, draftTitle, draftDescription, draftCharact
   return rows;
 }
 
+function cardDraftKey(card) {
+  return String(card?.nmID || card?.vendorCode || card?.nmUUID || "card").trim();
+}
+
+function buildStructuredCardDraft({
+  auditStatus,
+  title,
+  titleSource,
+  description,
+  descriptionSource,
+  characteristics,
+  card,
+}) {
+  return {
+    version: 2,
+    auditStatus,
+    content: {
+      title: {
+        value: title || "",
+        source: titleSource || "",
+      },
+      description: {
+        value: description || "",
+        source: descriptionSource || "",
+      },
+      characteristics: characteristics || {},
+    },
+    prices: {},
+    stocks: {},
+    meta: {
+      card: {
+        nmID: card?.nmID || "",
+        vendorCode: card?.vendorCode || "",
+        subjectID: card?.subjectID || card?.rawFields?.subjectID || "",
+        subjectName: card?.subjectName || "",
+      },
+      updatedIn: "opticards-card-detail",
+    },
+  };
+}
+
+function contentFromStoredDraft(storedDraft) {
+  const payload = storedDraft?.draft || storedDraft || {};
+  const content = payload.content || payload;
+  const title = content.title || {};
+  const description = content.description || {};
+  return {
+    auditStatus: payload.auditStatus || storedDraft?.auditStatus || "idle",
+    title: typeof title === "object" ? title.value || "" : payload.title || "",
+    description: typeof description === "object" ? description.value || "" : payload.description || "",
+    titleSource: typeof title === "object" ? title.source || "" : payload.titleSource || "",
+    descriptionSource: typeof description === "object" ? description.source || "" : payload.descriptionSource || "",
+    characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
+    savedAt: storedDraft?.updatedAt || payload.savedAt || "",
+  };
+}
+
 function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? "";
 }
@@ -1121,7 +1178,7 @@ export default function App() {
         ) : null}
 
         {screen === "audit" ? <PlaceholderScreen title="Аудит" copy="MPStats и полноценный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
-        {screen === "settings" ? <SettingsScreen users={displayUsers} /> : null}
+        {screen === "settings" ? <SettingsScreen users={displayUsers} canManage={canManagePortals} /> : null}
       </main>
 
       {portalModalOpen ? (
@@ -1595,6 +1652,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
+  const [draftSaveStatus, setDraftSaveStatus] = useState("");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
@@ -1609,10 +1667,13 @@ function CardDetailScreen({ card, portal, onBack }) {
   const dimensions = card?.dimensions || rawFields.dimensions || {};
   const auditDone = auditStatus === "done";
   const draftTitleLength = draftTitle.length;
-  const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${card?.nmID || card?.vendorCode || "card"}`;
+  const draftCardKey = cardDraftKey(card);
+  const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
+  const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
 
   useEffect(() => {
+    let active = true;
     setActiveTab("audit");
     setAuditStatus("idle");
     setDraftTitle("");
@@ -1622,17 +1683,22 @@ function CardDetailScreen({ card, portal, onBack }) {
     setDraftCharacteristics({});
     setCharacteristicSearch("");
     setDraftSavedAt("");
+    setDraftSaveStatus("");
+    const applyDraft = (storedDraft) => {
+      const normalized = contentFromStoredDraft(storedDraft);
+      setDraftTitle(normalized.title);
+      setDraftDescription(normalized.description);
+      setDraftTitleSource(normalized.titleSource);
+      setDraftDescriptionSource(normalized.descriptionSource);
+      setDraftCharacteristics(normalized.characteristics);
+      setAuditStatus(normalized.auditStatus);
+      setDraftSavedAt(normalized.savedAt);
+      setActiveTab("changes");
+    };
     try {
       const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
       if (saved) {
-        setDraftTitle(saved.title || "");
-        setDraftDescription(saved.description || "");
-        setDraftTitleSource(saved.titleSource || "");
-        setDraftDescriptionSource(saved.descriptionSource || "");
-        setDraftCharacteristics(normalizeDraftCharacteristics(saved.characteristics || {}));
-        setAuditStatus(saved.auditStatus || "done");
-        setDraftSavedAt(saved.savedAt || "");
-        setActiveTab("changes");
+        applyDraft(saved);
       } else {
         setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
       }
@@ -1640,7 +1706,23 @@ function CardDetailScreen({ card, portal, onBack }) {
       localStorage.removeItem(draftStorageKey);
       setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
     }
-  }, [draftStorageKey, card?.nmID, card?.vendorCode]);
+    if (backendDraftEnabled && draftCardKey) {
+      apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`)
+        .then((payload) => {
+          if (!active || !payload.draft) return;
+          applyDraft(payload.draft);
+          setDraftSaveStatus("backend");
+        })
+        .catch(() => {
+          if (active) {
+            setDraftSaveStatus("local-fallback");
+          }
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [draftStorageKey, draftCardKey, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
 
   useEffect(() => {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
@@ -1726,18 +1808,39 @@ function CardDetailScreen({ card, portal, onBack }) {
     setCharacteristicSearch("");
   }
 
-  function saveDraft() {
+  async function saveDraft() {
     const savedAt = new Date().toISOString();
-    localStorage.setItem(draftStorageKey, JSON.stringify({
-      version: 1,
-      savedAt,
+    const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       title: draftTitle,
       description: draftDescription,
       titleSource: draftTitleSource,
       descriptionSource: draftDescriptionSource,
       characteristics: draftCharacteristics,
-    }));
+      card,
+    });
+    localStorage.setItem(draftStorageKey, JSON.stringify({ ...structuredDraft, savedAt }));
+    if (backendDraftEnabled) {
+      try {
+        const response = await apiRequest("/api/card-drafts", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            cardKey: draftCardKey,
+            nmID: card?.nmID || "",
+            vendorCode: card?.vendorCode || "",
+            draft: structuredDraft,
+          }),
+        });
+        setDraftSavedAt(response.draft?.updatedAt || savedAt);
+        setDraftSaveStatus("backend");
+        return;
+      } catch {
+        setDraftSaveStatus("local-fallback");
+      }
+    } else {
+      setDraftSaveStatus("local");
+    }
     setDraftSavedAt(savedAt);
   }
 
@@ -1941,7 +2044,10 @@ function CardDetailScreen({ card, portal, onBack }) {
                 <div className="draft-actions">
                   <div>
                     <strong>Черновик изменений</strong>
-                    <p>{draftSavedAt ? `Сохранен ${new Date(draftSavedAt).toLocaleString("ru-RU")}` : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
+                    <p>{draftSavedAt
+                      ? `Сохранен ${new Date(draftSavedAt).toLocaleString("ru-RU")}${draftSaveStatus === "backend" ? " на backend" : " локально"}`
+                      : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
+                    {draftSaveStatus === "local-fallback" ? <p>Backend недоступен для черновика, временно сохранено в этом браузере.</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
@@ -2482,7 +2588,50 @@ function PlaceholderScreen({ title, copy }) {
   );
 }
 
-function SettingsScreen({ users }) {
+function SettingsScreen({ users, canManage = false }) {
+  const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
+  const [mpstatsKey, setMpstatsKey] = useState("");
+  const [mpstatsStatus, setMpstatsStatus] = useState("idle");
+
+  useEffect(() => {
+    let active = true;
+    apiRequest("/api/integrations/mpstats")
+      .then((payload) => {
+        if (active) {
+          setMpstatsIntegration(payload.integration || null);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setMpstatsStatus("error");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function saveMpstatsKey(event) {
+    event.preventDefault();
+    if (!canManage || !mpstatsKey.trim()) {
+      return;
+    }
+    setMpstatsStatus("saving");
+    try {
+      const payload = await apiRequest("/api/integrations/mpstats", {
+        method: "POST",
+        body: JSON.stringify({ apiKey: mpstatsKey.trim() }),
+      });
+      setMpstatsIntegration(payload.integration || null);
+      setMpstatsKey("");
+      setMpstatsStatus("saved");
+    } catch {
+      setMpstatsStatus("error");
+    }
+  }
+
+  const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
+
   return (
     <section className="screen active">
       <header className="topbar">
@@ -2508,9 +2657,36 @@ function SettingsScreen({ users }) {
             <h2>Интеграции</h2>
             <div className="panel-list">
               <div className="list-row"><span>Wildberries</span><strong>read-only API</strong></div>
-              <div className="list-row"><span>MPStats</span><strong>позже</strong></div>
+              <div className="list-row"><span>MPStats</span><strong>{mpstatsConnected ? "ключ сохранен" : "не подключен"}</strong></div>
               <div className="list-row"><span>Токены</span><strong>AES-GCM в SQLite</strong></div>
             </div>
+            <form className="integration-form" onSubmit={saveMpstatsKey}>
+              <div>
+                <strong>MPStats API</strong>
+                <p>Глобальный ключ для всех кабинетов и карточек сервиса. Ключ сохраняется только на backend и не показывается повторно.</p>
+              </div>
+              <label className="field-label">
+                API ключ
+                <input
+                  type="password"
+                  value={mpstatsKey}
+                  onChange={(event) => setMpstatsKey(event.target.value)}
+                  disabled={!canManage}
+                  autoComplete="off"
+                  placeholder={canManage ? "Введите ключ MPStats" : "Недостаточно прав для изменения"}
+                />
+              </label>
+              <div className="panel-actions">
+                <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
+                <button className="btn" type="button" disabled title="Проверку включим после получения документации MPStats">Проверить подключение</button>
+              </div>
+              <div className="integration-status">
+                {mpstatsStatus === "saving" ? "Сохраняем..." : null}
+                {mpstatsStatus === "saved" ? "Ключ сохранен и будет использоваться как общий MPStats источник." : null}
+                {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
+                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? `Обновлен ${new Date(mpstatsIntegration.updatedAt).toLocaleString("ru-RU")}` : "MPStats пока не настроен.") : null}
+              </div>
+            </form>
           </section>
         </div>
       </div>
