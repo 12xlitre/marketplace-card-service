@@ -1,6 +1,6 @@
 # OptiCards Deployment
 
-Дата фиксации: 2026-07-07.
+Дата фиксации: 2026-07-08.
 
 ## Статус
 
@@ -18,15 +18,17 @@ Health:
 https://opticards.weboptai.ru/healthz
 ```
 
-На 2026-07-07 `/healthz` отвечает `ok`, главная страница отдается через nginx с `HTTP/2 200`.
+На 2026-07-08 `/healthz` отвечает `ok`, главная страница отдается с `HTTP/2 200`, backend API работает через `server.py`.
 
 ## Как работает прод
 
-Приложение исторически было статическим сайтом: основной файл `index.html`.
+Прод переключен с nginx-static контейнера на Python backend. Контейнер запускает:
 
-Для реальной авторизации, хранения WB API токенов и будущей загрузки карточек прод должен запускать backend `server.py`. Старый nginx-only контейнер подходит только для интерфейсного прототипа и не может безопасно принимать API-ключи.
+```bash
+python3 server.py serve --host 0.0.0.0 --port 80
+```
 
-Фактическое состояние на 2026-07-08: команда `sudo opticards-deploy` доступна и выкатывает `main`, но серверная prod-обвязка пока root-owned и все еще собирает nginx-static контейнер. Поэтому `index.html` обновляется на `opticards.weboptai.ru`, а backend routes вроде `/api/session` и `/api/wb/cards` не поднимаются до переключения `Dockerfile`/`docker-compose.prod.yml` на `server.py`.
+Edge nginx по-прежнему завершает TLS и проксирует домен на контейнер `opticards_web:80`.
 
 Локально прототип отдается командой:
 
@@ -34,7 +36,7 @@ https://opticards.weboptai.ru/healthz
 npm run prototype
 ```
 
-В текущей серверной обвязке статику отдает nginx-контейнер. Перед подключением WB API эту обвязку нужно заменить на backend-контейнер или проксировать домен на `python3 server.py serve`.
+Backend `server.py` отдает `index.html` и API `/api/*`. Внутренние файлы (`docs/`, `WORK.md`, `document/`, `.git`) должны отвечать `404`.
 
 Серверный каталог:
 
@@ -67,23 +69,21 @@ ssh lostdeal-server
 ```bash
 sudo opticards-deploy    # git pull + пересборка + перезапуск
 sudo opticards-restart   # перезапуск без пересборки
-sudo opticards-logs      # логи nginx-контейнера
+sudo opticards-logs      # логи backend-контейнера
 sudo opticards-ps        # статус
 ```
 
-Перед backend-запуском на сервере нужны env-переменные:
+Backend env уже настроен на сервере в `/opt/opticards/.env.prod`:
 
 ```bash
-OPTICARDS_DB=/opt/opticards/var/opticards.sqlite3
-OPTICARDS_SECRET_KEY=<base64 32-byte key from npm run generate-secret-key>
+OPTICARDS_DB=/app/var/opticards.sqlite3
+OPTICARDS_SECRET_KEY=<stored in /opt/opticards/.env.prod>
 OPTICARDS_SECURE_COOKIE=1
 ```
 
-WB-токен добавляется только серверной командой:
+`OPTICARDS_SECRET_KEY` уже создан, хранится с правами `600`, gitignored, заново его не генерировать. SQLite находится в `/opt/opticards/var` и переживает пересборку контейнера.
 
-```bash
-WB_API_TOKEN="..." npm run set-wb-token -- <portal_id>
-```
+WB API ключ вводится через интерфейс `Добавить портал` -> `Через API`; backend шифрует его в SQLite этим секретом. Вручную передавать WB ключ на сервер не нужно.
 
 Рабочий цикл:
 
@@ -91,7 +91,7 @@ WB_API_TOKEN="..." npm run set-wb-token -- <portal_id>
 правка локально -> commit -> push в main -> sudo opticards-deploy на сервере
 ```
 
-Код прямо на сервере не редактировать: иначе следующий `git pull` может получить конфликт.
+Код прямо на сервере не редактировать: только локальная правка -> commit -> push -> `sudo opticards-deploy`.
 
 ## Публичные файлы
 

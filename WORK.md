@@ -92,11 +92,12 @@ npm run prototype
 - встроенный первый кабинет в frontend теперь пытается загрузить реальные карточки WB после логина; без токена показывает состояние `API ожидает токен` и остается на демонстрационных строках.
 - форма `Добавить портал` теперь включает поле WB API ключа в API-режиме и не сохраняет ключ в localStorage; при ошибке WB/backend показывает сообщение в модальном окне.
 - изменения `f213cd0` запушены в `origin/main`, создан backup tag `backup/pre-wb-readonly-deploy-20260708-084312`.
-- `sudo opticards-deploy` выполнен на сервере: живой `index.html` обновлен, но prod runtime пока остался nginx-static.
-- backend/read-only изменения зафиксированы в коммите `f213cd0`.
+- Сергей переключил prod runtime на Python backend `server.py`; `/api/session` отвечает `200`, `/document/test-users.csv` отвечает `404`, SQLite живет в `/opt/opticards/var`.
+- `OPTICARDS_SECRET_KEY` уже хранится в `/opt/opticards/.env.prod` с правами `600`; заново его не генерировать.
+- backend/read-only изменения зафиксированы в коммитах `f213cd0`, `8362a6c`, `cc38150`.
 
 Что осталось:
-- переключить root-owned prod-обвязку `/opt/opticards/Dockerfile` и `docker-compose.prod.yml` с nginx-static на backend `server.py`; без этого `/api/session` и `/api/wb/cards` на проде отвечают `404`;
+- выкатить текущий `main` через `sudo opticards-deploy`, если серверный checkout отстает от GitHub;
 - после включения backend runtime добавить реальный WB API ключ через кнопку `Добавить портал` и проверить фактический ответ WB на кабинете продавца;
 - после подключения API реализовать ограниченный рабочий список карточек.
 
@@ -104,6 +105,8 @@ npm run prototype
 - `AGENTS.md` в репозитории отсутствует, триггеры doc-update выполняем вручную по измененным зонам (`auth`, `REST`, `frontend`, `маршруты`);
 - не вести две версии "демо" и "деплой": текущий боевой контур `opticards.weboptai.ru` является рабочим демо для команды;
 - перед выкладкой фиксировать изменения в git и сохранять понятную точку отката;
+- прод-обвязка (`Dockerfile`, `docker-compose.prod.yml`, `deploy/`) root-owned на сервере и не добавляется в git;
+- код на сервере не редактировать, только `push main` -> `sudo opticards-deploy`;
 - до отдельного решения никаких write-операций в WB не выполняется.
 - env fallback `WB_API_TOKEN` разрешен только для `demo-wb`; числовые порталы должны использовать encrypted token через `set-wb-token`, чтобы не смешивать кабинеты.
 
