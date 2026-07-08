@@ -549,12 +549,52 @@ function editableCharacteristicValue(value) {
   return String(value);
 }
 
-function characteristicDraftsFromRows(rows) {
+function characteristicValueTokens(value) {
+  if (isEmptyValue(value)) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    if (value.every(isPrimitiveDisplayValue)) {
+      return value.filter((item) => !isEmptyValue(item)).map((item) => String(item).trim()).filter(Boolean);
+    }
+    return value
+      .map((item) => {
+        if (isPrimitiveDisplayValue(item)) return String(item).trim();
+        if (item && typeof item === "object") return String(item.value || item.name || item.charcName || "").trim();
+        return "";
+      })
+      .filter(Boolean);
+  }
+  if (typeof value === "object") {
+    return [editableCharacteristicValue(value)].filter(Boolean);
+  }
+  return [String(value).trim()].filter(Boolean);
+}
+
+function draftCharacteristicValues(draft) {
+  if (!draft) {
+    return [];
+  }
+  if (Array.isArray(draft.values)) {
+    return draft.values.map((item) => String(item).trim()).filter(Boolean);
+  }
+  return characteristicValueTokens(draft.value);
+}
+
+function characteristicDraftsFromRows(rows, source = "audit") {
   return Object.fromEntries(rows.map((row) => [row.key, {
     charcID: row.charcID,
     label: row.label,
     value: editableCharacteristicValue(row.value),
-    source: "audit",
+    values: characteristicValueTokens(row.value),
+    source,
+  }]));
+}
+
+function normalizeDraftCharacteristics(drafts) {
+  return Object.fromEntries(Object.entries(drafts || {}).map(([key, draft]) => [key, {
+    ...draft,
+    values: draftCharacteristicValues(draft),
   }]));
 }
 
@@ -567,6 +607,7 @@ function normalizeCharacteristicMeta(item) {
     charcID: item?.charcID || null,
     label: item?.name || "Характеристика",
     value: "",
+    values: [],
     source: "manual",
     required: Boolean(item?.required),
     popular: Boolean(item?.popular),
@@ -583,9 +624,26 @@ function draftCharacteristicsList(drafts) {
     .map((item) => ({
       charcID: item.charcID || "",
       name: item.label,
-      value: item.value || "",
+      value: draftCharacteristicValues(item).join(", "),
       unitName: item.unitName || "",
     }));
+}
+
+function characteristicValueOptionsByKey(portal, currentRows) {
+  const options = {};
+  currentRows.forEach((row) => {
+    options[row.key] = characteristicValueTokens(row.value);
+  });
+  (portal?.realCards || []).forEach((item) => {
+    characteristicRows(item?.characteristics || item?.rawFields?.characteristics || []).forEach((row) => {
+      const current = options[row.key] || [];
+      options[row.key] = [...current, ...characteristicValueTokens(row.value)];
+    });
+  });
+  return Object.fromEntries(Object.entries(options).map(([key, values]) => [
+    key,
+    [...new Set(values.map((value) => String(value).trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right, "ru")),
+  ]));
 }
 
 function buildContentExportRows(card, draftTitle, draftDescription, draftCharacteristics) {
@@ -1458,6 +1516,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
+  const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems);
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
@@ -1483,13 +1542,16 @@ function CardDetailScreen({ card, portal, onBack }) {
         setDraftDescription(saved.description || "");
         setDraftTitleSource(saved.titleSource || "");
         setDraftDescriptionSource(saved.descriptionSource || "");
-        setDraftCharacteristics(saved.characteristics || {});
+        setDraftCharacteristics(normalizeDraftCharacteristics(saved.characteristics || {}));
         setAuditStatus(saved.auditStatus || "done");
         setDraftSavedAt(saved.savedAt || "");
         setActiveTab("changes");
+      } else {
+        setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
       }
     } catch {
       localStorage.removeItem(draftStorageKey);
+      setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
     }
   }, [draftStorageKey, card?.nmID, card?.vendorCode]);
 
@@ -1537,11 +1599,11 @@ function CardDetailScreen({ card, portal, onBack }) {
     });
   }
 
-  function updateDraftCharacteristicValue(row, value) {
+  function setDraftCharacteristicValues(row, values, source = "manual") {
+    const normalizedValues = [...new Set((values || []).map((item) => String(item).trim()).filter(Boolean))];
     setDraftCharacteristics((current) => {
       const currentDraft = current[row.key];
-      const nextValue = value;
-      if (!nextValue.trim()) {
+      if (!normalizedValues.length) {
         const next = { ...current };
         delete next[row.key];
         return next;
@@ -1552,11 +1614,22 @@ function CardDetailScreen({ card, portal, onBack }) {
           ...currentDraft,
           charcID: currentDraft?.charcID || row.charcID,
           label: currentDraft?.label || row.label,
-          value: nextValue,
-          source: "manual",
+          value: normalizedValues.join(", "),
+          values: normalizedValues,
+          source,
         },
       };
     });
+  }
+
+  function addDraftCharacteristicValue(row, value) {
+    const currentValues = draftCharacteristicValues(draftCharacteristics[row.key]);
+    setDraftCharacteristicValues(row, [...currentValues, value], "manual");
+  }
+
+  function removeDraftCharacteristicValue(row, value) {
+    const currentValues = draftCharacteristicValues(draftCharacteristics[row.key]);
+    setDraftCharacteristicValues(row, currentValues.filter((item) => item !== value), "manual");
   }
 
   function addDraftCharacteristic(item) {
@@ -1769,10 +1842,12 @@ function CardDetailScreen({ card, portal, onBack }) {
                       availableCharacteristics={subjectCharacteristics}
                       search={characteristicSearch}
                       status={subjectCharacteristicsStatus}
+                      valueOptionsByKey={characteristicValueOptions}
                       onSearch={setCharacteristicSearch}
                       onAdd={addDraftCharacteristic}
                       onRemove={removeDraftCharacteristic}
-                      onUpdate={updateDraftCharacteristicValue}
+                      onAddValue={addDraftCharacteristicValue}
+                      onRemoveValue={removeDraftCharacteristicValue}
                     />
                   </div>
                 </div>
@@ -1863,10 +1938,12 @@ function CharacteristicsDiffTable({
   availableCharacteristics,
   search,
   status,
+  valueOptionsByKey,
   onSearch,
   onAdd,
   onRemove,
-  onUpdate,
+  onAddValue,
+  onRemoveValue,
 }) {
   const baseKeys = new Set(rows.map((row) => row.key));
   const draftOnlyRows = Object.entries(drafts)
@@ -1909,7 +1986,9 @@ function CharacteristicsDiffTable({
           <DraftCharacteristicEditor
             draft={drafts[row.key]}
             row={row}
-            onChange={(value) => onUpdate(row, value)}
+            valueOptions={valueOptionsByKey[row.key] || []}
+            onAddValue={(value) => onAddValue(row, value)}
+            onRemoveValue={(value) => onRemoveValue(row, value)}
             onRemove={() => onRemove(row.key)}
           />
         </div>
@@ -1944,23 +2023,55 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, onChange, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, valueOptions, onAddValue, onRemoveValue, onRemove }) {
+  const [query, setQuery] = useState("");
   const isAuditSuggestion = draft?.source === "audit";
+  const values = draftCharacteristicValues(draft);
+  const normalizedQuery = query.trim().toLowerCase();
+  const availableValues = valueOptions
+    .filter((value) => !values.includes(value))
+    .filter((value) => !normalizedQuery || value.toLowerCase().includes(normalizedQuery))
+    .slice(0, 6);
+
+  function addValue(value) {
+    onAddValue(value);
+    setQuery("");
+  }
+
   return (
     <div className={`draft-editor ${isAuditSuggestion ? "audit-suggestion" : ""}`}>
-      <div className="draft-editor-control">
-        <textarea
-          value={draft?.value || ""}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={`Введите новое значение: ${row.label}`}
-          rows={1}
-        />
-        {draft ? (
-          <button className="icon-btn" type="button" onClick={onRemove} aria-label="Убрать из черновика" title="Убрать из черновика">
+      <div className="draft-chip-list">
+        {values.map((value) => (
+          <button className="draft-chip" type="button" key={value} onClick={() => onRemoveValue(value)} title="Убрать значение">
+            <span>{value}</span>
+            <X size={14} />
+          </button>
+        ))}
+        {!values.length ? <span className="raw-field-value field-empty">Пусто в черновике</span> : null}
+        {row.draftOnly ? (
+          <button className="icon-btn" type="button" onClick={onRemove} aria-label="Убрать характеристику" title="Убрать характеристику">
             <X size={15} />
           </button>
         ) : null}
       </div>
+      <label className="draft-value-search">
+        <Search size={15} />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Найти значение"
+        />
+      </label>
+      {query ? (
+        <div className="draft-value-options">
+          {availableValues.length ? availableValues.map((value) => (
+            <button className="characteristic-option" type="button" key={value} onClick={() => addValue(value)}>
+              <span>{value}</span>
+            </button>
+          )) : <span className="field-empty">Нет готовых значений</span>}
+        </div>
+      ) : null}
       <div className="draft-editor-meta">
         {isAuditSuggestion ? <Tag tone="blue">рекомендация аудита</Tag> : null}
         {draft && !isAuditSuggestion ? <span>ручная правка</span> : null}
