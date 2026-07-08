@@ -163,6 +163,22 @@
       line-height: 1.4;
     }
 
+    .remember-field {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      margin: -2px 0 4px;
+    }
+
+    .remember-field input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
     .login-error {
       display: none;
       border: 1px solid #efb8bf;
@@ -1424,7 +1440,7 @@
     </div>
 
     <div class="login-panel">
-      <form class="login-card" id="login-form">
+      <form class="login-card" id="login-form" method="post" action="/" autocomplete="on">
         <div>
           <h2>Авторизация</h2>
           <p>Введите выданные учетные данные.</p>
@@ -1440,6 +1456,10 @@
             <input id="password-input" name="password" type="password" autocomplete="current-password" placeholder="Введите пароль">
           </label>
         </div>
+        <label class="remember-field">
+          <input type="checkbox" id="remember-session">
+          <span>Запомнить меня на этом устройстве</span>
+        </label>
 
         <div class="login-error" id="login-error">Логин или пароль не совпали.</div>
 
@@ -2309,6 +2329,7 @@
     const loginForm = document.querySelector("#login-form");
     const loginInput = document.querySelector("#login-input");
     const passwordInput = document.querySelector("#password-input");
+    const rememberSessionInput = document.querySelector("#remember-session");
     const loginError = document.querySelector("#login-error");
     const userAvatar = document.querySelector("#user-avatar");
     const userName = document.querySelector("#user-name");
@@ -2364,6 +2385,7 @@
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
     const staticSessionKey = "opticards-static-user";
+    const staticSessionStateKey = "opticards-static-auth-state";
     const fallbackUsers = [
       { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all", user_role: "admin" },
       { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview", user_role: "manager" },
@@ -2420,6 +2442,7 @@
       tech: "Технический специалист",
       manager: "Менеджер"
     };
+    let employeeDirectory = [];
 
     function getUserRoleType(user) {
       const marker = `${user.user_role || ""} ${user.access_level || ""} ${user.role || ""}`.toLowerCase();
@@ -2558,12 +2581,65 @@
       return publicUser(user);
     }
 
+    async function loadLocalEmployeeDirectory() {
+      if (employeeDirectory.length) {
+        return employeeDirectory;
+      }
+      try {
+        const response = await fetch("/document/test-users.csv", { cache: "no-store" });
+        if (!response.ok) {
+          return [];
+        }
+        const text = await response.text();
+        const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        if (lines.length < 2) {
+          return [];
+        }
+        const headers = lines[0].split(",").map((item) => item.trim().toLowerCase());
+        employeeDirectory = lines.slice(1).map((line) => {
+          const parts = line.split(",").map((item) => item.trim());
+          if (!parts.length || !parts[0]) {
+            return null;
+          }
+          const entry = {};
+          headers.forEach((header, index) => {
+            entry[header] = parts[index] || "";
+          });
+          if (!entry.login || !entry.full_name) {
+            return null;
+          }
+          return {
+            login: entry.login,
+            full_name: entry.full_name,
+            role: entry.role || "Специалист",
+            access_level: entry.access_level || "readonly_wb",
+            user_role: entry.user_role || entry.access_level || "tech"
+          };
+        }).filter(Boolean);
+      } catch (error) {
+        return [];
+      }
+      return employeeDirectory;
+    }
+
     async function loadUsers() {
       try {
         const payload = await apiRequest("/api/users");
-        users = payload.users || [];
+        users = normalizeUserList(payload.users || []);
+        if (currentUser && rememberSessionEnabled()) {
+          saveStaticSession(currentUser, users, true);
+        }
       } catch (error) {
-        users = users.length ? users : (currentUser ? staticAuthUsers.map(publicUser) : []);
+        const staticState = readStaticSession();
+        if (staticState.users.length) {
+          users = staticState.users;
+        } else {
+          const directoryUsers = await loadLocalEmployeeDirectory();
+          users = directoryUsers.length ? directoryUsers : (currentUser ? staticAuthUsers.map(publicUser) : []);
+          if (currentUser) {
+            saveStaticSession(currentUser, users, rememberSessionEnabled());
+          }
+        }
       }
       fillEmployeeSelects();
       renderProjectMembers();
@@ -2628,9 +2704,54 @@
       showScreen("employees");
     }
 
-    function saveStaticSession(user) {
+    function normalizeUserList(rawUsers) {
+      if (!Array.isArray(rawUsers) || !rawUsers.length) {
+        return [];
+      }
+      return rawUsers
+        .map((item) => {
+          if (!item || !item.login) {
+            return null;
+          }
+          return publicUser(item);
+        })
+        .filter(Boolean);
+    }
+
+    function rememberSessionEnabled() {
+      return Boolean(rememberSessionInput?.checked);
+    }
+
+    function persistStaticSession(state) {
       try {
-        sessionStorage.setItem(staticSessionKey, JSON.stringify(publicUser(user)));
+        sessionStorage.setItem(staticSessionStateKey, JSON.stringify(state));
+      } catch (error) {
+        // Session storage can be unavailable in strict browser modes.
+      }
+      if (state.remember) {
+        try {
+          localStorage.setItem(staticSessionStateKey, JSON.stringify(state));
+        } catch (error) {
+          // Local storage can be unavailable in strict browser modes.
+        }
+      } else {
+        try {
+          localStorage.removeItem(staticSessionStateKey);
+        } catch (error) {
+          // Ignore storage errors.
+        }
+      }
+    }
+
+    function saveStaticSession(user, userList, remember = null) {
+      const state = {
+        user: publicUser(user),
+        users: normalizeUserList(userList),
+        remember: remember ?? rememberSessionEnabled()
+      };
+      persistStaticSession(state);
+      try {
+        sessionStorage.setItem(staticSessionKey, JSON.stringify(state.user));
       } catch (error) {
         // Session storage can be unavailable in strict browser modes.
       }
@@ -2638,10 +2759,47 @@
 
     function readStaticSession() {
       try {
-        const user = JSON.parse(sessionStorage.getItem(staticSessionKey) || "null");
-        return user?.login ? user : null;
+        const fromSession = sessionStorage.getItem(staticSessionStateKey);
+        if (fromSession) {
+          const parsed = JSON.parse(fromSession);
+          return {
+            user: parsed?.user || null,
+            users: normalizeUserList(parsed?.users),
+            remember: Boolean(parsed?.remember)
+          };
+        }
       } catch (error) {
-        return null;
+        // Ignore parse errors and try local fallback.
+      }
+      try {
+        const fromLocal = localStorage.getItem(staticSessionStateKey);
+        if (fromLocal) {
+          const parsed = JSON.parse(fromLocal);
+          return {
+            user: parsed?.user || null,
+            users: normalizeUserList(parsed?.users),
+            remember: Boolean(parsed?.remember)
+          };
+        }
+      } catch (error) {
+        // Session storage can be unavailable in strict browser modes.
+        // Ignore parse errors.
+      }
+      return {
+        user: null,
+        users: [],
+        remember: false
+      };
+    }
+
+    function getStaticSessionUser() {
+      const state = readStaticSession();
+      return state.user?.login ? state.user : null;
+    }
+
+    function syncRememberMeFromState(state) {
+      if (rememberSessionInput) {
+        rememberSessionInput.checked = Boolean(state.remember);
       }
     }
 
@@ -2938,7 +3096,7 @@
         }
         loginError.classList.remove("active");
         passwordInput.value = "";
-        saveStaticSession(user);
+        saveStaticSession(user, staticAuthUsers.map(publicUser));
         await enterApp(user);
       }
     });
@@ -3069,7 +3227,12 @@
           await enterApp(payload.user);
         }
       } catch (error) {
-        const staticUser = readStaticSession();
+        const staticState = readStaticSession();
+        const staticUser = staticState.user;
+        if (staticState.users.length) {
+          users = staticState.users;
+        }
+        syncRememberMeFromState(staticState);
         if (staticUser) {
           await enterApp(staticUser);
           return;
