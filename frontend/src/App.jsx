@@ -1786,6 +1786,88 @@ function cardDraftKey(card) {
   return String(card?.nmID || card?.vendorCode || card?.nmUUID || "card").trim();
 }
 
+const MPSTATS_NICHE_PATH_WARNING = "Рыночный контекст MPStats по нише не загрузился: не удалось определить путь категории. Конкуренты, ценовые зоны и выводы по нише рассчитаны только по доступным данным карточки.";
+
+function auditPublicWarningText(message) {
+  const text = String(message || "").trim();
+  if (!text) return "";
+  if (text.startsWith("MPStats /analytics/v1/wb/subject/") || text.includes("MPStats niche path missing")) {
+    return MPSTATS_NICHE_PATH_WARNING;
+  }
+  if (text.includes("items/") && text.includes("/keywords")) {
+    return "SEO-запросы MPStats по карточке не загрузились. Рекомендации по заголовку и описанию нужно дополнительно сверить вручную.";
+  }
+  if (text.includes("items/") && text.includes("/full")) {
+    return "Метрики продаж MPStats по карточке не загрузились. Выводы по динамике продаж и выкупу не использовались.";
+  }
+  if (text.startsWith("MPStats ") && text.includes("items/")) {
+    return "Данные MPStats по карточке загрузились не полностью. Аудит использовал доступные WB-данные и локальные правила.";
+  }
+  if (text === "MPStats key missing" || text.includes("MPStats ключ не настроен")) {
+    return "MPStats не подключен или временно недоступен: аудит выполнен по WB snapshot и локальным правилам.";
+  }
+  if (text.includes("characteristics-analysis") || text.includes("MPStats characteristics-analysis")) {
+    return "MPStats-подсказки характеристик не загрузились. Значения характеристик нужно сверить по WB и вручную.";
+  }
+  if (text.startsWith("WB CDN")) {
+    return "Публичный снимок карточки WB CDN не загрузился; использован сохраненный WB snapshot.";
+  }
+  if (text.includes("WB справочник характеристик")) {
+    return "Справочник характеристик WB не загрузился. Лимиты и обязательность некоторых полей нужно проверить вручную.";
+  }
+  if (text.includes("LLM refinement") || text.includes("LLM вернул")) {
+    return "LLM-переформулировка недоступна; показан базовый аудит по фактам без дополнительной текстовой обработки.";
+  }
+  return text;
+}
+
+function auditPublicWarnings(warnings, limit = 8) {
+  const seen = new Set();
+  const result = [];
+  (Array.isArray(warnings) ? warnings : []).forEach((item) => {
+    const text = auditPublicWarningText(item);
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    result.push(text);
+  });
+  return result.slice(0, limit);
+}
+
+function sanitizeAuditSummary(summary) {
+  if (!summary || typeof summary !== "object") return summary || {};
+  const next = { ...summary };
+  if (Array.isArray(next.riskNotes)) {
+    next.riskNotes = auditPublicWarnings(next.riskNotes);
+  }
+  return next;
+}
+
+function sanitizeAuditHistory(history) {
+  return (Array.isArray(history) ? history : []).map((entry) => {
+    if (!entry || typeof entry !== "object") return entry;
+    return {
+      ...entry,
+      summary: sanitizeAuditSummary(entry.summary),
+    };
+  });
+}
+
+function sanitizeAuditResult(result) {
+  if (!result || typeof result !== "object") return result || null;
+  return {
+    ...result,
+    summary: sanitizeAuditSummary(result.summary),
+  };
+}
+
+function sanitizeEvidenceSummary(summary) {
+  if (!summary || typeof summary !== "object") return summary || null;
+  return {
+    ...summary,
+    warnings: Array.isArray(summary.warnings) ? auditPublicWarnings(summary.warnings) : summary.warnings,
+  };
+}
+
 function buildStructuredCardDraft({
   auditStatus,
   auditHistory,
@@ -1826,9 +1908,9 @@ function buildStructuredCardDraft({
         sections: ["title", "description", "characteristics"],
         expectedOutputs: ["value", "reason", "evidence", "confidence"],
       },
-      auditHistory: Array.isArray(auditHistory) ? auditHistory.slice(0, 20) : [],
-      auditResult: auditResult || null,
-      evidenceSummary: evidenceSummary || null,
+      auditHistory: sanitizeAuditHistory(auditHistory).slice(0, 20),
+      auditResult: sanitizeAuditResult(auditResult),
+      evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
       card: {
         nmID: card?.nmID || "",
         vendorCode: card?.vendorCode || "",
@@ -1855,7 +1937,7 @@ function contentFromStoredDraft(storedDraft) {
     titleReason: typeof title === "object" ? title.reason || "" : payload.titleReason || "",
     descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
-    auditHistory: Array.isArray(meta.auditHistory) ? meta.auditHistory : [],
+    auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: normalizeApprovalState(meta.approval),
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
@@ -3595,7 +3677,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestAuditSummary = auditHistory.find((item) => item?.summary)?.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
-  const latestRiskNotes = Array.isArray(latestAuditSummary.riskNotes) ? latestAuditSummary.riskNotes : [];
+  const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
 
   useEffect(() => {
     let active = true;

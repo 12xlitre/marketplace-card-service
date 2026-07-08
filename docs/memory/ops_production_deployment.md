@@ -53,3 +53,4 @@ sudo opticards-ps
 - SQLite хранится в `/opt/opticards/var` и переживает пересборку;
 - `OPTICARDS_SECRET_KEY` уже находится в `/opt/opticards/.env.prod`, права `600`, заново его не генерировать;
 - WB API ключ вводится через интерфейс и шифруется в SQLite.
+- на рабочей машине Chromium для Playwright можно запускать без sudo: сам браузер установлен в `~/.cache/ms-playwright`, недостающие системные библиотеки распакованы в `/home/dmitriy/.local/chromium-deps/root`; перед запуском нужен `LD_LIBRARY_PATH=/home/dmitriy/.local/chromium-deps/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH`.

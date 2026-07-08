@@ -1081,7 +1081,7 @@ def normalize_card_draft_payload(payload):
   characteristics = content.get("characteristics") if isinstance(content.get("characteristics"), dict) else {}
   prices = payload.get("prices") if isinstance(payload.get("prices"), dict) else {}
   stocks = payload.get("stocks") if isinstance(payload.get("stocks"), dict) else {}
-  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  meta = sanitize_card_draft_meta(payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
   audit_status = str(payload.get("auditStatus") or payload.get("audit_status") or "idle").strip() or "idle"
   return {
     "version": 2,
@@ -1105,11 +1105,52 @@ def normalize_card_draft_payload(payload):
   }
 
 
+def sanitize_audit_summary(summary):
+  if not isinstance(summary, dict):
+    return summary
+  cleaned = {**summary}
+  risk_notes = cleaned.get("riskNotes")
+  if isinstance(risk_notes, list):
+    cleaned["riskNotes"] = audit_public_warnings(risk_notes)
+  return cleaned
+
+
+def sanitize_audit_history_entry(entry):
+  if not isinstance(entry, dict):
+    return entry
+  cleaned = {**entry}
+  if isinstance(cleaned.get("summary"), dict):
+    cleaned["summary"] = sanitize_audit_summary(cleaned["summary"])
+  return cleaned
+
+
+def sanitize_card_draft_meta(meta):
+  if not isinstance(meta, dict):
+    return {}
+  cleaned = {**meta}
+  if isinstance(cleaned.get("auditHistory"), list):
+    cleaned["auditHistory"] = [sanitize_audit_history_entry(item) for item in cleaned["auditHistory"]]
+  audit_result = cleaned.get("auditResult")
+  if isinstance(audit_result, dict):
+    audit_result = {**audit_result}
+    if isinstance(audit_result.get("summary"), dict):
+      audit_result["summary"] = sanitize_audit_summary(audit_result["summary"])
+    cleaned["auditResult"] = audit_result
+  evidence_summary = cleaned.get("evidenceSummary")
+  if isinstance(evidence_summary, dict):
+    evidence_summary = {**evidence_summary}
+    if isinstance(evidence_summary.get("warnings"), list):
+      evidence_summary["warnings"] = audit_public_warnings(evidence_summary["warnings"])
+    cleaned["evidenceSummary"] = evidence_summary
+  return cleaned
+
+
 def public_card_draft(row):
   try:
     payload = json.loads(row["payload_json"])
   except (TypeError, json.JSONDecodeError):
     payload = normalize_card_draft_payload({})
+  payload = normalize_card_draft_payload(payload)
   return {
     "id": row["id"],
     "portalId": str(row["portal_id"]),

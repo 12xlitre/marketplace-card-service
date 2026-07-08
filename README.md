@@ -85,7 +85,7 @@ POST /api/card-audit
 
 `GET /api/wb/cards` возвращает нормализованные карточки и sanitised `rawFields` для детального просмотра. Поля с признаками секретов (`token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`) вырезаются на backend.
 
-`POST /api/card-audit` запускает backend-аудит карточки по методике OptiCards/MP Audit: собирает WB snapshot, WB CDN, справочник характеристик WB, MPStats-характеристики, SEO/рыночные данные MPStats при наличии ключа и возвращает структурированный `auditResult` + draft-предложения для вкладки `Изменения`. Если часть внешних источников недоступна, маршрут возвращает частичный аудит с `riskNotes`, а не применяет write-операции в WB.
+`POST /api/card-audit` запускает backend-аудит карточки по методике OptiCards/MP Audit: собирает WB snapshot, WB CDN, справочник характеристик WB, MPStats-характеристики, SEO/рыночные данные MPStats при наличии ключа и возвращает структурированный `auditResult` + draft-предложения для вкладки `Изменения`. Если часть внешних источников недоступна, маршрут возвращает частичный аудит с пользовательскими `riskNotes`, а не применяет write-операции в WB. Технические ошибки внешних API, например отсутствие `path` для MPStats-ниши, не выводятся в интерфейс напрямую.
 
 При повторном подключении того же WB кабинета `POST /api/portals` отвечает `409`: `portal_already_connected` для активного кабинета или `portal_already_archived`, если кабинет уже есть в архиве. Проверка идет по digest токена и fingerprint набора `nmID`, сам WB ключ в ответ не попадает.
 
