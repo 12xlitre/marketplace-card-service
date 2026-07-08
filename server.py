@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import datetime as dt
 import getpass
 import hashlib
@@ -15,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("OPTICARDS_DB", ROOT / "var" / "opticards.sqlite3"))
@@ -22,6 +25,7 @@ SESSION_COOKIE = "opticards_session"
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 64 * 1024
+SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
 
 
 def utc_now():
@@ -62,6 +66,41 @@ def init_db():
         token_hash TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS portals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        marketplace TEXT NOT NULL DEFAULT 'Wildberries',
+        scope TEXT NOT NULL DEFAULT 'full',
+        status TEXT NOT NULL DEFAULT 'draft',
+        api_connected INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_sync_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS portal_members (
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        user_login TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+        project_role TEXT NOT NULL CHECK(project_role IN ('lead', 'tech', 'manager')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (portal_id, project_role)
+      );
+
+      CREATE TABLE IF NOT EXISTS portal_integrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'stored',
+        token_nonce TEXT NOT NULL,
+        token_ciphertext TEXT NOT NULL,
+        token_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_checked_at TEXT,
+        UNIQUE (portal_id, provider)
       );
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -109,6 +148,130 @@ def public_user(row):
 
 def token_digest(token):
   return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def secret_digest(secret):
+  return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def generate_secret_key():
+  return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def load_secret_key():
+  raw_key = os.environ.get(SECRET_KEY_ENV, "").strip()
+  if not raw_key:
+    raise RuntimeError(f"{SECRET_KEY_ENV} is required for encrypted integration storage.")
+  try:
+    key = base64.urlsafe_b64decode(raw_key.encode("ascii"))
+  except (ValueError, TypeError) as exc:
+    raise RuntimeError(f"{SECRET_KEY_ENV} must be a base64-encoded 32-byte key.") from exc
+  if len(key) != 32:
+    raise RuntimeError(f"{SECRET_KEY_ENV} must decode to exactly 32 bytes.")
+  return key
+
+
+def encrypt_secret(secret, aad):
+  nonce = secrets.token_bytes(12)
+  ciphertext = AESGCM(load_secret_key()).encrypt(
+    nonce,
+    secret.encode("utf-8"),
+    aad.encode("utf-8"),
+  )
+  return base64.urlsafe_b64encode(nonce).decode("ascii"), base64.urlsafe_b64encode(ciphertext).decode("ascii")
+
+
+def decrypt_secret(nonce_b64, ciphertext_b64, aad):
+  nonce = base64.urlsafe_b64decode(nonce_b64.encode("ascii"))
+  ciphertext = base64.urlsafe_b64decode(ciphertext_b64.encode("ascii"))
+  return AESGCM(load_secret_key()).decrypt(nonce, ciphertext, aad.encode("utf-8")).decode("utf-8")
+
+
+def integration_aad(portal_id, provider):
+  return f"portal:{portal_id}:integration:{provider}"
+
+
+def create_portal(name, marketplace, scope, created_by, team):
+  init_db()
+  with connect_db() as db:
+    cursor = db.execute(
+      """
+      INSERT INTO portals (name, marketplace, scope, status, created_by)
+      VALUES (?, ?, ?, 'draft', ?)
+      """,
+      (name, marketplace, scope, created_by),
+    )
+    portal_id = cursor.lastrowid
+    for project_role, user_login in team.items():
+      if user_login:
+        db.execute(
+          """
+          INSERT INTO portal_members (portal_id, user_login, project_role)
+          VALUES (?, ?, ?)
+          ON CONFLICT(portal_id, project_role) DO UPDATE SET
+            user_login = excluded.user_login
+          """,
+          (portal_id, user_login, project_role),
+        )
+    return portal_id
+
+
+def save_integration_token(portal_id, provider, token):
+  init_db()
+  aad = integration_aad(portal_id, provider)
+  nonce, ciphertext = encrypt_secret(token, aad)
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    if not portal:
+      raise ValueError(f"Portal {portal_id} not found.")
+    db.execute(
+      """
+      INSERT INTO portal_integrations (
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest
+      )
+      VALUES (?, ?, 'stored', ?, ?, ?)
+      ON CONFLICT(portal_id, provider) DO UPDATE SET
+        status = 'stored',
+        token_nonce = excluded.token_nonce,
+        token_ciphertext = excluded.token_ciphertext,
+        token_digest = excluded.token_digest,
+        updated_at = CURRENT_TIMESTAMP
+      """,
+      (portal_id, provider, nonce, ciphertext, secret_digest(token)),
+    )
+    db.execute(
+      """
+      UPDATE portals
+      SET status = ?, api_connected = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (f"{provider} token stored", portal_id),
+    )
+
+
+def list_portals():
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT
+        portals.id,
+        portals.name,
+        portals.marketplace,
+        portals.scope,
+        portals.status,
+        portals.api_connected,
+        portals.last_sync_at,
+        GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
+        GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
+      FROM portals
+      LEFT JOIN portal_members ON portal_members.portal_id = portals.id
+      LEFT JOIN portal_integrations ON portal_integrations.portal_id = portals.id
+      GROUP BY portals.id
+      ORDER BY portals.id
+      """
+    ).fetchall()
+  return rows
 
 
 def create_session(db, user_id):
@@ -332,6 +495,24 @@ def main():
 
   subparsers.add_parser("list-users", help="list active users")
 
+  subparsers.add_parser("generate-secret-key", help=f"generate a value for {SECRET_KEY_ENV}")
+
+  portal = subparsers.add_parser("create-portal", help="create a marketplace cabinet")
+  portal.add_argument("name")
+  portal.add_argument("--marketplace", default="Wildberries")
+  portal.add_argument("--scope", choices=["full", "selected"], default="full")
+  portal.add_argument("--created-by", default="")
+  portal.add_argument("--lead", default="")
+  portal.add_argument("--tech", default="")
+  portal.add_argument("--manager", default="")
+
+  set_wb_token = subparsers.add_parser("set-wb-token", help="store a WB API token encrypted for a portal")
+  set_wb_token.add_argument("portal_id", type=int)
+  set_wb_token.add_argument("--token", default="")
+  set_wb_token.add_argument("--env", default="WB_API_TOKEN")
+
+  subparsers.add_parser("list-portals", help="list portals and integration status")
+
   args = parser.parse_args()
   if args.command == "serve":
     run_server(args.host, args.port)
@@ -350,6 +531,33 @@ def main():
     for row in rows:
       status = "active" if row["is_active"] else "disabled"
       print(f"{row['login']}\t{row['full_name']}\t{row['role']}\t{row['user_role']}\t{row['access_level']}\t{status}")
+  elif args.command == "generate-secret-key":
+    print(generate_secret_key())
+  elif args.command == "create-portal":
+    team = {
+      "lead": args.lead,
+      "tech": args.tech,
+      "manager": args.manager,
+    }
+    portal_id = create_portal(args.name, args.marketplace, args.scope, args.created_by or None, team)
+    print(f"Portal {portal_id} created.")
+  elif args.command == "set-wb-token":
+    token = args.token or os.environ.get(args.env, "").strip()
+    if not token:
+      token = getpass.getpass("WB API token: ")
+    if len(token) < 20:
+      raise SystemExit("WB API token looks too short.")
+    save_integration_token(args.portal_id, "wb", token)
+    print(f"WB token stored for portal {args.portal_id}.")
+  elif args.command == "list-portals":
+    for row in list_portals():
+      api_state = "api" if row["api_connected"] else "no-api"
+      members = row["members"] or "-"
+      integrations = row["integrations"] or "-"
+      print(
+        f"{row['id']}\t{row['name']}\t{row['marketplace']}\t{row['scope']}\t"
+        f"{row['status']}\t{api_state}\t{members}\t{integrations}"
+      )
 
 
 if __name__ == "__main__":

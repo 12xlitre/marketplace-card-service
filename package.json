@@ -6,6 +6,10 @@
     "start": "python3 server.py serve",
     "prototype": "python3 server.py serve",
     "create-user": "python3 server.py create-user",
-    "list-users": "python3 server.py list-users"
+    "list-users": "python3 server.py list-users",
+    "generate-secret-key": "python3 server.py generate-secret-key",
+    "create-portal": "python3 server.py create-portal",
+    "set-wb-token": "python3 server.py set-wb-token",
+    "list-portals": "python3 server.py list-portals"
   }
 }

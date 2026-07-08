@@ -30,6 +30,18 @@ npm run prototype
 npm run create-user -- dmitriy.admin "Сафиуллин Дмитрий" "Администратор" --user-role admin --access-level all
 ```
 
+Подготовка серверного хранения WB API:
+
+```bash
+npm run generate-secret-key
+export OPTICARDS_SECRET_KEY="..."
+npm run create-portal -- "Wildberries кабинет" --lead manager-login --tech tech-login --manager manager-login
+WB_API_TOKEN="..." npm run set-wb-token -- 1
+npm run list-portals
+```
+
+WB API ключ не вводится в браузере и не хранится в `index.html`. Для реального подключения прод должен запускать backend `server.py`, а не только статическую раздачу.
+
 ## Прод
 
 Живой адрес:
