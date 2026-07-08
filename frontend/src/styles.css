@@ -1082,16 +1082,30 @@ tr:last-child td {
 
 .detail-tabs {
   position: sticky;
-  top: 92px;
+  top: 84px;
   z-index: 8;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, .88);
+  box-shadow: 0 -16px 22px rgba(246, 247, 251, .82), var(--shadow);
+  backdrop-filter: blur(14px);
   padding: 6px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
+}
+
+.detail-tabs::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: -18px;
+  height: 18px;
+  border-radius: 8px 8px 0 0;
+  background: linear-gradient(180deg, rgba(246, 247, 251, .78), rgba(246, 247, 251, .28));
+  backdrop-filter: blur(14px);
+  pointer-events: none;
 }
 
 .detail-tabs button {
