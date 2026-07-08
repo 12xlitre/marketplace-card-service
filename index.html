@@ -699,6 +699,39 @@
       gap: 8px;
     }
 
+    .team-summary {
+      display: grid;
+      gap: 7px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+    }
+
+    .team-summary-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .team-summary-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .team-summary-row span {
+      color: var(--muted);
+    }
+
+    .team-summary-row strong {
+      text-align: right;
+      font-size: 12px;
+    }
+
     .step {
       min-height: 82px;
       border: 1px solid var(--line);
@@ -1509,6 +1542,12 @@
                 <div class="mini-stat"><strong>211</strong><span>правки</span></div>
                 <div class="mini-stat"><strong>8</strong><span>ошибки</span></div>
               </div>
+              <div class="team-summary">
+                <span class="team-summary-title">Команда проекта</span>
+                <div class="team-summary-row"><span>Руководитель</span><strong>Руководитель</strong></div>
+                <div class="team-summary-row"><span>Тех. специалист</span><strong>Специалист</strong></div>
+                <div class="team-summary-row"><span>Менеджер</span><strong>Менеджер</strong></div>
+              </div>
               <div class="card-actions">
                 <span class="tag blue">Просмотр данных</span>
                 <button class="btn primary" data-open-seller>Открыть</button>
@@ -2126,7 +2165,7 @@
       <div class="modal-head">
         <div>
           <h2 id="portal-modal-title">Добавить портал</h2>
-          <p>Можно подключить кабинет WB через API или завести портал вручную и добавить таблицы позже.</p>
+          <p>Можно подготовить кабинет под WB API или завести портал вручную и добавить таблицы позже.</p>
         </div>
         <button class="icon-btn" type="button" data-close-portal-modal aria-label="Закрыть">
           <svg class="ico" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"></path></svg>
@@ -2137,7 +2176,7 @@
         <div class="connect-mode" aria-label="Способ подключения">
           <button class="active" type="button" data-connect-mode="api">
             <strong>Через API</strong>
-            <span>Первый рабочий вариант: ключ подтверждает кабинет и дает загрузить карточки WB.</span>
+            <span>Подготовка кабинета под подключение WB API после настройки сервера.</span>
           </button>
           <button type="button" data-connect-mode="manual">
             <strong>Вручную</strong>
@@ -2161,10 +2200,29 @@
 
         <div class="form-two">
           <label class="field-label">
-            Ответственный
+            Руководитель проекта
             <select id="portal-owner" name="portal-owner">
+              <option value="manager">Руководитель</option>
+              <option value="admin">Администратор</option>
+              <option value="specialist">Специалист</option>
+            </select>
+          </label>
+          <label class="field-label">
+            Технический специалист
+            <select id="portal-tech" name="portal-tech">
               <option value="specialist">Специалист</option>
               <option value="manager">Руководитель</option>
+              <option value="admin">Администратор</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="form-two">
+          <label class="field-label">
+            Менеджер
+            <select id="portal-manager" name="portal-manager">
+              <option value="manager">Руководитель</option>
+              <option value="specialist">Специалист</option>
               <option value="admin">Администратор</option>
             </select>
           </label>
@@ -2180,9 +2238,9 @@
         <div id="api-fields">
           <label class="field-label">
             WB API ключ
-            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Вставьте ключ кабинета">
+            <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Подключение будет доступно после настройки сервера" disabled>
           </label>
-          <div class="form-note">Ключ нужен для проверки доступа к кабинету и загрузки карточек. После подключения он должен храниться только на сервере.</div>
+          <div class="form-note">Реальный ключ WB пока не вводим: серверное подключение API еще не включено. Сейчас можно создать кабинет, назначить команду и добавить данные вручную или таблицей.</div>
           <div class="source-flow" aria-label="Что произойдет после подключения API">
             <div class="list-row"><span>1. Проверка токена WB</span><strong>без изменений</strong></div>
             <div class="list-row"><span>2. Определение кабинета и брендов</span><strong>WB API</strong></div>
@@ -2261,6 +2319,8 @@
     const portalName = document.querySelector("#portal-name");
     const portalMarketplace = document.querySelector("#portal-marketplace");
     const portalOwner = document.querySelector("#portal-owner");
+    const portalTech = document.querySelector("#portal-tech");
+    const portalManager = document.querySelector("#portal-manager");
     const portalScope = document.querySelector("#portal-scope");
     const portalApiKey = document.querySelector("#portal-api-key");
     const portalStoreUrl = document.querySelector("#portal-store-url");
@@ -2292,6 +2352,12 @@
       cardCount: 1284,
       workCount: 211,
       problemCount: 38,
+      apiConnected: true,
+      teamRoles: {
+        lead: "manager",
+        tech: "specialist",
+        manager: "manager"
+      },
       memberLogins: ["admin", "manager", "specialist"],
       isDemo: true
     };
@@ -2307,6 +2373,47 @@
 
     function formatNumber(value) {
       return new Intl.NumberFormat("ru-RU").format(value);
+    }
+
+    function uniqueLogins(logins) {
+      return [...new Set(logins.filter(Boolean))];
+    }
+
+    function getPortalTeam(portal) {
+      const roles = portal.teamRoles || {};
+      return {
+        lead: roles.lead || portal.ownerLogin || "manager",
+        tech: roles.tech || "specialist",
+        manager: roles.manager || "manager"
+      };
+    }
+
+    function createTeamSummary(portal) {
+      const team = getPortalTeam(portal);
+      const wrapper = document.createElement("div");
+      wrapper.className = "team-summary";
+
+      const title = document.createElement("span");
+      title.className = "team-summary-title";
+      title.textContent = "Команда проекта";
+      wrapper.append(title);
+
+      [
+        ["Руководитель", team.lead],
+        ["Тех. специалист", team.tech],
+        ["Менеджер", team.manager]
+      ].forEach(([label, login]) => {
+        const row = document.createElement("div");
+        row.className = "team-summary-row";
+        const role = document.createElement("span");
+        role.textContent = label;
+        const person = document.createElement("strong");
+        person.textContent = findUser(login).full_name;
+        row.append(role, person);
+        wrapper.append(row);
+      });
+
+      return wrapper;
     }
 
     async function apiRequest(path, options = {}) {
@@ -2398,7 +2505,7 @@
     }
 
     function fillEmployeeSelects() {
-      [portalOwner, memberSelect].forEach((select) => {
+      [portalOwner, portalTech, portalManager, memberSelect].forEach((select) => {
         const selected = select.value;
         select.innerHTML = "";
         const userOptions = users.length ? users : fallbackUsers;
@@ -2483,9 +2590,27 @@
       localStorage.setItem("opticards-portals", JSON.stringify(userPortals));
     }
 
+    function normalizePortal(portal) {
+      const teamRoles = portal.teamRoles || {
+        lead: portal.ownerLogin || "manager",
+        tech: "specialist",
+        manager: "manager"
+      };
+      return {
+        ...portal,
+        apiConnected: Boolean(portal.apiConnected),
+        status: portal.mode === "api" && !portal.apiConnected ? "API ожидает подключения" : portal.status,
+        ownerLogin: teamRoles.lead,
+        teamRoles,
+        memberLogins: uniqueLogins(portal.memberLogins?.length
+          ? portal.memberLogins
+          : [teamRoles.lead, teamRoles.tech, teamRoles.manager])
+      };
+    }
+
     function loadUserPortals() {
       try {
-        userPortals = JSON.parse(localStorage.getItem("opticards-portals") || "[]");
+        userPortals = JSON.parse(localStorage.getItem("opticards-portals") || "[]").map(normalizePortal);
       } catch (error) {
         userPortals = [];
       }
@@ -2540,11 +2665,15 @@
         stats.append(item);
       });
 
+      const teamSummary = createTeamSummary(portal);
+
       const actions = document.createElement("div");
       actions.className = "card-actions";
       const mode = document.createElement("span");
       mode.className = portal.mode === "api" ? "tag blue" : "tag amber";
-      mode.textContent = portal.mode === "api" ? "Ожидает проверки API" : "Ручное наполнение";
+      mode.textContent = portal.apiConnected
+        ? "API подключен"
+        : (portal.mode === "api" ? "API ожидает подключения" : "Ручное наполнение");
       const button = document.createElement("button");
       button.className = "btn primary";
       button.type = "button";
@@ -2552,7 +2681,7 @@
       button.textContent = "Открыть";
       actions.append(mode, button);
 
-      article.append(head, scope, stats, actions);
+      article.append(head, scope, stats, teamSummary, actions);
       return article;
     }
 
@@ -2566,7 +2695,7 @@
 
     function updateDashboardMetrics() {
       const allPortals = [demoPortal, ...userPortals];
-      const apiCount = allPortals.filter((portal) => portal.mode === "api").length;
+      const apiCount = allPortals.filter((portal) => portal.apiConnected).length;
       metricPortals.textContent = formatNumber(allPortals.length);
       metricCards.textContent = formatNumber(allPortals.reduce((sum, portal) => sum + portal.cardCount, 0));
       metricApi.textContent = formatNumber(apiCount);
@@ -2577,8 +2706,8 @@
       const isApi = portal.mode === "api";
       const rows = isApi
         ? [
-            ["Проверка WB API ключа", portal.isDemo ? "готово" : "ожидает backend"],
-            ["Карточки из кабинета", portal.isDemo ? formatNumber(portal.cardCount) : "после проверки"],
+            ["Проверка WB API ключа", portal.apiConnected ? "готово" : "ожидает подключения"],
+            ["Карточки из кабинета", portal.apiConnected ? formatNumber(portal.cardCount) : "после подключения"],
             ["MPStats", "витрина/аналитика позже"],
             ["Запись в WB", "отключена"]
           ]
@@ -2610,14 +2739,16 @@
       sellerTitle.textContent = currentPortal.name;
       sellerSubtitle.textContent = `${currentPortal.marketplace} · ${scopeLabel} · ${isApi ? "API подключение" : "ручной режим"} · ответственный ${owner.full_name}`;
       sellerModeTag.className = isApi ? "tag blue" : "tag amber";
-      sellerModeTag.textContent = isApi ? "API подключен" : "ручной режим";
+      sellerModeTag.textContent = currentPortal.apiConnected ? "API подключен" : (isApi ? "API ожидает подключения" : "ручной режим");
       sellerTotalCards.textContent = formatNumber(currentPortal.cardCount);
       sellerWorkCards.textContent = formatNumber(currentPortal.workCount);
       sellerProblemCards.textContent = formatNumber(currentPortal.problemCount);
       sellerSourceTag.className = isApi ? "tag blue" : "tag amber";
-      sellerSourceTag.textContent = isApi ? "API ожидает серверной проверки" : "таблицы и ручной ввод";
+      sellerSourceTag.textContent = currentPortal.apiConnected ? "API подключен" : (isApi ? "API ожидает подключения" : "таблицы и ручной ввод");
       sellerSourceCopy.textContent = isApi
-        ? "После проверки доступа система определит кабинет WB и загрузит список карточек без внесения изменений на маркетплейсе."
+        ? (currentPortal.apiConnected
+            ? "После проверки доступа система определит кабинет WB и загрузит список карточек без внесения изменений на маркетплейсе."
+            : "Кабинет создан, но реальный ключ WB пока не подключается. Добавьте данные вручную или таблицей, а API подключим после включения серверной интеграции.")
         : "Портал создан без API: ссылка на магазин нужна только для ручной сверки, а карточки добавляются через Excel, nmID, SKU, артикулы продавца или ссылки. API можно подключить позже.";
       renderSourceFlow(currentPortal);
       renderProjectMembers();
@@ -2648,7 +2779,7 @@
       });
       apiFields.hidden = mode !== "api";
       manualFields.hidden = mode !== "manual";
-      portalApiKey.required = mode === "api";
+      portalApiKey.required = false;
     }
 
     function openPortalModal(mode = "api") {
@@ -2701,7 +2832,7 @@
 
       const selected = scope === "selected";
       scopeCount.textContent = selected ? "46" : formatNumber(currentPortal.cardCount);
-      scopeSource.textContent = selected ? "Таблица" : (currentPortal.mode === "api" ? "API" : "Ручной");
+      scopeSource.textContent = selected ? "Таблица" : (currentPortal.apiConnected ? "API" : "Ручной");
       scopeReady.textContent = selected ? "19" : formatNumber(currentPortal.workCount);
       scopeAlerts.textContent = selected ? "6" : formatNumber(currentPortal.problemCount);
       asideScope.textContent = selected ? "выбранные карточки" : "весь магазин";
@@ -2713,25 +2844,26 @@
     portalForm.addEventListener("submit", (event) => {
       event.preventDefault();
 
-      if (connectMode === "api" && !portalApiKey.value.trim()) {
-        portalApiKey.setCustomValidity("Вставьте WB API ключ для подключения через API.");
-        portalApiKey.reportValidity();
-        return;
-      }
-
       portalApiKey.setCustomValidity("");
+      const teamRoles = {
+        lead: portalOwner.value,
+        tech: portalTech.value,
+        manager: portalManager.value
+      };
       const portal = {
         id: `portal-${Date.now()}`,
         name: portalName.value.trim(),
         marketplace: portalMarketplace.value,
         mode: connectMode,
         scope: portalScope.value,
-        status: connectMode === "api" ? "API добавлен" : "Ручной режим",
-        ownerLogin: portalOwner.value,
+        status: connectMode === "api" ? "API ожидает подключения" : "Ручной режим",
+        ownerLogin: teamRoles.lead,
         cardCount: 0,
         workCount: 0,
         problemCount: 0,
-        memberLogins: [portalOwner.value],
+        apiConnected: false,
+        teamRoles,
+        memberLogins: uniqueLogins([teamRoles.lead, teamRoles.tech, teamRoles.manager]),
         storeUrl: connectMode === "manual" ? portalStoreUrl.value.trim() : "",
         manualSource: connectMode === "manual" ? portalManualSource.value.trim() : "",
         isDemo: false
