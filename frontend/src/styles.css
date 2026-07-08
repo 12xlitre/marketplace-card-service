@@ -1432,6 +1432,11 @@ tr:last-child td {
   content: none;
 }
 
+.draft-editor-mpstats {
+  color: var(--blue);
+  font-weight: 700;
+}
+
 .draft-source-manual {
   color: var(--muted);
   font-size: 12px;

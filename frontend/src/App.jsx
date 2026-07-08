@@ -915,7 +915,7 @@ function characteristicValueSourceText(meta, hasOptions) {
   return "свое";
 }
 
-function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSuggestion, hasDraft) {
+function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSuggestion, hasDraft, mpstatsCount = 0) {
   const details = [];
   const limit = characteristicValueLimit(meta);
   if (limit) {
@@ -934,6 +934,9 @@ function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSugg
     details.push("Рекомендация аудита");
   } else if (hasDraft) {
     details.push("Ручная правка");
+  }
+  if (mpstatsCount) {
+    details.push(`MPStats дал ${mpstatsCount} значений для этой характеристики`);
   }
   return details.join(". ");
 }
@@ -968,6 +971,27 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
     key,
     uniqueCharacteristicOptions(values),
   ]));
+}
+
+function mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics = []) {
+  const key = normalizedCharacteristicOption(meta?.name || meta?.label || "");
+  const item = (mpstatsCharacteristics || []).find((row) => normalizedCharacteristicOption(row.name) === key);
+  return item ? (item.values || []).map((value) => value?.value || value).filter(Boolean) : [];
+}
+
+function countMpstatsMatches(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
+  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  return rows.filter((row) => {
+    const meta = metaByKey[row.key] || row;
+    return mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics).length > 0;
+  }).length;
+}
+
+function requestDurationText(milliseconds) {
+  if (typeof milliseconds !== "number") {
+    return "";
+  }
+  return `${Math.max(0.1, milliseconds / 1000).toFixed(1)}с`;
 }
 
 function characteristicExportText(value) {
@@ -2011,6 +2035,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
   const [mpstatsCharacteristics, setMpstatsCharacteristics] = useState([]);
   const [mpstatsCharacteristicsStatus, setMpstatsCharacteristicsStatus] = useState("idle");
+  const [mpstatsCharacteristicsMs, setMpstatsCharacteristicsMs] = useState(null);
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -2032,12 +2057,14 @@ function CardDetailScreen({ card, portal, onBack }) {
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
+  const mpstatsMatches = countMpstatsMatches(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
+  const mpstatsDuration = requestDurationText(mpstatsCharacteristicsMs);
   const mpstatsHintsLabel = {
-    loaded: "подсказки MPStats",
+    loaded: `${mpstatsCharacteristics.length} MPStats · ${mpstatsMatches} совпало${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     loading: "загрузка",
-    empty: "MPStats пусто",
-    error: "MPStats ошибка",
-    unavailable: "MPStats недоступен",
+    empty: `MPStats пусто${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
+    error: `MPStats ошибка${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
+    unavailable: `MPStats недоступен${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     "missing-subject": "нет subjectID",
   }[mpstatsCharacteristicsStatus] || (auditDone ? "есть рекомендации" : "ручной черновик");
   const mpstatsHintsTone = ["loaded", "loading"].includes(mpstatsCharacteristicsStatus)
@@ -2057,6 +2084,7 @@ function CardDetailScreen({ card, portal, onBack }) {
     setDraftCharacteristics({});
     setMpstatsCharacteristics([]);
     setMpstatsCharacteristicsStatus("idle");
+    setMpstatsCharacteristicsMs(null);
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -2129,14 +2157,19 @@ function CardDetailScreen({ card, portal, onBack }) {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
     if (!subjectID || !portal?.id) {
       setMpstatsCharacteristicsStatus("missing-subject");
+      setMpstatsCharacteristicsMs(null);
       return;
     }
+    const startedAt = performance.now();
     setMpstatsCharacteristicsStatus("loading");
+    setMpstatsCharacteristicsMs(null);
     try {
       const payload = await apiRequest(`/api/mpstats/characteristics?portal_id=${encodeURIComponent(portal.id)}&type=subject&value=${encodeURIComponent(subjectID)}&num_top=100&min_cats=0`);
+      setMpstatsCharacteristicsMs(Math.round(performance.now() - startedAt));
       setMpstatsCharacteristics(payload.characteristics || []);
       setMpstatsCharacteristicsStatus((payload.characteristics || []).length ? "loaded" : "empty");
     } catch (error) {
+      setMpstatsCharacteristicsMs(Math.round(performance.now() - startedAt));
       setMpstatsCharacteristics([]);
       setMpstatsCharacteristicsStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
     }
@@ -2436,6 +2469,7 @@ function CardDetailScreen({ card, portal, onBack }) {
                       availableCharacteristics={subjectCharacteristics}
                       search={characteristicSearch}
                       status={subjectCharacteristicsStatus}
+                      mpstatsCharacteristics={mpstatsCharacteristics}
                       valueOptionsByKey={characteristicValueOptions}
                       onSearch={setCharacteristicSearch}
                       onAdd={addDraftCharacteristic}
@@ -2535,6 +2569,7 @@ function CharacteristicsDiffTable({
   availableCharacteristics,
   search,
   status,
+  mpstatsCharacteristics,
   valueOptionsByKey,
   onSearch,
   onAdd,
@@ -2593,6 +2628,7 @@ function CharacteristicsDiffTable({
             row={row}
             meta={row.meta}
             valueOptions={valueOptionsByKey[row.key] || []}
+            mpstatsValues={mpstatsValuesForCharacteristic(row.meta, mpstatsCharacteristics)}
             onAddValue={(value) => onAddValue(row, value)}
             onRemoveValue={(value) => onRemoveValue(row, value)}
             onRemove={() => onRemove(row.key)}
@@ -2630,7 +2666,7 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], onAddValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
@@ -2692,7 +2728,11 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
       </label>
       {isOptionsOpen ? (
         <div className="draft-value-options">
-          {!strictValues && hasKnownOptions ? <span className="draft-option-source">Ниже не полный список WB, а подсказки из карточек</span> : null}
+          {!strictValues && hasKnownOptions ? (
+            <span className="draft-option-source">
+              {mpstatsValues.length ? `Подсказки из карточек + MPStats (${mpstatsValues.length})` : "Ниже не полный список WB, а подсказки из карточек"}
+            </span>
+          ) : null}
           {isLimitReached ? <span className="field-empty">Сначала удалите одно значение</span> : null}
           {!isLimitReached && canAddCustomValue ? (
             <button className="characteristic-option custom-option" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(customValue)}>
@@ -2708,9 +2748,10 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
           {!isLimitReached && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
         </div>
       ) : null}
-      <div className="draft-editor-meta" title={characteristicValueMetaTitle(meta, hasKnownOptions, values.length, isAuditSuggestion, Boolean(draft))}>
+      <div className="draft-editor-meta" title={characteristicValueMetaTitle(meta, hasKnownOptions, values.length, isAuditSuggestion, Boolean(draft), mpstatsValues.length)}>
         <span>{characteristicLimitText(meta, values.length)}</span>
         <span>{characteristicValueSourceText(meta, hasKnownOptions)}</span>
+        {mpstatsValues.length ? <span className="draft-editor-mpstats">MPStats {mpstatsValues.length}</span> : null}
         {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
     </div>
