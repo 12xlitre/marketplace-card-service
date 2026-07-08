@@ -4327,9 +4327,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
               <>
                 <section className="workspace-strip card-snapshot-strip">
                   <div className="card-snapshot-main">
-                    <div className={`card-snapshot-photo ${photoUrl ? "has-image" : ""}`}>
-                      {photoUrl ? <img src={photoUrl} alt={currentTitle} loading="eager" decoding="async" /> : null}
-                    </div>
                     <div className="card-snapshot-content">
                       <div className="strip-head">
                         <div>
