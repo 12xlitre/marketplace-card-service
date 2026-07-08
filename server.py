@@ -1405,9 +1405,9 @@ def approval_workflow(portal_id, user):
       SELECT *
       FROM card_drafts
       WHERE portal_id = ?
-        AND json_extract(payload_json, '$.meta.approval.status') IN ('draft', 'submitted', 'changes_requested', 'approved')
+        AND COALESCE(NULLIF(json_extract(payload_json, '$.meta.approval.status'), ''), 'draft') IN ('draft', 'submitted', 'changes_requested', 'approved')
       ORDER BY
-        CASE json_extract(payload_json, '$.meta.approval.status')
+        CASE COALESCE(NULLIF(json_extract(payload_json, '$.meta.approval.status'), ''), 'draft')
           WHEN 'submitted' THEN 1
           WHEN 'changes_requested' THEN 2
           WHEN 'draft' THEN 3

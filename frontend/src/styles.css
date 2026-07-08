@@ -585,7 +585,7 @@ a {
 
 .cards-table-wrap th:nth-child(2),
 .cards-table-wrap td:nth-child(2) {
-  width: 34%;
+  width: 32%;
 }
 
 .cards-table-wrap th:nth-child(3),
@@ -600,7 +600,7 @@ a {
 
 .cards-table-wrap th:nth-child(5),
 .cards-table-wrap td:nth-child(5) {
-  width: 190px;
+  width: 230px;
 }
 
 .cards-table-wrap th:nth-child(6),
@@ -621,6 +621,15 @@ a {
   white-space: normal;
   overflow-wrap: anywhere;
   text-align: left;
+  min-width: 0;
+}
+
+.cards-table-wrap {
+  overflow-x: auto;
+}
+
+.cards-table-wrap table {
+  min-width: 1040px;
 }
 
 .select-col {
@@ -646,7 +655,10 @@ tr.selected-row td {
 }
 
 .cards-table-wrap .problem-reasons {
+  display: grid;
+  justify-items: start;
   align-items: flex-start;
+  gap: 5px;
 }
 
 .problem-reasons > span:not(.tag) {
