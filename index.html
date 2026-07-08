@@ -2274,9 +2274,9 @@
       { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb" }
     ];
     const staticAuthUsers = [
-      { ...fallbackUsers[0], password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
-      { ...fallbackUsers[1], password_hash: "pbkdf2_sha256$240000$fbf2a62d71c3b03051d63cfdb3ebf60a$bd3d33bc4eb0b06a6a3da022fc6ecc2ea645ac4327c8d12cb486557261177444" },
-      { ...fallbackUsers[2], password_hash: "pbkdf2_sha256$240000$ffd06404ba2295d304f53eb3f223a9a7$5b4868dbae93b71ee0248baffe0d7fa0aa23447989c0a0cf5fe4edc46b6ff98e" }
+      { ...fallbackUsers[0], login_hash: "0bbe3aea024a982e63e8f5bb4bb0fe7d90cb3c451e399d400c51d79c7e22998e", password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
+      { ...fallbackUsers[1], login_hash: "ab38dec250a8262fa226d8f4b4def99251043e506d93435175f6454a4edfa4ba", password_hash: "pbkdf2_sha256$240000$fbf2a62d71c3b03051d63cfdb3ebf60a$bd3d33bc4eb0b06a6a3da022fc6ecc2ea645ac4327c8d12cb486557261177444" },
+      { ...fallbackUsers[2], login_hash: "079d708b2c27d35617c2ce3e9a6e2a7d6d14618f5c51b11214ca876cc7a22f37", password_hash: "pbkdf2_sha256$240000$ffd06404ba2295d304f53eb3f223a9a7$5b4868dbae93b71ee0248baffe0d7fa0aa23447989c0a0cf5fe4edc46b6ff98e" }
     ];
     let users = [];
     let currentUser = null;
@@ -2334,6 +2334,19 @@
       };
     }
 
+    async function sha256Hex(value) {
+      if (!window.crypto?.subtle) {
+        return "";
+      }
+      const digest = await window.crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(value)
+      );
+      return Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    }
+
     async function verifyStaticPassword(password, passwordHash) {
       const [algorithm, iterations, saltHex, expectedHex] = passwordHash.split("$");
       if (algorithm !== "pbkdf2_sha256" || !window.crypto?.subtle) {
@@ -2364,7 +2377,8 @@
     }
 
     async function staticLogin(login, password) {
-      const user = staticAuthUsers.find((item) => item.login === login);
+      const loginHash = await sha256Hex(login);
+      const user = staticAuthUsers.find((item) => item.login_hash === loginHash);
       if (!user || !(await verifyStaticPassword(password, user.password_hash))) {
         return null;
       }
