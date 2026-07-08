@@ -715,34 +715,88 @@ function titleSuggestions(card) {
   const subject = String(card?.subjectName || "").trim();
   const brand = String(card?.brand || "").trim();
   const base = title === "Не указано" ? (subject || "Карточка WB") : title;
+  const compactBase = base
+    .replace(/\s+/g, " ")
+    .replace(/[|/]+/g, " ")
+    .trim();
   const values = [
-    base,
-    subject && !base.toLowerCase().includes(subject.toLowerCase().slice(0, -1)) ? `${subject} ${base}` : "",
-    brand && !base.toLowerCase().includes(brand.toLowerCase()) ? `${base} ${brand}` : "",
+    compactBase,
+    subject && !compactBase.toLowerCase().includes(subject.toLowerCase().slice(0, -1)) ? `${subject} ${compactBase}` : "",
+    brand && !compactBase.toLowerCase().includes(brand.toLowerCase()) ? `${compactBase} ${brand}` : "",
   ].filter(Boolean);
   const unique = [...new Set(values.map((value) => value.slice(0, 60)))];
   while (unique.length < 3) {
-    unique.push(base.slice(0, 60));
+    unique.push(compactBase.slice(0, 60));
   }
   return unique.slice(0, 3);
 }
 
+function descriptionQualityIssues(description, card) {
+  const text = String(description || "").trim();
+  if (!text) {
+    return ["нет описания"];
+  }
+  const lower = text.toLowerCase();
+  const subject = String(card?.subjectName || "").trim().toLowerCase();
+  const titleWords = String(card?.title || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 4)
+    .slice(0, 4);
+  const issues = [];
+  if (text.length < 250) {
+    issues.push("короткое описание");
+  }
+  if (text.length > 5000) {
+    issues.push("слишком длинное описание");
+  }
+  if (subject && !lower.includes(subject.slice(0, Math.max(4, subject.length - 1)))) {
+    issues.push("категория не раскрыта в тексте");
+  }
+  if (titleWords.length && titleWords.filter((word) => lower.includes(word)).length < Math.min(2, titleWords.length)) {
+    issues.push("мало связки с заголовком");
+  }
+  if (!/[.!?]\s+\S/.test(text) && text.length > 180) {
+    issues.push("текст выглядит как один длинный блок");
+  }
+  if (!/(состав|материал|уход|размер|посадк|комплект|назначен|подход)/i.test(text)) {
+    issues.push("мало покупательских деталей");
+  }
+  return issues;
+}
+
 function descriptionSuggestion(card, description) {
   const current = String(description || "").trim();
-  if (current) {
+  const issues = descriptionQualityIssues(current, card);
+  if (current && !issues.length) {
     return current;
   }
   const subject = String(card?.subjectName || "").trim();
   const brand = String(card?.brand || "").trim();
   const title = textOrDash(card?.title);
-  return [title, brand, subject]
+  if (current) {
+    const additions = [
+      subject ? `Подходит для категории: ${subject}.` : "",
+      brand && !current.toLowerCase().includes(brand.toLowerCase()) ? `Бренд: ${brand}.` : "",
+      "Проверьте состав, посадку, комплектацию, уход и сценарии использования перед публикацией.",
+    ].filter(Boolean);
+    return [current, ...additions].join("\n\n");
+  }
+  const intro = [title, brand, subject]
     .filter((value, index, list) => value && value !== "Не указано" && list.indexOf(value) === index)
     .join(". ");
+  return [
+    intro,
+    "Добавьте ключевые свойства товара: состав, посадку, сезон, комплектацию, уход и сценарии использования.",
+  ].filter(Boolean).join("\n\n");
 }
 
 function titleAuditReason(card, currentTitle, draftTitle) {
   if (isEmptyValue(card?.title)) {
     return "WB не вернул название, поэтому аудит предлагает собрать его из категории, бренда и текущих данных карточки.";
+  }
+  if (/[|/]{2,}|\s{2,}/.test(currentTitle)) {
+    return "В названии есть лишние разделители или пробелы; аудит предлагает более чистый вариант в лимите WB.";
   }
   if (currentTitle.length > 60) {
     return "Название длиннее лимита WB 60 символов, поэтому аудит предлагает укоротить его.";
@@ -753,9 +807,13 @@ function titleAuditReason(card, currentTitle, draftTitle) {
   return "Название уже укладывается в лимит WB, поэтому аудит оставил его без изменения.";
 }
 
-function descriptionAuditReason(description) {
+function descriptionAuditReason(description, card) {
+  const issues = descriptionQualityIssues(description, card);
   if (String(description || "").trim()) {
-    return "Описание уже есть в WB, поэтому аудит перенес его в черновик без изменения.";
+    if (issues.length) {
+      return `Описание есть, но аудит нашел зоны улучшения: ${issues.join(", ")}. Черновик добавляет структуру и детали для ручной доработки.`;
+    }
+    return "Описание выглядит достаточно полным по базовым правилам, поэтому аудит оставил его без изменения.";
   }
   return "В WB нет описания, поэтому аудит собрал базовый черновик из названия, бренда и категории.";
 }
@@ -2670,7 +2728,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
     const nextTitle = suggestions[1] || suggestions[0] || "";
     const nextDescription = descriptionSuggestion(card, description);
     const nextTitleReason = titleAuditReason(card, currentTitle, nextTitle);
-    const nextDescriptionReason = descriptionAuditReason(description);
+    const nextDescriptionReason = descriptionAuditReason(description, card);
     const nextDraftCharacteristics = characteristicDraftsFromRows(characteristicItems, "audit", auditMpstatsCharacteristics, subjectCharacteristics);
     const changedCharacteristics = Object.entries(nextDraftCharacteristics)
       .filter(([key, draft]) => {
@@ -3027,11 +3085,11 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
                     </p>
                     <DraftReason reason={draftTitleReason} />
                   </div>
-                  <div className="field-box">
+                  <div className="field-box description-box">
                     <strong>Было: описание</strong>
                     <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                   </div>
-                  <div className="field-box">
+                  <div className="field-box description-box">
                     <strong>Стало: описание</strong>
                     <textarea
                       className={`description-editor ${draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}`}
