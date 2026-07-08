@@ -27,7 +27,7 @@ npm run prototype
 Создание или обновление пользователя:
 
 ```bash
-npm run create-user -- dmitriy.admin "Сафиуллин Дмитрий" "Администратор" --access-level all
+npm run create-user -- dmitriy.admin "Сафиуллин Дмитрий" "Администратор" --user-role admin --access-level all
 ```
 
 ## Прод

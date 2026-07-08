@@ -1542,7 +1542,7 @@
                 <div class="mini-stat"><strong>211</strong><span>правки</span></div>
                 <div class="mini-stat"><strong>8</strong><span>ошибки</span></div>
               </div>
-              <div class="team-summary">
+              <div class="team-summary" data-demo-team-summary>
                 <span class="team-summary-title">Команда проекта</span>
                 <div class="team-summary-row"><span>Руководитель</span><strong>Руководитель</strong></div>
                 <div class="team-summary-row"><span>Тех. специалист</span><strong>Специалист</strong></div>
@@ -1871,6 +1871,11 @@
                   <div class="list-row" data-member-login="specialist"><span>Специалист</span><strong>Карточки и аудит</strong></div>
                 </div>
                 <div class="panel-actions">
+                  <select class="select" id="member-role-select" aria-label="Роль в проекте">
+                    <option value="lead">Руководитель</option>
+                    <option value="tech">Технический специалист</option>
+                    <option value="manager">Менеджер</option>
+                  </select>
                   <select class="select" id="member-select" aria-label="Добавить участника">
                     <option value="admin">Администратор</option>
                     <option value="manager">Руководитель</option>
@@ -2312,6 +2317,7 @@
     const sellerSourceTag = document.querySelector("#seller-source-tag");
     const sellerSourceFlow = document.querySelector("#seller-source-flow");
     const projectMembers = document.querySelector("#project-members");
+    const memberRoleSelect = document.querySelector("#member-role-select");
     const memberSelect = document.querySelector("#member-select");
     const addMemberButton = document.querySelector("#add-member-button");
     const portalModal = document.querySelector("#portal-modal");
@@ -2329,9 +2335,9 @@
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
     const fallbackUsers = [
-      { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all" },
-      { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview" },
-      { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb" }
+      { login: "admin", full_name: "Администратор", role: "Полный доступ", access_level: "all", user_role: "admin" },
+      { login: "manager", full_name: "Руководитель", role: "Проекты и отчеты", access_level: "overview", user_role: "manager" },
+      { login: "specialist", full_name: "Специалист", role: "Карточки и аудит", access_level: "readonly_wb", user_role: "tech" }
     ];
     const staticAuthUsers = [
       { ...fallbackUsers[0], login_hash: "0bbe3aea024a982e63e8f5bb4bb0fe7d90cb3c451e399d400c51d79c7e22998e", password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
@@ -2379,6 +2385,34 @@
       return [...new Set(logins.filter(Boolean))];
     }
 
+    const projectRoleLabels = {
+      lead: "Руководитель проекта",
+      tech: "Технический специалист",
+      manager: "Менеджер"
+    };
+
+    function getUserRoleType(user) {
+      const marker = `${user.user_role || ""} ${user.access_level || ""} ${user.role || ""}`.toLowerCase();
+      if (marker.includes("tech") || marker.includes("readonly") || marker.includes("карточ")) {
+        return "tech";
+      }
+      if (marker.includes("admin") || marker.includes("all") || marker.includes("полный")) {
+        return "admin";
+      }
+      return "manager";
+    }
+
+    function userCanFillProjectRole(user, projectRole) {
+      const roleType = getUserRoleType(user);
+      if (projectRole === "tech") {
+        return roleType === "tech" || roleType === "admin";
+      }
+      if (projectRole === "lead") {
+        return roleType === "manager" || roleType === "admin";
+      }
+      return roleType === "manager" || roleType === "admin";
+    }
+
     function getPortalTeam(portal) {
       const roles = portal.teamRoles || {};
       return {
@@ -2399,9 +2433,9 @@
       wrapper.append(title);
 
       [
-        ["Руководитель", team.lead],
-        ["Тех. специалист", team.tech],
-        ["Менеджер", team.manager]
+        [projectRoleLabels.lead, team.lead],
+        [projectRoleLabels.tech, team.tech],
+        [projectRoleLabels.manager, team.manager]
       ].forEach(([label, login]) => {
         const row = document.createElement("div");
         row.className = "team-summary-row";
@@ -2437,7 +2471,8 @@
         login: user.login,
         full_name: user.full_name,
         role: user.role,
-        access_level: user.access_level
+        access_level: user.access_level,
+        user_role: user.user_role || user.access_level || "manager"
       };
     }
 
@@ -2505,7 +2540,7 @@
     }
 
     function fillEmployeeSelects() {
-      [portalOwner, portalTech, portalManager, memberSelect].forEach((select) => {
+      [portalOwner, portalTech, portalManager].forEach((select) => {
         const selected = select.value;
         select.innerHTML = "";
         const userOptions = users.length ? users : fallbackUsers;
@@ -2519,6 +2554,26 @@
           ? selected
           : select.options[0]?.value || "";
       });
+      fillMemberSelect();
+    }
+
+    function fillMemberSelect() {
+      const selected = memberSelect.value;
+      const projectRole = memberRoleSelect.value;
+      const userOptions = (users.length ? users : fallbackUsers)
+        .filter((user) => userCanFillProjectRole(user, projectRole));
+
+      memberSelect.innerHTML = "";
+      userOptions.forEach((user) => {
+        const option = document.createElement("option");
+        option.value = user.login;
+        option.textContent = user.full_name;
+        memberSelect.append(option);
+      });
+
+      memberSelect.value = userOptions.some((user) => user.login === selected)
+        ? selected
+        : memberSelect.options[0]?.value || "";
     }
 
     function initials(name) {
@@ -2691,6 +2746,17 @@
       userPortals.forEach((portal) => {
         portalList.insertBefore(createPortalCard(portal), addCard);
       });
+      updateDemoPortalCard();
+    }
+
+    function updateDemoPortalCard() {
+      const existing = document.querySelector("[data-demo-team-summary]");
+      if (!existing) {
+        return;
+      }
+      const summary = createTeamSummary(demoPortal);
+      summary.dataset.demoTeamSummary = "true";
+      existing.replaceWith(summary);
     }
 
     function updateDashboardMetrics() {
@@ -2761,15 +2827,18 @@
       }
 
       projectMembers.innerHTML = "";
-      currentPortal.memberLogins.forEach((login) => {
+      const team = getPortalTeam(currentPortal);
+      Object.entries(projectRoleLabels).forEach(([roleKey, label]) => {
+        const login = team[roleKey];
         const user = findUser(login);
         const row = document.createElement("div");
         row.className = "list-row";
         row.dataset.memberLogin = login;
-        row.innerHTML = `<span>${user.full_name}</span><strong>${user.role}</strong>`;
+        row.dataset.projectRole = roleKey;
+        row.innerHTML = `<span>${label}</span><strong>${user.full_name}</strong>`;
         projectMembers.append(row);
       });
-      sellerMemberCount.textContent = formatNumber(currentPortal.memberLogins.length);
+      sellerMemberCount.textContent = formatNumber(uniqueLogins(Object.values(team)).length);
     }
 
     function setConnectMode(mode) {
@@ -2915,19 +2984,33 @@
     scopeButtons.forEach((button) => {
       button.addEventListener("click", () => setScope(button.dataset.scope));
     });
+    memberRoleSelect.addEventListener("change", fillMemberSelect);
     addMemberButton.addEventListener("click", () => {
+      const projectRole = memberRoleSelect.value;
       const login = memberSelect.value;
-      if (!currentPortal.memberLogins.includes(login)) {
-        currentPortal.memberLogins.push(login);
-        if (!currentPortal.isDemo) {
-          const stored = userPortals.find((portal) => portal.id === currentPortal.id);
-          if (stored) {
-            stored.memberLogins = [...currentPortal.memberLogins];
-            saveUserPortals();
-          }
-        }
-        renderProjectMembers();
+      if (!login) {
+        return;
       }
+
+      currentPortal.teamRoles = {
+        ...getPortalTeam(currentPortal),
+        [projectRole]: login
+      };
+      currentPortal.ownerLogin = currentPortal.teamRoles.lead;
+      currentPortal.memberLogins = uniqueLogins(Object.values(currentPortal.teamRoles));
+
+      if (!currentPortal.isDemo) {
+        const stored = userPortals.find((portal) => portal.id === currentPortal.id);
+        if (stored) {
+          stored.teamRoles = { ...currentPortal.teamRoles };
+          stored.ownerLogin = currentPortal.ownerLogin;
+          stored.memberLogins = [...currentPortal.memberLogins];
+          saveUserPortals();
+        }
+      }
+      renderProjectMembers();
+      renderUserPortals();
+      updateSellerView();
     });
 
     async function restoreSession() {

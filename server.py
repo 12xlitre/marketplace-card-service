@@ -49,6 +49,7 @@ def init_db():
         password_hash TEXT NOT NULL,
         full_name TEXT NOT NULL,
         role TEXT NOT NULL,
+        user_role TEXT NOT NULL DEFAULT 'manager',
         access_level TEXT NOT NULL DEFAULT 'overview',
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -63,6 +64,9 @@ def init_db():
         expires_at TEXT NOT NULL
       );
     """)
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "user_role" not in columns:
+      db.execute("ALTER TABLE users ADD COLUMN user_role TEXT NOT NULL DEFAULT 'manager'")
 
 
 def hash_password(password, salt=None):
@@ -98,6 +102,7 @@ def public_user(row):
     "login": row["login"],
     "full_name": row["full_name"],
     "role": row["role"],
+    "user_role": row["user_role"],
     "access_level": row["access_level"],
   }
 
@@ -133,23 +138,24 @@ def find_session_user(db, token):
   return row
 
 
-def upsert_user(login, password, full_name, role, access_level):
+def upsert_user(login, password, full_name, role, access_level, user_role):
   init_db()
   password_hash = hash_password(password)
   with connect_db() as db:
     db.execute(
       """
-      INSERT INTO users (login, password_hash, full_name, role, access_level)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO users (login, password_hash, full_name, role, user_role, access_level)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(login) DO UPDATE SET
         password_hash = excluded.password_hash,
         full_name = excluded.full_name,
         role = excluded.role,
+        user_role = excluded.user_role,
         access_level = excluded.access_level,
         is_active = 1,
         updated_at = CURRENT_TIMESTAMP
       """,
-      (login, password_hash, full_name, role, access_level),
+      (login, password_hash, full_name, role, user_role, access_level),
     )
 
 
@@ -225,7 +231,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       with connect_db() as db:
         rows = db.execute(
           """
-          SELECT login, full_name, role, access_level
+          SELECT login, full_name, role, user_role, access_level
           FROM users
           WHERE is_active = 1
           ORDER BY id
@@ -320,6 +326,7 @@ def main():
   create.add_argument("login")
   create.add_argument("full_name")
   create.add_argument("role")
+  create.add_argument("--user-role", choices=["admin", "manager", "tech"], default="manager")
   create.add_argument("--access-level", default="overview")
   create.add_argument("--password", default="")
 
@@ -332,17 +339,17 @@ def main():
     password = args.password or getpass.getpass("Password: ")
     if len(password) < 12:
       raise SystemExit("Password must be at least 12 characters.")
-    upsert_user(args.login, password, args.full_name, args.role, args.access_level)
+    upsert_user(args.login, password, args.full_name, args.role, args.access_level, args.user_role)
     print(f"User {args.login} saved in {DB_PATH}.")
   elif args.command == "list-users":
     init_db()
     with connect_db() as db:
       rows = db.execute(
-        "SELECT login, full_name, role, access_level, is_active FROM users ORDER BY id"
+        "SELECT login, full_name, role, user_role, access_level, is_active FROM users ORDER BY id"
       ).fetchall()
     for row in rows:
       status = "active" if row["is_active"] else "disabled"
-      print(f"{row['login']}\t{row['full_name']}\t{row['role']}\t{row['access_level']}\t{status}")
+      print(f"{row['login']}\t{row['full_name']}\t{row['role']}\t{row['user_role']}\t{row['access_level']}\t{status}")
 
 
 if __name__ == "__main__":
