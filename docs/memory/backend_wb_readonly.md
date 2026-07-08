@@ -15,4 +15,5 @@
 - запросы к WB идут с timeout и retry только для transient ошибок, `5xx`, сети и `429`;
 - на `429` учитывается `Retry-After`;
 - используется cursor-пагинация и `withPhoto: -1` для любых карточек;
-- UI получает нормализованные карточки и статусы качества, а не raw WB token или секреты.
+- UI получает нормализованные карточки, статусы качества и расширенный снимок полей карточки (`rawFields`) для детального просмотра;
+- `rawFields` проходит backend-sanitizer: из вложенных объектов вырезаются ключи с `token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`; raw WB token и секреты в ответ не попадают.
