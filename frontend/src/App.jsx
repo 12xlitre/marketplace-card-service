@@ -888,7 +888,7 @@ const AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS = new Set([
 ]);
 
 const CHARACTERISTIC_ALIAS_GROUPS = [
-  ["тип рукавов", "длина рукава", "рукав", "рукава"],
+  ["тип рукавов", "тип рукава", "длина рукава", "длина рукавов", "длина рукава изделия", "длина рукавов изделия", "рукав", "рукава", "рукава модель"],
   ["тип карманов", "карманы", "вид кармана", "карман"],
   ["фактура материала", "фактура", "структура материала", "текстура материала"],
   ["особенности модели", "особенности", "особенности товара"],
@@ -969,6 +969,9 @@ function characteristicNameMatchScore(left, right) {
   }
   const leftCoverage = overlap / leftTokens.length;
   const rightCoverage = overlap / rightTokens.length;
+  if (leftTokens.includes("рукав") && rightTokens.includes("рукав")) {
+    return 0.9;
+  }
   if (leftTokens.length === 1 && rightTokens.includes(leftTokens[0]) && !AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS.has(leftTokens[0])) {
     return 0.82;
   }
@@ -980,13 +983,34 @@ function characteristicNameMatchScore(left, right) {
 
 function matchingMpstatsCharacteristics(meta, mpstatsCharacteristics = []) {
   const label = meta?.name || meta?.label || "";
+  return scoredMpstatsCharacteristics(label, mpstatsCharacteristics)
+    .filter((match) => match.score >= 0.72)
+    .sort((left, right) => right.score - left.score);
+}
+
+function scoredMpstatsCharacteristics(label, mpstatsCharacteristics = []) {
   return (mpstatsCharacteristics || [])
     .map((item) => ({
       item,
       score: characteristicNameMatchScore(label, item?.name || ""),
-    }))
-    .filter((match) => match.score >= 0.72)
-    .sort((left, right) => right.score - left.score);
+    }));
+}
+
+function nearbyMpstatsCharacteristicNames(meta, mpstatsCharacteristics = []) {
+  const label = meta?.name || meta?.label || "";
+  const labelTokens = characteristicNameTokens(label);
+  return scoredMpstatsCharacteristics(label, mpstatsCharacteristics)
+    .filter((match) => {
+      if (match.score >= 0.72) {
+        return false;
+      }
+      const mpstatsTokens = characteristicNameTokens(match.item?.name || "");
+      return labelTokens.some((token) => mpstatsTokens.includes(token));
+    })
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 2)
+    .map((match) => match.item?.name)
+    .filter(Boolean);
 }
 
 function fallbackCharacteristicValueOptions(label) {
@@ -2804,6 +2828,7 @@ function CharacteristicsDiffTable({
             meta={row.meta}
             valueOptions={valueOptionsByKey[row.key] || []}
             mpstatsValues={mpstatsValuesForCharacteristic(row.meta, mpstatsCharacteristics)}
+            mpstatsNearbyNames={nearbyMpstatsCharacteristicNames(row.meta, mpstatsCharacteristics)}
             onAddValue={(value) => onAddValue(row, value)}
             onRemoveValue={(value) => onRemoveValue(row, value)}
             onRemove={() => onRemove(row.key)}
@@ -2841,7 +2866,7 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], onAddValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsNearbyNames = [], onAddValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
@@ -2927,6 +2952,7 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
         <span>{characteristicLimitText(meta, values.length)}</span>
         <span>{characteristicValueSourceText(meta, hasKnownOptions)}</span>
         {mpstatsValues.length ? <span className="draft-editor-mpstats">MPStats {mpstatsValues.length}</span> : null}
+        {!mpstatsValues.length && mpstatsNearbyNames.length ? <span className="draft-editor-nearby" title={`Похожие поля MPStats: ${mpstatsNearbyNames.join(", ")}`}>MPStats рядом</span> : null}
         {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
     </div>
