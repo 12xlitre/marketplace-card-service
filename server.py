@@ -63,11 +63,16 @@ WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
 MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
 MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "86400"))
+AUDIT_MARKET_CACHE_TTL_SECONDS = int(os.environ.get("AUDIT_MARKET_CACHE_TTL_SECONDS", "21600"))
+OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
 WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
+AUDIT_MARKET_CACHE = {}
 
 
 def utc_now():
@@ -2482,6 +2487,961 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0, f
   return payload
 
 
+AUDIT_REQUIRED_KEYS = ("category", "competitors", "title", "description", "characteristics", "summary")
+
+AUDIT_LLM_SYSTEM_PROMPT = """
+Ты — аналитик маркетплейсов для Wildberries. Заполни структурированный результат аудита карточки:
+category, competitors, title, description, characteristics, summary.
+
+ПРИНЦИП №1: ничего не выдумывать. Каждый факт, число и рекомендация должны опираться только на evidenceBundle.
+Нет данных — оставь консервативно и вынеси ограничение в summary.riskNotes.
+
+Пиши простым русским для владельца магазина. Любая оценка "мало/много/выше/ниже" должна иметь число или ориентир.
+Различай органическую, рекламную и итоговую позицию. Не обещай рост продаж в процентах.
+Приоритет high/medium/low ставь только при наличии причины и числа.
+
+Верни строго JSON без текста вокруг. Не добавляй поля кроме допустимых верхнеуровневых блоков и _meta.
+""".strip()
+
+
+def audit_period_default():
+  d2 = (utc_now().date() - dt.timedelta(days=14))
+  d1 = d2 - dt.timedelta(days=29)
+  return {"d1": d1.isoformat(), "d2": d2.isoformat()}
+
+
+def audit_str(value, limit=None):
+  text = str(value or "").strip()
+  if limit and len(text) > limit:
+    return text[:limit].rstrip()
+  return text
+
+
+def audit_number(value, default=None):
+  try:
+    if value in (None, ""):
+      return default
+    return float(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def audit_int(value, default=0):
+  number = audit_number(value)
+  if number is None:
+    return default
+  return int(number)
+
+
+def audit_normalized(value):
+  return re.sub(r"\s+", " ", str(value or "").strip().lower().replace("ё", "е"))
+
+
+def audit_tokens(value):
+  return [
+    token
+    for token in re.split(r"[^0-9a-zа-я]+", audit_normalized(value))
+    if len(token) > 2
+  ]
+
+
+def audit_contains_phrase(text, phrase):
+  text_tokens = set(audit_tokens(text))
+  phrase_tokens = [token for token in audit_tokens(phrase) if len(token) > 3]
+  if not phrase_tokens:
+    return True
+  return sum(1 for token in phrase_tokens if token in text_tokens) >= max(1, min(len(phrase_tokens), 2))
+
+
+def audit_unique(values, limit=12):
+  output = []
+  seen = set()
+  for value in values:
+    text = audit_str(value)
+    key = audit_normalized(text)
+    if text and key not in seen:
+      seen.add(key)
+      output.append(text)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def audit_extract_list(payload):
+  if isinstance(payload, list):
+    return payload
+  if not isinstance(payload, dict):
+    return []
+  candidates = [
+    payload.get("data"),
+    payload.get("items"),
+    payload.get("rows"),
+    payload.get("result"),
+  ]
+  output = payload.get("output")
+  if isinstance(output, dict):
+    candidates.extend([output.get("data"), output.get("items"), output.get("rows")])
+  data = payload.get("data")
+  if isinstance(data, dict):
+    candidates.extend([data.get("items"), data.get("rows"), data.get("words"), data.get("data")])
+  for candidate in candidates:
+    if isinstance(candidate, list):
+      return candidate
+  return []
+
+
+def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
+  token = str(token or "").strip()
+  if not token:
+    raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
+  query = urlencode(params or {}, doseq=True)
+  url = f"{MPSTATS_API_BASE.rstrip('/')}{path}{'?' + query if query else ''}"
+  headers = {
+    "X-Mpstats-TOKEN": token,
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "OptiCards/0.1 audit",
+  }
+  data = json.dumps(body if isinstance(body, dict) else {}, ensure_ascii=False).encode("utf-8")
+
+  for attempt in range(attempts):
+    request = urlrequest.Request(url, data=data, headers=headers, method="POST")
+    try:
+      with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
+        response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+    except urlerror.HTTPError as exc:
+      response_body = exc.read().decode("utf-8", errors="replace")
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      retryable = exc.code == 202 or exc.code == 429 or 500 <= exc.code < 600
+      if retryable and attempt < attempts - 1:
+        time.sleep(retry_after if retry_after is not None else 0.75 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(
+        exc.code,
+        mpstats_error_message(response_body, HTTPStatus(exc.code).phrase),
+        retryable=retryable,
+      ) from exc
+    except (TimeoutError, urlerror.URLError) as exc:
+      if attempt < attempts - 1:
+        time.sleep(0.75 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(HTTPStatus.GATEWAY_TIMEOUT, "mpstats_request_timeout", retryable=True) from exc
+    except json.JSONDecodeError as exc:
+      raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_invalid_json", retryable=False) from exc
+
+  raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_request_failed", retryable=True)
+
+
+def audit_cache_get(key):
+  cached = AUDIT_MARKET_CACHE.get(key)
+  if not cached:
+    return None
+  if time.time() >= cached["expires"]:
+    AUDIT_MARKET_CACHE.pop(key, None)
+    return None
+  return cached["payload"]
+
+
+def audit_cache_set(key, payload, ttl=AUDIT_MARKET_CACHE_TTL_SECONDS):
+  AUDIT_MARKET_CACHE[key] = {"payload": payload, "expires": time.time() + ttl}
+  return payload
+
+
+def audit_mpstats_get(token, path, warnings, cache_ttl=AUDIT_MARKET_CACHE_TTL_SECONDS):
+  cache_key = f"GET:{path}"
+  cached = audit_cache_get(cache_key)
+  if cached is not None:
+    return cached
+  try:
+    return audit_cache_set(cache_key, mpstats_get_json(token, path, attempts=2), cache_ttl)
+  except MpstatsApiError as exc:
+    warnings.append(f"MPStats {path}: {exc.message}")
+    return {}
+
+
+def audit_mpstats_post(token, path, params, body, warnings, cache_ttl=AUDIT_MARKET_CACHE_TTL_SECONDS):
+  cache_key = f"POST:{path}:{json.dumps(params or {}, sort_keys=True, ensure_ascii=False)}:{json.dumps(body or {}, sort_keys=True, ensure_ascii=False)}"
+  cached = audit_cache_get(cache_key)
+  if cached is not None:
+    return cached
+  try:
+    return audit_cache_set(cache_key, mpstats_post_body_json(token, path, body=body, params=params, attempts=2), cache_ttl)
+  except MpstatsApiError as exc:
+    warnings.append(f"MPStats {path}: {exc.message}")
+    return {}
+
+
+def audit_card_values_from_characteristic(item):
+  if not isinstance(item, dict):
+    return audit_unique([item])
+  value = item.get("value")
+  if value is None:
+    value = item.get("values")
+  if value is None:
+    value = item.get("name") if not (item.get("charcID") or item.get("charcId") or item.get("charcName")) else ""
+  if isinstance(value, list):
+    raw_values = []
+    for entry in value:
+      if isinstance(entry, dict):
+        raw_values.append(entry.get("value") or entry.get("name") or entry.get("charcName") or "")
+      else:
+        raw_values.append(entry)
+    return audit_unique(raw_values)
+  if isinstance(value, dict):
+    return audit_card_values_from_characteristic(value)
+  return audit_unique(re.split(r"[,;]+", str(value or "")))
+
+
+def audit_card_characteristics(card):
+  rows = []
+  items = card.get("characteristics") if isinstance(card, dict) else []
+  if not isinstance(items, list):
+    return rows
+  for index, item in enumerate(items):
+    if isinstance(item, dict):
+      name = audit_str(item.get("name") or item.get("charcName") or item.get("id") or item.get("charcID") or f"Характеристика {index + 1}")
+      charc_id = item.get("charcID") or item.get("charcId") or item.get("id")
+      unit_name = audit_str(item.get("unitName") or "")
+    else:
+      name = f"Характеристика {index + 1}"
+      charc_id = None
+      unit_name = ""
+    rows.append({
+      "key": f"charc:{charc_id}" if charc_id else f"charc-name:{audit_normalized(name)}",
+      "charcId": charc_id,
+      "name": name,
+      "values": audit_card_values_from_characteristic(item),
+      "unitName": unit_name,
+    })
+  return rows
+
+
+def audit_meta_by_characteristic(subject_characteristics):
+  output = {}
+  for item in subject_characteristics if isinstance(subject_characteristics, list) else []:
+    if not isinstance(item, dict):
+      continue
+    charc_id = item.get("charcID") or item.get("charcId")
+    name = audit_str(item.get("name") or "")
+    keys = []
+    if charc_id:
+      keys.append(f"charc:{charc_id}")
+    if name:
+      keys.append(f"charc-name:{audit_normalized(name)}")
+    for key in keys:
+      output[key] = item
+  return output
+
+
+def audit_characteristic_name_score(left, right):
+  left_norm = audit_normalized(left)
+  right_norm = audit_normalized(right)
+  if not left_norm or not right_norm:
+    return 0
+  if left_norm == right_norm:
+    return 1
+  left_tokens = set(audit_tokens(left_norm))
+  right_tokens = set(audit_tokens(right_norm))
+  if not left_tokens or not right_tokens:
+    return 0
+  overlap = len(left_tokens & right_tokens)
+  if not overlap:
+    return 0
+  return min(overlap / max(len(left_tokens), len(right_tokens)), overlap / min(len(left_tokens), len(right_tokens)))
+
+
+def audit_mpstats_matches(name, mpstats_characteristics):
+  matches = []
+  for item in mpstats_characteristics if isinstance(mpstats_characteristics, list) else []:
+    score = audit_characteristic_name_score(name, item.get("name") if isinstance(item, dict) else "")
+    if score >= 0.5:
+      matches.append((score, item))
+  return [item for _, item in sorted(matches, key=lambda pair: pair[0], reverse=True)]
+
+
+def audit_mpstats_value_stats(name, mpstats_characteristics):
+  by_value = {}
+  for match in audit_mpstats_matches(name, mpstats_characteristics):
+    for raw_value in match.get("values", []) if isinstance(match, dict) else []:
+      if isinstance(raw_value, dict):
+        value = audit_str(raw_value.get("value") or raw_value.get("name") or "")
+        score = audit_number(raw_value.get("score"), 1)
+      else:
+        value = audit_str(raw_value)
+        score = 1
+      if not value:
+        continue
+      key = audit_normalized(value)
+      current = by_value.get(key, {"value": value, "score": 0})
+      current["score"] += max(0, score or 0)
+      by_value[key] = current
+  values = sorted(by_value.values(), key=lambda item: (-item["score"], item["value"].lower()))
+  total = sum(item["score"] for item in values)
+  for item in values:
+    item["share"] = (item["score"] / total) if total > 0 else None
+  return values
+
+
+def audit_characteristic_limit(meta):
+  if not isinstance(meta, dict):
+    return None
+  if audit_int(meta.get("charcType"), None) == 4:
+    return 1
+  max_count = audit_int(meta.get("maxCount"), 0)
+  return max_count if max_count > 0 else None
+
+
+def audit_promotion_relevant(meta, mpstats_matches):
+  if isinstance(meta, dict) and any(bool(meta.get(key)) for key in ("required", "popular", "hasFilter", "isVariable")):
+    return True
+  return any(bool(item.get("promotionRelevant")) for item in mpstats_matches if isinstance(item, dict))
+
+
+def audit_format_count(value):
+  number = audit_number(value)
+  if number is None:
+    return ""
+  return f"{int(number):,}".replace(",", " ")
+
+
+def audit_keywords_from_payload(payload):
+  data = payload.get("data") if isinstance(payload, dict) else {}
+  words = []
+  if isinstance(data, dict) and isinstance(data.get("words"), list):
+    words = data.get("words")
+  elif isinstance(payload, dict) and isinstance(payload.get("words"), list):
+    words = payload.get("words")
+  else:
+    words = audit_extract_list(payload)
+  output = []
+  for item in words:
+    if not isinstance(item, dict):
+      continue
+    query = audit_str(item.get("query") or item.get("keyword") or item.get("word") or "")
+    if not query:
+      continue
+    output.append({
+      "query": query,
+      "wbCount": audit_int(item.get("wb_count") or item.get("wbCount") or item.get("count"), 0),
+      "orgPos": item.get("avg_organic_position") or item.get("orgPos") or item.get("organic_position"),
+      "adPos": item.get("avg_ad_position") or item.get("adPos") or item.get("ad_position"),
+      "avgPos": item.get("avg_position") or item.get("avgPos") or item.get("position"),
+      "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
+    })
+  return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:30]
+
+
+def audit_normalize_subject_item(item):
+  if not isinstance(item, dict):
+    return None
+  nm_id = item.get("id") or item.get("itemid") or item.get("nmId") or item.get("nmID")
+  if not nm_id:
+    return None
+  return {
+    "nmId": nm_id,
+    "title": audit_str(item.get("name") or item.get("title") or ""),
+    "brand": audit_str(item.get("brand") or ""),
+    "seller": audit_str(item.get("seller") or ""),
+    "supplierId": item.get("supplier_id") or item.get("supplierId"),
+    "price": audit_number(item.get("final_price") or item.get("price"), 0),
+    "sales": audit_int(item.get("sales"), 0),
+    "revenue": audit_number(item.get("revenue"), 0),
+    "comments": audit_int(item.get("comments") or item.get("feedbacks"), 0),
+    "rating": audit_number(item.get("rating"), None),
+    "position": item.get("category_position") or item.get("position"),
+    "balance": audit_number(item.get("balance"), 0),
+    "salesPerDay": audit_number(item.get("sales_per_day") or item.get("salesPerDay"), 0),
+    "lostProfit": audit_number(item.get("lost_profit") or item.get("lostProfit"), None),
+  }
+
+
+def audit_is_fake_market_item(item):
+  sales = audit_number(item.get("sales"), 0) or 0
+  balance = audit_number(item.get("balance"), 0) or 0
+  sales_per_day = audit_number(item.get("salesPerDay"), 0) or 0
+  comments = audit_number(item.get("comments"), 0) or 0
+  price = audit_number(item.get("price"), 0) or 0
+  revenue = audit_number(item.get("revenue"), 0) or 0
+  if sales >= 999990 or balance >= 999990 or abs(sales_per_day - 32258) < 2:
+    return True
+  if sales >= 2000 and comments <= 0:
+    return True
+  if sales >= 1000 and comments <= sales * 0.005:
+    return True
+  if sales >= 1000 and price > 0 and revenue > 0:
+    expected = price * sales
+    if abs(revenue - expected) > expected * 0.75:
+      return True
+  return False
+
+
+def audit_fetch_wb_cdn_card(nm_id, warnings):
+  try:
+    nm_int = int(nm_id)
+  except (TypeError, ValueError):
+    return {}
+  vol = nm_int // 100000
+  part = nm_int // 1000
+  for basket in range(1, 28):
+    url = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/info/ru/card.json"
+    try:
+      request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "OptiCards/0.1 audit-wb-cdn"})
+      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        return json.loads(response.read().decode("utf-8"))
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError):
+      continue
+  warnings.append(f"WB CDN card.json недоступен для {nm_id}")
+  return {}
+
+
+def audit_merge_card_content(card, cdn_card):
+  if not isinstance(card, dict):
+    card = {}
+  if not isinstance(cdn_card, dict):
+    cdn_card = {}
+  selling = cdn_card.get("selling") if isinstance(cdn_card.get("selling"), dict) else {}
+  title = audit_str(card.get("title") or cdn_card.get("imt_name") or cdn_card.get("imtName") or cdn_card.get("name") or "")
+  description = audit_str(card.get("description") or cdn_card.get("description") or "", 7000)
+  characteristics = card.get("characteristics") if isinstance(card.get("characteristics"), list) else []
+  if not characteristics:
+    options = cdn_card.get("grouped_options") or cdn_card.get("options") or []
+    if isinstance(options, list):
+      characteristics = [
+        {
+          "name": item.get("name") or item.get("group_name") or item.get("charcName"),
+          "value": item.get("value") or item.get("values"),
+        }
+        for item in options if isinstance(item, dict)
+      ]
+  return {
+    **card,
+    "title": title,
+    "description": description,
+    "brand": audit_str(card.get("brand") or selling.get("brand_name") or ""),
+    "subjectID": card.get("subjectID") or card.get("subjectId"),
+    "subjectName": audit_str(card.get("subjectName") or cdn_card.get("subj_name") or cdn_card.get("subject_name") or ""),
+    "characteristics": characteristics,
+  }
+
+
+def audit_market_data(nm_id, subject_id, period, warnings):
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    warnings.append("MPStats ключ не настроен: аудит выполнен по WB snapshot и локальным правилам")
+    return {"keywords": [], "stats": {}, "nicheItems": [], "brands": [], "priceSegmentation": {}, "season": {}, "info": {}}
+
+  d1 = period.get("d1")
+  d2 = period.get("d2")
+  info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{nm_id}", warnings, cache_ttl=86400)
+  stats_payload = audit_mpstats_get(token, f"/analytics/v1/wb/items/{nm_id}/full?{urlencode({'d1': d1, 'd2': d2})}", warnings, cache_ttl=86400)
+  keywords_payload = audit_mpstats_post(
+    token,
+    f"/analytics/v1/wb/items/{nm_id}/keywords",
+    {"d1": d1, "d2": d2},
+    {"startRow": 0, "endRow": 500, "filterModel": {}, "sortModel": []},
+    warnings,
+    cache_ttl=86400,
+  )
+  subject_params = {"d1": d1, "d2": d2}
+  if subject_id:
+    subject_params["subject_id"] = subject_id
+  subject_body = {"startRow": 0, "endRow": 300, "filterModel": {}, "sortModel": [{"colId": "revenue", "sort": "desc"}]}
+  subject_items_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/items", subject_params, subject_body, warnings)
+  brands_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/brands", subject_params, subject_body, warnings)
+  price_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/price_segmentation", subject_params, subject_body, warnings)
+  season_payload = audit_mpstats_get(token, f"/analytics/v1/wb/subject/season_effects/annual?{urlencode({'subject_id': subject_id})}", warnings, cache_ttl=30 * 86400) if subject_id else {}
+
+  stats = stats_payload.get("period_stats") if isinstance(stats_payload, dict) else {}
+  if not isinstance(stats, dict):
+    stats = stats_payload if isinstance(stats_payload, dict) else {}
+  niche_items = [
+    item for item in (audit_normalize_subject_item(row) for row in audit_extract_list(subject_items_payload))
+    if item and not audit_is_fake_market_item(item)
+  ]
+  return {
+    "info": info if isinstance(info, dict) else {},
+    "stats": stats,
+    "keywords": audit_keywords_from_payload(keywords_payload),
+    "nicheItems": sorted(niche_items, key=lambda item: audit_number(item.get("revenue"), 0) or 0, reverse=True)[:80],
+    "brands": audit_extract_list(brands_payload)[:30],
+    "priceSegmentation": price_payload if isinstance(price_payload, dict) else {},
+    "season": season_payload if isinstance(season_payload, dict) else {},
+  }
+
+
+def audit_pick_competitors(nm_id, market_data, warnings):
+  competitors = []
+  seen = {str(nm_id)}
+  for item in market_data.get("nicheItems", []):
+    if str(item.get("nmId")) in seen:
+      continue
+    seen.add(str(item.get("nmId")))
+    competitors.append(item)
+    if len(competitors) >= 3:
+      break
+  for competitor in competitors:
+    cdn_warnings = []
+    cdn_card = audit_fetch_wb_cdn_card(competitor.get("nmId"), cdn_warnings)
+    competitor["descriptionLength"] = len(audit_str(cdn_card.get("description") if isinstance(cdn_card, dict) else ""))
+    competitor["characteristics"] = audit_card_characteristics(audit_merge_card_content({}, cdn_card))
+  if not competitors and market_data.get("keywords"):
+    warnings.append("Не удалось выбрать конкурентов из MPStats subject/items")
+  return competitors
+
+
+def audit_title_candidate(card, keywords):
+  current = audit_str(card.get("title") or "")
+  subject = audit_str(card.get("subjectName") or "")
+  brand = audit_str(card.get("brand") or "")
+  top_missing = [item for item in keywords if item.get("wbCount") and not audit_contains_phrase(current, item.get("query"))]
+  phrase = top_missing[0]["query"] if top_missing else ""
+  base = phrase or current or subject or "Карточка WB"
+  extras = []
+  if subject and not audit_contains_phrase(base, subject):
+    extras.append(subject)
+  if brand and len(base) + len(brand) + 1 <= 60 and not audit_contains_phrase(base, brand):
+    extras.append(brand)
+  candidate = " ".join([base, *extras]).replace("  ", " ").strip()
+  if len(candidate) > 60:
+    candidate = candidate[:60].rsplit(" ", 1)[0].strip() or candidate[:60].strip()
+  return candidate or current[:60]
+
+
+def audit_description_candidate(card, keywords, competitors, characteristic_recommendations):
+  current = audit_str(card.get("description") or "", 5000)
+  title = audit_str(card.get("title") or card.get("subjectName") or "Товар")
+  subject = audit_str(card.get("subjectName") or "")
+  brand = audit_str(card.get("brand") or "")
+  keyword_phrases = [item["query"] for item in keywords[:5] if item.get("query") and not audit_contains_phrase(current, item["query"])]
+  char_values = []
+  for item in characteristic_recommendations:
+    if item.get("priority") in {"high", "medium"}:
+      char_values.extend(item.get("recommendedValues") or item.get("currentValues") or [])
+  details = audit_unique(char_values, limit=6)
+  additions = []
+  if keyword_phrases:
+    additions.append(f"Добавьте в текст поисковые формулировки: {', '.join(keyword_phrases[:3])}.")
+  if details:
+    additions.append(f"Раскройте важные свойства товара: {', '.join(details[:5])}.")
+  if competitors:
+    lengths = [item.get("descriptionLength") for item in competitors if item.get("descriptionLength")]
+    if lengths:
+      additions.append(f"У ближайших конкурентов описание до {max(lengths)} знаков; у текущей карточки {len(current)}.")
+  additions.append("Опишите состав, назначение, сценарии применения, комплектацию и ограничения простым языком для покупателя.")
+  if current and len(current) >= 350 and not keyword_phrases:
+    return current
+  intro = ". ".join(audit_unique([title, brand, subject], limit=3))
+  generated = "\n\n".join([part for part in [intro + "." if intro else "", *additions] if part])
+  if current:
+    return f"{current}\n\n{generated}".strip()
+  return generated.strip()
+
+
+def audit_build_characteristics(card, subject_characteristics, mpstats_characteristics):
+  rows = audit_card_characteristics(card)
+  meta_by_key = audit_meta_by_characteristic(subject_characteristics)
+  output = []
+  draft = {}
+  seen_keys = set()
+  for row in rows:
+    meta = meta_by_key.get(row["key"]) or meta_by_key.get(f"charc-name:{audit_normalized(row['name'])}") or {}
+    stats = audit_mpstats_value_stats(row["name"], mpstats_characteristics)
+    matches = audit_mpstats_matches(row["name"], mpstats_characteristics)
+    current_values = row["values"]
+    current_set = {audit_normalized(value) for value in current_values}
+    limit = audit_characteristic_limit(meta)
+    recommended = []
+    for item in stats:
+      if audit_normalized(item["value"]) not in current_set:
+        recommended.append(item["value"])
+      if limit and len(current_values) + len(recommended) >= limit:
+        break
+      if not limit and len(recommended) >= 3:
+        break
+    is_relevant = audit_promotion_relevant(meta, matches)
+    priority = "high" if recommended and is_relevant else "medium" if recommended else "low"
+    top_values = [
+      {"value": item["value"], "share": item["share"], "source": "mpstats"}
+      for item in stats[:5]
+    ]
+    reason = ""
+    if recommended and top_values:
+      formatted = ", ".join(
+        f"{item['value']} ({round((item['share'] or 0) * 100)}%)" if item.get("share") is not None else item["value"]
+        for item in top_values[:3]
+      )
+      reason = f"MPStats по нише чаще показывает: {formatted}. У текущей карточки этих значений нет."
+    elif not current_values:
+      reason = "Характеристика пустая в WB snapshot; перед публикацией ее нужно проверить."
+    else:
+      reason = "Текущее значение заполнено; аудит оставил его как базу для ручной проверки."
+    result_item = {
+      "name": row["name"],
+      "charcId": row["charcId"],
+      "currentValues": current_values,
+      "recommendedValues": recommended,
+      "topCategoryValues": top_values,
+      "isPromotionRelevant": is_relevant,
+      "limit": limit,
+      "reason": reason,
+      "priority": priority,
+    }
+    output.append(result_item)
+    next_values = audit_unique([*recommended, *current_values], limit=limit or 8)
+    draft[row["key"]] = {
+      "charcID": row["charcId"],
+      "label": row["name"],
+      "value": ", ".join(next_values),
+      "values": next_values,
+      "source": "audit",
+      "reason": reason,
+      "unitName": row.get("unitName") or (meta.get("unitName") if isinstance(meta, dict) else ""),
+      "maxCount": meta.get("maxCount") if isinstance(meta, dict) else None,
+      "charcType": meta.get("charcType") if isinstance(meta, dict) else None,
+    }
+    seen_keys.add(row["key"])
+
+  for meta in subject_characteristics if isinstance(subject_characteristics, list) else []:
+    if not isinstance(meta, dict):
+      continue
+    key = f"charc:{meta.get('charcID') or meta.get('charcId')}" if (meta.get("charcID") or meta.get("charcId")) else f"charc-name:{audit_normalized(meta.get('name'))}"
+    if key in seen_keys or not (meta.get("required") or meta.get("popular") or meta.get("hasFilter")):
+      continue
+    stats = audit_mpstats_value_stats(meta.get("name"), mpstats_characteristics)
+    if not stats and not meta.get("required"):
+      continue
+    limit = audit_characteristic_limit(meta)
+    recommended = [item["value"] for item in stats[:limit or 3]]
+    reason = "Поле есть в справочнике WB как важное/фильтруемое; аудит предлагает проверить заполнение."
+    if stats:
+      reason = f"Поле важно для категории; MPStats часто показывает значения: {', '.join(recommended[:3])}."
+    result_item = {
+      "name": audit_str(meta.get("name") or "Характеристика"),
+      "charcId": meta.get("charcID") or meta.get("charcId"),
+      "currentValues": [],
+      "recommendedValues": recommended,
+      "topCategoryValues": [{"value": item["value"], "share": item["share"], "source": "mpstats"} for item in stats[:5]],
+      "isPromotionRelevant": True,
+      "limit": limit,
+      "reason": reason,
+      "priority": "high" if meta.get("required") else "medium",
+    }
+    output.append(result_item)
+    if recommended:
+      draft[key] = {
+        "charcID": result_item["charcId"],
+        "label": result_item["name"],
+        "value": ", ".join(recommended),
+        "values": recommended,
+        "source": "audit",
+        "reason": reason,
+        "unitName": meta.get("unitName") or "",
+        "maxCount": meta.get("maxCount"),
+        "charcType": meta.get("charcType"),
+      }
+  output.sort(key=lambda item: {"high": 0, "medium": 1, "low": 2}.get(item.get("priority"), 3))
+  return output[:40], draft
+
+
+def audit_build_result(card, market_data, competitors, characteristics, warnings, period):
+  keywords = market_data.get("keywords", [])
+  current_title = audit_str(card.get("title") or "")
+  recommended_title = audit_title_candidate(card, keywords)
+  missing_keywords = [item for item in keywords[:8] if not audit_contains_phrase(current_title, item.get("query"))]
+  title_reason = "Название собрано по текущим данным WB."
+  title_priority = "low"
+  if missing_keywords:
+    top = missing_keywords[0]
+    pos = top.get("orgPos")
+    pos_text = f", органическая позиция {pos}" if pos not in (None, "", 0, "0") else ", в органике не найдено"
+    title_reason = f"Запрос «{top['query']}» ({audit_format_count(top.get('wbCount'))} показов/мес){pos_text}; его нет в текущем заголовке."
+    title_priority = "high" if audit_int(top.get("wbCount"), 0) >= 1000 else "medium"
+  elif len(current_title) > 60:
+    title_reason = "Название длиннее лимита WB 60 символов; аудит предлагает укоротить без потери предмета."
+    title_priority = "high"
+
+  description = audit_str(card.get("description") or "", 7000)
+  recommended_description = audit_description_candidate(card, keywords, competitors, characteristics)
+  competitor_lengths = [item.get("descriptionLength") for item in competitors if item.get("descriptionLength")]
+  description_reason = "Описание проверено по длине, запросам и данным карточки."
+  description_priority = "low"
+  if not description:
+    description_reason = "В WB snapshot нет описания; аудит подготовил базовый текст из фактов карточки и ниши."
+    description_priority = "high"
+  elif len(description) < 350:
+    tail = f"; у конкурента до {max(competitor_lengths)}" if competitor_lengths else ""
+    description_reason = f"Описание короткое: {len(description)} знаков{tail}. Нужно раскрыть свойства и поисковые формулировки."
+    description_priority = "medium"
+  elif missing_keywords:
+    description_reason = f"В описании стоит проверить вхождения частотных запросов, например «{missing_keywords[0]['query']}»."
+    description_priority = "medium"
+
+  current_subject = audit_str(card.get("subjectName") or market_data.get("info", {}).get("subject") or "")
+  category_reason = "Предмет карточки совпадает с WB snapshot; смена категории не предлагается без подтверждения данными."
+  confidence = 0.75
+  if market_data.get("nicheItems"):
+    category_reason = f"Ниша проверена по MPStats subject/items: найдено {len(market_data['nicheItems'])} карточек после фильтра аномалий."
+    confidence = 0.9
+
+  competitors_result = []
+  for item in competitors[:3]:
+    why = f"Выбран из топа ниши по выручке: {audit_format_count(item.get('revenue'))} ₽ за период."
+    if item.get("sales"):
+      why += f" Продажи: {audit_format_count(item.get('sales'))}."
+    competitors_result.append({
+      "nmId": item.get("nmId"),
+      "url": f"https://www.wildberries.ru/catalog/{item.get('nmId')}/detail.aspx",
+      "position": item.get("position"),
+      "whyRelevant": why,
+    })
+
+  high_characteristics = [item for item in characteristics if item.get("priority") == "high"]
+  quick_wins = []
+  if title_priority in {"high", "medium"} and recommended_title != current_title:
+    quick_wins.append(f"Переписать заголовок под частотный запрос: {recommended_title}.")
+  quick_wins.extend(
+    f"Заполнить «{item['name']}»: {', '.join(item.get('recommendedValues') or [])}."
+    for item in high_characteristics[:3]
+    if item.get("recommendedValues")
+  )
+  main_problems = []
+  if title_priority == "high":
+    main_problems.append(title_reason)
+  if high_characteristics:
+    main_problems.append(f"{len(high_characteristics)} промо-значимых характеристик требуют проверки по MPStats/WB.")
+  if description_priority in {"high", "medium"}:
+    main_problems.append(description_reason)
+  risk_notes = list(warnings)
+  if not market_data.get("keywords"):
+    risk_notes.append("SEO-запросы MPStats не получены: заголовок и описание оценены по WB snapshot и локальным правилам.")
+  if characteristics and any(item.get("topCategoryValues") for item in characteristics):
+    risk_notes.append("Доли значений характеристик рассчитаны по MPStats/выборке и требуют ручной проверки специалистом перед публикацией.")
+
+  return {
+    "category": {
+      "current": current_subject or "Категория не указана",
+      "recommended": current_subject or "Категория не указана",
+      "confidence": confidence,
+      "reason": category_reason,
+    },
+    "competitors": competitors_result,
+    "title": {
+      "current": current_title,
+      "recommended": recommended_title,
+      "reason": title_reason,
+      "priority": title_priority,
+    },
+    "description": {
+      "currentSummary": f"{len(description)} знаков" if description else "Описание пустое",
+      "recommended": recommended_description,
+      "reason": description_reason,
+      "priority": description_priority,
+    },
+    "characteristics": characteristics,
+    "summary": {
+      "mainProblems": main_problems[:3] or ["Критичные проблемы не подтверждены данными; нужна ручная проверка специалиста."],
+      "quickWins": quick_wins[:5] or ["Проверить черновик характеристик и сохранить подтвержденные значения."],
+      "strategicRecommendations": [
+        "Сравнить карточку с топом ниши по выручке и проверить цену, отзывы, фото и рекламные позиции отдельным этапом.",
+        "Накопить историю аудитов по предмету, чтобы переиспользовать рабочие формулировки и значения характеристик.",
+      ],
+      "riskNotes": risk_notes[:8],
+    },
+    "_meta": {
+      "engine": "opticards-deterministic-sergey-v1",
+      "period": period,
+      "generatedAt": utc_now().isoformat(),
+    },
+  }
+
+
+def audit_result_valid(payload):
+  return isinstance(payload, dict) and all(key in payload for key in AUDIT_REQUIRED_KEYS)
+
+
+def audit_llm_refine(evidence, base_result, warnings):
+  token = audit_str(OPTICARDS_LLM_API_KEY)
+  if not token:
+    return base_result
+  url = f"{OPTICARDS_LLM_API_BASE.rstrip('/')}/chat/completions"
+  body = {
+    "model": OPTICARDS_LLM_MODEL,
+    "temperature": 0.2,
+    "response_format": {"type": "json_object"},
+    "messages": [
+      {"role": "system", "content": AUDIT_LLM_SYSTEM_PROMPT},
+      {"role": "user", "content": json.dumps({"evidenceBundle": evidence, "baseResult": base_result}, ensure_ascii=False)},
+    ],
+  }
+  request = urlrequest.Request(
+    url,
+    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+    headers={
+      "Authorization": f"Bearer {token}",
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "User-Agent": "OptiCards/0.1 audit-llm",
+    },
+    method="POST",
+  )
+  try:
+    with urlrequest.urlopen(request, timeout=45) as response:
+      payload = json.loads(response.read().decode("utf-8"))
+    content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+    refined = json.loads(content)
+    if not audit_result_valid(refined):
+      warnings.append("LLM вернул неполный JSON: использован deterministic audit")
+      return base_result
+    refined["_meta"] = {
+      **(refined.get("_meta") if isinstance(refined.get("_meta"), dict) else {}),
+      "engine": "opticards-llm-sergey-v1",
+      "model": OPTICARDS_LLM_MODEL,
+      "baseEngine": base_result.get("_meta", {}).get("engine"),
+      "generatedAt": utc_now().isoformat(),
+    }
+    return refined
+  except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+    warnings.append(f"LLM refinement недоступен: {type(exc).__name__}")
+    return base_result
+
+
+def audit_draft_from_result(result, characteristic_draft):
+  characteristics = {key: {**value} for key, value in (characteristic_draft or {}).items()}
+  for item in result.get("characteristics", []) if isinstance(result.get("characteristics"), list) else []:
+    if not isinstance(item, dict):
+      continue
+    charc_id = item.get("charcId") or item.get("charcID")
+    name = audit_str(item.get("name") or "Характеристика")
+    key = f"charc:{charc_id}" if charc_id else f"charc-name:{audit_normalized(name)}"
+    current_values = item.get("currentValues") if isinstance(item.get("currentValues"), list) else []
+    recommended_values = item.get("recommendedValues") if isinstance(item.get("recommendedValues"), list) else []
+    values = audit_unique([*recommended_values, *current_values], limit=audit_int(item.get("limit"), 0) or 8)
+    if not values and key not in characteristics:
+      continue
+    existing = characteristics.get(key, {})
+    characteristics[key] = {
+      **existing,
+      "charcID": charc_id or existing.get("charcID"),
+      "label": name or existing.get("label"),
+      "value": ", ".join(values) if values else existing.get("value", ""),
+      "values": values or existing.get("values", []),
+      "source": "audit",
+      "reason": audit_str(item.get("reason") or existing.get("reason") or ""),
+    }
+  return {
+    "title": {
+      "value": audit_str(result.get("title", {}).get("recommended") or result.get("title", {}).get("current") or ""),
+      "source": "audit",
+      "reason": audit_str(result.get("title", {}).get("reason") or ""),
+    },
+    "description": {
+      "value": audit_str(result.get("description", {}).get("recommended") or "", 7000),
+      "source": "audit",
+      "reason": audit_str(result.get("description", {}).get("reason") or ""),
+    },
+    "characteristics": characteristics,
+  }
+
+
+def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None, mpstats_characteristics=None, period=None):
+  period = period if isinstance(period, dict) and period.get("d1") and period.get("d2") else audit_period_default()
+  warnings = []
+  card = raw_card if isinstance(raw_card, dict) else {}
+  if portal_id and str(portal_id) != "demo-wb":
+    init_db()
+    with connect_db() as db:
+      row = db.execute("SELECT cards_snapshot_json FROM portals WHERE id = ?", (int(portal_id),)).fetchone()
+    snapshot_card = snapshot_card_lookup(row["cards_snapshot_json"] if row else "").get(card_key)
+    if snapshot_card:
+      card = snapshot_card
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = card.get("nmID") or card.get("nmId") or card.get("nm_id") or raw_fields.get("nmID") or raw_fields.get("nmId")
+  nm_id = audit_str(nm_id)
+  if not nm_id:
+    raise ValueError("missing_nm_id")
+  cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  card = audit_merge_card_content(card, cdn_card)
+  subject_id = card.get("subjectID") or card.get("subjectId")
+  subject_characteristics = subject_characteristics if isinstance(subject_characteristics, list) else []
+  if not subject_characteristics and portal_id and subject_id:
+    try:
+      wb_token, _ = get_wb_token_for_portal(portal_id)
+      if wb_token:
+        subject_characteristics = fetch_wb_subject_characteristics(wb_token, subject_id).get("characteristics", [])
+    except (WbApiError, ValueError):
+      warnings.append("WB справочник характеристик не получен")
+  if not isinstance(mpstats_characteristics, list) or not mpstats_characteristics:
+    try:
+      mpstats_payload = fetch_mpstats_characteristics("subject", subject_id, num_top=300, min_cats=0, force_refresh=False, cache_only=False) if subject_id else {}
+      mpstats_characteristics = mpstats_payload.get("characteristics", []) if isinstance(mpstats_payload, dict) else []
+    except (MpstatsApiError, ValueError, RuntimeError):
+      mpstats_characteristics = []
+      warnings.append("MPStats characteristics-analysis не получен")
+
+  market_data = audit_market_data(nm_id, subject_id, period, warnings)
+  competitors = audit_pick_competitors(nm_id, market_data, warnings)
+  characteristics, characteristic_draft = audit_build_characteristics(card, subject_characteristics, mpstats_characteristics)
+  base_result = audit_build_result(card, market_data, competitors, characteristics, warnings, period)
+  evidence = {
+    "input": {"nmId": nm_id, "subjectId": subject_id, "period": period},
+    "card": {
+      "nmId": nm_id,
+      "title": card.get("title"),
+      "brand": card.get("brand"),
+      "subject": card.get("subjectName"),
+      "subjectId": subject_id,
+      "descriptionLength": len(card.get("description") or ""),
+      "characteristics": audit_card_characteristics(card),
+    },
+    "stats": market_data.get("stats"),
+    "keywords": market_data.get("keywords"),
+    "niche": {
+      "topByRevenue": market_data.get("nicheItems", [])[:10],
+      "brandsTop": market_data.get("brands", [])[:10],
+      "priceSegmentation": market_data.get("priceSegmentation"),
+    },
+    "competitors": competitors,
+    "mpstatsCharacteristics": mpstats_characteristics[:80],
+    "warnings": warnings,
+  }
+  result = audit_llm_refine(evidence, base_result, warnings)
+  if result is not base_result:
+    result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *warnings], limit=8)
+  draft_content = audit_draft_from_result(result, characteristic_draft)
+  changed_characteristics = sum(1 for item in draft_content.get("characteristics", {}).values() if item.get("source") == "audit")
+  return {
+    "auditResult": result,
+    "draftContent": draft_content,
+    "auditEntry": {
+      "id": f"audit-{int(time.time() * 1000)}",
+      "createdAt": utc_now().isoformat(),
+      "engine": result.get("_meta", {}).get("engine", "opticards-audit"),
+      "sourceInputs": ["wb_snapshot", "wb_cdn", "wb_subject_characteristics", "mpstats_market", "mpstats_characteristics", "llm_optional"],
+      "mpstatsGroups": len(mpstats_characteristics),
+      "mpstatsMatches": sum(1 for item in characteristics if item.get("topCategoryValues")),
+      "promotionRelevantCount": sum(1 for item in characteristics if item.get("isPromotionRelevant")),
+      "changedCharacteristics": changed_characteristics,
+      "content": {
+        "titleChanged": audit_normalized(draft_content["title"]["value"]) != audit_normalized(result.get("title", {}).get("current")),
+        "descriptionChanged": True,
+        "titleReason": draft_content["title"]["reason"],
+        "descriptionReason": draft_content["description"]["reason"],
+      },
+      "summary": result.get("summary", {}),
+      "status": "done" if not warnings else "partial",
+    },
+    "evidenceSummary": {
+      "period": period,
+      "keywords": len(market_data.get("keywords", [])),
+      "competitors": len(competitors),
+      "mpstatsCharacteristics": len(mpstats_characteristics),
+      "warnings": warnings,
+    },
+    "mpstatsCharacteristics": mpstats_characteristics,
+  }
+
+
 def get_wb_token_for_portal(portal_id):
   if str(portal_id) == "demo-wb":
     token = os.environ.get(WB_ENV_TOKEN, "").strip()
@@ -3366,6 +4326,43 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_key"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-audit":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      portal_id = str(payload.get("portalId") or payload.get("portal_id") or "demo-wb")
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key") or "")
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      if not card_key:
+        card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
+      if not card_key:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_card_key"})
+        return
+      try:
+        result = build_card_audit(
+          portal_id,
+          card_key,
+          raw_card,
+          subject_characteristics=None,
+          mpstats_characteristics=None,
+          period=payload.get("period"),
+        )
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_audit_request"})
+        return
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

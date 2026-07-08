@@ -2306,6 +2306,30 @@ tr:last-child td {
   font-style: normal;
 }
 
+.audit-findings {
+  gap: 12px;
+}
+
+.audit-finding-group {
+  display: grid;
+  gap: 6px;
+}
+
+.audit-finding-group span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.audit-finding-group p {
+  margin: 0;
+}
+
+.audit-finding-group.muted p {
+  color: var(--muted);
+}
+
 .draft-source-line {
   display: flex;
   flex-wrap: wrap;

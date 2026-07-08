@@ -1798,6 +1798,8 @@ function buildStructuredCardDraft({
   descriptionReason,
   characteristics,
   card,
+  auditResult,
+  evidenceSummary,
 }) {
   return {
     version: 2,
@@ -1825,6 +1827,8 @@ function buildStructuredCardDraft({
         expectedOutputs: ["value", "reason", "evidence", "confidence"],
       },
       auditHistory: Array.isArray(auditHistory) ? auditHistory.slice(0, 20) : [],
+      auditResult: auditResult || null,
+      evidenceSummary: evidenceSummary || null,
       card: {
         nmID: card?.nmID || "",
         vendorCode: card?.vendorCode || "",
@@ -3588,6 +3592,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const approvalReadOnly = isProjectLead || (approval.status === "submitted" && isApprovalReviewer);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(approval.status);
   const canReviewApproval = approval.status === "submitted" && isApprovalReviewer;
+  const latestAuditSummary = auditHistory.find((item) => item?.summary)?.summary || {};
+  const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
+  const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
+  const latestRiskNotes = Array.isArray(latestAuditSummary.riskNotes) ? latestAuditSummary.riskNotes : [];
 
   useEffect(() => {
     let active = true;
@@ -3756,7 +3764,98 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
-  async function runAuditStub() {
+  async function runAudit() {
+    setAuditStatus("loading");
+    try {
+      const payload = await apiRequest("/api/card-audit", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal?.id,
+          cardKey: draftCardKey,
+          card,
+        }),
+      });
+      const returnedMpstats = Array.isArray(payload.mpstatsCharacteristics) ? payload.mpstatsCharacteristics : [];
+      if (returnedMpstats.length) {
+        setMpstatsCharacteristics(returnedMpstats);
+        setMpstatsCharacteristicsStatus("loaded");
+        setMpstatsCharacteristicsMeta({
+          cached: false,
+          cachedAt: new Date().toISOString(),
+          expiresAt: "",
+          refreshError: null,
+        });
+      }
+      const draftContent = payload.draftContent || {};
+      const titleDraft = draftContent.title || {};
+      const descriptionDraft = draftContent.description || {};
+      const nextTitle = titleDraft.value || currentTitle;
+      const nextDescription = descriptionDraft.value || description;
+      const nextTitleReason = titleDraft.reason || payload.auditResult?.title?.reason || "";
+      const nextDescriptionReason = descriptionDraft.reason || payload.auditResult?.description?.reason || "";
+      const nextDraftCharacteristics = normalizeDraftCharacteristics(
+        draftContent.characteristics || characteristicDraftsFromRows(characteristicItems, "audit", returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics, subjectCharacteristics)
+      );
+      const fallbackEntry = {
+        id: `audit-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        engine: payload.auditResult?._meta?.engine || "opticards-backend-audit",
+        sourceInputs: ["wb_snapshot", "mpstats_market", "sergey_methodology"],
+        mpstatsGroups: returnedMpstats.length || mpstatsCharacteristics.length,
+        mpstatsMatches: countMpstatsMatches(characteristicItems, subjectCharacteristics, returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics),
+        promotionRelevantCount: countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics),
+        changedCharacteristics: Object.keys(nextDraftCharacteristics).length,
+        content: {
+          titleChanged: normalizedCharacteristicOption(nextTitle) !== normalizedCharacteristicOption(currentTitle),
+          descriptionChanged: normalizedCharacteristicOption(nextDescription) !== normalizedCharacteristicOption(description),
+          titleReason: nextTitleReason,
+          descriptionReason: nextDescriptionReason,
+        },
+        summary: payload.auditResult?.summary || {},
+        status: payload.evidenceSummary?.warnings?.length ? "partial" : "done",
+      };
+      const auditEntry = {
+        ...fallbackEntry,
+        ...(payload.auditEntry || {}),
+        summary: payload.auditEntry?.summary || payload.auditResult?.summary || fallbackEntry.summary,
+      };
+      const nextAuditHistory = [auditEntry, ...auditHistory].slice(0, 20);
+      const structuredDraft = buildStructuredCardDraft({
+        auditStatus: "done",
+        auditHistory: nextAuditHistory,
+        approval,
+        title: nextTitle,
+        description: nextDescription,
+        titleSource: "audit",
+        descriptionSource: "audit",
+        titleReason: nextTitleReason,
+        descriptionReason: nextDescriptionReason,
+        characteristics: nextDraftCharacteristics,
+        card,
+        auditResult: payload.auditResult,
+        evidenceSummary: payload.evidenceSummary,
+      });
+      setDraftTitle(nextTitle);
+      setDraftDescription(nextDescription);
+      setDraftTitleSource("audit");
+      setDraftDescriptionSource("audit");
+      setDraftTitleReason(nextTitleReason);
+      setDraftDescriptionReason(nextDescriptionReason);
+      setDraftCharacteristics(nextDraftCharacteristics);
+      setAuditHistory(nextAuditHistory);
+      setAuditStatus("done");
+      if (onDraftActivity) {
+        onDraftActivity({ audit: true, draft: true });
+      }
+      const persistPromise = persistStructuredDraft(structuredDraft, { auditDone: true });
+      setActiveTab("changes");
+      await persistPromise;
+    } catch (error) {
+      await runAuditLocalStub();
+    }
+  }
+
+  async function runAuditLocalStub() {
     setAuditStatus("loading");
     const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: false });
     const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
@@ -4173,6 +4272,32 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
                     </div>
                   ) : null}
+                  {auditDone && (latestMainProblems.length || latestQuickWins.length || latestRiskNotes.length) ? (
+                    <div className="issue audit-findings">
+                      <div className="issue-head">
+                        <strong>Выводы аудита</strong>
+                        <Tag tone={latestRiskNotes.length ? "amber" : "green"}>{latestRiskNotes.length ? "есть ограничения" : "доказательно"}</Tag>
+                      </div>
+                      {latestMainProblems.length ? (
+                        <div className="audit-finding-group">
+                          <span>Главное</span>
+                          {latestMainProblems.slice(0, 3).map((item, index) => <p key={`problem-${index}`}>{item}</p>)}
+                        </div>
+                      ) : null}
+                      {latestQuickWins.length ? (
+                        <div className="audit-finding-group">
+                          <span>Быстрые правки</span>
+                          {latestQuickWins.slice(0, 4).map((item, index) => <p key={`quick-${index}`}>{item}</p>)}
+                        </div>
+                      ) : null}
+                      {latestRiskNotes.length ? (
+                        <div className="audit-finding-group muted">
+                          <span>Что проверить вручную</span>
+                          {latestRiskNotes.slice(0, 3).map((item, index) => <p key={`risk-${index}`}>{item}</p>)}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="issue audit-history">
                     <div className="issue-head">
                       <strong>История аудитов</strong>
@@ -4193,7 +4318,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 </div>
                 <div className="tab-actions">
-                  <button className="btn primary" type="button" onClick={runAuditStub} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
+                  <button className="btn primary" type="button" onClick={runAudit} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
                 </div>
               </section>
             ) : null}
@@ -4680,10 +4805,10 @@ function ContentAuditSummary({
       </div>
       <div className="content-audit-card future">
         <div>
-          <strong>Будущий аудит</strong>
-          <Tag tone="blue">готово к модели</Tag>
+          <strong>Методика</strong>
+          <Tag tone="blue">MP Audit</Tag>
         </div>
-        <p>Черновик уже разделен на title, description и characteristics; контракт аудита готов принять reason, evidence и confidence от логики Сергея.</p>
+        <p>Рекомендации опираются на WB snapshot, MPStats, конкурентов и правило: нет источника — нет утверждения.</p>
       </div>
     </div>
   );
