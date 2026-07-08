@@ -61,13 +61,12 @@ WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
 MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
-MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "21600"))
+MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "86400"))
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
 WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
-MPSTATS_CHARACTERISTICS_CACHE = {}
 
 
 def utc_now():
@@ -179,6 +178,18 @@ def init_db():
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_checked_at TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS mpstats_characteristics_cache (
+        cache_key TEXT PRIMARY KEY,
+        report_type TEXT NOT NULL,
+        value TEXT NOT NULL,
+        num_top INTEGER NOT NULL,
+        min_cats INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TEXT NOT NULL
+      );
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "user_role" not in columns:
@@ -212,6 +223,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_drafts_portal_card
       ON card_drafts(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_mpstats_characteristics_cache_expires
+      ON mpstats_characteristics_cache(expires_at)
       """
     )
 
@@ -1498,21 +1515,97 @@ def normalize_mpstats_characteristics(payload):
   return rows
 
 
-def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0):
-  token = get_service_integration_secret(MPSTATS_PROVIDER)
-  if not token:
-    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+def mpstats_characteristics_cache_key(report_type, value, num_top, min_cats):
+  return f"{report_type}:{value}:{num_top}:{min_cats}"
+
+
+def normalize_mpstats_request(report_type, value, num_top=100, min_cats=0):
   report_type = str(report_type or "subject").strip()
   value = str(value or "").strip()
   if report_type not in {"category", "subject", "skus", "keywords"} or not value:
     raise ValueError("invalid_mpstats_characteristics_request")
   num_top = max(10, min(int(num_top or 100), 300))
   min_cats = max(0, min(int(min_cats or 0), 20))
-  cache_key = f"{report_type}:{value}:{num_top}:{min_cats}"
-  cached = MPSTATS_CHARACTERISTICS_CACHE.get(cache_key)
-  now_ts = time.time()
-  if cached and now_ts - cached["stored_at"] < MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS:
-    return {**cached["payload"], "cached": True}
+  return report_type, value, num_top, min_cats
+
+
+def load_mpstats_characteristics_cache(cache_key):
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT payload_json, updated_at, expires_at
+      FROM mpstats_characteristics_cache
+      WHERE cache_key = ?
+      """,
+      (cache_key,),
+    ).fetchone()
+  if not row:
+    return None
+  try:
+    expires_at = dt.datetime.fromisoformat(row["expires_at"])
+  except ValueError:
+    return None
+  if expires_at <= utc_now():
+    return None
+  try:
+    payload = json.loads(row["payload_json"])
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(payload, dict):
+    return None
+  return {
+    **payload,
+    "cached": True,
+    "cachedAt": row["updated_at"],
+    "expiresAt": row["expires_at"],
+  }
+
+
+def save_mpstats_characteristics_cache(cache_key, report_type, value, num_top, min_cats, payload, stored_at, expires_at):
+  with connect_db() as db:
+    db.execute(
+      """
+      INSERT INTO mpstats_characteristics_cache (
+        cache_key, report_type, value, num_top, min_cats, payload_json, created_at, updated_at, expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at,
+        expires_at = excluded.expires_at
+      """,
+      (
+        cache_key,
+        report_type,
+        value,
+        num_top,
+        min_cats,
+        json.dumps(payload, ensure_ascii=False),
+        stored_at,
+        stored_at,
+        expires_at,
+      ),
+    )
+
+
+def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0, force_refresh=False, cache_only=False):
+  report_type, value, num_top, min_cats = normalize_mpstats_request(report_type, value, num_top, min_cats)
+  cache_key = mpstats_characteristics_cache_key(report_type, value, num_top, min_cats)
+  if not force_refresh:
+    cached = load_mpstats_characteristics_cache(cache_key)
+    if cached:
+      return cached
+  if cache_only:
+    return {
+      "source": "mpstats",
+      "status": "cache-miss",
+      "characteristics": [],
+      "cached": False,
+    }
+
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
 
   create_payload = mpstats_post_json(
     token,
@@ -1537,6 +1630,9 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0):
       time.sleep(1)
 
   normalized = normalize_mpstats_characteristics(report_payload)
+  now = utc_now()
+  stored_at = now.isoformat()
+  expires_at = (now + dt.timedelta(seconds=MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS)).isoformat()
   payload = {
     "source": "mpstats",
     "status": "loaded" if normalized else "empty",
@@ -1544,8 +1640,10 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0):
     "input": report_payload.get("input", {}) if isinstance(report_payload, dict) else {},
     "characteristics": normalized,
     "cached": False,
+    "cachedAt": stored_at,
+    "expiresAt": expires_at,
   }
-  MPSTATS_CHARACTERISTICS_CACHE[cache_key] = {"stored_at": now_ts, "payload": payload}
+  save_mpstats_characteristics_cache(cache_key, report_type, value, num_top, min_cats, payload, stored_at, expires_at)
   return payload
 
 
@@ -2104,8 +2202,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_characteristics_request"})
         return
+      force_refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
+      cache_only = query.get("cache_only", ["0"])[0] in {"1", "true", "yes"}
       try:
-        payload = fetch_mpstats_characteristics(report_type, value, num_top=num_top, min_cats=min_cats)
+        payload = fetch_mpstats_characteristics(report_type, value, num_top=num_top, min_cats=min_cats, force_refresh=force_refresh, cache_only=cache_only)
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_characteristics_request"})
         return

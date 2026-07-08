@@ -1208,8 +1208,8 @@ function buildStocksExportSheets(card) {
   ];
 }
 
-function Tag({ children, tone = "amber" }) {
-  return <span className={`tag ${tone}`}>{children}</span>;
+function Tag({ children, tone = "amber", title = "" }) {
+  return <span className={`tag ${tone}`} title={title}>{children}</span>;
 }
 
 function IconButton({ icon: Icon, label, onClick, disabled = false }) {
@@ -2036,6 +2036,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [mpstatsCharacteristics, setMpstatsCharacteristics] = useState([]);
   const [mpstatsCharacteristicsStatus, setMpstatsCharacteristicsStatus] = useState("idle");
   const [mpstatsCharacteristicsMs, setMpstatsCharacteristicsMs] = useState(null);
+  const [mpstatsCharacteristicsMeta, setMpstatsCharacteristicsMeta] = useState({});
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -2059,14 +2060,21 @@ function CardDetailScreen({ card, portal, onBack }) {
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
   const mpstatsMatches = countMpstatsMatches(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
   const mpstatsDuration = requestDurationText(mpstatsCharacteristicsMs);
+  const mpstatsSourceLabel = mpstatsCharacteristicsMeta.cached ? "кэш" : (mpstatsCharacteristicsMeta.cachedAt ? "сейчас" : "");
+  const mpstatsUpdatedAt = mpstatsCharacteristicsMeta.cachedAt
+    ? new Date(mpstatsCharacteristicsMeta.cachedAt).toLocaleString("ru-RU")
+    : "";
   const mpstatsHintsLabel = {
-    loaded: `${mpstatsCharacteristics.length} MPStats · ${mpstatsMatches} совпало${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
+    loaded: `${mpstatsCharacteristics.length} MPStats · ${mpstatsMatches} совпало${mpstatsSourceLabel ? ` · ${mpstatsSourceLabel}` : ""}${!mpstatsCharacteristicsMeta.cached && mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     loading: "загрузка",
     empty: `MPStats пусто${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     error: `MPStats ошибка${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     unavailable: `MPStats недоступен${mpstatsDuration ? ` · ${mpstatsDuration}` : ""}`,
     "missing-subject": "нет subjectID",
   }[mpstatsCharacteristicsStatus] || (auditDone ? "есть рекомендации" : "ручной черновик");
+  const mpstatsHintsTitle = mpstatsUpdatedAt
+    ? `MPStats обновлен ${mpstatsUpdatedAt}${mpstatsCharacteristicsMeta.cached ? ". Загружено из backend-кэша." : "."}`
+    : "Подтянуть популярные значения характеристик из MPStats";
   const mpstatsHintsTone = ["loaded", "loading"].includes(mpstatsCharacteristicsStatus)
     ? "blue"
     : ["empty", "error", "unavailable", "missing-subject"].includes(mpstatsCharacteristicsStatus)
@@ -2085,6 +2093,7 @@ function CardDetailScreen({ card, portal, onBack }) {
     setMpstatsCharacteristics([]);
     setMpstatsCharacteristicsStatus("idle");
     setMpstatsCharacteristicsMs(null);
+    setMpstatsCharacteristicsMeta({});
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -2153,24 +2162,75 @@ function CardDetailScreen({ card, portal, onBack }) {
     };
   }, [card?.subjectID, rawFields.subjectID, portal?.id, portal?.mode]);
 
+  function mpstatsCharacteristicsPath(subjectID, { forceRefresh = false, cacheOnly = false } = {}) {
+    const params = new URLSearchParams({
+      portal_id: String(portal.id),
+      type: "subject",
+      value: String(subjectID),
+      num_top: "100",
+      min_cats: "0",
+    });
+    if (forceRefresh) {
+      params.set("refresh", "1");
+    }
+    if (cacheOnly) {
+      params.set("cache_only", "1");
+    }
+    return `/api/mpstats/characteristics?${params.toString()}`;
+  }
+
+  function applyMpstatsCharacteristicsPayload(payload, elapsedMs) {
+    const characteristics = payload.characteristics || [];
+    setMpstatsCharacteristicsMs(elapsedMs);
+    setMpstatsCharacteristics(characteristics);
+    setMpstatsCharacteristicsMeta({
+      cached: Boolean(payload.cached),
+      cachedAt: payload.cachedAt || "",
+      expiresAt: payload.expiresAt || "",
+    });
+    setMpstatsCharacteristicsStatus(characteristics.length ? "loaded" : "empty");
+  }
+
+  useEffect(() => {
+    const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
+    if (!subjectID || !portal?.id) {
+      return;
+    }
+    let active = true;
+    const startedAt = performance.now();
+    apiRequest(mpstatsCharacteristicsPath(subjectID, { cacheOnly: true }))
+      .then((payload) => {
+        if (!active || payload.status === "cache-miss") return;
+        applyMpstatsCharacteristicsPayload(payload, Math.round(performance.now() - startedAt));
+      })
+      .catch(() => {
+        if (!active) return;
+        setMpstatsCharacteristics([]);
+        setMpstatsCharacteristicsMeta({});
+      });
+    return () => {
+      active = false;
+    };
+  }, [card?.subjectID, rawFields.subjectID, portal?.id]);
+
   async function loadMpstatsCharacteristicHints() {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
     if (!subjectID || !portal?.id) {
       setMpstatsCharacteristicsStatus("missing-subject");
       setMpstatsCharacteristicsMs(null);
+      setMpstatsCharacteristicsMeta({});
       return;
     }
     const startedAt = performance.now();
     setMpstatsCharacteristicsStatus("loading");
     setMpstatsCharacteristicsMs(null);
     try {
-      const payload = await apiRequest(`/api/mpstats/characteristics?portal_id=${encodeURIComponent(portal.id)}&type=subject&value=${encodeURIComponent(subjectID)}&num_top=100&min_cats=0`);
-      setMpstatsCharacteristicsMs(Math.round(performance.now() - startedAt));
-      setMpstatsCharacteristics(payload.characteristics || []);
-      setMpstatsCharacteristicsStatus((payload.characteristics || []).length ? "loaded" : "empty");
+      const payload = await apiRequest(mpstatsCharacteristicsPath(subjectID, { forceRefresh: true }));
+      applyMpstatsCharacteristicsPayload(payload, Math.round(performance.now() - startedAt));
     } catch (error) {
       setMpstatsCharacteristicsMs(Math.round(performance.now() - startedAt));
       setMpstatsCharacteristics([]);
+      setMpstatsCharacteristicsMeta({});
       setMpstatsCharacteristicsStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
     }
   }
@@ -2415,11 +2475,11 @@ function CardDetailScreen({ card, portal, onBack }) {
                       type="button"
                       onClick={loadMpstatsCharacteristicHints}
                       disabled={mpstatsCharacteristicsStatus === "loading"}
-                      title="Подтянуть популярные значения характеристик из MPStats"
+                      title="Обновить значения характеристик из MPStats"
                     >
                       <RefreshCw size={16} />MPStats
                     </button>
-                    <Tag tone={mpstatsHintsTone}>{mpstatsHintsLabel}</Tag>
+                    <Tag tone={mpstatsHintsTone} title={mpstatsHintsTitle}>{mpstatsHintsLabel}</Tag>
                   </div>
                 </div>
                 <div className="before-after">
