@@ -720,7 +720,9 @@ function titleSuggestions(card) {
     .replace(/[|/]+/g, " ")
     .trim();
   const signals = contentAuditSignals(card);
-  const generatedTitle = buildContentTitleCandidate(compactBase, subject, brand, signals);
+  const generatedTitle = titleQualityIssues(compactBase, card).length
+    ? buildContentTitleCandidate(compactBase, subject, brand, signals)
+    : "";
   const values = [
     generatedTitle,
     compactBase,
@@ -732,6 +734,25 @@ function titleSuggestions(card) {
     unique.push(compactBase.slice(0, 60));
   }
   return unique.slice(0, 3);
+}
+
+function titleQualityIssues(title, card) {
+  const text = String(title || "").trim();
+  const issues = [];
+  if (!text || text === "Не указано") {
+    issues.push("нет названия");
+  }
+  if (text.length > 60) {
+    issues.push("длиннее лимита WB");
+  }
+  if (/[|/]{2,}|\s{2,}/.test(text)) {
+    issues.push("лишние разделители или пробелы");
+  }
+  const subject = String(card?.subjectName || "").trim().toLowerCase();
+  if (subject && text.length < 24 && !text.toLowerCase().includes(subject.slice(0, Math.max(4, subject.length - 1)))) {
+    issues.push("слишком общее название");
+  }
+  return issues;
 }
 
 function rawCharacteristicItems(card) {
@@ -894,7 +915,7 @@ function descriptionSuggestion(card, description) {
     "Опишите посадку, состав, ощущения от ткани, комплектацию, сезонность, уход и сценарии использования простым языком для покупателя.",
   ].filter(Boolean).join("\n\n");
   if (current && !issues.length) {
-    return [current, structuredDraft].filter(Boolean).join("\n\n");
+    return current;
   }
   if (current) {
     const additions = [
@@ -909,17 +930,21 @@ function descriptionSuggestion(card, description) {
 }
 
 function titleAuditReason(card, currentTitle, draftTitle) {
-  if (isEmptyValue(card?.title)) {
+  const issues = titleQualityIssues(currentTitle, card);
+  if (issues.includes("нет названия")) {
     return "WB не вернул название, поэтому аудит предлагает собрать его из категории, бренда и текущих данных карточки.";
   }
-  if (/[|/]{2,}|\s{2,}/.test(currentTitle)) {
+  if (issues.includes("лишние разделители или пробелы")) {
     return "В названии есть лишние разделители или пробелы; аудит предлагает более чистый вариант в лимите WB.";
   }
-  if (currentTitle.length > 60) {
+  if (issues.includes("длиннее лимита WB")) {
     return "Название длиннее лимита WB 60 символов, поэтому аудит предлагает укоротить его.";
   }
+  if (issues.includes("слишком общее название")) {
+    return "Название слишком общее, поэтому аудит предлагает добавить категорию или понятные товарные признаки.";
+  }
   if (draftTitle !== currentTitle) {
-    return "Аудит пересобрал заголовок из текущей категории и характеристик WB, чтобы получить более содержательный вариант в лимите 60 символов.";
+    return "Аудит предложил вариант на основе текущей категории и характеристик WB.";
   }
   return "Название уже укладывается в лимит WB, поэтому аудит оставил его без изменения.";
 }
@@ -930,7 +955,7 @@ function descriptionAuditReason(description, card) {
     if (issues.length) {
       return `Описание есть, но аудит нашел зоны улучшения: ${issues.join(", ")}. Черновик добавляет структуру и детали для ручной доработки.`;
     }
-    return "Описание проходит базовую проверку, но аудит добавил блок с покупательскими деталями из текущих характеристик WB.";
+    return "Описание проходит базовую проверку, поэтому аудит оставил его без изменения.";
   }
   return "В WB нет описания, поэтому аудит собрал базовый черновик из названия, бренда и категории.";
 }
@@ -1885,6 +1910,28 @@ export default function App() {
     });
   }
 
+  function resetPortalWorkSummary(portalId) {
+    const normalizedPortalId = String(portalId || "");
+    if (!normalizedPortalId) {
+      return;
+    }
+    setPortalWorkSummaries((current) => ({
+      ...current,
+      [normalizedPortalId]: {
+        draftKeys: [],
+        auditKeys: [],
+        lastActivityAt: new Date().toISOString(),
+      },
+    }));
+  }
+
+  function clearLocalDraftsForPortal(portalId) {
+    const prefix = `opticards-draft:${portalId}:`;
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(prefix))
+      .forEach((key) => localStorage.removeItem(key));
+  }
+
   async function refreshUsers() {
     const payload = await apiRequest("/api/users");
     const nextUsers = normalizeUserList(payload.users || []);
@@ -2011,7 +2058,20 @@ export default function App() {
     await loadPortalCards(portal);
   }
 
-  async function loadPortalCards(portal, { force = false } = {}) {
+  async function refreshPortalCards(portal) {
+    if (!portal || portal.isDemo || !portal.apiConnected) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Загрузить свежие данные WB? Будут удалены черновики, история аудитов и MPStats-кэш по категориям этого кабинета.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    await loadPortalCards(portal, { force: true, resetWork: true });
+  }
+
+  async function loadPortalCards(portal, { force = false, resetWork = false } = {}) {
     if (!portal || portal.isDemo || !portal.apiConnected || (!force && portal.realCards?.length)) {
       return;
     }
@@ -2021,11 +2081,31 @@ export default function App() {
     }
     setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
     try {
+      if (resetWork) {
+        await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-work-cache`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        clearLocalDraftsForPortal(portal.id);
+        resetPortalWorkSummary(portal.id);
+        replaceUserPortal({
+          ...portal,
+          draftSummary: { draftCount: 0, auditCount: 0, lastDraftAt: "" },
+          realCards: portal.realCards || [],
+        });
+      }
       const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
       const updatedPortal = applyWbSnapshotToPortal(portal, payload);
-      replaceUserPortal(updatedPortal);
+      replaceUserPortal(resetWork ? {
+        ...updatedPortal,
+        draftSummary: { draftCount: 0, auditCount: 0, lastDraftAt: "" },
+      } : updatedPortal);
     } catch {
-      replaceUserPortal({ ...portal, syncStatus: "error" });
+      replaceUserPortal({
+        ...portal,
+        syncStatus: "error",
+        draftSummary: resetWork ? { draftCount: 0, auditCount: 0, lastDraftAt: "" } : portal.draftSummary,
+      });
     } finally {
       setLoadingPortalCards((items) => {
         const next = { ...items };
@@ -2148,7 +2228,7 @@ export default function App() {
             canManage={canManagePortals}
             onBack={() => setScreen("cabinets")}
             onOpenCard={openCard}
-            onRefreshCards={() => loadPortalCards(currentPortal, { force: true })}
+            onRefreshCards={() => refreshPortalCards(currentPortal)}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
               setPortalModalOpen(true);
@@ -2650,6 +2730,7 @@ function CardsTable({ cards, portal, onOpenCard }) {
 
 function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
   const [activeTab, setActiveTab] = useState("audit");
+  const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
@@ -2882,7 +2963,10 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: false });
     const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
     const suggestions = titleSuggestions(card);
-    const nextTitle = suggestions.find((value) => normalizedCharacteristicOption(value) !== normalizedCharacteristicOption(currentTitle)) || suggestions[0] || "";
+    const titleIssues = titleQualityIssues(currentTitle, card);
+    const nextTitle = titleIssues.length
+      ? suggestions.find((value) => normalizedCharacteristicOption(value) !== normalizedCharacteristicOption(currentTitle)) || suggestions[0] || ""
+      : currentTitle;
     const nextDescription = descriptionSuggestion(card, description);
     const nextTitleReason = titleAuditReason(card, currentTitle, nextTitle);
     const nextDescriptionReason = descriptionAuditReason(description, card);
@@ -3263,6 +3347,13 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     <Tag tone={mpstatsHintsTone} title={mpstatsHintsTitle}>{mpstatsHintsLabel}</Tag>
                   </div>
                 </div>
+                <div className="changes-tabs" aria-label="Тип изменений">
+                  <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}>Контент</button>
+                  <button className={changesTab === "prices" ? "active" : ""} type="button" onClick={() => setChangesTab("prices")}>Цены</button>
+                  <button className={changesTab === "stocks" ? "active" : ""} type="button" onClick={() => setChangesTab("stocks")}>Остатки</button>
+                </div>
+                {changesTab === "content" ? (
+                <>
                 <div className="before-after">
                   <div className="field-box">
                     <strong>Было: заголовок</strong>
@@ -3324,6 +3415,49 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     />
                   </div>
                 </div>
+                <div className="tab-actions">
+                  <button className="btn" type="button" onClick={() => downloadDraftTable("content")}><Download size={17} />Скачать контент</button>
+                </div>
+                </>
+                ) : null}
+                {changesTab === "prices" ? (
+                  <div className="before-after">
+                    <div className="field-box">
+                      <strong>Было: цены</strong>
+                      <div className="panel-list compact-list">
+                        <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(firstDefined(card?.price, card?.rawFields?.price))}</strong></div>
+                        <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(firstDefined(card?.discount, card?.rawFields?.discount))}</strong></div>
+                        <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice))}</strong></div>
+                        <div className="list-row"><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
+                      </div>
+                    </div>
+                    <div className="field-box">
+                      <strong>Стало: цены</strong>
+                      <p>Редактирование цен вынесено в отдельный черновик. Сейчас можно скачать WB-таблицу и заполнить значения в Excel.</p>
+                      <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
+                    </div>
+                  </div>
+                ) : null}
+                {changesTab === "stocks" ? (
+                  <div className="before-after">
+                    <div className="field-box">
+                      <strong>Было: размеры и баркоды</strong>
+                      <div className="panel-list compact-list">
+                        {(Array.isArray(sizes) && sizes.length ? sizes : [{}]).slice(0, 8).map((size, index) => (
+                          <div className="list-row" key={`${size?.chrtID || index}-${size?.techSize || ""}`}>
+                            <span>{size?.techSize || size?.wbSize || `Размер ${index + 1}`}</span>
+                            <strong>{Array.isArray(size?.skus) && size.skus.length ? size.skus.join(", ") : "Баркод не указан"}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="field-box">
+                      <strong>Стало: остатки</strong>
+                      <p>Остатки загружаются отдельной WB-таблицей по баркоду. Заполните количество в скачанном файле перед загрузкой в ЛК WB.</p>
+                      <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Скачать остатки</button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="draft-actions">
                   <div>
                     <strong>Черновик изменений</strong>
@@ -3340,9 +3474,6 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
                     <button className="btn" type="button" onClick={resetDraft} disabled={draftSaveStatus === "resetting"}><RotateCcw size={17} />Сбросить</button>
-                    <button className="btn" type="button" onClick={() => downloadDraftTable("content")}><Download size={17} />Контент</button>
-                    <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Цены</button>
-                    <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Остатки</button>
                   </div>
                 </div>
               </section>

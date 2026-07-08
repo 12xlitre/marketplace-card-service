@@ -1161,6 +1161,40 @@ tr:last-child td {
   gap: 10px;
 }
 
+.changes-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.changes-tabs button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.changes-tabs button.active {
+  border-color: var(--line);
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.compact-list {
+  margin-top: 10px;
+}
+
 .draft-actions {
   border-top: 1px solid var(--line);
   margin-top: 14px;

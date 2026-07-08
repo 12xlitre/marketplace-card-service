@@ -1095,6 +1095,63 @@ def delete_card_draft(portal_id, card_key, user):
   return cursor.rowcount > 0
 
 
+def subject_ids_from_cards_snapshot(snapshot_json):
+  try:
+    cards = json.loads(snapshot_json or "[]")
+  except json.JSONDecodeError:
+    cards = []
+  if not isinstance(cards, list):
+    return []
+  subject_ids = []
+  for card in cards:
+    if not isinstance(card, dict):
+      continue
+    subject_id = card.get("subjectID")
+    raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+    subject_id = subject_id or raw_fields.get("subjectID")
+    if subject_id:
+      subject_ids.append(str(subject_id))
+  return sorted(set(subject_ids))
+
+
+def reset_portal_work_cache(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    subject_ids = subject_ids_from_cards_snapshot(portal["cards_snapshot_json"])
+    draft_cursor = db.execute(
+      "DELETE FROM card_drafts WHERE portal_id = ?",
+      (numeric_portal_id,),
+    )
+    mpstats_deleted = 0
+    if subject_ids:
+      placeholders = ",".join("?" for _ in subject_ids)
+      mpstats_cursor = db.execute(
+        f"""
+        DELETE FROM mpstats_characteristics_cache
+        WHERE report_type = 'subject' AND value IN ({placeholders})
+        """,
+        subject_ids,
+      )
+      mpstats_deleted = mpstats_cursor.rowcount
+  return {
+    "draftsDeleted": draft_cursor.rowcount,
+    "mpstatsDeleted": mpstats_deleted,
+    "subjectIDs": subject_ids,
+  }
+
+
 def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -2701,6 +2758,24 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         {"ok": True},
         {"Set-Cookie": self.session_cookie_header("", max_age=0)},
       )
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/reset-work-cache"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/reset-work-cache")].strip("/")
+      try:
+        result = reset_portal_work_cache(portal_id_text, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path.startswith("/api/portals/") and (path.endswith("/archive") or path.endswith("/restore")):
