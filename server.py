@@ -296,6 +296,13 @@ def user_has_global_portal_access(row):
   return any(part in marker for part in ("admin", "all", "полный", "админ", "руковод"))
 
 
+def user_is_admin(row):
+  if not row:
+    return False
+  marker = f"{row['user_role']} {row['access_level']} {row['role']}".lower()
+  return any(part in marker for part in ("admin", "all", "полный", "админ"))
+
+
 def user_can_access_portal(user, portal_id):
   if str(portal_id) == "demo-wb":
     return True
@@ -749,6 +756,9 @@ def list_portals(user=None):
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
         COALESCE(MAX(draft_stats.draft_count), 0) AS draft_count,
         COALESCE(MAX(draft_stats.audit_count), 0) AS audit_count,
+        COALESCE(MAX(draft_stats.approval_pending_count), 0) AS approval_pending_count,
+        COALESCE(MAX(draft_stats.approval_returned_count), 0) AS approval_returned_count,
+        COALESCE(MAX(draft_stats.approval_approved_count), 0) AS approval_approved_count,
         MAX(draft_stats.last_draft_at) AS last_draft_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
@@ -760,6 +770,9 @@ def list_portals(user=None):
           portal_id,
           COUNT(*) AS draft_count,
           SUM(CASE WHEN audit_status = 'done' THEN 1 ELSE 0 END) AS audit_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'submitted' THEN 1 ELSE 0 END) AS approval_pending_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'changes_requested' THEN 1 ELSE 0 END) AS approval_returned_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'approved' THEN 1 ELSE 0 END) AS approval_approved_count,
           MAX(updated_at) AS last_draft_at
         FROM card_drafts
         GROUP BY portal_id
@@ -833,6 +846,9 @@ def public_portal_from_row(row):
     "draftSummary": {
       "draftCount": int(row["draft_count"] or 0),
       "auditCount": int(row["audit_count"] or 0),
+      "approvalPendingCount": int(row["approval_pending_count"] or 0),
+      "approvalReturnedCount": int(row["approval_returned_count"] or 0),
+      "approvalApprovedCount": int(row["approval_approved_count"] or 0),
       "lastDraftAt": row["last_draft_at"] or "",
     },
     "isDemo": False,
@@ -878,6 +894,9 @@ def get_portal_row(portal_id, user=None):
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_ciphertext END) AS wb_token_ciphertext,
         COALESCE(MAX(draft_stats.draft_count), 0) AS draft_count,
         COALESCE(MAX(draft_stats.audit_count), 0) AS audit_count,
+        COALESCE(MAX(draft_stats.approval_pending_count), 0) AS approval_pending_count,
+        COALESCE(MAX(draft_stats.approval_returned_count), 0) AS approval_returned_count,
+        COALESCE(MAX(draft_stats.approval_approved_count), 0) AS approval_approved_count,
         MAX(draft_stats.last_draft_at) AS last_draft_at,
         GROUP_CONCAT(DISTINCT portal_members.project_role || ':' || portal_members.user_login) AS members,
         GROUP_CONCAT(DISTINCT portal_integrations.provider || ':' || portal_integrations.status) AS integrations
@@ -889,6 +908,9 @@ def get_portal_row(portal_id, user=None):
           portal_id,
           COUNT(*) AS draft_count,
           SUM(CASE WHEN audit_status = 'done' THEN 1 ELSE 0 END) AS audit_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'submitted' THEN 1 ELSE 0 END) AS approval_pending_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'changes_requested' THEN 1 ELSE 0 END) AS approval_returned_count,
+          SUM(CASE WHEN json_extract(payload_json, '$.meta.approval.status') = 'approved' THEN 1 ELSE 0 END) AS approval_approved_count,
           MAX(updated_at) AS last_draft_at
         FROM card_drafts
         GROUP BY portal_id
@@ -1095,6 +1117,32 @@ def delete_card_draft(portal_id, card_key, user):
   return cursor.rowcount > 0
 
 
+def portal_team_roles(portal_id):
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT project_role, user_login
+      FROM portal_members
+      WHERE portal_id = ?
+      """,
+      (portal_id,),
+    ).fetchall()
+  return {row["project_role"]: row["user_login"] for row in rows if row["project_role"] and row["user_login"]}
+
+
+def user_can_review_portal_approval(user, portal_id):
+  if user_is_admin(user):
+    return True
+  return portal_team_roles(portal_id).get("manager") == user.get("login")
+
+
+def approval_status_from_payload(payload):
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  return str(approval.get("status") or "draft").strip()
+
+
 def subject_ids_from_cards_snapshot(snapshot_json):
   try:
     cards = json.loads(snapshot_json or "[]")
@@ -1163,6 +1211,9 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
   normalized_payload = normalize_card_draft_payload(payload)
+  approval_status = approval_status_from_payload(normalized_payload)
+  if approval_status in {"approved", "changes_requested"} and not user_can_review_portal_approval(user, numeric_portal_id):
+    raise PermissionError("approval_forbidden")
   payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
   with connect_db() as db:
     db.execute(

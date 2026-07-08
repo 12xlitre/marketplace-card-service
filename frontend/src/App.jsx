@@ -605,9 +605,61 @@ function normalizePortal(portal) {
     draftSummary: {
       draftCount: Number(portal.draftSummary?.draftCount || 0),
       auditCount: Number(portal.draftSummary?.auditCount || 0),
+      approvalPendingCount: Number(portal.draftSummary?.approvalPendingCount || 0),
+      approvalReturnedCount: Number(portal.draftSummary?.approvalReturnedCount || 0),
+      approvalApprovedCount: Number(portal.draftSummary?.approvalApprovedCount || 0),
       lastDraftAt: portal.draftSummary?.lastDraftAt || "",
     },
   };
+}
+
+function defaultApprovalState() {
+  return {
+    status: "draft",
+    assigneeLogin: "",
+    submittedBy: "",
+    submittedAt: "",
+    reviewedBy: "",
+    reviewedAt: "",
+    returnReason: "",
+    history: [],
+  };
+}
+
+function normalizeApprovalState(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const status = ["draft", "submitted", "changes_requested", "approved", "exported"].includes(source.status)
+    ? source.status
+    : "draft";
+  return {
+    ...defaultApprovalState(),
+    ...source,
+    status,
+    assigneeLogin: String(source.assigneeLogin || ""),
+    submittedBy: String(source.submittedBy || ""),
+    submittedAt: String(source.submittedAt || ""),
+    reviewedBy: String(source.reviewedBy || ""),
+    reviewedAt: String(source.reviewedAt || ""),
+    returnReason: String(source.returnReason || ""),
+    history: Array.isArray(source.history) ? source.history.slice(0, 20) : [],
+  };
+}
+
+function approvalStatusLabel(status) {
+  return {
+    draft: "черновик",
+    submitted: "на согласовании",
+    changes_requested: "на доработке",
+    approved: "принято",
+    exported: "выгружено",
+  }[status] || "черновик";
+}
+
+function approvalStatusTone(status) {
+  if (status === "submitted") return "amber";
+  if (status === "approved" || status === "exported") return "green";
+  if (status === "changes_requested") return "red";
+  return "blue";
 }
 
 function normalizeUserList(rawUsers) {
@@ -1545,6 +1597,7 @@ function cardDraftKey(card) {
 function buildStructuredCardDraft({
   auditStatus,
   auditHistory,
+  approval,
   title,
   titleSource,
   titleReason,
@@ -1573,6 +1626,7 @@ function buildStructuredCardDraft({
     prices: {},
     stocks: {},
     meta: {
+      approval: normalizeApprovalState(approval),
       auditContract: {
         version: "sergey-audit-v1",
         sections: ["title", "description", "characteristics"],
@@ -1606,6 +1660,7 @@ function contentFromStoredDraft(storedDraft) {
     descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
     auditHistory: Array.isArray(meta.auditHistory) ? meta.auditHistory : [],
+    approval: normalizeApprovalState(meta.approval),
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
 }
@@ -1774,6 +1829,9 @@ export default function App() {
         ...backendSummary,
         draftCount,
         auditCount,
+        approvalPendingCount: Number(backendSummary.approvalPendingCount || 0),
+        approvalReturnedCount: Number(backendSummary.approvalReturnedCount || 0),
+        approvalApprovedCount: Number(backendSummary.approvalApprovedCount || 0),
         lastDraftAt: localSummary.lastActivityAt || backendSummary.lastDraftAt || "",
       },
     };
@@ -2261,6 +2319,7 @@ export default function App() {
             key={selectedCardFromPortal?.nmID || selectedCardFromPortal?.vendorCode || selectedCardFromPortal?.title}
             card={selectedCardFromPortal}
             portal={currentPortal}
+            currentUser={currentUser}
             onBack={() => setScreen("seller")}
             onDraftSaved={refreshPortals}
             onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
@@ -2413,6 +2472,7 @@ function Rail({ user, screen, onNavigate, onLogout }) {
 function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onOpenModal }) {
   const apiCount = activePortals.filter((portal) => portal.apiConnected).length;
   const cardsCount = activePortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
+  const approvalTasksCount = activePortals.reduce((sum, portal) => sum + Number(portal.draftSummary?.approvalPendingCount || 0), 0);
   return (
     <section className="screen active">
       <header className="topbar">
@@ -2431,7 +2491,7 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
           <Metric label="Активные кабинеты" value={formatNumber(activePortals.length)} />
           <Metric label="Карточки загружены" value={formatNumber(cardsCount)} />
           <Metric label="Подключены через API" value={formatNumber(apiCount)} />
-          <Metric label="Ручные порталы" value={formatNumber(activePortals.length - apiCount)} />
+          <Metric label="На согласовании" value={formatNumber(approvalTasksCount)} />
         </div>
 
         <div className="band">
@@ -2503,7 +2563,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
       <div className="card-stats">
         <MiniStat value={portal.cardCount} label="карточки" />
         <MiniStat value={portal.problemCount} label="к проверке" />
-        <MiniStat value={portal.apiConnected ? 1 : 0} label="API" />
+        <MiniStat value={portal.draftSummary?.approvalPendingCount || 0} label="задачи" />
       </div>
       <TeamSummary portal={portal} findUser={findUser} fallbackOwner={owner} />
       <div className="card-actions">
@@ -2579,7 +2639,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <Metric label="Карточек в кабинете" value={formatNumber(portal.cardCount)} />
                 <Metric label="К проверке" value={formatNumber(portal.problemCount)} />
                 <Metric label="Черновики правок" value={formatNumber(portal.draftSummary?.draftCount || 0)} />
-                <Metric label="Участников проекта" value={formatNumber(uniqueLogins(Object.values(team)).length)} />
+                <Metric label="На согласовании" value={formatNumber(portal.draftSummary?.approvalPendingCount || 0)} />
               </div>
             </section>
 
@@ -2747,7 +2807,7 @@ function CardsTable({ cards, portal, onOpenCard }) {
   );
 }
 
-function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
+function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
   const [activeTab, setActiveTab] = useState("audit");
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
@@ -2758,6 +2818,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
   const [draftTitleReason, setDraftTitleReason] = useState("");
   const [draftDescriptionReason, setDraftDescriptionReason] = useState("");
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
+  const [approval, setApproval] = useState(defaultApprovalState());
+  const [approvalComment, setApprovalComment] = useState("");
   const [auditHistory, setAuditHistory] = useState([]);
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
@@ -2815,6 +2877,13 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
       : auditDone ? "blue" : "green";
   const changedDraftCharacteristicsCount = countChangedDraftCharacteristics(draftCharacteristics, characteristicItems);
   const auditDraftCharacteristicsCount = Object.values(draftCharacteristics).filter((draft) => draft?.source === "audit").length;
+  const portalTeam = getPortalTeam(portal || {});
+  const userRoleType = getUserRoleType(currentUser);
+  const isApprovalReviewer = Boolean(currentUser?.login && (currentUser.login === portalTeam.manager || userRoleType === "admin"));
+  const isProjectLead = Boolean(currentUser?.login && currentUser.login === portalTeam.lead && !isApprovalReviewer);
+  const approvalReadOnly = isProjectLead || (approval.status === "submitted" && isApprovalReviewer);
+  const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(approval.status);
+  const canReviewApproval = approval.status === "submitted" && isApprovalReviewer;
 
   useEffect(() => {
     let active = true;
@@ -2827,6 +2896,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     setDraftTitleReason("");
     setDraftDescriptionReason("");
     setDraftCharacteristics({});
+    setApproval(defaultApprovalState());
+    setApprovalComment("");
     setAuditHistory([]);
     setMpstatsCharacteristics([]);
     setMpstatsCharacteristicsStatus("idle");
@@ -2844,6 +2915,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
       setDraftTitleReason(normalized.titleReason);
       setDraftDescriptionReason(normalized.descriptionReason);
       setDraftCharacteristics(normalized.characteristics);
+      setApproval(normalized.approval);
+      setApprovalComment("");
       setAuditHistory(normalized.auditHistory);
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
@@ -3021,6 +3094,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     const structuredDraft = buildStructuredCardDraft({
       auditStatus: "done",
       auditHistory: nextAuditHistory,
+      approval,
       title: nextTitle,
       description: nextDescription,
       titleSource: "audit",
@@ -3140,6 +3214,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       auditHistory,
+      approval,
       title: draftTitle,
       description: draftDescription,
       titleSource: draftTitleSource,
@@ -3150,6 +3225,89 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
       card,
     });
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+  }
+
+  function buildCurrentStructuredDraft(nextApproval = approval) {
+    return buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      approval: nextApproval,
+      title: draftTitle,
+      description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
+      characteristics: draftCharacteristics,
+      card,
+    });
+  }
+
+  async function applyApprovalChange(nextApproval, statusMessage) {
+    const normalized = normalizeApprovalState(nextApproval);
+    setApproval(normalized);
+    await persistStructuredDraft(buildCurrentStructuredDraft(normalized), { auditDone: auditStatus === "done" });
+    setDraftSaveStatus(statusMessage);
+  }
+
+  function approvalHistoryItem(action, reason = "") {
+    return {
+      id: `approval-${Date.now()}`,
+      action,
+      reason,
+      userLogin: currentUser?.login || "",
+      userName: currentUser?.full_name || currentUser?.login || "",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  async function submitForApproval() {
+    const now = new Date().toISOString();
+    const nextApproval = normalizeApprovalState({
+      ...approval,
+      status: "submitted",
+      assigneeLogin: portalTeam.manager || "",
+      submittedBy: currentUser?.login || "",
+      submittedAt: now,
+      reviewedBy: "",
+      reviewedAt: "",
+      returnReason: "",
+      history: [approvalHistoryItem("submitted"), ...(approval.history || [])],
+    });
+    await applyApprovalChange(nextApproval, "approval-submitted");
+  }
+
+  async function approveChanges() {
+    const now = new Date().toISOString();
+    const nextApproval = normalizeApprovalState({
+      ...approval,
+      status: "approved",
+      reviewedBy: currentUser?.login || "",
+      reviewedAt: now,
+      returnReason: "",
+      history: [approvalHistoryItem("approved"), ...(approval.history || [])],
+    });
+    setApprovalComment("");
+    await applyApprovalChange(nextApproval, "approval-approved");
+  }
+
+  async function requestChanges() {
+    const reason = approvalComment.trim();
+    if (!reason) {
+      setDraftSaveStatus("approval-reason-required");
+      return;
+    }
+    const now = new Date().toISOString();
+    const nextApproval = normalizeApprovalState({
+      ...approval,
+      status: "changes_requested",
+      reviewedBy: currentUser?.login || "",
+      reviewedAt: now,
+      returnReason: reason,
+      history: [approvalHistoryItem("changes_requested", reason), ...(approval.history || [])],
+    });
+    setApprovalComment("");
+    await applyApprovalChange(nextApproval, "approval-returned");
   }
 
   async function resetDraft() {
@@ -3174,6 +3332,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
       setDraftTitleReason("");
       setDraftDescriptionReason("");
       setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
+      setApproval(defaultApprovalState());
+      setApprovalComment("");
       setDraftSavedAt("");
       setDraftSaveStatus("reset");
       setActiveTab("changes");
@@ -3210,7 +3370,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Карточки</button>
           <a className="btn" href={wbCardUrl(card)} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть WB</a>
-          <button className="btn primary" type="button" disabled><CheckSquare size={17} />Утвердить</button>
+          <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
         </div>
       </header>
 
@@ -3412,6 +3572,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     <textarea
                       className={draftTitleSource === "audit" ? "short audit-suggestion-field" : "short"}
                       value={draftTitle}
+                      disabled={approvalReadOnly}
                       onChange={(event) => {
                         setDraftTitle(event.target.value);
                         setDraftTitleSource(event.target.value.trim() ? "manual" : "");
@@ -3434,6 +3595,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     <textarea
                       className={`description-editor ${draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}`}
                       value={draftDescription}
+                      disabled={approvalReadOnly}
                       onChange={(event) => {
                         setDraftDescription(event.target.value);
                         setDraftDescriptionSource(event.target.value.trim() ? "manual" : "");
@@ -3460,6 +3622,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                       onRemove={removeDraftCharacteristic}
                       onAddValue={addDraftCharacteristicValue}
                       onRemoveValue={removeDraftCharacteristicValue}
+                      readOnly={approvalReadOnly}
                     />
                   </div>
                 </div>
@@ -3506,6 +3669,20 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     </div>
                   </div>
                 ) : null}
+                <ApprovalPanel
+                  approval={approval}
+                  currentUser={currentUser}
+                  team={portalTeam}
+                  canSubmit={canSubmitApproval}
+                  canReview={canReviewApproval}
+                  readOnly={approvalReadOnly}
+                  comment={approvalComment}
+                  onComment={setApprovalComment}
+                  onSubmit={submitForApproval}
+                  onApprove={approveChanges}
+                  onReturn={requestChanges}
+                  status={draftSaveStatus}
+                />
                 <div className="draft-actions">
                   <div>
                     <strong>Черновик изменений</strong>
@@ -3517,11 +3694,15 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                     {draftSaveStatus === "resetting" ? <p>Сбрасываем черновик.</p> : null}
                     {draftSaveStatus === "reset" ? <p>Черновик сброшен. В колонке Стало снова текущие данные WB.</p> : null}
                     {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
+                    {draftSaveStatus === "approval-submitted" ? <p>Задача отправлена аккаунт-менеджеру на согласование.</p> : null}
+                    {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
+                    {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
+                    {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
                     {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
-                    <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
-                    <button className="btn" type="button" onClick={resetDraft} disabled={draftSaveStatus === "resetting"}><RotateCcw size={17} />Сбросить</button>
+                    <button className="btn primary" type="button" onClick={saveDraft} disabled={approvalReadOnly}><Save size={17} />Сохранить</button>
+                    <button className="btn" type="button" onClick={resetDraft} disabled={approvalReadOnly || draftSaveStatus === "resetting"}><RotateCcw size={17} />Сбросить</button>
                   </div>
                 </div>
               </section>
@@ -3567,6 +3748,89 @@ function RawFieldValue({ value }) {
     return <CharacteristicsList items={value} />;
   }
   return <pre className="json-value">{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function ApprovalPanel({
+  approval,
+  currentUser,
+  team,
+  canSubmit,
+  canReview,
+  readOnly,
+  comment,
+  onComment,
+  onSubmit,
+  onApprove,
+  onReturn,
+  status,
+}) {
+  const assignee = approval.assigneeLogin || team.manager || "";
+  const lastEvent = approval.history?.[0];
+  const busy = status === "saving";
+  return (
+    <section className={`approval-panel approval-${approval.status}`}>
+      <div className="approval-panel-head">
+        <div>
+          <strong>Согласование изменений</strong>
+          <p>{approval.status === "submitted"
+            ? `Задача у аккаунт-менеджера${assignee ? `: ${assignee}` : ""}.`
+            : approval.status === "approved"
+              ? "Правки приняты и готовы к выгрузке."
+              : approval.status === "changes_requested"
+                ? "Правки возвращены специалисту на доработку."
+                : "Когда правки готовы, отправьте их аккаунт-менеджеру на проверку."}</p>
+        </div>
+        <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
+      </div>
+      {approval.returnReason ? (
+        <div className="approval-note">
+          <span>Причина доработки</span>
+          <p>{approval.returnReason}</p>
+        </div>
+      ) : null}
+      {readOnly ? (
+        <div className="approval-note">
+          <span>Режим просмотра</span>
+          <p>{canReview
+            ? "Поля заблокированы для правки. Можно принять изменения или вернуть специалисту с причиной."
+            : "Поля доступны только для просмотра. Руководитель отдела видит процесс и статистику без ручного изменения карточки."}</p>
+        </div>
+      ) : null}
+      {canReview ? (
+        <div className="approval-review">
+          <textarea
+            value={comment}
+            onChange={(event) => onComment(event.target.value)}
+            placeholder="Причина возврата на доработку"
+          />
+          <div className="approval-buttons">
+            <button className="btn" type="button" onClick={onReturn} disabled={busy}><RotateCcw size={17} />На доработку</button>
+            <button className="btn primary" type="button" onClick={onApprove} disabled={busy}><CheckSquare size={17} />Принято</button>
+          </div>
+        </div>
+      ) : null}
+      {canSubmit ? (
+        <div className="approval-buttons">
+          <button className="btn primary" type="button" onClick={onSubmit} disabled={busy}>
+            <Upload size={17} />Отправить на согласование
+          </button>
+        </div>
+      ) : null}
+      {lastEvent ? (
+        <div className="approval-history-line">
+          <span>Последнее действие: {approvalEventLabel(lastEvent.action)} · {lastEvent.createdAt ? new Date(lastEvent.createdAt).toLocaleString("ru-RU") : "без даты"} · {lastEvent.userName || lastEvent.userLogin || currentUser?.login}</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function approvalEventLabel(action) {
+  return {
+    submitted: "отправлено на согласование",
+    approved: "принято",
+    changes_requested: "возвращено на доработку",
+  }[action] || "обновлено";
 }
 
 function PrimitiveValueList({ values }) {
@@ -3674,6 +3938,7 @@ function CharacteristicsDiffTable({
   onRemove,
   onAddValue,
   onRemoveValue,
+  readOnly = false,
 }) {
   const baseKeys = new Set(rows.map((row) => row.key));
   const characteristicMetaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
@@ -3742,11 +4007,12 @@ function CharacteristicsDiffTable({
               onReplaceValue={(value) => onAddValue(row, value, { replace: true })}
               onRemoveValue={(value) => onRemoveValue(row, value)}
               onRemove={() => onRemove(row.key)}
+              readOnly={readOnly}
             />
           </div>
         );
       })}
-      <div className="characteristics-search">
+      {!readOnly ? <div className="characteristics-search">
         <label className="search">
           <Search size={17} />
           <input
@@ -3772,12 +4038,12 @@ function CharacteristicsDiffTable({
             </button>
           ))}
         </div>
-      </div>
+      </div> : null}
     </div>
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsStats = [], mpstatsNearbyNames = [], onAddValue, onReplaceValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsStats = [], mpstatsNearbyNames = [], onAddValue, onReplaceValue, onRemoveValue, onRemove, readOnly = false }) {
   const [query, setQuery] = useState("");
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
@@ -3804,6 +4070,9 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
   );
 
   function addValue(value) {
+    if (readOnly) {
+      return;
+    }
     if (isLimitReached) {
       if (canReplaceSingleValue) {
         onReplaceValue(value);
@@ -3821,13 +4090,13 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
     <div className={`draft-editor ${isAuditSuggestion ? "audit-suggestion" : ""}`}>
       <div className="draft-chip-list">
         {values.map((value) => (
-          <button className="draft-chip" type="button" key={value} onClick={() => onRemoveValue(value)} title="Убрать значение">
+          <button className="draft-chip" type="button" key={value} onClick={() => readOnly ? undefined : onRemoveValue(value)} disabled={readOnly} title={readOnly ? "Просмотр значения" : "Убрать значение"}>
             <span>{value}</span>
-            <X size={14} />
+            {!readOnly ? <X size={14} /> : null}
           </button>
         ))}
         {!values.length ? <span className="raw-field-value field-empty">Пусто в черновике</span> : null}
-        {row.draftOnly ? (
+        {row.draftOnly && !readOnly ? (
           <button className="icon-btn" type="button" onClick={onRemove} aria-label="Убрать характеристику" title="Убрать характеристику">
             <X size={15} />
           </button>
@@ -3841,11 +4110,11 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
           onChange={(event) => setQuery(event.target.value)}
           onFocus={() => setIsOptionsOpen(true)}
           onBlur={() => setIsOptionsOpen(false)}
-          disabled={isLimitReached && !canReplaceSingleValue}
-          placeholder={isLimitReached ? "Выбрать замену" : (strictValues ? "Выбрать из списка WB" : "Подсказки или свое значение")}
+          disabled={readOnly || (isLimitReached && !canReplaceSingleValue)}
+          placeholder={readOnly ? "Только просмотр" : (isLimitReached ? "Выбрать замену" : (strictValues ? "Выбрать из списка WB" : "Подсказки или свое значение"))}
         />
       </label>
-      {isOptionsOpen ? (
+      {isOptionsOpen && !readOnly ? (
         <div className="draft-value-options">
           {!strictValues && hasKnownOptions ? (
             <span className="draft-option-source">
@@ -4098,8 +4367,12 @@ function workRouteRows(portal) {
   const hasCards = Number(portal.cardCount || 0) > 0 || Boolean(portal.realCards?.length);
   const draftCount = Number(portal.draftSummary?.draftCount || 0);
   const auditCount = Number(portal.draftSummary?.auditCount || 0);
+  const approvalPendingCount = Number(portal.draftSummary?.approvalPendingCount || 0);
+  const approvalReturnedCount = Number(portal.draftSummary?.approvalReturnedCount || 0);
+  const approvalApprovedCount = Number(portal.draftSummary?.approvalApprovedCount || 0);
   const hasAudit = auditCount > 0;
   const hasDrafts = draftCount > 0;
+  const hasApproval = approvalPendingCount > 0 || approvalReturnedCount > 0 || approvalApprovedCount > 0;
   const rows = [
     { title: "Загрузка", status: hasCards ? "данные получены" : "ожидает загрузку", className: hasCards ? "active" : "paused" },
     {
@@ -4116,15 +4389,27 @@ function workRouteRows(portal) {
         : "0 черновиков",
       className: hasDrafts ? "active" : "off",
     },
-    { title: "Согласование", status: "нет правок", className: "off" },
+    {
+      title: "Согласование",
+      status: approvalPendingCount
+        ? `${approvalPendingCount} ${pluralRu(approvalPendingCount, "задача", "задачи", "задач")}`
+        : approvalReturnedCount
+          ? `${approvalReturnedCount} на доработке`
+          : approvalApprovedCount
+            ? `${approvalApprovedCount} принято`
+            : "нет задач",
+      className: hasApproval ? "active" : "off",
+    },
     { title: "Публикация", status: "запись в WB отключена", className: "off" },
   ];
   const done = rows.filter((step) => step.className === "active").length;
   return {
     rows,
     done,
-    copy: hasDrafts
-      ? `Данные WB загружены. Найдено ${draftCount} ${pluralRu(draftCount, "черновик правок", "черновика правок", "черновиков правок")}${hasAudit ? ` и ${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}` : ""}.`
+    copy: hasApproval
+      ? `Данные WB загружены. В согласовании: ${approvalPendingCount}, на доработке: ${approvalReturnedCount}, принято: ${approvalApprovedCount}.`
+      : hasDrafts
+        ? `Данные WB загружены. Найдено ${draftCount} ${pluralRu(draftCount, "черновик правок", "черновика правок", "черновиков правок")}${hasAudit ? ` и ${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}` : ""}.`
       : hasCards
         ? "Данные WB загружены. Аудит по карточкам и черновики правок появятся здесь после сохранения изменений."
         : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.",
