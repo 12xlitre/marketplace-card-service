@@ -1374,6 +1374,7 @@ export default function App() {
   const [selectedCard, setSelectedCard] = useState(
     demoCards.find((card) => cardDraftKey(card) === initialView.cardKey) || demoCards[0],
   );
+  const [loadingPortalCards, setLoadingPortalCards] = useState({});
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [notice, setNotice] = useState("");
@@ -1402,9 +1403,9 @@ export default function App() {
     localStorage.setItem(appViewStorageKey, JSON.stringify({
       screen,
       portalId: selectedPortalId,
-      cardKey: selectedCard ? cardDraftKey(selectedCard) : selectedCardKey,
+      cardKey: selectedCardKey,
     }));
-  }, [currentUser, screen, selectedPortalId, selectedCard, selectedCardKey]);
+  }, [currentUser, screen, selectedPortalId, selectedCardKey]);
 
   useEffect(() => {
     if (screen !== "card") {
@@ -1419,6 +1420,16 @@ export default function App() {
       setSelectedCard(nextCard);
     }
   }, [screen, currentPortal, selectedCardKey, selectedCard]);
+
+  useEffect(() => {
+    if (!currentUser || !currentPortal || currentPortal.isDemo || !currentPortal.apiConnected) {
+      return;
+    }
+    if (!["seller", "card"].includes(screen)) {
+      return;
+    }
+    loadPortalCards(currentPortal);
+  }, [currentUser, screen, currentPortal?.id, currentPortal?.apiConnected, currentPortal?.realCards?.length]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -1574,12 +1585,23 @@ export default function App() {
     if (!portal || portal.isDemo || !portal.apiConnected || portal.realCards?.length) {
       return;
     }
+    const portalKey = String(portal.id);
+    if (loadingPortalCards[portalKey]) {
+      return;
+    }
+    setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
     try {
       const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
       const updatedPortal = applyWbSnapshotToPortal(portal, payload);
       replaceUserPortal(updatedPortal);
     } catch {
       replaceUserPortal({ ...portal, syncStatus: "error" });
+    } finally {
+      setLoadingPortalCards((items) => {
+        const next = { ...items };
+        delete next[portalKey];
+        return next;
+      });
     }
   }
 
@@ -1625,6 +1647,18 @@ export default function App() {
       setNotice("Не удалось сохранить состав проекта на backend.");
     }
   }
+
+  const currentPortalCards = cardsForPortal(currentPortal);
+  const selectedCardFromPortal = currentPortalCards.find((card) => cardDraftKey(card) === selectedCardKey) || null;
+  const currentPortalKey = String(currentPortal?.id || "");
+  const cardScreenLoading = Boolean(
+    screen === "card"
+    && !selectedCardFromPortal
+    && currentPortal
+    && !currentPortal.isDemo
+    && currentPortal.apiConnected
+    && (loadingPortalCards[currentPortalKey] || !currentPortal.realCards?.length)
+  );
 
   if (sessionLoading) {
     return (
@@ -1676,7 +1710,7 @@ export default function App() {
         {screen === "seller" ? (
           <SellerScreen
             portal={currentPortal}
-            cards={cardsForPortal(currentPortal)}
+            cards={currentPortalCards}
             displayUsers={displayUsers}
             findUser={findUser}
             canManage={canManagePortals}
@@ -1690,13 +1724,17 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "card" ? (
+        {screen === "card" && selectedCardFromPortal ? (
           <CardDetailScreen
-            key={selectedCard?.nmID || selectedCard?.vendorCode || selectedCard?.title}
-            card={selectedCard}
+            key={selectedCardFromPortal?.nmID || selectedCardFromPortal?.vendorCode || selectedCardFromPortal?.title}
+            card={selectedCardFromPortal}
             portal={currentPortal}
             onBack={() => setScreen("seller")}
           />
+        ) : null}
+
+        {screen === "card" && !selectedCardFromPortal ? (
+          <CardRecoveryScreen loading={cardScreenLoading} onBack={() => setScreen("seller")} />
         ) : null}
 
         {screen === "audit" ? <PlaceholderScreen title="Аудит" copy="MPStats и полноценный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
@@ -3225,6 +3263,28 @@ function PlaceholderScreen({ title, copy }) {
           <div className="empty-state">
             <strong>Раздел готовится</strong>
             <span>Сначала фиксируем безопасную загрузку WB и структуру кабинетов, затем подключаем следующий рабочий слой.</span>
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function CardRecoveryScreen({ loading, onBack }) {
+  return (
+    <section className="screen active">
+      <header className="topbar">
+        <div className="title">
+          <h1>{loading ? "Загружаем карточку" : "Карточка не найдена"}</h1>
+          <p>{loading ? "Ждем данные WB API и восстановим детальную карточку автоматически." : "Карточка могла не попасть в текущую загрузку или была удалена в кабинете."}</p>
+        </div>
+        <button className="btn" type="button" onClick={onBack}>К списку карточек</button>
+      </header>
+      <div className="content">
+        <section className="workspace-strip">
+          <div className="empty-state">
+            <strong>{loading ? "Идет загрузка" : "Нет данных карточки"}</strong>
+            <span>{loading ? "Обычно это занимает несколько секунд после обновления страницы." : "Вернитесь к списку и откройте карточку заново."}</span>
           </div>
         </section>
       </div>
