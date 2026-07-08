@@ -839,12 +839,12 @@ function characteristicValueLimit(meta) {
 function characteristicLimitText(meta, filledCount) {
   const limit = characteristicValueLimit(meta);
   if (limit) {
-    return `${filledCount} из ${limit}`;
+    return `${filledCount}/${limit}`;
   }
   if (Number(meta?.charcType) === 1 && Number(meta?.maxCount || 0) === 0) {
-    return `${filledCount} заполнено`;
+    return filledCount ? `${filledCount}` : "";
   }
-  return filledCount ? `${filledCount} заполнено` : "не заполнено";
+  return filledCount ? `${filledCount}` : "";
 }
 
 function draftCharacteristicsList(drafts) {
@@ -907,21 +907,49 @@ function characteristicUsesStrictValues(meta) {
 
 function characteristicValueSourceText(meta, hasOptions) {
   if (characteristicUsesStrictValues(meta)) {
-    return "значения из справочника WB";
+    return "WB";
   }
   if (hasOptions) {
-    return "подсказки из карточек";
+    return "подсказки";
   }
-  return "можно ввести свое";
+  return "свое";
 }
 
-function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = []) {
+function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSuggestion, hasDraft) {
+  const details = [];
+  const limit = characteristicValueLimit(meta);
+  if (limit) {
+    details.push(`Заполнено ${valuesCount} из ${limit}`);
+  } else if (valuesCount) {
+    details.push(`Заполнено ${valuesCount}`);
+  }
+  if (characteristicUsesStrictValues(meta)) {
+    details.push("Выбор из справочника WB");
+  } else if (hasOptions) {
+    details.push("Подсказки собраны из карточек и справочников, свое значение разрешено");
+  } else {
+    details.push("Свое значение разрешено");
+  }
+  if (isAuditSuggestion) {
+    details.push("Рекомендация аудита");
+  } else if (hasDraft) {
+    details.push("Ручная правка");
+  }
+  return details.join(". ");
+}
+
+function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = [], mpstatsCharacteristics = []) {
   const options = {};
   const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const mpstatsByName = Object.fromEntries((mpstatsCharacteristics || []).map((item) => [
+    normalizedCharacteristicOption(item.name),
+    (item.values || []).map((value) => value?.value || value).filter(Boolean),
+  ]));
   currentRows.forEach((row) => {
     const meta = metaByKey[row.key] || {};
     const wbOptions = Array.isArray(meta.valueOptions) ? meta.valueOptions : [];
-    options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions, ...fallbackCharacteristicValueOptions(row.label)];
+    const mpstatsOptions = mpstatsByName[normalizedCharacteristicOption(row.label)] || [];
+    options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions, ...mpstatsOptions, ...fallbackCharacteristicValueOptions(row.label)];
   });
   (portal?.realCards || []).forEach((item) => {
     characteristicRows(item?.characteristics || item?.rawFields?.characteristics || []).forEach((row) => {
@@ -933,7 +961,8 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
     const key = characteristicKeyFromMeta(item);
     const current = options[key] || [];
     const wbOptions = Array.isArray(item.valueOptions) ? item.valueOptions : [];
-    options[key] = [...current, ...wbOptions, ...fallbackCharacteristicValueOptions(item.name)];
+    const mpstatsOptions = mpstatsByName[normalizedCharacteristicOption(item.name)] || [];
+    options[key] = [...current, ...wbOptions, ...mpstatsOptions, ...fallbackCharacteristicValueOptions(item.name)];
   });
   return Object.fromEntries(Object.entries(options).map(([key, values]) => [
     key,
@@ -1980,6 +2009,8 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
+  const [mpstatsCharacteristics, setMpstatsCharacteristics] = useState([]);
+  const [mpstatsCharacteristicsStatus, setMpstatsCharacteristicsStatus] = useState("idle");
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -1991,7 +2022,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
-  const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems, subjectCharacteristics);
+  const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
@@ -2001,6 +2032,19 @@ function CardDetailScreen({ card, portal, onBack }) {
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
+  const mpstatsHintsLabel = {
+    loaded: "подсказки MPStats",
+    loading: "загрузка",
+    empty: "MPStats пусто",
+    error: "MPStats ошибка",
+    unavailable: "MPStats недоступен",
+    "missing-subject": "нет subjectID",
+  }[mpstatsCharacteristicsStatus] || (auditDone ? "есть рекомендации" : "ручной черновик");
+  const mpstatsHintsTone = ["loaded", "loading"].includes(mpstatsCharacteristicsStatus)
+    ? "blue"
+    : ["empty", "error", "unavailable", "missing-subject"].includes(mpstatsCharacteristicsStatus)
+      ? "amber"
+      : auditDone ? "blue" : "green";
 
   useEffect(() => {
     let active = true;
@@ -2011,6 +2055,8 @@ function CardDetailScreen({ card, portal, onBack }) {
     setDraftTitleSource("");
     setDraftDescriptionSource("");
     setDraftCharacteristics({});
+    setMpstatsCharacteristics([]);
+    setMpstatsCharacteristicsStatus("idle");
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -2078,6 +2124,23 @@ function CardDetailScreen({ card, portal, onBack }) {
       active = false;
     };
   }, [card?.subjectID, rawFields.subjectID, portal?.id, portal?.mode]);
+
+  async function loadMpstatsCharacteristicHints() {
+    const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
+    if (!subjectID || !portal?.id) {
+      setMpstatsCharacteristicsStatus("missing-subject");
+      return;
+    }
+    setMpstatsCharacteristicsStatus("loading");
+    try {
+      const payload = await apiRequest(`/api/mpstats/characteristics?portal_id=${encodeURIComponent(portal.id)}&type=subject&value=${encodeURIComponent(subjectID)}&num_top=100&min_cats=0`);
+      setMpstatsCharacteristics(payload.characteristics || []);
+      setMpstatsCharacteristicsStatus((payload.characteristics || []).length ? "loaded" : "empty");
+    } catch (error) {
+      setMpstatsCharacteristics([]);
+      setMpstatsCharacteristicsStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
+    }
+  }
 
   function runAuditStub() {
     const suggestions = titleSuggestions(card);
@@ -2313,7 +2376,18 @@ function CardDetailScreen({ card, portal, onBack }) {
                     <h2>Было / стало</h2>
                     <p>{auditDone ? "Рекомендации аудита помечены, но любые поля можно править вручную." : "Заполняйте колонку Стало вручную. Аудит позже добавит помеченные рекомендации."}</p>
                   </div>
-                  <Tag tone={auditDone ? "blue" : "green"}>{auditDone ? "есть рекомендации" : "ручной черновик"}</Tag>
+                  <div className="strip-actions">
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={loadMpstatsCharacteristicHints}
+                      disabled={mpstatsCharacteristicsStatus === "loading"}
+                      title="Подтянуть популярные значения характеристик из MPStats"
+                    >
+                      <RefreshCw size={16} />MPStats
+                    </button>
+                    <Tag tone={mpstatsHintsTone}>{mpstatsHintsLabel}</Tag>
+                  </div>
                 </div>
                 <div className="before-after">
                   <div className="field-box">
@@ -2634,12 +2708,10 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
           {!isLimitReached && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
         </div>
       ) : null}
-      <div className="draft-editor-meta">
+      <div className="draft-editor-meta" title={characteristicValueMetaTitle(meta, hasKnownOptions, values.length, isAuditSuggestion, Boolean(draft))}>
         <span>{characteristicLimitText(meta, values.length)}</span>
         <span>{characteristicValueSourceText(meta, hasKnownOptions)}</span>
-        {!strictValues ? <span>свое значение разрешено</span> : null}
-        {isAuditSuggestion ? <Tag tone="blue">рекомендация аудита</Tag> : null}
-        {draft && !isAuditSuggestion ? <span>ручная правка</span> : null}
+        {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
     </div>
   );

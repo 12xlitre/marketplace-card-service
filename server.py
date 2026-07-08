@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -61,11 +61,13 @@ WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
 MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
+MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "21600"))
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
 WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
+MPSTATS_CHARACTERISTICS_CACHE = {}
 
 
 def utc_now():
@@ -1395,6 +1397,48 @@ def mpstats_get_json(token, path, attempts=3):
   raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_request_failed", retryable=True)
 
 
+def mpstats_post_json(token, path, params=None, attempts=3):
+  token = str(token or "").strip()
+  if not token:
+    raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
+  query = urlencode(params or {}, doseq=True)
+  url = f"{MPSTATS_API_BASE.rstrip('/')}{path}{'?' + query if query else ''}"
+  headers = {
+    "X-Mpstats-TOKEN": token,
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "OptiCards/0.1 mpstats-characteristics",
+  }
+
+  for attempt in range(attempts):
+    request = urlrequest.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+      with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
+        response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+    except urlerror.HTTPError as exc:
+      response_body = exc.read().decode("utf-8", errors="replace")
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      retryable = exc.code == 429 or 500 <= exc.code < 600
+      if retryable and attempt < attempts - 1:
+        time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(
+        exc.code,
+        mpstats_error_message(response_body, HTTPStatus(exc.code).phrase),
+        retryable=retryable,
+      ) from exc
+    except (TimeoutError, urlerror.URLError) as exc:
+      if attempt < attempts - 1:
+        time.sleep(0.5 * (2 ** attempt))
+        continue
+      raise MpstatsApiError(HTTPStatus.GATEWAY_TIMEOUT, "mpstats_request_timeout", retryable=True) from exc
+    except json.JSONDecodeError as exc:
+      raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_invalid_json", retryable=False) from exc
+
+  raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_request_failed", retryable=True)
+
+
 def check_mpstats_connection():
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
@@ -1427,6 +1471,82 @@ def check_mpstats_connection():
     },
     "integration": integration,
   }
+
+
+def normalize_mpstats_characteristics(payload):
+  output = payload.get("output") if isinstance(payload, dict) else {}
+  if not isinstance(output, dict):
+    return []
+  rows = []
+  for name, table in output.items():
+    if name == "products" or not isinstance(table, dict):
+      continue
+    data = table.get("data")
+    if not isinstance(data, list):
+      continue
+    values = []
+    for item in data[:30]:
+      if not isinstance(item, list) or not item:
+        continue
+      value = str(item[0] or "").strip()
+      if not value:
+        continue
+      score = item[1] if len(item) > 1 and isinstance(item[1], (int, float)) else None
+      values.append({"value": value, "score": score})
+    if values:
+      rows.append({"name": str(name).strip(), "values": values})
+  return rows
+
+
+def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0):
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+  report_type = str(report_type or "subject").strip()
+  value = str(value or "").strip()
+  if report_type not in {"category", "subject", "skus", "keywords"} or not value:
+    raise ValueError("invalid_mpstats_characteristics_request")
+  num_top = max(10, min(int(num_top or 100), 300))
+  min_cats = max(0, min(int(min_cats or 0), 20))
+  cache_key = f"{report_type}:{value}:{num_top}:{min_cats}"
+  cached = MPSTATS_CHARACTERISTICS_CACHE.get(cache_key)
+  now_ts = time.time()
+  if cached and now_ts - cached["stored_at"] < MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS:
+    return {**cached["payload"], "cached": True}
+
+  create_payload = mpstats_post_json(
+    token,
+    "/analytics/v1/wb/characteristics-analysis",
+    {
+      "type": report_type,
+      "value": value,
+      "numTop": num_top,
+      "minCats": min_cats,
+    },
+  )
+  report_hash = create_payload.get("result") if isinstance(create_payload, dict) else ""
+  if not report_hash:
+    raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_report_hash_missing", retryable=True)
+
+  report_payload = {}
+  for attempt in range(3):
+    report_payload = mpstats_get_json(token, f"/analytics/v1/wb/characteristics-analysis/{report_hash}")
+    if isinstance(report_payload, dict) and isinstance(report_payload.get("output"), dict):
+      break
+    if attempt < 2:
+      time.sleep(1)
+
+  normalized = normalize_mpstats_characteristics(report_payload)
+  payload = {
+    "source": "mpstats",
+    "status": "loaded" if normalized else "empty",
+    "reportHash": report_hash,
+    "input": report_payload.get("input", {}) if isinstance(report_payload, dict) else {},
+    "characteristics": normalized,
+    "cached": False,
+  }
+  MPSTATS_CHARACTERISTICS_CACHE[cache_key] = {"stored_at": now_ts, "payload": payload}
+  return payload
 
 
 def get_wb_token_for_portal(portal_id):
@@ -1964,6 +2084,48 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         )
         return
       payload = {**payload, "portalId": portal_id, "tokenSource": token_source}
+      self.send_json(HTTPStatus.OK, payload)
+      return
+
+    if path == "/api/mpstats/characteristics":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", ["demo-wb"])[0]
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      report_type = query.get("type", ["subject"])[0]
+      value = query.get("value", [""])[0] or query.get("subject_id", [""])[0]
+      try:
+        num_top = int(query.get("num_top", ["100"])[0])
+        min_cats = int(query.get("min_cats", ["0"])[0])
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_characteristics_request"})
+        return
+      try:
+        payload = fetch_mpstats_characteristics(report_type, value, num_top=num_top, min_cats=min_cats)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_characteristics_request"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except MpstatsApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "mpstats_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
       self.send_json(HTTPStatus.OK, payload)
       return
 

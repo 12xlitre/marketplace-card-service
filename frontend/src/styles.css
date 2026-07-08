@@ -556,6 +556,20 @@ a {
   gap: 12px;
 }
 
+.strip-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.strip-actions .btn {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
 .seller {
   display: flex;
   gap: 12px;
@@ -1395,12 +1409,27 @@ tr:last-child td {
 }
 
 .draft-editor-meta {
-  min-height: 24px;
+  min-height: 18px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
+  gap: 5px;
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.draft-editor-meta span:empty {
+  display: none;
+}
+
+.draft-editor-meta span + span::before {
+  content: "·";
+  margin-right: 5px;
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+.draft-editor-meta .tag::before {
+  content: none;
 }
 
 .draft-source-manual {
