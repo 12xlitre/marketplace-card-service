@@ -1191,6 +1191,44 @@ tr:last-child td {
   color: var(--brand);
 }
 
+.content-audit-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.content-audit-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.content-audit-card.future {
+  background: var(--blue-soft);
+}
+
+.content-audit-card > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.content-audit-card strong {
+  font-size: 13px;
+}
+
+.content-audit-card p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .compact-list {
   margin-top: 10px;
 }
@@ -1409,10 +1447,21 @@ tr:last-child td {
 
 .characteristic-diff-title {
   min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.characteristic-title-line {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+.characteristic-reason {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .draft-chip-list {
@@ -1941,6 +1990,10 @@ tr:last-child td {
   .detail-layout {
     grid-template-columns: 1fr;
   }
+
+  .content-audit-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
@@ -2001,6 +2054,7 @@ tr:last-child td {
   .form-two,
   .connect-mode,
   .before-after,
+  .content-audit-summary,
   .raw-field-row,
   .characteristic-row,
   .characteristics-diff-head,

@@ -1570,6 +1570,11 @@ function buildStructuredCardDraft({
     prices: {},
     stocks: {},
     meta: {
+      auditContract: {
+        version: "sergey-audit-v1",
+        sections: ["title", "description", "characteristics"],
+        expectedOutputs: ["value", "reason", "evidence", "confidence"],
+      },
       auditHistory: Array.isArray(auditHistory) ? auditHistory.slice(0, 20) : [],
       card: {
         nmID: card?.nmID || "",
@@ -1600,6 +1605,17 @@ function contentFromStoredDraft(storedDraft) {
     auditHistory: Array.isArray(meta.auditHistory) ? meta.auditHistory : [],
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
+}
+
+function countChangedDraftCharacteristics(drafts, rows) {
+  return Object.entries(drafts || {}).filter(([key, draft]) => {
+    const currentRow = rows.find((row) => row.key === key);
+    if (!currentRow) {
+      return true;
+    }
+    const currentSet = new Set(characteristicValueTokens(currentRow.value).map(normalizedCharacteristicOption));
+    return draftCharacteristicValues(draft).some((value) => !currentSet.has(normalizedCharacteristicOption(value)));
+  }).length;
 }
 
 function firstDefined(...values) {
@@ -2794,6 +2810,8 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     : ["empty", "error", "unavailable", "missing-subject"].includes(mpstatsCharacteristicsStatus)
       ? "amber"
       : auditDone ? "blue" : "green";
+  const changedDraftCharacteristicsCount = countChangedDraftCharacteristics(draftCharacteristics, characteristicItems);
+  const auditDraftCharacteristicsCount = Object.values(draftCharacteristics).filter((draft) => draft?.source === "audit").length;
 
   useEffect(() => {
     let active = true;
@@ -2982,10 +3000,18 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     const auditEntry = {
       id: `audit-${Date.now()}`,
       createdAt: new Date().toISOString(),
+      engine: "opticards-basic-v1",
+      sourceInputs: ["wb_snapshot", "mpstats_characteristics_cache", "manual_rules"],
       mpstatsGroups: auditMpstatsCharacteristics.length,
       mpstatsMatches: countMpstatsMatches(characteristicItems, subjectCharacteristics, auditMpstatsCharacteristics),
       promotionRelevantCount: countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, auditMpstatsCharacteristics),
       changedCharacteristics,
+      content: {
+        titleChanged: normalizedCharacteristicOption(nextTitle) !== normalizedCharacteristicOption(currentTitle),
+        descriptionChanged: normalizedCharacteristicOption(nextDescription) !== normalizedCharacteristicOption(description),
+        titleReason: nextTitleReason,
+        descriptionReason: nextDescriptionReason,
+      },
       status: mpstatsPayload ? "done" : "partial",
     };
     const nextAuditHistory = [auditEntry, ...auditHistory].slice(0, 20);
@@ -3354,6 +3380,17 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                 </div>
                 {changesTab === "content" ? (
                 <>
+                <ContentAuditSummary
+                  titleChanged={normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)}
+                  titleSource={draftTitleSource}
+                  titleReason={draftTitleReason}
+                  descriptionChanged={normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description)}
+                  descriptionSource={draftDescriptionSource}
+                  descriptionReason={draftDescriptionReason}
+                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
+                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
+                  mpstatsStatus={mpstatsHintsLabel}
+                />
                 <div className="before-after">
                   <div className="field-box">
                     <strong>Было: заголовок</strong>
@@ -3545,6 +3582,74 @@ function CharacteristicsBlock({ items }) {
   return <RawFieldValue value={items} />;
 }
 
+function contentSummaryState({ changed, source, reason, emptyText }) {
+  if (!reason && !source) {
+    return { tone: "green", label: emptyText || "без черновика", reason: "Запустите аудит или внесите ручную правку." };
+  }
+  if (source === "manual") {
+    return { tone: "blue", label: "ручная правка", reason: reason || "Значение изменено специалистом вручную." };
+  }
+  if (source === "audit") {
+    return {
+      tone: changed ? "amber" : "green",
+      label: changed ? "предложение аудита" : "аудит оставил",
+      reason: reason || "Аудит не нашел причины менять значение.",
+    };
+  }
+  return {
+    tone: changed ? "amber" : "green",
+    label: changed ? "изменено" : "без изменения",
+    reason: reason || "Черновик совпадает с текущими данными WB.",
+  };
+}
+
+function ContentAuditSummary({
+  titleChanged,
+  titleSource,
+  titleReason,
+  descriptionChanged,
+  descriptionSource,
+  descriptionReason,
+  changedCharacteristicsCount,
+  auditCharacteristicsCount,
+  mpstatsStatus,
+}) {
+  const titleState = contentSummaryState({ changed: titleChanged, source: titleSource, reason: titleReason, emptyText: "нет заголовка" });
+  const descriptionState = contentSummaryState({ changed: descriptionChanged, source: descriptionSource, reason: descriptionReason, emptyText: "нет описания" });
+  return (
+    <div className="content-audit-summary">
+      <div className="content-audit-card">
+        <div>
+          <strong>Заголовок</strong>
+          <Tag tone={titleState.tone}>{titleState.label}</Tag>
+        </div>
+        <p>{titleState.reason}</p>
+      </div>
+      <div className="content-audit-card">
+        <div>
+          <strong>Описание</strong>
+          <Tag tone={descriptionState.tone}>{descriptionState.label}</Tag>
+        </div>
+        <p>{descriptionState.reason}</p>
+      </div>
+      <div className="content-audit-card">
+        <div>
+          <strong>Характеристики</strong>
+          <Tag tone={changedCharacteristicsCount ? "amber" : "green"}>{changedCharacteristicsCount ? `${changedCharacteristicsCount} изменено` : "без изменений"}</Tag>
+        </div>
+        <p>{auditCharacteristicsCount ? `Аудит подготовил ${auditCharacteristicsCount} ${pluralRu(auditCharacteristicsCount, "поле", "поля", "полей")}. ${mpstatsStatus}.` : "Можно править вручную или добавить поля из справочника WB."}</p>
+      </div>
+      <div className="content-audit-card future">
+        <div>
+          <strong>Будущий аудит</strong>
+          <Tag tone="blue">готово к модели</Tag>
+        </div>
+        <p>Черновик уже разделен на title, description и characteristics; контракт аудита готов принять reason, evidence и confidence от логики Сергея.</p>
+      </div>
+    </div>
+  );
+}
+
 function CharacteristicsDiffTable({
   rows,
   drafts,
@@ -3601,28 +3706,35 @@ function CharacteristicsDiffTable({
         <span>Стало</span>
       </div>
       {!visibleRows.length ? <div className="empty-state"><span>Характеристики не заполнены</span></div> : null}
-      {visibleRows.map((row) => (
-        <div className="characteristics-diff-row" key={row.key}>
-          <div className="characteristic-diff-title">
-            <strong>{row.label}</strong>
-            {characteristicIsPromotionRelevant(row.meta, mpstatsCharacteristics) ? <Tag tone="amber">важно</Tag> : null}
+      {visibleRows.map((row) => {
+        const draft = drafts[row.key];
+        return (
+          <div className="characteristics-diff-row" key={row.key}>
+            <div className="characteristic-diff-title">
+              <div className="characteristic-title-line">
+                <strong>{row.label}</strong>
+                {characteristicIsPromotionRelevant(row.meta, mpstatsCharacteristics) ? <Tag tone="amber">важно</Tag> : null}
+                <DraftSourceMark source={draft?.source || ""} />
+              </div>
+              {draft?.reason ? <span className="characteristic-reason">{draft.reason}</span> : null}
+            </div>
+            {row.draftOnly ? <span className="raw-field-value field-empty">Добавлено в черновик</span> : <RawFieldValue value={row.value} />}
+            <DraftCharacteristicEditor
+              draft={draft}
+              row={row}
+              meta={row.meta}
+              valueOptions={valueOptionsByKey[row.key] || []}
+              mpstatsValues={mpstatsValuesForCharacteristic(row.meta, mpstatsCharacteristics)}
+              mpstatsStats={mpstatsValueStatsForCharacteristic(row.meta, mpstatsCharacteristics)}
+              mpstatsNearbyNames={nearbyMpstatsCharacteristicNames(row.meta, mpstatsCharacteristics)}
+              onAddValue={(value) => onAddValue(row, value)}
+              onReplaceValue={(value) => onAddValue(row, value, { replace: true })}
+              onRemoveValue={(value) => onRemoveValue(row, value)}
+              onRemove={() => onRemove(row.key)}
+            />
           </div>
-          {row.draftOnly ? <span className="raw-field-value field-empty">Добавлено в черновик</span> : <RawFieldValue value={row.value} />}
-          <DraftCharacteristicEditor
-            draft={drafts[row.key]}
-            row={row}
-            meta={row.meta}
-            valueOptions={valueOptionsByKey[row.key] || []}
-            mpstatsValues={mpstatsValuesForCharacteristic(row.meta, mpstatsCharacteristics)}
-            mpstatsStats={mpstatsValueStatsForCharacteristic(row.meta, mpstatsCharacteristics)}
-            mpstatsNearbyNames={nearbyMpstatsCharacteristicNames(row.meta, mpstatsCharacteristics)}
-            onAddValue={(value) => onAddValue(row, value)}
-            onReplaceValue={(value) => onAddValue(row, value, { replace: true })}
-            onRemoveValue={(value) => onRemoveValue(row, value)}
-            onRemove={() => onRemove(row.key)}
-          />
-        </div>
-      ))}
+        );
+      })}
       <div className="characteristics-search">
         <label className="search">
           <Search size={17} />
@@ -3757,7 +3869,6 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
         {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
       {topMarketValues.length ? <p className="market-compare">Топ категории: {topMarketValues.join(", ")}</p> : null}
-      <DraftReason reason={draft?.reason || ""} compact />
     </div>
   );
 }
