@@ -1404,6 +1404,12 @@ tr:last-child td {
 }
 
 .draft-value-options {
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;

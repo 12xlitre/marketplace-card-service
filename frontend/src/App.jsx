@@ -2090,6 +2090,7 @@ function CharacteristicsDiffTable({
 
 function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
+  const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
   const values = draftCharacteristicValues(draft);
   const limit = characteristicValueLimit(meta);
@@ -2098,8 +2099,7 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
   const normalizedQuery = normalizedCharacteristicOption(query);
   const availableValues = valueOptions
     .filter((value) => !selectedValues.has(normalizedCharacteristicOption(value)))
-    .filter((value) => !normalizedQuery || normalizedCharacteristicOption(value).includes(normalizedQuery))
-    .slice(0, 6);
+    .filter((value) => !normalizedQuery || normalizedCharacteristicOption(value).includes(normalizedQuery));
 
   function addValue(value) {
     if (isLimitReached) {
@@ -2107,6 +2107,7 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
     }
     onAddValue(value);
     setQuery("");
+    setIsOptionsOpen(false);
   }
 
   return (
@@ -2131,15 +2132,17 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onFocus={() => setIsOptionsOpen(true)}
+          onBlur={() => setIsOptionsOpen(false)}
           disabled={isLimitReached}
-          placeholder={isLimitReached ? "Лимит значений достигнут" : "Найти значение"}
+          placeholder={isLimitReached ? "Лимит значений достигнут" : "Выбрать из вариантов WB"}
         />
       </label>
-      {query ? (
+      {isOptionsOpen ? (
         <div className="draft-value-options">
           {isLimitReached ? <span className="field-empty">Сначала удалите одно значение</span> : null}
           {!isLimitReached && availableValues.length ? availableValues.map((value) => (
-            <button className="characteristic-option" type="button" key={value} onClick={() => addValue(value)}>
+            <button className="characteristic-option" type="button" key={value} onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(value)}>
               <span>{value}</span>
             </button>
           )) : null}
