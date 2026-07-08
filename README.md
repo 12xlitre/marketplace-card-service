@@ -82,6 +82,8 @@ GET /api/wb/cards?portal_id=demo-wb&limit=100
 
 `GET /api/wb/cards` возвращает нормализованные карточки и sanitised `rawFields` для детального просмотра. Поля с признаками секретов (`token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`) вырезаются на backend.
 
+При повторном подключении того же WB кабинета `POST /api/portals` отвечает `409`: `portal_already_connected` для активного кабинета или `portal_already_archived`, если кабинет уже есть в архиве. Проверка идет по digest токена и fingerprint набора `nmID`, сам WB ключ в ответ не попадает.
+
 ## Прод
 
 Живой адрес:

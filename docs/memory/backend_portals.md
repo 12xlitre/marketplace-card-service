@@ -12,5 +12,6 @@
 
 Правила:
 - WB API токены не попадают в ответ `GET /api/portals`;
+- `portal_integrations.external_key` хранит не секретный fingerprint внешнего кабинета/набора карточек для защиты от повторного добавления;
 - счетчики `card_count`, `work_count`, `problem_count` и `last_sync_at` обновляются после read-only загрузки WB;
 - карточки пока не являются отдельной постоянной таблицей, при открытии API-кабинета frontend может перечитать snapshot через `/api/wb/cards`.

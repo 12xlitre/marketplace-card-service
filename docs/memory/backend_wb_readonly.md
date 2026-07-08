@@ -17,3 +17,4 @@
 - используется cursor-пагинация и `withPhoto: -1` для любых карточек;
 - UI получает нормализованные карточки, статусы качества и расширенный снимок полей карточки (`rawFields`) для детального просмотра;
 - `rawFields` проходит backend-sanitizer: из вложенных объектов вырезаются ключи с `token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`; raw WB token и секреты в ответ не попадают.
+- повторное подключение того же WB кабинета блокируется: сначала по digest API-ключа, после read-only проверки по fingerprint набора `nmID`; активный дубль возвращает `portal_already_connected`, архивный - `portal_already_archived`.

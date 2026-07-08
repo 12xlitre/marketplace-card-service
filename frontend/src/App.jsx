@@ -1381,6 +1381,12 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
   }
 
   function errorText(errorObject) {
+    if (errorObject.message === "portal_already_connected") {
+      return `Этот WB кабинет уже подключен: ${errorObject.payload?.portal?.name || "существующий кабинет"}. Повторно добавить его нельзя.`;
+    }
+    if (errorObject.message === "portal_already_archived") {
+      return `Этот WB кабинет уже подключен, но находится в архиве: ${errorObject.payload?.portal?.name || "существующий кабинет"}. Верните его из архива вместо повторного добавления.`;
+    }
     if (errorObject.message === "wb_token_required") return "Введите WB API ключ для подключения кабинета.";
     if (errorObject.message === "wb_api_error") return `WB API не подключился: ${errorObject.payload?.message || "WB отклонил запрос."}`;
     if (errorObject.message === "secret_storage_unavailable") return "На backend не настроен ключ шифрования.";

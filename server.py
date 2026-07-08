@@ -130,6 +130,7 @@ def init_db():
         token_nonce TEXT NOT NULL,
         token_ciphertext TEXT NOT NULL,
         token_digest TEXT NOT NULL,
+        external_key TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_checked_at TEXT,
@@ -145,6 +146,21 @@ def init_db():
         db.execute(f"ALTER TABLE portals ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT 0")
     if "is_active" not in portal_columns:
       db.execute("ALTER TABLE portals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    integration_columns = {row["name"] for row in db.execute("PRAGMA table_info(portal_integrations)").fetchall()}
+    if "external_key" not in integration_columns:
+      db.execute("ALTER TABLE portal_integrations ADD COLUMN external_key TEXT NOT NULL DEFAULT ''")
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_portal_integrations_provider_token_digest
+      ON portal_integrations(provider, token_digest)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_portal_integrations_provider_external_key
+      ON portal_integrations(provider, external_key)
+      """
+    )
 
 
 def hash_password(password, salt=None):
@@ -237,6 +253,19 @@ def integration_aad(portal_id, provider):
   return f"portal:{portal_id}:integration:{provider}"
 
 
+def wb_snapshot_external_key(snapshot):
+  cards = snapshot.get("cards") or []
+  nm_ids = sorted({
+    str(card.get("nmID")).strip()
+    for card in cards
+    if card.get("nmID")
+  })
+  if not nm_ids:
+    return ""
+  digest = hashlib.sha256("\n".join(nm_ids).encode("utf-8")).hexdigest()
+  return f"wb-nmids:{digest}"
+
+
 def create_portal(name, marketplace, scope, created_by, team):
   init_db()
   with connect_db() as db:
@@ -266,6 +295,7 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
   init_db()
   stats = snapshot.get("stats") or {}
   portal_name = stats.get("portalName") or name
+  external_key = wb_snapshot_external_key(snapshot)
   with connect_db() as db:
     cursor = db.execute(
       """
@@ -304,13 +334,49 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
     db.execute(
       """
       INSERT INTO portal_integrations (
-        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, last_checked_at
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at
       )
-      VALUES (?, ?, 'connected', ?, ?, ?, CURRENT_TIMESTAMP)
+      VALUES (?, ?, 'connected', ?, ?, ?, ?, CURRENT_TIMESTAMP)
       """,
-      (portal_id, WB_PROVIDER, nonce, ciphertext, secret_digest(token)),
+      (portal_id, WB_PROVIDER, nonce, ciphertext, secret_digest(token), external_key),
     )
     return portal_id
+
+
+def find_portal_by_integration_token(provider, token):
+  init_db()
+  with connect_db() as db:
+    return db.execute(
+      """
+      SELECT portals.id, portals.name, portals.is_active, portals.status
+      FROM portal_integrations
+      JOIN portals ON portals.id = portal_integrations.portal_id
+      WHERE portal_integrations.provider = ?
+        AND portal_integrations.token_digest = ?
+      ORDER BY portals.is_active DESC, portals.id
+      LIMIT 1
+      """,
+      (provider, secret_digest(token)),
+    ).fetchone()
+
+
+def find_portal_by_integration_external_key(provider, external_key):
+  if not external_key:
+    return None
+  init_db()
+  with connect_db() as db:
+    return db.execute(
+      """
+      SELECT portals.id, portals.name, portals.is_active, portals.status
+      FROM portal_integrations
+      JOIN portals ON portals.id = portal_integrations.portal_id
+      WHERE portal_integrations.provider = ?
+        AND portal_integrations.external_key = ?
+      ORDER BY portals.is_active DESC, portals.id
+      LIMIT 1
+      """,
+      (provider, external_key),
+    ).fetchone()
 
 
 def save_integration_token(portal_id, provider, token):
@@ -324,14 +390,15 @@ def save_integration_token(portal_id, provider, token):
     db.execute(
       """
       INSERT INTO portal_integrations (
-        portal_id, provider, status, token_nonce, token_ciphertext, token_digest
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key
       )
-      VALUES (?, ?, 'stored', ?, ?, ?)
+      VALUES (?, ?, 'stored', ?, ?, ?, '')
       ON CONFLICT(portal_id, provider) DO UPDATE SET
         status = 'stored',
         token_nonce = excluded.token_nonce,
         token_ciphertext = excluded.token_ciphertext,
         token_digest = excluded.token_digest,
+        external_key = '',
         updated_at = CURRENT_TIMESTAMP
       """,
       (portal_id, provider, nonce, ciphertext, secret_digest(token)),
@@ -487,6 +554,7 @@ def update_portal_sync_stats(portal_id, snapshot):
   except (TypeError, ValueError):
     return
   stats = snapshot.get("stats") or {}
+  external_key = wb_snapshot_external_key(snapshot)
   with connect_db() as db:
     db.execute(
       """
@@ -511,6 +579,15 @@ def update_portal_sync_stats(portal_id, snapshot):
         numeric_portal_id,
       ),
     )
+    if external_key:
+      db.execute(
+        """
+        UPDATE portal_integrations
+        SET external_key = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE portal_id = ? AND provider = ?
+        """,
+        (external_key, numeric_portal_id, WB_PROVIDER),
+      )
 
 
 def create_session(db, user_id, remember=False):
@@ -1077,8 +1154,43 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         if len(api_key) < 20:
           self.send_json(HTTPStatus.BAD_REQUEST, {"error": "wb_token_required"})
           return
+        existing_portal = find_portal_by_integration_token(WB_PROVIDER, api_key)
+        if existing_portal:
+          error_code = "portal_already_connected" if existing_portal["is_active"] else "portal_already_archived"
+          self.send_json(
+            HTTPStatus.CONFLICT,
+            {
+              "error": error_code,
+              "portal": {
+                "id": str(existing_portal["id"]),
+                "name": existing_portal["name"],
+                "isActive": bool(existing_portal["is_active"]),
+                "status": existing_portal["status"],
+              },
+            },
+          )
+          return
         try:
           snapshot = fetch_wb_cards(api_key, max_cards=100)
+          existing_portal = find_portal_by_integration_external_key(
+            WB_PROVIDER,
+            wb_snapshot_external_key(snapshot),
+          )
+          if existing_portal:
+            error_code = "portal_already_connected" if existing_portal["is_active"] else "portal_already_archived"
+            self.send_json(
+              HTTPStatus.CONFLICT,
+              {
+                "error": error_code,
+                "portal": {
+                  "id": str(existing_portal["id"]),
+                  "name": existing_portal["name"],
+                  "isActive": bool(existing_portal["is_active"]),
+                  "status": existing_portal["status"],
+                },
+              },
+            )
+            return
           portal_id = create_connected_wb_portal(
             name,
             marketplace,
