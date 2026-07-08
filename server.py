@@ -1073,6 +1073,28 @@ def get_card_draft(portal_id, card_key, user):
   return public_card_draft(row) if row else None
 
 
+def delete_card_draft(portal_id, card_key, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    cursor = db.execute(
+      """
+      DELETE FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    )
+  return cursor.rowcount > 0
+
+
 def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -2451,6 +2473,36 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return
 
     self.serve_static(path)
+
+  def do_DELETE(self):
+    parsed = urlparse(self.path)
+    path = parsed.path
+    if path == "/api/card-drafts":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      card_key = query.get("card_key", [""])[0]
+      if not portal_id or not card_key:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_draft_request"})
+        return
+      try:
+        deleted = delete_card_draft(portal_id, card_key, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
+        return
+      self.send_json(HTTPStatus.OK, {"deleted": deleted})
+      return
+
+    if path.startswith("/api/"):
+      self.send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+      return
+
+    self.send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method_not_allowed"})
 
   def do_POST(self):
     path = urlparse(self.path).path

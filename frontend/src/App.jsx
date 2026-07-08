@@ -1744,6 +1744,30 @@ export default function App() {
     });
   }
 
+  function resetPortalWorkActivity(portalId, cardKey) {
+    const normalizedPortalId = String(portalId || "");
+    const normalizedCardKey = String(cardKey || "");
+    if (!normalizedPortalId || !normalizedCardKey) {
+      return;
+    }
+    setPortalWorkSummaries((current) => {
+      const summary = current[normalizedPortalId];
+      if (!summary) {
+        return current;
+      }
+      const draftKeys = (summary.draftKeys || []).filter((key) => key !== normalizedCardKey);
+      const auditKeys = (summary.auditKeys || []).filter((key) => key !== normalizedCardKey);
+      return {
+        ...current,
+        [normalizedPortalId]: {
+          draftKeys,
+          auditKeys,
+          lastActivityAt: new Date().toISOString(),
+        },
+      };
+    });
+  }
+
   async function refreshUsers() {
     const payload = await apiRequest("/api/users");
     const nextUsers = normalizeUserList(payload.users || []);
@@ -2024,6 +2048,7 @@ export default function App() {
             onBack={() => setScreen("seller")}
             onDraftSaved={refreshPortals}
             onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
+            onDraftReset={() => resetPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal))}
           />
         ) : null}
 
@@ -2506,7 +2531,7 @@ function CardsTable({ cards, portal, onOpenCard }) {
   );
 }
 
-function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity }) {
+function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
   const [activeTab, setActiveTab] = useState("audit");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
@@ -2897,6 +2922,42 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
   }
 
+  async function resetDraft() {
+    const confirmed = window.confirm("Сбросить черновик и историю аудита по этой карточке? Это действие нельзя отменить.");
+    if (!confirmed) {
+      return;
+    }
+    setDraftSaveStatus("resetting");
+    try {
+      localStorage.removeItem(draftStorageKey);
+      if (backendDraftEnabled) {
+        await apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`, {
+          method: "DELETE",
+        });
+      }
+      setAuditStatus("idle");
+      setAuditHistory([]);
+      setDraftTitle("");
+      setDraftDescription("");
+      setDraftTitleSource("");
+      setDraftDescriptionSource("");
+      setDraftTitleReason("");
+      setDraftDescriptionReason("");
+      setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
+      setDraftSavedAt("");
+      setDraftSaveStatus("reset");
+      setActiveTab("changes");
+      if (onDraftReset) {
+        onDraftReset();
+      }
+      if (onDraftSaved) {
+        await onDraftSaved(null);
+      }
+    } catch {
+      setDraftSaveStatus("reset-error");
+    }
+  }
+
   function downloadDraftTable(type) {
     if (type === "content") {
       downloadXlsx(`${exportFileBase}-content-wb.xlsx`, buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics));
@@ -3154,10 +3215,14 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity 
                       : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
                     {draftSaveStatus === "local-fallback" ? <p>Backend недоступен для черновика, временно сохранено в этом браузере.</p> : null}
                     {draftSaveStatus === "saving" ? <p>Сохраняем копию на backend.</p> : null}
+                    {draftSaveStatus === "resetting" ? <p>Сбрасываем черновик.</p> : null}
+                    {draftSaveStatus === "reset" ? <p>Черновик сброшен. В колонке Стало снова текущие данные WB.</p> : null}
+                    {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
+                    <button className="btn" type="button" onClick={resetDraft} disabled={draftSaveStatus === "resetting"}><RotateCcw size={17} />Сбросить</button>
                     <button className="btn" type="button" onClick={() => downloadDraftTable("content")}><Download size={17} />Контент</button>
                     <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Цены</button>
                     <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Остатки</button>
