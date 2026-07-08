@@ -2545,6 +2545,84 @@ def audit_tokens(value):
   ]
 
 
+AUDIT_CHARACTERISTIC_NAME_STOPWORDS = {
+  "для",
+  "вид",
+  "тип",
+  "товар",
+  "товара",
+  "изделие",
+  "изделия",
+  "модель",
+  "модели",
+  "модел",
+  "материал",
+  "материала",
+  "характеристика",
+  "значение",
+  "значения",
+  "на",
+}
+
+AUDIT_AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS = {
+  "длин",
+  "ширин",
+  "высот",
+  "размер",
+  "объем",
+  "вес",
+  "ростовк",
+}
+
+AUDIT_CHARACTERISTIC_ALIAS_GROUPS = (
+  ("тип рукавов", "тип рукава", "длина рукава", "длина рукавов", "длина рукава изделия", "длина рукавов изделия", "рукав", "рукава", "рукава модель"),
+  ("тип карманов", "карманы", "вид кармана", "карман"),
+  ("фактура материала", "фактура", "структура материала", "текстура материала"),
+  ("особенности модели", "особенности", "особенности товара"),
+  ("декоративные элементы", "декор", "элементы декора"),
+  ("конструктивные элементы", "конструктивные особенности", "элементы конструкции"),
+  ("назначение", "назначение товара", "назначение модели"),
+  ("покрой", "силуэт", "крой"),
+  ("тип застежки", "застежка", "вид застежки"),
+  ("вырез горловины", "горловина", "тип горловины"),
+  ("рисунок", "принт", "узор"),
+)
+
+
+def audit_normalized_characteristic_name(value):
+  return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", audit_normalized(value))).strip()
+
+
+def audit_stem_characteristic_token(token):
+  output = str(token or "")
+  if len(output) > 5:
+    output = re.sub(r"(ыми|ими|ого|его|ому|ему|ами|ями|ах|ях|ов|ев|ей|ом|ем)$", "", output)
+  if len(output) > 4:
+    output = re.sub(r"(ая|яя|ое|ее|ые|ие|ый|ий|ой|ую|юю|ам|ям|а|я|ы|и|у|ю|е)$", "", output)
+  return output
+
+
+def audit_characteristic_name_tokens(value):
+  return [
+    token
+    for token in (
+      audit_stem_characteristic_token(token)
+      for token in audit_normalized_characteristic_name(value).split(" ")
+    )
+    if len(token) > 1 and token not in AUDIT_CHARACTERISTIC_NAME_STOPWORDS
+  ]
+
+
+def audit_characteristic_alias_matches(left, right):
+  left_name = audit_normalized_characteristic_name(left)
+  right_name = audit_normalized_characteristic_name(right)
+  for group in AUDIT_CHARACTERISTIC_ALIAS_GROUPS:
+    names = {audit_normalized_characteristic_name(name) for name in group}
+    if left_name in names and right_name in names:
+      return True
+  return False
+
+
 def audit_contains_phrase(text, phrase):
   text_tokens = set(audit_tokens(text))
   phrase_tokens = [token for token in audit_tokens(phrase) if len(token) > 3]
@@ -2735,27 +2813,44 @@ def audit_meta_by_characteristic(subject_characteristics):
 
 
 def audit_characteristic_name_score(left, right):
-  left_norm = audit_normalized(left)
-  right_norm = audit_normalized(right)
-  if not left_norm or not right_norm:
+  left_name = audit_normalized_characteristic_name(left)
+  right_name = audit_normalized_characteristic_name(right)
+  if not left_name or not right_name:
     return 0
-  if left_norm == right_norm:
+  if left_name == right_name:
     return 1
-  left_tokens = set(audit_tokens(left_norm))
-  right_tokens = set(audit_tokens(right_norm))
+  if audit_characteristic_alias_matches(left_name, right_name):
+    return 0.96
+  left_tokens = list(dict.fromkeys(audit_characteristic_name_tokens(left_name)))
+  right_tokens = list(dict.fromkeys(audit_characteristic_name_tokens(right_name)))
   if not left_tokens or not right_tokens:
     return 0
-  overlap = len(left_tokens & right_tokens)
+  overlap = len([token for token in left_tokens if token in right_tokens])
   if not overlap:
     return 0
-  return min(overlap / max(len(left_tokens), len(right_tokens)), overlap / min(len(left_tokens), len(right_tokens)))
+  overlap_tokens = {token for token in left_tokens if token in right_tokens}
+  if overlap_tokens and overlap_tokens.issubset(AUDIT_AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS):
+    return 0
+  left_coverage = overlap / len(left_tokens)
+  right_coverage = overlap / len(right_tokens)
+  if "рукав" in left_tokens and "рукав" in right_tokens:
+    return 0.9
+  if (
+    len(left_tokens) == 1
+    and left_tokens[0] in right_tokens
+    and left_tokens[0] not in AUDIT_AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS
+  ):
+    return 0.82
+  if left_coverage >= 0.66 and right_coverage >= 0.5:
+    return 0.72 + min(left_coverage, right_coverage) * 0.18
+  return 0
 
 
 def audit_mpstats_matches(name, mpstats_characteristics):
   matches = []
   for item in mpstats_characteristics if isinstance(mpstats_characteristics, list) else []:
     score = audit_characteristic_name_score(name, item.get("name") if isinstance(item, dict) else "")
-    if score >= 0.5:
+    if score >= 0.72:
       matches.append((score, item))
   return [item for _, item in sorted(matches, key=lambda pair: pair[0], reverse=True)]
 
