@@ -2446,11 +2446,11 @@
 
     function getUserRoleType(user) {
       const marker = `${user.user_role || ""} ${user.access_level || ""} ${user.role || ""}`.toLowerCase();
-      if (marker.includes("tech") || marker.includes("readonly") || marker.includes("карточ")) {
-        return "tech";
-      }
-      if (marker.includes("admin") || marker.includes("all") || marker.includes("полный")) {
+      if (marker.includes("admin") || marker.includes("all") || marker.includes("полный") || marker.includes("админ")) {
         return "admin";
+      }
+      if (marker.includes("tech") || marker.includes("readonly") || marker.includes("карточ") || marker.includes("тех") || marker.includes("спец")) {
+        return "tech";
       }
       return "manager";
     }
@@ -2626,8 +2626,8 @@
       try {
         const payload = await apiRequest("/api/users");
         users = normalizeUserList(payload.users || []);
-        if (currentUser && rememberSessionEnabled()) {
-          saveStaticSession(currentUser, users, true);
+        if (currentUser) {
+          saveStaticSession(currentUser, users, rememberSessionEnabled());
         }
       } catch (error) {
         const staticState = readStaticSession();
@@ -3082,6 +3082,7 @@
         });
         loginError.classList.remove("active");
         passwordInput.value = "";
+        saveStaticSession(payload.user, []);
         await enterApp(payload.user);
       } catch (error) {
         if (error.message === "invalid_credentials") {
