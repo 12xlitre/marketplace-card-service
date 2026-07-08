@@ -2230,6 +2230,7 @@ function CardDetailScreen({ card, portal, onBack }) {
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
   const auditDone = auditStatus === "done";
+  const auditRunning = auditStatus === "loading";
   const draftTitleLength = draftTitle.length;
   const draftCardKey = cardDraftKey(card);
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
@@ -2390,36 +2391,40 @@ function CardDetailScreen({ card, portal, onBack }) {
     };
   }, [card?.subjectID, rawFields.subjectID, portal?.id]);
 
-  async function loadMpstatsCharacteristicHints() {
+  async function loadMpstatsCharacteristicHints({ forceRefresh = true } = {}) {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
     if (!subjectID || !portal?.id) {
       setMpstatsCharacteristicsStatus("missing-subject");
       setMpstatsCharacteristicsMs(null);
       setMpstatsCharacteristicsMeta({});
-      return;
+      return null;
     }
     const startedAt = performance.now();
     setMpstatsCharacteristicsStatus("loading");
     setMpstatsCharacteristicsMs(null);
     try {
-      const payload = await apiRequest(mpstatsCharacteristicsPath(subjectID, { forceRefresh: true }));
+      const payload = await apiRequest(mpstatsCharacteristicsPath(subjectID, { forceRefresh }));
       applyMpstatsCharacteristicsPayload(payload, Math.round(performance.now() - startedAt));
+      return payload;
     } catch (error) {
       setMpstatsCharacteristicsMs(Math.round(performance.now() - startedAt));
       setMpstatsCharacteristics([]);
       setMpstatsCharacteristicsMeta({});
       setMpstatsCharacteristicsStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
+      return null;
     }
   }
 
-  function runAuditStub() {
+  async function runAuditStub() {
+    setAuditStatus("loading");
+    await loadMpstatsCharacteristicHints({ forceRefresh: true });
     const suggestions = titleSuggestions(card);
-    setAuditStatus("done");
     setDraftTitle(suggestions[1] || suggestions[0] || "");
     setDraftDescription(descriptionSuggestion(card, description));
     setDraftTitleSource("audit");
     setDraftDescriptionSource("audit");
     setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems));
+    setAuditStatus("done");
     setActiveTab("changes");
   }
 
@@ -2569,9 +2574,9 @@ function CardDetailScreen({ card, portal, onBack }) {
                 <div className="strip-head">
                   <div>
                     <h2>Аудит карточки</h2>
-                    <p>Пока это локальная заглушка для проверки рабочего сценария.</p>
+                    <p>Запускает аналитику MPStats, сохраняет результат в кэш и готовит черновик изменений.</p>
                   </div>
-                  <Tag tone={auditDone ? "green" : "amber"}>{auditDone ? "аудит готов" : "не запускался"}</Tag>
+                  <Tag tone={auditRunning ? "blue" : (auditDone ? "green" : "amber")}>{auditRunning ? "идет аудит" : (auditDone ? "аудит готов" : "не запускался")}</Tag>
                 </div>
                 <div className="audit-list">
                   <div className="issue">
@@ -2580,6 +2585,17 @@ function CardDetailScreen({ card, portal, onBack }) {
                       <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "проверка" : "ок"}</Tag>
                     </div>
                     <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
+                  </div>
+                  <div className="issue">
+                    <div className="issue-head">
+                      <strong>Аналитика MPStats</strong>
+                      <Tag tone={mpstatsHintsTone}>{mpstatsHintsLabel}</Tag>
+                    </div>
+                    <p>{mpstatsCharacteristicsStatus === "loaded"
+                      ? `Найдено ${mpstatsCharacteristics.length} групп характеристик, ${mpstatsMatches} совпало с карточкой. Эти значения уже подмешиваются в правки.`
+                      : mpstatsCharacteristicsStatus === "loading"
+                        ? "Запрашиваем отчет MPStats. Это расходует запрос аналитики и может занять несколько секунд."
+                        : "Будет запрошена при запуске аудита. После этого результат сохранится в кэше и будет использоваться в ручных правках."}</p>
                   </div>
                   {auditDone ? (
                     <div className="issue">
@@ -2592,7 +2608,7 @@ function CardDetailScreen({ card, portal, onBack }) {
                   ) : null}
                 </div>
                 <div className="tab-actions">
-                  <button className="btn primary" type="button" onClick={runAuditStub}><ClipboardList size={17} />Запустить аудит</button>
+                  <button className="btn primary" type="button" onClick={runAuditStub} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
                 </div>
               </section>
             ) : null}
@@ -2644,17 +2660,17 @@ function CardDetailScreen({ card, portal, onBack }) {
                 <div className="strip-head">
                   <div>
                     <h2>Было / стало</h2>
-                    <p>{auditDone ? "Рекомендации аудита помечены, но любые поля можно править вручную." : "Заполняйте колонку Стало вручную. Аудит позже добавит помеченные рекомендации."}</p>
+                    <p>{auditDone ? "Рекомендации аудита помечены, но любые поля можно править вручную." : "Заполняйте колонку Стало вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
                   </div>
                   <div className="strip-actions">
                     <button
                       className="btn"
                       type="button"
-                      onClick={loadMpstatsCharacteristicHints}
+                      onClick={() => loadMpstatsCharacteristicHints({ forceRefresh: true })}
                       disabled={mpstatsCharacteristicsStatus === "loading"}
-                      title="Обновить значения характеристик из MPStats"
+                      title="Принудительно обновить аналитику MPStats. Расходует запрос MPStats."
                     >
-                      <RefreshCw size={16} />MPStats
+                      <RefreshCw size={16} />Обновить аналитику
                     </button>
                     <Tag tone={mpstatsHintsTone} title={mpstatsHintsTitle}>{mpstatsHintsLabel}</Tag>
                   </div>
