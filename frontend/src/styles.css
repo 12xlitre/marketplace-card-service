@@ -1048,6 +1048,18 @@ tr:last-child td {
   align-items: start;
 }
 
+.detail-layout.wide-changes {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.detail-layout.wide-changes .detail-aside {
+  display: none;
+}
+
+.detail-layout.wide-changes .detail-main {
+  min-width: 0;
+}
+
 .photo-preview {
   min-height: 0;
   height: 278px;
@@ -1153,6 +1165,44 @@ tr:last-child td {
   border-color: var(--line);
   background: var(--brand-soft);
   color: var(--brand);
+}
+
+.changes-context {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.changes-context .thumb {
+  width: 54px;
+  height: 70px;
+}
+
+.changes-context-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.changes-context-main strong,
+.changes-context-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-context-main strong {
+  font-size: 15px;
+}
+
+.changes-context-main span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .tab-actions {
@@ -2035,6 +2085,15 @@ tr:last-child td {
 
   .content {
     padding: 18px;
+  }
+
+  .changes-context {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  .changes-context > .tag {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .draft-actions {

@@ -3212,7 +3212,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
       </header>
 
       <div className="content">
-        <div className="detail-layout">
+        <div className={`detail-layout ${activeTab === "changes" ? "wide-changes" : ""}`}>
           <aside className="detail-aside">
             <div className={`photo-preview ${photoUrl ? "has-image" : ""}`}>
               {photoUrl ? <img src={photoUrl} alt={currentTitle} loading="eager" decoding="async" /> : null}
@@ -3355,6 +3355,14 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
 
             {activeTab === "changes" ? (
               <section className="workspace-strip">
+                <div className="changes-context">
+                  <Thumb url={photoUrl} alt={false} />
+                  <div className="changes-context-main">
+                    <strong>{currentTitle}</strong>
+                    <span>WB {textOrDash(card?.nmID)} · артикул {textOrDash(card?.vendorCode)} · {textOrDash(card?.subjectName)}</span>
+                  </div>
+                  <Tag tone={issueCount ? "amber" : "green"}>{card?.status || "Статус не указан"}</Tag>
+                </div>
                 <div className="strip-head">
                   <div>
                     <h2>Было / стало</h2>
