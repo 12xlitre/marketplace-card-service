@@ -1791,8 +1791,15 @@ const MPSTATS_NICHE_PATH_WARNING = "Рыночный контекст MPStats п
 function auditPublicWarningText(message) {
   const text = String(message || "").trim();
   if (!text) return "";
-  if (text.startsWith("MPStats /analytics/v1/wb/subject/") || text.includes("MPStats niche path missing")) {
+  if (
+    text.startsWith("MPStats /analytics/v1/wb/subject/")
+    || text.includes("MPStats niche path missing")
+    || text.includes("Не удалось выбрать конкурентов из MPStats subject/items")
+  ) {
     return MPSTATS_NICHE_PATH_WARNING;
+  }
+  if (text.includes("Доли значений характеристик рассчитаны по MPStats/выборке")) {
+    return "MPStats-значения характеристик — статистическая подсказка по выборке ниши, не официальный справочник WB; перед публикацией специалист должен подтвердить релевантность.";
   }
   if (text.includes("items/") && text.includes("/keywords")) {
     return "SEO-запросы MPStats по карточке не загрузились. Рекомендации по заголовку и описанию нужно дополнительно сверить вручную.";

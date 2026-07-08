@@ -2823,8 +2823,14 @@ def audit_public_warning_text(message):
   text = audit_str(message)
   if not text:
     return ""
-  if text.startswith("MPStats /analytics/v1/wb/subject/") or "MPStats niche path missing" in text:
+  if (
+    text.startswith("MPStats /analytics/v1/wb/subject/")
+    or "MPStats niche path missing" in text
+    or "Не удалось выбрать конкурентов из MPStats subject/items" in text
+  ):
     return "Рыночный контекст MPStats по нише не загрузился: не удалось определить путь категории. Конкуренты, ценовые зоны и выводы по нише рассчитаны только по доступным данным карточки."
+  if "Доли значений характеристик рассчитаны по MPStats/выборке" in text:
+    return "MPStats-значения характеристик — статистическая подсказка по выборке ниши, не официальный справочник WB; перед публикацией специалист должен подтвердить релевантность."
   if "items/" in text and "/keywords" in text:
     return "SEO-запросы MPStats по карточке не загрузились. Рекомендации по заголовку и описанию нужно дополнительно сверить вручную."
   if "items/" in text and "/full" in text:
@@ -3140,6 +3146,7 @@ def audit_market_data(nm_id, subject_id, period, warnings):
   if subject_id:
     subject_params["subject_id"] = subject_id
   subject_path = audit_subject_path_from_info(info)
+  niche_path_missing = not bool(subject_path)
   subject_body = {"startRow": 0, "endRow": 300, "filterModel": {}, "sortModel": [{"colId": "revenue", "sort": "desc"}]}
   if subject_path:
     subject_params["path"] = subject_path
@@ -3166,6 +3173,7 @@ def audit_market_data(nm_id, subject_id, period, warnings):
     "stats": stats,
     "keywords": audit_keywords_from_payload(keywords_payload),
     "nicheItems": sorted(niche_items, key=lambda item: audit_number(item.get("revenue"), 0) or 0, reverse=True)[:80],
+    "nichePathMissing": niche_path_missing,
     "brands": audit_extract_list(brands_payload)[:30],
     "priceSegmentation": price_payload if isinstance(price_payload, dict) else {},
     "season": season_payload if isinstance(season_payload, dict) else {},
@@ -3187,7 +3195,7 @@ def audit_pick_competitors(nm_id, market_data, warnings):
     cdn_card = audit_fetch_wb_cdn_card(competitor.get("nmId"), cdn_warnings)
     competitor["descriptionLength"] = len(audit_str(cdn_card.get("description") if isinstance(cdn_card, dict) else ""))
     competitor["characteristics"] = audit_card_characteristics(audit_merge_card_content({}, cdn_card))
-  if not competitors and market_data.get("keywords"):
+  if not competitors and market_data.get("keywords") and not market_data.get("nichePathMissing"):
     warnings.append("Не удалось выбрать конкурентов из MPStats subject/items")
   return competitors
 
@@ -3418,7 +3426,8 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   if not market_data.get("keywords"):
     risk_notes.append("SEO-запросы MPStats не получены: заголовок и описание оценены по WB snapshot и локальным правилам.")
   if characteristics and any(item.get("topCategoryValues") for item in characteristics):
-    risk_notes.append("Доли значений характеристик рассчитаны по MPStats/выборке и требуют ручной проверки специалистом перед публикацией.")
+    risk_notes.append("MPStats-значения характеристик — статистическая подсказка по выборке ниши, не официальный справочник WB; перед публикацией специалист должен подтвердить релевантность.")
+  risk_notes = audit_unique(risk_notes, limit=8)
 
   return {
     "category": {
@@ -3448,7 +3457,7 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
         "Сравнить карточку с топом ниши по выручке и проверить цену, отзывы, фото и рекламные позиции отдельным этапом.",
         "Накопить историю аудитов по предмету, чтобы переиспользовать рабочие формулировки и значения характеристик.",
       ],
-      "riskNotes": risk_notes[:8],
+      "riskNotes": risk_notes,
     },
     "_meta": {
       "engine": "opticards-deterministic-sergey-v1",
