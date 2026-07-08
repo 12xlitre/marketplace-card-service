@@ -862,6 +862,45 @@ function normalizedCharacteristicOption(value) {
   return String(value || "").trim().toLowerCase().replaceAll("ё", "е");
 }
 
+const CHARACTERISTIC_NAME_STOPWORDS = new Set([
+  "для",
+  "вид",
+  "тип",
+  "товар",
+  "товара",
+  "изделие",
+  "изделия",
+  "модель",
+  "модели",
+  "материал",
+  "материала",
+  "характеристика",
+  "значение",
+]);
+
+const AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS = new Set([
+  "длин",
+  "ширин",
+  "высот",
+  "размер",
+  "объем",
+  "вес",
+]);
+
+const CHARACTERISTIC_ALIAS_GROUPS = [
+  ["тип рукавов", "длина рукава", "рукав", "рукава"],
+  ["тип карманов", "карманы", "вид кармана", "карман"],
+  ["фактура материала", "фактура", "структура материала", "текстура материала"],
+  ["особенности модели", "особенности", "особенности товара"],
+  ["декоративные элементы", "декор", "элементы декора"],
+  ["конструктивные элементы", "конструктивные особенности", "элементы конструкции"],
+  ["назначение", "назначение товара", "назначение модели"],
+  ["покрой", "силуэт", "крой"],
+  ["тип застежки", "застежка", "вид застежки"],
+  ["вырез горловины", "горловина", "тип горловины"],
+  ["рисунок", "принт", "узор"],
+];
+
 function uniqueCharacteristicOptions(values) {
   const byNormalizedValue = new Map();
   values.map((value) => String(value).trim()).filter(Boolean).forEach((value) => {
@@ -871,6 +910,83 @@ function uniqueCharacteristicOptions(values) {
     }
   });
   return [...byNormalizedValue.values()].sort((left, right) => left.localeCompare(right, "ru"));
+}
+
+function normalizedCharacteristicName(value) {
+  return normalizedCharacteristicOption(value)
+    .replace(/[^a-zа-я0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stemCharacteristicToken(token) {
+  let output = String(token || "");
+  if (output.length > 5) {
+    output = output.replace(/(ыми|ими|ого|его|ому|ему|ами|ями|ах|ях|ов|ев|ей|ом|ем)$/u, "");
+  }
+  if (output.length > 4) {
+    output = output.replace(/(ая|яя|ое|ее|ые|ие|ый|ий|ой|ую|юю|ам|ям|а|я|ы|и|у|ю|е)$/u, "");
+  }
+  return output;
+}
+
+function characteristicNameTokens(value) {
+  return normalizedCharacteristicName(value)
+    .split(" ")
+    .map(stemCharacteristicToken)
+    .filter((token) => token.length > 1 && !CHARACTERISTIC_NAME_STOPWORDS.has(token));
+}
+
+function characteristicAliasMatches(left, right) {
+  const leftName = normalizedCharacteristicName(left);
+  const rightName = normalizedCharacteristicName(right);
+  return CHARACTERISTIC_ALIAS_GROUPS.some((group) => {
+    const names = group.map(normalizedCharacteristicName);
+    return names.includes(leftName) && names.includes(rightName);
+  });
+}
+
+function characteristicNameMatchScore(left, right) {
+  const leftName = normalizedCharacteristicName(left);
+  const rightName = normalizedCharacteristicName(right);
+  if (!leftName || !rightName) {
+    return 0;
+  }
+  if (leftName === rightName) {
+    return 1;
+  }
+  if (characteristicAliasMatches(leftName, rightName)) {
+    return 0.96;
+  }
+  const leftTokens = [...new Set(characteristicNameTokens(leftName))];
+  const rightTokens = [...new Set(characteristicNameTokens(rightName))];
+  if (!leftTokens.length || !rightTokens.length) {
+    return 0;
+  }
+  const overlap = leftTokens.filter((token) => rightTokens.includes(token)).length;
+  if (!overlap) {
+    return 0;
+  }
+  const leftCoverage = overlap / leftTokens.length;
+  const rightCoverage = overlap / rightTokens.length;
+  if (leftTokens.length === 1 && rightTokens.includes(leftTokens[0]) && !AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS.has(leftTokens[0])) {
+    return 0.82;
+  }
+  if (leftCoverage >= 0.66 && rightCoverage >= 0.5) {
+    return 0.72 + Math.min(leftCoverage, rightCoverage) * 0.18;
+  }
+  return 0;
+}
+
+function matchingMpstatsCharacteristics(meta, mpstatsCharacteristics = []) {
+  const label = meta?.name || meta?.label || "";
+  return (mpstatsCharacteristics || [])
+    .map((item) => ({
+      item,
+      score: characteristicNameMatchScore(label, item?.name || ""),
+    }))
+    .filter((match) => match.score >= 0.72)
+    .sort((left, right) => right.score - left.score);
 }
 
 function fallbackCharacteristicValueOptions(label) {
@@ -944,14 +1060,10 @@ function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSugg
 function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = [], mpstatsCharacteristics = []) {
   const options = {};
   const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
-  const mpstatsByName = Object.fromEntries((mpstatsCharacteristics || []).map((item) => [
-    normalizedCharacteristicOption(item.name),
-    (item.values || []).map((value) => value?.value || value).filter(Boolean),
-  ]));
   currentRows.forEach((row) => {
-    const meta = metaByKey[row.key] || {};
+    const meta = metaByKey[row.key] || row;
     const wbOptions = Array.isArray(meta.valueOptions) ? meta.valueOptions : [];
-    const mpstatsOptions = mpstatsByName[normalizedCharacteristicOption(row.label)] || [];
+    const mpstatsOptions = mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics);
     options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions, ...mpstatsOptions, ...fallbackCharacteristicValueOptions(row.label)];
   });
   (portal?.realCards || []).forEach((item) => {
@@ -964,7 +1076,7 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
     const key = characteristicKeyFromMeta(item);
     const current = options[key] || [];
     const wbOptions = Array.isArray(item.valueOptions) ? item.valueOptions : [];
-    const mpstatsOptions = mpstatsByName[normalizedCharacteristicOption(item.name)] || [];
+    const mpstatsOptions = mpstatsValuesForCharacteristic(item, mpstatsCharacteristics);
     options[key] = [...current, ...wbOptions, ...mpstatsOptions, ...fallbackCharacteristicValueOptions(item.name)];
   });
   return Object.fromEntries(Object.entries(options).map(([key, values]) => [
@@ -974,9 +1086,12 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
 }
 
 function mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics = []) {
-  const key = normalizedCharacteristicOption(meta?.name || meta?.label || "");
-  const item = (mpstatsCharacteristics || []).find((row) => normalizedCharacteristicOption(row.name) === key);
-  return item ? (item.values || []).map((value) => value?.value || value).filter(Boolean) : [];
+  return uniqueCharacteristicOptions(
+    matchingMpstatsCharacteristics(meta, mpstatsCharacteristics)
+      .flatMap((match) => match.item?.values || [])
+      .map((value) => value?.value || value)
+      .filter(Boolean)
+  );
 }
 
 function countMpstatsMatches(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
