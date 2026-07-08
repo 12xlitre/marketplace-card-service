@@ -719,6 +719,36 @@ function descriptionSuggestion(card, description) {
     .join(". ");
 }
 
+function titleAuditReason(card, currentTitle, draftTitle) {
+  if (isEmptyValue(card?.title)) {
+    return "WB не вернул название, поэтому аудит предлагает собрать его из категории, бренда и текущих данных карточки.";
+  }
+  if (currentTitle.length > 60) {
+    return "Название длиннее лимита WB 60 символов, поэтому аудит предлагает укоротить его.";
+  }
+  if (draftTitle !== currentTitle) {
+    return "Аудит добавил категорию или бренд, потому что их не было в текущем названии.";
+  }
+  return "Название уже укладывается в лимит WB, поэтому аудит оставил его без изменения.";
+}
+
+function descriptionAuditReason(description) {
+  if (String(description || "").trim()) {
+    return "Описание уже есть в WB, поэтому аудит перенес его в черновик без изменения.";
+  }
+  return "В WB нет описания, поэтому аудит собрал базовый черновик из названия, бренда и категории.";
+}
+
+function characteristicAuditReason(row, mpstatsValues = []) {
+  if (mpstatsValues.length) {
+    return `MPStats нашел ${mpstatsValues.length} популярных значений для этой характеристики; текущее значение сохранено для ручного сравнения.`;
+  }
+  if (isEmptyValue(row.value)) {
+    return "Характеристика пустая в WB, ее нужно проверить перед публикацией.";
+  }
+  return "Значение уже заполнено в WB; аудит перенес его в черновик как базу для ручной правки.";
+}
+
 function characteristicRows(items) {
   if (!Array.isArray(items)) {
     return [];
@@ -789,13 +819,14 @@ function draftCharacteristicValues(draft) {
   return characteristicValueTokens(draft.value);
 }
 
-function characteristicDraftsFromRows(rows, source = "audit") {
+function characteristicDraftsFromRows(rows, source = "audit", mpstatsCharacteristics = []) {
   return Object.fromEntries(rows.map((row) => [row.key, {
     charcID: row.charcID,
     label: row.label,
     value: editableCharacteristicValue(row.value),
     values: characteristicValueTokens(row.value),
     source,
+    reason: source === "audit" ? characteristicAuditReason(row, mpstatsValuesForCharacteristic(row, mpstatsCharacteristics)) : "",
   }]));
 }
 
@@ -1202,8 +1233,10 @@ function buildStructuredCardDraft({
   auditStatus,
   title,
   titleSource,
+  titleReason,
   description,
   descriptionSource,
+  descriptionReason,
   characteristics,
   card,
 }) {
@@ -1214,10 +1247,12 @@ function buildStructuredCardDraft({
       title: {
         value: title || "",
         source: titleSource || "",
+        reason: titleReason || "",
       },
       description: {
         value: description || "",
         source: descriptionSource || "",
+        reason: descriptionReason || "",
       },
       characteristics: characteristics || {},
     },
@@ -1246,6 +1281,8 @@ function contentFromStoredDraft(storedDraft) {
     description: typeof description === "object" ? description.value || "" : payload.description || "",
     titleSource: typeof title === "object" ? title.source || "" : payload.titleSource || "",
     descriptionSource: typeof description === "object" ? description.source || "" : payload.descriptionSource || "",
+    titleReason: typeof title === "object" ? title.reason || "" : payload.titleReason || "",
+    descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
@@ -2207,6 +2244,8 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [draftDescription, setDraftDescription] = useState("");
   const [draftTitleSource, setDraftTitleSource] = useState("");
   const [draftDescriptionSource, setDraftDescriptionSource] = useState("");
+  const [draftTitleReason, setDraftTitleReason] = useState("");
+  const [draftDescriptionReason, setDraftDescriptionReason] = useState("");
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
   const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
@@ -2267,6 +2306,8 @@ function CardDetailScreen({ card, portal, onBack }) {
     setDraftDescription("");
     setDraftTitleSource("");
     setDraftDescriptionSource("");
+    setDraftTitleReason("");
+    setDraftDescriptionReason("");
     setDraftCharacteristics({});
     setMpstatsCharacteristics([]);
     setMpstatsCharacteristicsStatus("idle");
@@ -2281,6 +2322,8 @@ function CardDetailScreen({ card, portal, onBack }) {
       setDraftDescription(normalized.description);
       setDraftTitleSource(normalized.titleSource);
       setDraftDescriptionSource(normalized.descriptionSource);
+      setDraftTitleReason(normalized.titleReason);
+      setDraftDescriptionReason(normalized.descriptionReason);
       setDraftCharacteristics(normalized.characteristics);
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
@@ -2417,13 +2460,18 @@ function CardDetailScreen({ card, portal, onBack }) {
 
   async function runAuditStub() {
     setAuditStatus("loading");
-    await loadMpstatsCharacteristicHints({ forceRefresh: true });
+    const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: true });
+    const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
     const suggestions = titleSuggestions(card);
-    setDraftTitle(suggestions[1] || suggestions[0] || "");
-    setDraftDescription(descriptionSuggestion(card, description));
+    const nextTitle = suggestions[1] || suggestions[0] || "";
+    const nextDescription = descriptionSuggestion(card, description);
+    setDraftTitle(nextTitle);
+    setDraftDescription(nextDescription);
     setDraftTitleSource("audit");
     setDraftDescriptionSource("audit");
-    setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems));
+    setDraftTitleReason(titleAuditReason(card, currentTitle, nextTitle));
+    setDraftDescriptionReason(descriptionAuditReason(description));
+    setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "audit", auditMpstatsCharacteristics));
     setAuditStatus("done");
     setActiveTab("changes");
   }
@@ -2454,6 +2502,7 @@ function CardDetailScreen({ card, portal, onBack }) {
           value: normalizedValues.join(", "),
           values: normalizedValues,
           source,
+          reason: source === "manual" ? "" : currentDraft?.reason || "",
         },
       };
     });
@@ -2484,6 +2533,8 @@ function CardDetailScreen({ card, portal, onBack }) {
       description: draftDescription,
       titleSource: draftTitleSource,
       descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
       characteristics: draftCharacteristics,
       card,
     });
@@ -2688,6 +2739,7 @@ function CardDetailScreen({ card, portal, onBack }) {
                       onChange={(event) => {
                         setDraftTitle(event.target.value);
                         setDraftTitleSource(event.target.value.trim() ? "manual" : "");
+                        setDraftTitleReason("");
                       }}
                       placeholder="Введите новый заголовок или запустите аудит для рекомендации."
                     />
@@ -2695,6 +2747,7 @@ function CardDetailScreen({ card, portal, onBack }) {
                       <span className={`char-counter ${draftTitleLength <= 60 ? "ok" : ""}`}>{draftTitleLength}/60 символов</span>
                       <DraftSourceMark source={draftTitleSource} />
                     </p>
+                    <DraftReason reason={draftTitleReason} />
                   </div>
                   <div className="field-box">
                     <strong>Было: описание</strong>
@@ -2703,15 +2756,17 @@ function CardDetailScreen({ card, portal, onBack }) {
                   <div className="field-box">
                     <strong>Стало: описание</strong>
                     <textarea
-                      className={draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}
+                      className={`description-editor ${draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}`}
                       value={draftDescription}
                       onChange={(event) => {
                         setDraftDescription(event.target.value);
                         setDraftDescriptionSource(event.target.value.trim() ? "manual" : "");
+                        setDraftDescriptionReason("");
                       }}
                       placeholder="Введите новое описание или запустите аудит для рекомендации."
                     />
                     <DraftSourceMark source={draftDescriptionSource} />
+                    <DraftReason reason={draftDescriptionReason} />
                   </div>
                   <div className="field-box characteristics-diff-box">
                     <strong>Характеристики</strong>
@@ -3009,8 +3064,16 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
         {!mpstatsValues.length && mpstatsNearbyNames.length ? <span className="draft-editor-nearby" title={`Похожие поля MPStats: ${mpstatsNearbyNames.join(", ")}`}>MPStats рядом</span> : null}
         {isAuditSuggestion ? <Tag tone="blue">аудит</Tag> : null}
       </div>
+      <DraftReason reason={draft?.reason || ""} compact />
     </div>
   );
+}
+
+function DraftReason({ reason, compact = false }) {
+  if (!reason) {
+    return null;
+  }
+  return <p className={`draft-reason ${compact ? "compact" : ""}`}>{reason}</p>;
 }
 
 function DraftSourceMark({ source }) {

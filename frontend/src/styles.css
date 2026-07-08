@@ -1632,10 +1632,27 @@ tr:last-child td {
   min-height: 74px;
 }
 
+.field-box textarea.description-editor {
+  min-height: 210px;
+}
+
 .field-box textarea.audit-suggestion-field,
 .field-box textarea.short.audit-suggestion-field {
   border-color: #bfd6ed;
   background: var(--blue-soft);
+}
+
+.draft-reason {
+  margin: 8px 0 0;
+  color: var(--blue);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.draft-reason.compact {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .empty-state {
