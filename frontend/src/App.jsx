@@ -1588,6 +1588,7 @@ export default function App() {
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [notice, setNotice] = useState("");
   const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
+  const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
@@ -1698,6 +1699,13 @@ export default function App() {
       setUserPortals((payload.portals || []).map(normalizePortal));
     } catch {
       setUserPortals([]);
+    }
+
+    try {
+      const payload = await apiRequest("/api/integrations/mpstats");
+      setMpstatsIntegration(payload.integration || null);
+    } catch {
+      setMpstatsIntegration(null);
     }
 
     await loadWbDemoSnapshot();
@@ -1993,6 +2001,7 @@ export default function App() {
             portal={currentPortal}
             cards={currentPortalCards}
             cardsLoading={Boolean(loadingPortalCards[currentPortalKey])}
+            mpstatsIntegration={mpstatsIntegration}
             displayUsers={displayUsers}
             findUser={findUser}
             canManage={canManagePortals}
@@ -2028,6 +2037,8 @@ export default function App() {
             users={displayUsers}
             canManage={canManagePortals}
             canManageUsers={canManageUsers}
+            mpstatsIntegration={mpstatsIntegration}
+            onMpstatsIntegrationChange={setMpstatsIntegration}
             onCreateUser={createUserAccount}
             onResetPassword={resetUserPassword}
           />
@@ -2273,11 +2284,11 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onUpdateTeam }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onUpdateTeam }) {
   const owner = findUser(portal.ownerLogin);
   const isApi = portal.mode === "api";
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
-  const sourceRows = sourceFlowRows(portal);
+  const sourceRows = sourceFlowRows(portal, mpstatsIntegration);
   const workRoute = workRouteRows(portal);
   const team = getPortalTeam(portal);
   const [teamEditing, setTeamEditing] = useState(false);
@@ -3617,14 +3628,26 @@ function UserSelect({ label, value, users, onChange }) {
   );
 }
 
-function sourceFlowRows(portal) {
+function mpstatsIntegrationStatusText(integration) {
+  const connected = Boolean(integration?.connected);
+  return {
+    verified: "подключен и проверен",
+    stored: "ключ сохранен",
+    auth_error: "ошибка авторизации",
+    rate_limited: "лимит MPStats",
+    error: "ошибка проверки",
+    missing: "не подключен",
+  }[integration?.status] || (connected ? "ключ сохранен" : "не подключен");
+}
+
+function sourceFlowRows(portal, mpstatsIntegration = null) {
   if (portal.mode === "api") {
     const tokenDays = tokenDaysLeftText(portal.tokenMeta);
     const tokenStatus = portal.apiConnected ? `готово${tokenDays ? `, ${tokenDays}` : ""}` : "ожидает подключения";
     return [
       ["Проверка WB API ключа", tokenStatus],
       ["Карточки из кабинета", portal.apiConnected ? formatNumber(portal.cardCount) : "после подключения"],
-      ["MPStats", "витрина/аналитика позже"],
+      ["MPStats", mpstatsIntegrationStatusText(mpstatsIntegration)],
       ["Запись в WB", "отключена"],
     ];
   }
@@ -3632,7 +3655,7 @@ function sourceFlowRows(portal) {
     ["Ссылка на магазин/карточку", portal.storeUrl ? "добавлена" : "не указана"],
     ["Первичный источник", portal.manualSource ? "описан" : "ожидает таблицу"],
     ["Автозагрузка карточек", "нужен API"],
-    ["MPStats", "может подтянуть витрину"],
+    ["MPStats", mpstatsIntegrationStatusText(mpstatsIntegration)],
   ];
 }
 
@@ -3766,8 +3789,8 @@ const defaultNewUserForm = {
   accessLevel: "overview",
 };
 
-function SettingsScreen({ users, canManage = false, canManageUsers = false, onCreateUser, onResetPassword }) {
-  const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
+function SettingsScreen({ users, canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onResetPassword }) {
+  const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
   const [newUserForm, setNewUserForm] = useState(defaultNewUserForm);
@@ -3796,6 +3819,10 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
     };
   }, []);
 
+  useEffect(() => {
+    setMpstatsIntegration(initialMpstatsIntegration);
+  }, [initialMpstatsIntegration]);
+
   async function saveMpstatsKey(event) {
     event.preventDefault();
     if (!canManage || !mpstatsKey.trim()) {
@@ -3808,6 +3835,9 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
         body: JSON.stringify({ apiKey: mpstatsKey.trim() }),
       });
       setMpstatsIntegration(payload.integration || null);
+      if (onMpstatsIntegrationChange) {
+        onMpstatsIntegrationChange(payload.integration || null);
+      }
       setMpstatsKey("");
       setMpstatsStatus(payload.ok ? "saved" : payload.status || "error");
     } catch {
@@ -3826,6 +3856,9 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, onCr
         body: JSON.stringify({ action: "check" }),
       });
       setMpstatsIntegration(payload.integration || null);
+      if (onMpstatsIntegrationChange) {
+        onMpstatsIntegrationChange(payload.integration || null);
+      }
       setMpstatsStatus(payload.ok ? "verified" : payload.status || "error");
     } catch {
       setMpstatsStatus("error");
