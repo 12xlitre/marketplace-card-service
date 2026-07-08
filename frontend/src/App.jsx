@@ -5,6 +5,7 @@ import {
   CheckSquare,
   ChevronDown,
   ClipboardList,
+  FileText,
   Download,
   Eye,
   ExternalLink,
@@ -16,7 +17,9 @@ import {
   Save,
   Search,
   Settings,
+  Tags,
   Upload,
+  Warehouse,
   X,
 } from "lucide-react";
 
@@ -3382,9 +3385,9 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
                   </div>
                 </div>
                 <div className="changes-tabs" aria-label="Тип изменений">
-                  <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}>Контент</button>
-                  <button className={changesTab === "prices" ? "active" : ""} type="button" onClick={() => setChangesTab("prices")}>Цены</button>
-                  <button className={changesTab === "stocks" ? "active" : ""} type="button" onClick={() => setChangesTab("stocks")}>Остатки</button>
+                  <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}><FileText size={17} />Контент</button>
+                  <button className={changesTab === "prices" ? "active" : ""} type="button" onClick={() => setChangesTab("prices")}><Tags size={17} />Цены</button>
+                  <button className={changesTab === "stocks" ? "active" : ""} type="button" onClick={() => setChangesTab("stocks")}><Warehouse size={17} />Остатки</button>
                 </div>
                 {changesTab === "content" ? (
                 <>

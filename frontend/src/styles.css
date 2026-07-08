@@ -1212,33 +1212,39 @@ tr:last-child td {
 }
 
 .changes-tabs {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px;
-  margin-bottom: 14px;
-  border: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  margin-bottom: 16px;
+  border: 1px solid #d7dee8;
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface-soft);
 }
 
 .changes-tabs button {
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: 6px;
-  min-height: 34px;
-  padding: 0 12px;
-  background: transparent;
-  color: var(--muted);
+  min-height: 46px;
+  padding: 0 14px;
+  background: #fff;
+  color: var(--ink);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 1px 0 rgba(20, 35, 55, .04);
 }
 
 .changes-tabs button.active {
-  border-color: var(--line);
-  background: var(--brand-soft);
+  border-color: #a9c6ff;
+  background: #edf4ff;
   color: var(--brand);
+  box-shadow: 0 8px 20px rgba(53, 100, 245, .12);
 }
 
 .content-audit-summary {
