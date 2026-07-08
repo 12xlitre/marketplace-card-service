@@ -948,6 +948,129 @@ a {
   font-size: 12px;
 }
 
+.approval-workflow-strip {
+  display: grid;
+  gap: 14px;
+}
+
+.approval-task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.approval-task-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.approval-task-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.approval-task-main > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.approval-task-main strong,
+.approval-task-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-task-main strong {
+  font-size: 14px;
+}
+
+.approval-task-main span,
+.approval-task-meta,
+.approval-events-head span,
+.approval-event-row span,
+.approval-event-row time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.approval-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.approval-task-reason {
+  margin: 0;
+  border-left: 3px solid #e6b3b3;
+  padding-left: 9px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.approval-task-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.approval-analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.approval-events {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.approval-events-head,
+.approval-event-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+}
+
+.approval-events-head {
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+}
+
+.approval-events-head strong,
+.approval-event-row strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.approval-event-row + .approval-event-row {
+  border-top: 1px solid var(--line);
+}
+
+.approval-event-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.approval-event-row p {
+  margin: 2px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .table-wrap {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2218,6 +2341,9 @@ tr:last-child td {
   .workspace-grid,
   .filters,
   .pipeline,
+  .approval-analytics-grid,
+  .approval-events-head,
+  .approval-event-row,
   .settings-grid,
   .form-two,
   .connect-mode,

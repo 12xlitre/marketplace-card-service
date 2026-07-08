@@ -662,6 +662,53 @@ function approvalStatusTone(status) {
   return "blue";
 }
 
+function defaultApprovalWorkflow() {
+  return {
+    tasks: [],
+    analytics: {
+      pendingCount: 0,
+      returnedCount: 0,
+      approvedCount: 0,
+      eventCount: 0,
+      avgApprovalMinutes: null,
+      avgPendingMinutes: null,
+      lastEventAt: "",
+    },
+    recentEvents: [],
+  };
+}
+
+function normalizeApprovalWorkflow(value) {
+  const analytics = value?.analytics || {};
+  return {
+    tasks: Array.isArray(value?.tasks) ? value.tasks : [],
+    analytics: {
+      pendingCount: Number(analytics.pendingCount || 0),
+      returnedCount: Number(analytics.returnedCount || 0),
+      approvedCount: Number(analytics.approvedCount || 0),
+      eventCount: Number(analytics.eventCount || 0),
+      avgApprovalMinutes: analytics.avgApprovalMinutes ?? null,
+      avgPendingMinutes: analytics.avgPendingMinutes ?? null,
+      lastEventAt: analytics.lastEventAt || "",
+    },
+    recentEvents: Array.isArray(value?.recentEvents) ? value.recentEvents : [],
+  };
+}
+
+function durationShort(minutes) {
+  if (minutes === null || minutes === undefined || Number.isNaN(Number(minutes))) {
+    return "нет данных";
+  }
+  const total = Math.max(0, Number(minutes));
+  if (total < 60) {
+    return `${Math.round(total)} мин`;
+  }
+  if (total < 60 * 24) {
+    return `${Math.round(total / 60)} ч`;
+  }
+  return `${Math.round(total / (60 * 24))} дн`;
+}
+
 function normalizeUserList(rawUsers) {
   if (!Array.isArray(rawUsers)) {
     return [];
@@ -2594,12 +2641,46 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const team = getPortalTeam(portal);
   const [teamEditing, setTeamEditing] = useState(false);
   const [teamDraft, setTeamDraft] = useState(team);
+  const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
+  const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
 
   useEffect(() => {
     if (!teamEditing) {
       setTeamDraft(team);
     }
   }, [portal.id, team.lead, team.tech, team.manager, teamEditing]);
+
+  useEffect(() => {
+    let active = true;
+    if (!portal?.id || portal.isDemo) {
+      setApprovalWorkflow(defaultApprovalWorkflow());
+      setApprovalWorkflowStatus("idle");
+      return () => {
+        active = false;
+      };
+    }
+    setApprovalWorkflowStatus("loading");
+    apiRequest(`/api/approval-workflow?portal_id=${encodeURIComponent(portal.id)}`)
+      .then((payload) => {
+        if (!active) return;
+        setApprovalWorkflow(normalizeApprovalWorkflow(payload));
+        setApprovalWorkflowStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setApprovalWorkflow(defaultApprovalWorkflow());
+        setApprovalWorkflowStatus("error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    portal?.id,
+    portal?.isDemo,
+    portal.draftSummary?.approvalPendingCount,
+    portal.draftSummary?.approvalReturnedCount,
+    portal.draftSummary?.approvalApprovedCount,
+  ]);
 
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
@@ -2608,6 +2689,17 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   function saveTeamDraft() {
     onUpdateTeam(teamDraft);
     setTeamEditing(false);
+  }
+
+  function openApprovalTask(task) {
+    const card = cards.find((item) => (
+      cardDraftKey(item) === task.cardKey
+      || String(item?.nmID || "") === String(task.nmID || "")
+      || String(item?.vendorCode || "") === String(task.vendorCode || "")
+    ));
+    if (card) {
+      onOpenCard(card);
+    }
   }
 
   return (
@@ -2683,6 +2775,14 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 ))}
               </div>
             </section>
+
+            <ApprovalWorkflowPanel
+              workflow={approvalWorkflow}
+              status={approvalWorkflowStatus}
+              cards={cards}
+              findUser={findUser}
+              onOpenTask={openApprovalTask}
+            />
 
             <section className="workspace-strip">
               <div className="strip-head">
@@ -2804,6 +2904,92 @@ function CardsTable({ cards, portal, onOpenCard }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }) {
+  const tasks = workflow.tasks || [];
+  const activeTasks = tasks.filter((task) => ["submitted", "changes_requested"].includes(task.status));
+  const analytics = workflow.analytics || {};
+  const recentEvents = workflow.recentEvents || [];
+  const cardKeys = new Set(cards.map(cardDraftKey));
+  return (
+    <section className="workspace-strip approval-workflow-strip">
+      <div className="strip-head">
+        <div>
+          <h2>Задачи и согласование</h2>
+          <p>Очередь карточек для аккаунт-менеджера и история решений по кабинету.</p>
+        </div>
+        <Tag tone={activeTasks.length ? "amber" : "green"}>
+          {status === "loading" ? "загрузка" : `${activeTasks.length} ${pluralRu(activeTasks.length, "задача", "задачи", "задач")}`}
+        </Tag>
+      </div>
+
+      {status === "error" ? (
+        <div className="empty-state"><span>Не удалось загрузить задачи согласования</span></div>
+      ) : null}
+
+      <div className="approval-task-list">
+        {activeTasks.length ? activeTasks.map((task) => {
+          const canOpen = cardKeys.has(task.cardKey);
+          const assignee = findUser(task.assigneeLogin);
+          const author = findUser(task.submittedBy);
+          return (
+            <article className="approval-task-card" key={`${task.cardKey}-${task.status}`}>
+              <div className="approval-task-main">
+                <div>
+                  <strong>{task.title}</strong>
+                  <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
+                </div>
+                <Tag tone={approvalStatusTone(task.status)}>{approvalStatusLabel(task.status)}</Tag>
+              </div>
+              <div className="approval-task-meta">
+                <span>Автор: {author?.full_name || task.submittedBy || "не указан"}</span>
+                <span>Согласует: {assignee?.full_name || task.assigneeLogin || "аккаунт-менеджер"}</span>
+                <span>{task.submittedAt ? new Date(task.submittedAt).toLocaleString("ru-RU") : "без даты"}</span>
+              </div>
+              {task.returnReason ? <p className="approval-task-reason">{task.returnReason}</p> : null}
+              <div className="approval-task-actions">
+                <button className="btn primary" type="button" onClick={() => onOpenTask(task)} disabled={!canOpen}>
+                  <Eye size={17} />Открыть изменения
+                </button>
+              </div>
+            </article>
+          );
+        }) : (
+          <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
+        )}
+      </div>
+
+      <div className="approval-analytics-grid">
+        <Metric label="Ждет решения" value={formatNumber(analytics.pendingCount || 0)} />
+        <Metric label="На доработке" value={formatNumber(analytics.returnedCount || 0)} />
+        <Metric label="Принято" value={formatNumber(analytics.approvedCount || 0)} />
+        <Metric label="Среднее согласование" value={durationShort(analytics.avgApprovalMinutes)} />
+      </div>
+
+      <div className="approval-events">
+        <div className="approval-events-head">
+          <strong>История решений</strong>
+          <span>{recentEvents.length ? `${recentEvents.length} последних событий` : "пока пусто"}</span>
+        </div>
+        {recentEvents.length ? recentEvents.slice(0, 8).map((event) => {
+          const actor = findUser(event.actorLogin);
+          return (
+            <div className="approval-event-row" key={event.id}>
+              <div>
+                <strong>{approvalEventLabel(event.action)}</strong>
+                <span>{event.title} · {actor?.full_name || event.actorLogin || "пользователь"}</span>
+                {event.reason ? <p>{event.reason}</p> : null}
+              </div>
+              <time>{event.eventAt ? new Date(event.eventAt).toLocaleString("ru-RU") : "без даты"}</time>
+            </div>
+          );
+        }) : (
+          <div className="empty-state"><span>История появится после отправки, возврата или принятия правок.</span></div>
+        )}
+      </div>
+    </section>
   );
 }
 

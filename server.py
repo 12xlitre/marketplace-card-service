@@ -1101,6 +1101,167 @@ def public_card_draft(row):
   }
 
 
+def card_key_from_snapshot_card(card):
+  if not isinstance(card, dict):
+    return ""
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  return draft_card_key(
+    card.get("nmID")
+    or card.get("vendorCode")
+    or card.get("nmUUID")
+    or raw_fields.get("nmID")
+    or raw_fields.get("vendorCode")
+    or raw_fields.get("nmUUID")
+  )
+
+
+def snapshot_card_lookup(snapshot_json):
+  try:
+    cards = json.loads(snapshot_json or "[]")
+  except json.JSONDecodeError:
+    cards = []
+  lookup = {}
+  if not isinstance(cards, list):
+    return lookup
+  for card in cards:
+    key = card_key_from_snapshot_card(card)
+    if key:
+      lookup[key] = card
+  return lookup
+
+
+def public_approval_task(row, snapshot_lookup):
+  try:
+    payload = json.loads(row["payload_json"])
+  except (TypeError, json.JSONDecodeError):
+    payload = normalize_card_draft_payload({})
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
+  card = snapshot_lookup.get(row["card_key"], {})
+  return {
+    "portalId": str(row["portal_id"]),
+    "cardKey": row["card_key"],
+    "nmID": row["nm_id"] or card_meta.get("nmID") or card.get("nmID") or "",
+    "vendorCode": row["vendor_code"] or card_meta.get("vendorCode") or card.get("vendorCode") or "",
+    "title": card.get("title") or card_meta.get("title") or row["vendor_code"] or row["nm_id"] or "Карточка WB",
+    "subjectName": card.get("subjectName") or card_meta.get("subjectName") or "",
+    "status": str(approval.get("status") or "draft"),
+    "assigneeLogin": str(approval.get("assigneeLogin") or ""),
+    "submittedBy": str(approval.get("submittedBy") or ""),
+    "submittedAt": str(approval.get("submittedAt") or ""),
+    "reviewedBy": str(approval.get("reviewedBy") or ""),
+    "reviewedAt": str(approval.get("reviewedAt") or ""),
+    "returnReason": str(approval.get("returnReason") or ""),
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def event_minutes_between(start, end):
+  if not start or not end:
+    return None
+  try:
+    start_dt = dt.datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+    end_dt = dt.datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+  except ValueError:
+    return None
+  return max(0, int((end_dt - start_dt).total_seconds() // 60))
+
+
+def approval_workflow(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    snapshot_lookup = snapshot_card_lookup(portal["cards_snapshot_json"])
+    task_rows = db.execute(
+      """
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ?
+        AND json_extract(payload_json, '$.meta.approval.status') IN ('submitted', 'changes_requested', 'approved')
+      ORDER BY
+        CASE json_extract(payload_json, '$.meta.approval.status')
+          WHEN 'submitted' THEN 1
+          WHEN 'changes_requested' THEN 2
+          ELSE 3
+        END,
+        updated_at DESC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    all_event_rows = db.execute(
+      """
+      SELECT *
+      FROM card_approval_events
+      WHERE portal_id = ?
+      ORDER BY event_at DESC, id DESC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    event_rows = all_event_rows[:50]
+
+  tasks = [public_approval_task(row, snapshot_lookup) for row in task_rows]
+  submitted_tasks = [task for task in tasks if task["status"] == "submitted"]
+  returned_tasks = [task for task in tasks if task["status"] == "changes_requested"]
+  approved_tasks = [task for task in tasks if task["status"] == "approved"]
+  latest_submitted_by_card = {}
+  approval_minutes = []
+  for row in reversed(all_event_rows):
+    if row["status"] == "submitted":
+      latest_submitted_by_card[row["card_key"]] = row["event_at"]
+    elif row["status"] == "approved":
+      minutes = event_minutes_between(latest_submitted_by_card.get(row["card_key"]), row["event_at"])
+      if minutes is not None:
+        approval_minutes.append(minutes)
+  approval_minutes = [value for value in approval_minutes if value is not None]
+  pending_minutes = [
+    event_minutes_between(task.get("submittedAt"), dt.datetime.now(dt.timezone.utc).isoformat())
+    for task in submitted_tasks
+  ]
+  pending_minutes = [value for value in pending_minutes if value is not None]
+  recent_events = []
+  for row in event_rows:
+    card = snapshot_lookup.get(row["card_key"], {})
+    recent_events.append({
+      "id": row["id"],
+      "cardKey": row["card_key"],
+      "nmID": row["nm_id"] or card.get("nmID") or "",
+      "vendorCode": row["vendor_code"] or card.get("vendorCode") or "",
+      "title": card.get("title") or row["vendor_code"] or row["nm_id"] or "Карточка WB",
+      "subjectName": card.get("subjectName") or "",
+      "status": row["status"],
+      "action": row["action"],
+      "actorLogin": row["actor_login"],
+      "assigneeLogin": row["assignee_login"],
+      "reason": row["reason"],
+      "eventAt": row["event_at"],
+    })
+  return {
+    "tasks": tasks,
+    "analytics": {
+      "pendingCount": len(submitted_tasks),
+      "returnedCount": len(returned_tasks),
+      "approvedCount": len(approved_tasks),
+      "eventCount": len(all_event_rows),
+      "avgApprovalMinutes": round(sum(approval_minutes) / len(approval_minutes)) if approval_minutes else None,
+      "avgPendingMinutes": round(sum(pending_minutes) / len(pending_minutes)) if pending_minutes else None,
+      "lastEventAt": recent_events[0]["eventAt"] if recent_events else "",
+    },
+    "recentEvents": recent_events,
+  }
+
+
 def get_card_draft(portal_id, card_key, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -2493,6 +2654,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if not self.require_user():
         return
       self.send_json(HTTPStatus.OK, {"integration": get_service_integration(MPSTATS_PROVIDER)})
+      return
+
+    if path == "/api/approval-workflow":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, approval_workflow(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
     if path == "/api/card-drafts":
