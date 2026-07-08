@@ -695,6 +695,35 @@ def normalize_wb_card(card):
   }
 
 
+def most_common_nonempty(values):
+  counts = {}
+  order = []
+  for raw_value in values:
+    value = str(raw_value or "").strip()
+    if not value:
+      continue
+    if value not in counts:
+      counts[value] = 0
+      order.append(value)
+    counts[value] += 1
+  if not counts:
+    return ""
+  return max(order, key=lambda value: counts[value])
+
+
+def derive_wb_portal_name(cards):
+  brand = most_common_nonempty(card.get("brand") for card in cards)
+  if brand:
+    return f"{brand} WB"
+  subject = most_common_nonempty(card.get("subjectName") for card in cards)
+  if subject:
+    return f"{subject} WB"
+  vendor_prefix = most_common_nonempty(str(card.get("vendorCode") or "").split("-", 1)[0] for card in cards)
+  if vendor_prefix:
+    return f"{vendor_prefix} WB"
+  return "Wildberries"
+
+
 def fetch_wb_cards(token, max_cards=100):
   max_cards = max(1, min(int(max_cards), WB_MAX_CARDS_PER_SYNC))
   cards = []
@@ -728,8 +757,7 @@ def fetch_wb_cards(token, max_cards=100):
   normalized_cards = [normalize_wb_card(card) for card in cards[:max_cards]]
   problem_count = sum(1 for card in normalized_cards if card["issueCount"] > 0)
   work_count = problem_count
-  brands = [card["brand"] for card in normalized_cards if card["brand"]]
-  portal_name = f"{brands[0]} WB" if brands else "Кабинет WB"
+  portal_name = derive_wb_portal_name(normalized_cards)
   return {
     "cards": normalized_cards,
     "raw_count": len(cards),

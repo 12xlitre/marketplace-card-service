@@ -2239,9 +2239,9 @@
         </div>
 
         <div class="form-two">
-          <label class="field-label">
+          <label class="field-label" id="portal-name-field">
             Название портала
-            <input id="portal-name" name="portal-name" required placeholder="Например, Brand WB">
+            <input id="portal-name" name="portal-name" placeholder="Например, Brand WB">
           </label>
           <label class="field-label">
             Маркетплейс
@@ -2375,6 +2375,7 @@
     const portalModal = document.querySelector("#portal-modal");
     const portalForm = document.querySelector("#portal-form");
     const portalName = document.querySelector("#portal-name");
+    const portalNameField = document.querySelector("#portal-name-field");
     const portalMarketplace = document.querySelector("#portal-marketplace");
     const portalOwner = document.querySelector("#portal-owner");
     const portalTech = document.querySelector("#portal-tech");
@@ -3236,6 +3237,9 @@
       });
       apiFields.hidden = mode !== "api";
       manualFields.hidden = mode !== "manual";
+      portalNameField.hidden = mode === "api";
+      portalName.required = mode !== "api";
+      portalName.value = mode === "api" ? "" : portalName.value;
       portalApiKey.required = mode === "api";
       portalApiKey.disabled = mode !== "api";
       portalApiKey.value = mode === "api" ? portalApiKey.value : "";
