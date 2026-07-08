@@ -2187,12 +2187,12 @@ export default function App() {
       return;
     }
     const confirmed = window.confirm(
-      "Загрузить свежие данные WB? Будут удалены черновики, история аудитов и MPStats-кэш по категориям этого кабинета.",
+      "Загрузить свежие данные WB? Черновики, аудит, задачи согласования и MPStats-кэш останутся без изменений.",
     );
     if (!confirmed) {
       return;
     }
-    await loadPortalCards(portal, { force: true, resetWork: true });
+    await loadPortalCards(portal, { force: true });
   }
 
   async function loadPortalCards(portal, { force = false, resetWork = false } = {}) {
