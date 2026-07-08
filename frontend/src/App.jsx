@@ -1862,8 +1862,8 @@ export default function App() {
     await loadPortalCards(portal);
   }
 
-  async function loadPortalCards(portal) {
-    if (!portal || portal.isDemo || !portal.apiConnected || portal.realCards?.length) {
+  async function loadPortalCards(portal, { force = false } = {}) {
+    if (!portal || portal.isDemo || !portal.apiConnected || (!force && portal.realCards?.length)) {
       return;
     }
     const portalKey = String(portal.id);
@@ -1992,11 +1992,13 @@ export default function App() {
           <SellerScreen
             portal={currentPortal}
             cards={currentPortalCards}
+            cardsLoading={Boolean(loadingPortalCards[currentPortalKey])}
             displayUsers={displayUsers}
             findUser={findUser}
             canManage={canManagePortals}
             onBack={() => setScreen("cabinets")}
             onOpenCard={openCard}
+            onRefreshCards={() => loadPortalCards(currentPortal, { force: true })}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
               setPortalModalOpen(true);
@@ -2271,7 +2273,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onUpdateTeam }) {
+function SellerScreen({ portal, cards, cardsLoading = false, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onUpdateTeam }) {
   const owner = findUser(portal.ownerLogin);
   const isApi = portal.mode === "api";
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
@@ -2340,7 +2342,9 @@ function SellerScreen({ portal, cards, displayUsers, findUser, canManage = false
                 <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : "ручной режим"}</Tag>
               </div>
               <div className="panel-actions">
-                <button className="btn readonly" type="button"><RefreshCw size={16} />Загрузить свежие данные</button>
+                <button className="btn" type="button" onClick={onRefreshCards} disabled={!portal.apiConnected || cardsLoading}>
+                  <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : "Загрузить свежие данные"}
+                </button>
                 <button className="btn" type="button" onClick={() => onOpenModal("api")}>Подключить API</button>
               </div>
               <div className="source-flow">

@@ -121,6 +121,7 @@ def init_db():
         card_count INTEGER NOT NULL DEFAULT 0,
         work_count INTEGER NOT NULL DEFAULT 0,
         problem_count INTEGER NOT NULL DEFAULT 0,
+        cards_snapshot_json TEXT NOT NULL DEFAULT '',
         created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -201,6 +202,8 @@ def init_db():
         db.execute(f"ALTER TABLE portals ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT 0")
     if "is_active" not in portal_columns:
       db.execute("ALTER TABLE portals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if "cards_snapshot_json" not in portal_columns:
+      db.execute("ALTER TABLE portals ADD COLUMN cards_snapshot_json TEXT NOT NULL DEFAULT ''")
     integration_columns = {row["name"] for row in db.execute("PRAGMA table_info(portal_integrations)").fetchall()}
     if "external_key" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN external_key TEXT NOT NULL DEFAULT ''")
@@ -523,6 +526,21 @@ def wb_snapshot_external_key(snapshot):
   return f"wb-nmids:{digest}"
 
 
+def wb_snapshot_cards_json(snapshot):
+  cards = snapshot.get("cards") if isinstance(snapshot, dict) else []
+  if not isinstance(cards, list):
+    cards = []
+  return json.dumps(cards[:WB_MAX_CARDS_PER_SYNC], ensure_ascii=False, separators=(",", ":"))
+
+
+def wb_snapshot_cards_from_row(row):
+  try:
+    cards = json.loads(row["cards_snapshot_json"] or "[]")
+  except (KeyError, TypeError, json.JSONDecodeError):
+    cards = []
+  return cards if isinstance(cards, list) else []
+
+
 def create_portal(name, marketplace, scope, created_by, team):
   init_db()
   with connect_db() as db:
@@ -559,9 +577,9 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
       """
       INSERT INTO portals (
         name, marketplace, scope, status, api_connected,
-        card_count, work_count, problem_count, created_by, last_sync_at
+        card_count, work_count, problem_count, cards_snapshot_json, created_by, last_sync_at
       )
-      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?, ?, ?, ?, ?)
       """,
       (
         portal_name,
@@ -570,6 +588,7 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
         stats.get("cardCount", 0),
         stats.get("workCount", 0),
         stats.get("problemCount", 0),
+        wb_snapshot_cards_json(snapshot),
         created_by,
         stats.get("loadedAt"),
       ),
@@ -722,6 +741,7 @@ def list_portals(user=None):
         portals.card_count,
         portals.work_count,
         portals.problem_count,
+        portals.cards_snapshot_json,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
@@ -806,7 +826,7 @@ def public_portal_from_row(row):
     "apiConnected": api_connected,
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
-    "realCards": [],
+    "realCards": wb_snapshot_cards_from_row(row),
     "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
     "lastSyncAt": row["last_sync_at"] or "",
     "tokenMeta": wb_token_meta_for_portal_row(row),
@@ -850,6 +870,7 @@ def get_portal_row(portal_id, user=None):
         portals.card_count,
         portals.work_count,
         portals.problem_count,
+        portals.cards_snapshot_json,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
@@ -939,6 +960,7 @@ def update_portal_sync_stats(portal_id, snapshot):
         card_count = ?,
         work_count = ?,
         problem_count = ?,
+        cards_snapshot_json = ?,
         last_sync_at = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
@@ -948,6 +970,7 @@ def update_portal_sync_stats(portal_id, snapshot):
         stats.get("cardCount", 0),
         stats.get("workCount", 0),
         stats.get("problemCount", 0),
+        wb_snapshot_cards_json(snapshot),
         stats.get("loadedAt"),
         numeric_portal_id,
       ),
