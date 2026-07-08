@@ -1416,6 +1416,13 @@ tr:last-child td {
   align-items: center;
 }
 
+.draft-option-source {
+  flex: 0 0 100%;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .characteristics-search {
   border-top: 1px solid var(--line);
   padding: 12px;
