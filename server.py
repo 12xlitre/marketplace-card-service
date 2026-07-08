@@ -2791,31 +2791,29 @@ def audit_mpstats_post(token, path, params, body, warnings, cache_ttl=AUDIT_MARK
     return {}
 
 
-def audit_subject_path_from_info(info):
-  if not isinstance(info, dict):
-    return ""
-  candidates = [
-    info.get("path"),
-    info.get("subject_path"),
-    info.get("subjectPath"),
-    info.get("category_path"),
-    info.get("categoryPath"),
-  ]
-  subject = info.get("subject") if isinstance(info.get("subject"), dict) else {}
-  category = info.get("category") if isinstance(info.get("category"), dict) else {}
-  candidates.extend([
-    subject.get("path"),
-    subject.get("full_path"),
-    category.get("path"),
-    category.get("full_path"),
-  ])
+def audit_subject_path_from_info(*sources, fallback_subject_id=None):
+  candidates = [fallback_subject_id]
+  for info in sources:
+    if not isinstance(info, dict):
+      continue
+    subject = info.get("subject") if isinstance(info.get("subject"), dict) else {}
+    niche = info.get("niche") if isinstance(info.get("niche"), dict) else {}
+    category = info.get("category") if isinstance(info.get("category"), dict) else {}
+    candidates.extend([
+      subject.get("id"),
+      niche.get("id"),
+      info.get("subject_id"),
+      info.get("subjectId"),
+      info.get("path"),
+      info.get("subject_path"),
+      info.get("subjectPath"),
+      category.get("id"),
+      category.get("path"),
+    ])
   for candidate in candidates:
-    if isinstance(candidate, list):
-      text = "/".join(audit_str(item) for item in candidate if audit_str(item))
-    else:
-      text = audit_str(candidate)
-    if text:
-      return text
+    text = audit_str(candidate)
+    if text and text.isdigit():
+      return int(text)
   return ""
 
 
@@ -3145,12 +3143,11 @@ def audit_market_data(nm_id, subject_id, period, warnings):
   subject_params = {"d1": d1, "d2": d2}
   if subject_id:
     subject_params["subject_id"] = subject_id
-  subject_path = audit_subject_path_from_info(info)
+  subject_path = audit_subject_path_from_info(info, stats_payload, fallback_subject_id=subject_id)
   niche_path_missing = not bool(subject_path)
   subject_body = {"startRow": 0, "endRow": 300, "filterModel": {}, "sortModel": [{"colId": "revenue", "sort": "desc"}]}
   if subject_path:
     subject_params["path"] = subject_path
-    subject_body["path"] = subject_path
     subject_items_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/items", subject_params, subject_body, warnings)
     brands_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/brands", subject_params, subject_body, warnings)
     price_payload = audit_mpstats_post(token, "/analytics/v1/wb/subject/price_segmentation", subject_params, subject_body, warnings)
@@ -3159,7 +3156,7 @@ def audit_market_data(nm_id, subject_id, period, warnings):
     subject_items_payload = {}
     brands_payload = {}
     price_payload = {}
-  season_payload = audit_mpstats_get(token, f"/analytics/v1/wb/subject/season_effects/annual?{urlencode({'subject_id': subject_id})}", warnings, cache_ttl=30 * 86400) if subject_id else {}
+  season_payload = audit_mpstats_get(token, f"/analytics/v1/wb/subject/season_effects/annual?{urlencode({'path': subject_path})}", warnings, cache_ttl=30 * 86400) if subject_path else {}
 
   stats = stats_payload.get("period_stats") if isinstance(stats_payload, dict) else {}
   if not isinstance(stats, dict):
