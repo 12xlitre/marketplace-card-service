@@ -1081,6 +1081,9 @@ tr:last-child td {
 }
 
 .detail-tabs {
+  position: sticky;
+  top: 92px;
+  z-index: 8;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1120,9 +1123,15 @@ tr:last-child td {
   margin-top: 14px;
   padding-top: 14px;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: 14px;
+}
+
+.draft-actions > div:first-child {
+  flex: 1 1 280px;
+  min-width: 0;
 }
 
 .draft-actions strong {
@@ -1139,10 +1148,16 @@ tr:last-child td {
 }
 
 .draft-buttons {
+  flex: 1 1 360px;
+  min-width: min(100%, 280px);
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.draft-buttons .btn {
+  flex: 0 1 auto;
 }
 
 .raw-field-list {
@@ -1611,6 +1626,31 @@ tr:last-child td {
   line-height: 1.4;
 }
 
+.integration-saved {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  gap: 4px 12px;
+  background: var(--surface-soft);
+  font-size: 13px;
+}
+
+.integration-saved span,
+.integration-saved em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.integration-saved strong {
+  letter-spacing: 2px;
+}
+
+.integration-saved em {
+  grid-column: 1 / -1;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1750,6 +1790,10 @@ tr:last-child td {
     padding: 18px;
   }
 
+  .detail-tabs {
+    top: 10px;
+  }
+
   .content {
     padding: 18px;
   }
@@ -1759,6 +1803,7 @@ tr:last-child td {
   }
 
   .draft-buttons {
+    width: 100%;
     justify-content: flex-start;
   }
 

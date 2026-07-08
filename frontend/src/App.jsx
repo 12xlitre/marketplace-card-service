@@ -25,6 +25,9 @@ const hardcodedDirectoryFallback = [
   { login: "anastasia", full_name: "Анастасия", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" },
 ];
 
+const appViewStorageKey = "opticards-active-view";
+const appScreens = new Set(["cabinets", "seller", "card", "settings"]);
+
 const projectRoleLabels = {
   lead: "Руководитель проекта",
   tech: "Технический специалист",
@@ -130,17 +133,222 @@ function safeFilePart(value) {
     .slice(0, 60) || "card";
 }
 
-function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\n;]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
+function readSavedAppView() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(appViewStorageKey) || "null");
+    if (!saved || typeof saved !== "object") {
+      return {};
+    }
+    return {
+      screen: appScreens.has(saved.screen) ? saved.screen : "cabinets",
+      portalId: saved.portalId ? String(saved.portalId) : "demo-wb",
+      cardKey: saved.cardKey ? String(saved.cardKey) : "",
+    };
+  } catch {
+    return {};
   }
-  return text;
 }
 
-function downloadCsv(filename, rows) {
-  const body = rows.map((row) => row.map(csvEscape).join(";")).join("\n");
-  const blob = new Blob([`\uFEFF${body}`], { type: "text/csv;charset=utf-8" });
+function xmlEscape(value) {
+  return String(value ?? "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function columnName(index) {
+  let value = index + 1;
+  let name = "";
+  while (value > 0) {
+    const rest = (value - 1) % 26;
+    name = String.fromCharCode(65 + rest) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  bytes.forEach((byte) => {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  });
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function setUint16(view, offset, value) {
+  view.setUint16(offset, value, true);
+}
+
+function setUint32(view, offset, value) {
+  view.setUint32(offset, value >>> 0, true);
+}
+
+function dosDateTime(date = new Date()) {
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+function concatBytes(chunks) {
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return result;
+}
+
+function createZip(files) {
+  const encoder = new TextEncoder();
+  const fileChunks = [];
+  const centralChunks = [];
+  const stamp = dosDateTime();
+  let offset = 0;
+
+  files.forEach((file) => {
+    const nameBytes = encoder.encode(file.name);
+    const dataBytes = typeof file.data === "string" ? encoder.encode(file.data) : file.data;
+    const checksum = crc32(dataBytes);
+
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    setUint32(localView, 0, 0x04034b50);
+    setUint16(localView, 4, 20);
+    setUint16(localView, 6, 0);
+    setUint16(localView, 8, 0);
+    setUint16(localView, 10, stamp.time);
+    setUint16(localView, 12, stamp.date);
+    setUint32(localView, 14, checksum);
+    setUint32(localView, 18, dataBytes.length);
+    setUint32(localView, 22, dataBytes.length);
+    setUint16(localView, 26, nameBytes.length);
+    setUint16(localView, 28, 0);
+    localHeader.set(nameBytes, 30);
+
+    fileChunks.push(localHeader, dataBytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    setUint32(centralView, 0, 0x02014b50);
+    setUint16(centralView, 4, 20);
+    setUint16(centralView, 6, 20);
+    setUint16(centralView, 8, 0);
+    setUint16(centralView, 10, 0);
+    setUint16(centralView, 12, stamp.time);
+    setUint16(centralView, 14, stamp.date);
+    setUint32(centralView, 16, checksum);
+    setUint32(centralView, 20, dataBytes.length);
+    setUint32(centralView, 24, dataBytes.length);
+    setUint16(centralView, 28, nameBytes.length);
+    setUint16(centralView, 30, 0);
+    setUint16(centralView, 32, 0);
+    setUint16(centralView, 34, 0);
+    setUint16(centralView, 36, 0);
+    setUint32(centralView, 38, 0);
+    setUint32(centralView, 42, offset);
+    centralHeader.set(nameBytes, 46);
+    centralChunks.push(centralHeader);
+
+    offset += localHeader.length + dataBytes.length;
+  });
+
+  const centralDirectory = concatBytes(centralChunks);
+  const endRecord = new Uint8Array(22);
+  const endView = new DataView(endRecord.buffer);
+  setUint32(endView, 0, 0x06054b50);
+  setUint16(endView, 8, files.length);
+  setUint16(endView, 10, files.length);
+  setUint32(endView, 12, centralDirectory.length);
+  setUint32(endView, 16, offset);
+  setUint16(endView, 20, 0);
+
+  return concatBytes([...fileChunks, centralDirectory, endRecord]);
+}
+
+function sheetXml(sheet) {
+  const rows = sheet.rows || [];
+  const maxColumns = Math.max(1, ...rows.map((row) => row.length));
+  const lastCell = `${columnName(maxColumns - 1)}${Math.max(rows.length, 1)}`;
+  const columns = Array.from({ length: maxColumns }, (_, index) => {
+    const width = sheet.widths?.[index] || 18;
+    return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`;
+  }).join("");
+  const freezePane = sheet.freezeRows
+    ? `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${sheet.freezeRows}" topLeftCell="A${sheet.freezeRows + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`
+    : "";
+  const sheetRows = rows.map((row, rowIndex) => {
+    const rowNumber = rowIndex + 1;
+    const cells = row.map((cell, columnIndex) => {
+      const value = cell && typeof cell === "object" && !Array.isArray(cell) ? cell.value : cell;
+      const style = rowIndex === 0 ? 1 : 0;
+      const ref = `${columnName(columnIndex)}${rowNumber}`;
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return `<c r="${ref}" s="${style}"><v>${value}</v></c>`;
+      }
+      return `<c r="${ref}" s="${style}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`;
+    }).join("");
+    return `<row r="${rowNumber}">${cells}</row>`;
+  }).join("");
+  const autoFilter = rows.length > 1 ? `<autoFilter ref="A1:${lastCell}"/>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${freezePane}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${autoFilter}</worksheet>`;
+}
+
+function xlsxFiles(sheets) {
+  const contentSheetTypes = sheets.map((_, index) => `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+  const workbookSheets = sheets.map((sheet, index) => `<sheet name="${xmlEscape(sheet.name).slice(0, 31)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("");
+  const workbookRels = sheets.map((_, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join("");
+  const worksheetFiles = sheets.map((sheet, index) => ({
+    name: `xl/worksheets/sheet${index + 1}.xml`,
+    data: sheetXml(sheet),
+  }));
+
+  return [
+    {
+      name: "[Content_Types].xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${contentSheetTypes}</Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    },
+    {
+      name: "xl/workbook.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets}</sheets></workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${workbookRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    },
+    {
+      name: "xl/styles.xml",
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+    },
+    ...worksheetFiles,
+  ];
+}
+
+function downloadXlsx(filename, sheets) {
+  const bytes = createZip(xlsxFiles(sheets));
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -733,35 +941,65 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
   ]));
 }
 
-function buildContentExportRows(card, draftTitle, draftDescription, draftCharacteristics) {
-  const rows = [
-    ["nmID", "Артикул продавца", "Название", "Описание", "Характеристика", "charcID", "Значение"],
-  ];
-  const characteristics = draftCharacteristicsList(draftCharacteristics);
-  if (!characteristics.length) {
-    rows.push([
-      card?.nmID || "",
-      card?.vendorCode || "",
-      draftTitle || "",
-      draftDescription || "",
-      "",
-      "",
-      "",
-    ]);
-    return rows;
+function characteristicExportText(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? "").trim()).filter(Boolean).join("; ");
   }
-  characteristics.forEach((item) => {
-    rows.push([
-      card?.nmID || "",
+  return String(value ?? "").trim();
+}
+
+function buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics) {
+  const characteristics = draftCharacteristicsList(draftCharacteristics);
+  const characteristicHeaders = characteristics.map((item) => item.name);
+  const characteristicValues = characteristics.map((item) => characteristicExportText(item.value));
+  const baseHeaders = ["Артикул продавца", "Номенклатура WB", "Предмет", "ID предмета", "Бренд", "Название", "Описание"];
+  const baseValues = [
+    card?.vendorCode || "",
+    card?.nmID || "",
+    card?.subjectName || "",
+    card?.subjectID || card?.rawFields?.subjectID || "",
+    card?.brand || "",
+    draftTitle || "",
+    draftDescription || "",
+  ];
+  const characteristicRows = [
+    ["Артикул продавца", "Номенклатура WB", "Характеристика", "charcID", "Значение"],
+    ...characteristics.map((item) => [
       card?.vendorCode || "",
-      draftTitle || "",
-      draftDescription || "",
+      card?.nmID || "",
       item.name,
       item.charcID,
-      item.value,
-    ]);
-  });
-  return rows;
+      characteristicExportText(item.value),
+    ]),
+  ];
+
+  return [
+    {
+      name: "Контент WB",
+      freezeRows: 1,
+      widths: [24, 18, 26, 14, 18, 42, 70, ...characteristicHeaders.map(() => 28)],
+      rows: [
+        [...baseHeaders, ...characteristicHeaders],
+        [...baseValues, ...characteristicValues],
+      ],
+    },
+    {
+      name: "Характеристики",
+      freezeRows: 1,
+      widths: [24, 18, 32, 14, 48],
+      rows: characteristicRows,
+    },
+    {
+      name: "Инструкция",
+      widths: [34, 96],
+      rows: [
+        ["Раздел WB", "Что делать"],
+        ["Карточка товара", "В ЛК WB откройте Товары и цены -> Карточка товара, выберите карточки и используйте массовое редактирование или категорийный XLSX-шаблон."],
+        ["Категория", "WB формирует точный шаблон под предмет/категорию. Перенесите значения из листа Контент WB в соответствующие колонки шаблона WB."],
+        ["Характеристики", "Лист Характеристики дублирует значения в построчном виде: удобно сверять charcID и переносить спорные поля вручную."],
+      ],
+    },
+  ];
 }
 
 function cardDraftKey(card) {
@@ -825,40 +1063,96 @@ function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? "";
 }
 
-function buildPricesExportRows(card) {
+function firstSku(card) {
+  const sizes = Array.isArray(card?.sizes) ? card.sizes : [];
+  for (const size of sizes) {
+    if (Array.isArray(size?.skus) && size.skus.length) {
+      return size.skus[0];
+    }
+  }
+  return "";
+}
+
+function buildPricesExportSheets(card) {
   return [
-    ["nmID", "Артикул продавца", "Цена", "Скидка", "Цена со скидкой"],
-    [
-      card?.nmID || "",
-      card?.vendorCode || "",
-      firstDefined(card?.price, card?.rawFields?.price),
-      firstDefined(card?.discount, card?.rawFields?.discount),
-      firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
-    ],
+    {
+      name: "Цены и скидки",
+      freezeRows: 1,
+      widths: [18, 24, 24, 22, 20, 22],
+      rows: [
+        ["Номенклатура WB", "Артикул продавца", "Баркод", "Цена продавца до скидки", "Скидка продавца", "Цена со скидкой"],
+        [
+          card?.nmID || "",
+          card?.vendorCode || "",
+          firstSku(card),
+          firstDefined(card?.price, card?.rawFields?.price),
+          firstDefined(card?.discount, card?.rawFields?.discount),
+          firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
+        ],
+      ],
+    },
+    {
+      name: "Инструкция",
+      widths: [34, 96],
+      rows: [
+        ["Раздел WB", "Что делать"],
+        ["Цены и скидки", "В ЛК WB откройте Товары и цены -> Цены и скидки -> Обновить через Excel -> Цены или скидки."],
+        ["Редактируемые поля", "В WB-шаблоне обычно редактируются цена продавца до скидки и скидка продавца. Итоговая цена пересчитывается WB."],
+        ["Ограничение", "Если WB выгрузил свой шаблон со всеми товарами, переносите значения из листа Цены и скидки в строки с тем же nmID/артикулом/баркодом."],
+      ],
+    },
   ];
 }
 
-function buildStocksExportRows(card) {
-  const rows = [["nmID", "Артикул продавца", "Размер", "Баркод/SKU", "Склад", "Остаток"]];
+function buildStocksExportSheets(card) {
   const sizes = Array.isArray(card?.sizes) ? card.sizes : [];
+  const uploadRows = [["Баркод", "Количество"]];
+  const referenceRows = [["Баркод", "Артикул продавца", "Номенклатура WB", "Размер", "ID размера WB", "Количество"]];
+
   if (!sizes.length) {
-    rows.push([card?.nmID || "", card?.vendorCode || "", "", "", "", ""]);
-    return rows;
-  }
-  sizes.forEach((size) => {
-    const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
-    skus.forEach((sku) => {
-      rows.push([
-        card?.nmID || "",
-        card?.vendorCode || "",
-        size?.techSize || size?.wbSize || size?.chrtID || "",
-        sku,
-        "",
-        "",
-      ]);
+    uploadRows.push(["", ""]);
+    referenceRows.push(["", card?.vendorCode || "", card?.nmID || "", "", "", ""]);
+  } else {
+    sizes.forEach((size) => {
+      const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
+      skus.forEach((sku) => {
+        uploadRows.push([sku, ""]);
+        referenceRows.push([
+          sku,
+          card?.vendorCode || "",
+          card?.nmID || "",
+          size?.techSize || size?.wbSize || "",
+          size?.chrtID || "",
+          "",
+        ]);
+      });
     });
-  });
-  return rows;
+  }
+
+  return [
+    {
+      name: "Остатки WB",
+      freezeRows: 1,
+      widths: [24, 16],
+      rows: uploadRows,
+    },
+    {
+      name: "Справка по размерам",
+      freezeRows: 1,
+      widths: [24, 24, 18, 18, 18, 16],
+      rows: referenceRows,
+    },
+    {
+      name: "Инструкция",
+      widths: [34, 96],
+      rows: [
+        ["Раздел WB", "Что делать"],
+        ["Управление остатками FBS", "В ЛК WB откройте Управление остатками -> Действия с Excel -> загрузка XLSX-шаблона."],
+        ["Формат импорта", "Первый лист Остатки WB оставлен в формате WB для FBS: только две колонки Баркод и Количество."],
+        ["Количество", "Заполните количество по нужному баркоду. Служебные поля вынесены на отдельный лист, чтобы не мешать загрузке."],
+      ],
+    },
+  ];
 }
 
 function Tag({ children, tone = "amber" }) {
@@ -874,16 +1168,20 @@ function IconButton({ icon: Icon, label, onClick, disabled = false }) {
 }
 
 export default function App() {
+  const [initialView] = useState(readSavedAppView);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [users, setUsers] = useState([]);
   const [userPortals, setUserPortals] = useState([]);
   const [demoPortal, setDemoPortal] = useState(initialDemoPortal);
   const [demoPortalArchived, setDemoPortalArchived] = useState(() => localStorage.getItem("opticards-demo-archived") === "1");
-  const [screen, setScreen] = useState("cabinets");
+  const [screen, setScreen] = useState(initialView.screen || "cabinets");
   const [portalStatusFilter, setPortalStatusFilter] = useState("active");
-  const [selectedPortalId, setSelectedPortalId] = useState("demo-wb");
-  const [selectedCard, setSelectedCard] = useState(demoCards[0]);
+  const [selectedPortalId, setSelectedPortalId] = useState(initialView.portalId || "demo-wb");
+  const [selectedCardKey, setSelectedCardKey] = useState(initialView.cardKey || cardDraftKey(demoCards[0]));
+  const [selectedCard, setSelectedCard] = useState(
+    demoCards.find((card) => cardDraftKey(card) === initialView.cardKey) || demoCards[0],
+  );
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [notice, setNotice] = useState("");
@@ -905,6 +1203,35 @@ export default function App() {
     restoreSession();
   }, []);
 
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+    localStorage.setItem(appViewStorageKey, JSON.stringify({
+      screen,
+      portalId: selectedPortalId,
+      cardKey: selectedCard ? cardDraftKey(selectedCard) : selectedCardKey,
+    }));
+  }, [currentUser, screen, selectedPortalId, selectedCard, selectedCardKey]);
+
+  useEffect(() => {
+    if (screen !== "card") {
+      return;
+    }
+    const cards = cardsForPortal(currentPortal);
+    if (!cards.length) {
+      return;
+    }
+    const nextCard = cards.find((card) => cardDraftKey(card) === selectedCardKey) || cards[0];
+    if (!selectedCard || cardDraftKey(selectedCard) !== cardDraftKey(nextCard)) {
+      setSelectedCard(nextCard);
+    }
+  }, [screen, currentPortal, selectedCardKey, selectedCard]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [screen, selectedPortalId, selectedCardKey]);
+
   async function restoreSession() {
     try {
       const payload = await apiRequest("/api/session");
@@ -919,7 +1246,6 @@ export default function App() {
   async function enterApp(user) {
     setCurrentUser(user);
     await loadAppData(user);
-    setScreen("cabinets");
   }
 
   async function loadAppData(user) {
@@ -983,6 +1309,9 @@ export default function App() {
     setCurrentUser(null);
     setScreen("cabinets");
     setSelectedPortalId("demo-wb");
+    setSelectedCardKey(cardDraftKey(demoCards[0]));
+    setSelectedCard(demoCards[0]);
+    localStorage.removeItem(appViewStorageKey);
   }
 
   function findUser(login) {
@@ -1068,6 +1397,7 @@ export default function App() {
 
   function openCard(card) {
     setSelectedCard(card);
+    setSelectedCardKey(cardDraftKey(card));
     setScreen("card");
   }
 
@@ -1846,14 +2176,14 @@ function CardDetailScreen({ card, portal, onBack }) {
 
   function downloadDraftTable(type) {
     if (type === "content") {
-      downloadCsv(`${exportFileBase}-content.csv`, buildContentExportRows(card, draftTitle, draftDescription, draftCharacteristics));
+      downloadXlsx(`${exportFileBase}-content-wb.xlsx`, buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics));
       return;
     }
     if (type === "prices") {
-      downloadCsv(`${exportFileBase}-prices.csv`, buildPricesExportRows(card));
+      downloadXlsx(`${exportFileBase}-prices-wb.xlsx`, buildPricesExportSheets(card));
       return;
     }
-    downloadCsv(`${exportFileBase}-stocks.csv`, buildStocksExportRows(card));
+    downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card));
   }
 
   return (
@@ -2631,6 +2961,9 @@ function SettingsScreen({ users, canManage = false }) {
   }
 
   const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
+  const mpstatsUpdatedAt = mpstatsIntegration?.updatedAt
+    ? new Date(mpstatsIntegration.updatedAt).toLocaleString("ru-RU")
+    : "";
 
   return (
     <section className="screen active">
@@ -2673,18 +3006,27 @@ function SettingsScreen({ users, canManage = false }) {
                   onChange={(event) => setMpstatsKey(event.target.value)}
                   disabled={!canManage}
                   autoComplete="off"
-                  placeholder={canManage ? "Введите ключ MPStats" : "Недостаточно прав для изменения"}
+                  placeholder={canManage
+                    ? (mpstatsConnected ? "Введите новый ключ, чтобы заменить сохраненный" : "Введите ключ MPStats")
+                    : "Недостаточно прав для изменения"}
                 />
               </label>
+              {mpstatsConnected ? (
+                <div className="integration-saved">
+                  <span>Сохраненный ключ</span>
+                  <strong>••••••••••••</strong>
+                  <em>{mpstatsUpdatedAt ? `обновлен ${mpstatsUpdatedAt}` : "хранится на backend"}</em>
+                </div>
+              ) : null}
               <div className="panel-actions">
                 <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
                 <button className="btn" type="button" disabled title="Проверку включим после получения документации MPStats">Проверить подключение</button>
               </div>
               <div className="integration-status">
                 {mpstatsStatus === "saving" ? "Сохраняем..." : null}
-                {mpstatsStatus === "saved" ? "Ключ сохранен и будет использоваться как общий MPStats источник." : null}
+                {mpstatsStatus === "saved" ? "Ключ сохранен. Поле очищено специально: сам ключ не показываем повторно." : null}
                 {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
-                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? `Обновлен ${new Date(mpstatsIntegration.updatedAt).toLocaleString("ru-RU")}` : "MPStats пока не настроен.") : null}
+                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? "MPStats ключ сохранен и будет использоваться для всех кабинетов." : "MPStats пока не настроен.") : null}
               </div>
             </form>
           </section>
