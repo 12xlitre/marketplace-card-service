@@ -954,6 +954,32 @@
       color: var(--ink);
     }
 
+    .project-member-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+      gap: 5px;
+      min-height: 56px;
+      padding: 10px 0 12px;
+    }
+
+    .project-member-row span {
+      line-height: 1.25;
+    }
+
+    .project-member-row strong {
+      display: block;
+      font-size: 14px;
+      line-height: 1.25;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .panel-list .project-member-row:last-child {
+      padding-bottom: 12px;
+    }
+
     .empty-state {
       min-height: 132px;
       border: 1px dashed #bac5be;
@@ -1094,12 +1120,36 @@
     }
 
     .source-flow .list-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) max-content;
+      align-items: center;
+      gap: 12px;
+      min-height: 48px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       background: transparent;
     }
 
     .source-flow .list-row:last-child {
       border-bottom: 0;
+      padding-bottom: 10px;
+    }
+
+    .source-flow .list-row span {
+      line-height: 1.3;
+    }
+
+    .source-flow .list-row strong {
+      justify-self: end;
+      max-width: 190px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      padding: 4px 9px;
+      text-align: right;
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: normal;
     }
 
     .modal-actions {
@@ -1131,9 +1181,21 @@
       background:
         radial-gradient(circle at 50% 18%, rgba(255,255,255,.9) 0 12%, transparent 13%),
         linear-gradient(145deg, #e7f1ea 0 45%, #dceaf6 45% 100%);
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
       position: relative;
       overflow: hidden;
       box-shadow: var(--shadow);
+    }
+
+    .photo-preview.has-image {
+      background-color: var(--surface-soft);
+    }
+
+    .photo-preview.has-image:before,
+    .photo-preview.has-image:after {
+      content: none;
     }
 
     .photo-preview:before {
@@ -1909,9 +1971,9 @@
                 <h2>Состав проекта</h2>
                 <p>Участники выбираются из учетных записей сотрудников.</p>
                 <div class="panel-list" id="project-members">
-                  <div class="list-row" data-member-login="admin"><span>Администратор</span><strong>Полный доступ</strong></div>
-                  <div class="list-row" data-member-login="manager"><span>Руководитель</span><strong>Проекты и отчеты</strong></div>
-                  <div class="list-row" data-member-login="specialist"><span>Специалист</span><strong>Карточки и аудит</strong></div>
+                  <div class="list-row project-member-row" data-member-login="admin"><span>Администратор</span><strong>Полный доступ</strong></div>
+                  <div class="list-row project-member-row" data-member-login="manager"><span>Руководитель</span><strong>Проекты и отчеты</strong></div>
+                  <div class="list-row project-member-row" data-member-login="specialist"><span>Специалист</span><strong>Карточки и аудит</strong></div>
                 </div>
                 <div class="panel-actions member-picker">
                   <label class="picker-field">
@@ -1977,14 +2039,14 @@
         <header class="topbar">
           <div class="title">
             <h1>Детальная карточка</h1>
-            <p>Панама детская летняя на завязках · WB 1111070706 · артикул 43564R-11-46</p>
+            <p id="detail-subtitle">Панама детская летняя на завязках · WB 1111070706 · артикул 43564R-11-46</p>
           </div>
           <div class="toolbar">
             <button class="btn ghost" data-back-seller>
               <svg class="ico" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"></path></svg>
               Карточки
             </button>
-            <a class="btn" href="https://www.wildberries.ru/catalog/7332835/detail.aspx?targetUrl=MI" target="_blank" rel="noreferrer">
+            <a class="btn" id="detail-wb-link" href="https://www.wildberries.ru/catalog/7332835/detail.aspx?targetUrl=MI" target="_blank" rel="noreferrer">
               <svg class="ico" viewBox="0 0 24 24"><path d="M14 3h7v7"></path><path d="M10 14L21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg>
               Открыть WB
             </a>
@@ -1998,7 +2060,7 @@
         <div class="content">
           <div class="detail-layout">
             <aside class="detail-aside">
-              <div class="photo-preview" aria-label="Превью товара"></div>
+              <div class="photo-preview" id="detail-photo" aria-label="Превью товара"></div>
 
               <section class="panel">
                 <h2>Заполненность</h2>
@@ -2017,12 +2079,12 @@
               <section class="panel">
                 <h2>Данные карточки</h2>
                 <div class="panel-list">
-                  <div class="list-row"><span>Категория</span><strong>Панамы</strong></div>
-                  <div class="list-row"><span>Бренд</span><strong>Dan&Dani</strong></div>
-                  <div class="list-row"><span>Пол</span><strong>Мальчики</strong></div>
-                  <div class="list-row"><span>Состав</span><strong>хлопок 100%</strong></div>
-                  <div class="list-row"><span>Фото</span><strong>1 из 30</strong></div>
-                  <div class="list-row"><span>Цена</span><strong>требует сверки</strong></div>
+                  <div class="list-row"><span>Категория</span><strong id="detail-subject">Панамы</strong></div>
+                  <div class="list-row"><span>Бренд</span><strong id="detail-brand">Dan&Dani</strong></div>
+                  <div class="list-row"><span>nmID</span><strong id="detail-nmid">1111070706</strong></div>
+                  <div class="list-row"><span>Артикул продавца</span><strong id="detail-vendor-code">43564R-11-46</strong></div>
+                  <div class="list-row"><span>Фото</span><strong id="detail-photo-status">1 из 30</strong></div>
+                  <div class="list-row"><span>Статус</span><strong id="detail-status">требует сверки</strong></div>
                 </div>
               </section>
 
@@ -2054,15 +2116,15 @@
                     <h2>Проблемы аудита</h2>
                     <p>Сервис показывает причину и действие для специалиста.</p>
                   </div>
-                  <span class="tag amber">4 проблемы</span>
+                  <span class="tag amber" id="detail-issue-count">4 проблемы</span>
                 </div>
                 <div class="audit-list">
                   <div class="issue">
                     <div class="issue-head">
-                      <strong>Название слабее конкурентов</strong>
+                      <strong id="detail-primary-issue-title">Название слабее конкурентов</strong>
                       <span class="tag amber">SEO</span>
                     </div>
-                    <p>В заголовке есть товарный тип, но не хватает высокочастотных формулировок: "панама детская", "летняя", "на завязках".</p>
+                    <p id="detail-primary-issue-copy">В заголовке есть товарный тип, но не хватает высокочастотных формулировок: "панама детская", "летняя", "на завязках".</p>
                   </div>
                   <div class="issue">
                     <div class="issue-head">
@@ -2099,24 +2161,24 @@
                 <div class="option-list">
                   <div class="option-row">
                     <div class="option-head">
-                      <strong>Панама детская летняя хлопковая на завязках</strong>
-                      <span class="char-counter ok">45/60</span>
+                      <strong id="detail-option-title-1">Панама детская летняя хлопковая на завязках</strong>
+                      <span class="char-counter ok" id="detail-option-count-1">45/60</span>
                     </div>
-                    <p>Сохраняет смысл товара и добавляет целевые запросы без дублей.</p>
+                    <p id="detail-option-copy-1">Сохраняет смысл товара и добавляет целевые запросы без дублей.</p>
                   </div>
                   <div class="option-row">
                     <div class="option-head">
-                      <strong>Панама для мальчика летняя хлопок на завязках</strong>
-                      <span class="char-counter ok">47/60</span>
+                      <strong id="detail-option-title-2">Панама для мальчика летняя хлопок на завязках</strong>
+                      <span class="char-counter ok" id="detail-option-count-2">47/60</span>
                     </div>
-                    <p>Усиливает запрос по полу и материалу, подходит для категории "Панамы".</p>
+                    <p id="detail-option-copy-2">Усиливает запрос по полу и материалу, подходит для категории "Панамы".</p>
                   </div>
                   <div class="option-row">
                     <div class="option-head">
-                      <strong>Панама детская хлопковая для мальчика летняя</strong>
-                      <span class="char-counter ok">47/60</span>
+                      <strong id="detail-option-title-3">Панама детская хлопковая для мальчика летняя</strong>
+                      <span class="char-counter ok" id="detail-option-count-3">47/60</span>
                     </div>
-                    <p>Более частотная структура: тип товара, аудитория, материал, сезон.</p>
+                    <p id="detail-option-copy-3">Более частотная структура: тип товара, аудитория, материал, сезон.</p>
                   </div>
                 </div>
               </section>
@@ -2132,21 +2194,21 @@
                 <div class="before-after">
                   <div class="field-box">
                     <strong>Было: заголовок</strong>
-                    <p>Панама детская летняя на завязках</p>
+                    <p id="detail-before-title">Панама детская летняя на завязках</p>
                   </div>
                   <div class="field-box">
                     <strong>Стало: заголовок</strong>
-                    <textarea class="short">Панама детская летняя хлопковая на завязках</textarea>
-                    <p><span class="char-counter ok">45/60 символов</span></p>
+                    <textarea class="short" id="detail-after-title">Панама детская летняя хлопковая на завязках</textarea>
+                    <p><span class="char-counter ok" id="detail-after-title-count">45/60 символов</span></p>
                   </div>
                   <div class="field-box">
                     <strong>Было: описание</strong>
-                    <p>Панама для мальчика - удобный и легкий летний головной убор для прогулок, отдыха и поездок.</p>
+                    <p id="detail-before-description">Панама для мальчика - удобный и легкий летний головной убор для прогулок, отдыха и поездок.</p>
                   </div>
                   <div class="field-box">
                     <strong>Стало: описание</strong>
-                    <textarea>Детская летняя панама для мальчика из хлопка подходит для прогулок, отдыха, поездок и защиты от солнца. Модель на завязках удобно фиксируется, не спадает при активном движении и подходит для теплой погоды.</textarea>
-                    <p>Добавлены релевантные запросы: детская панама, летняя панама, панама для мальчика, хлопок, на завязках.</p>
+                    <textarea id="detail-after-description">Детская летняя панама для мальчика из хлопка подходит для прогулок, отдыха, поездок и защиты от солнца. Модель на завязках удобно фиксируется, не спадает при активном движении и подходит для теплой погоды.</textarea>
+                    <p id="detail-description-note">Добавлены релевантные запросы: детская панама, летняя панама, панама для мальчика, хлопок, на завязках.</p>
                   </div>
                 </div>
               </section>
@@ -2161,19 +2223,19 @@
                 </div>
                 <div class="field-grid">
                   <div class="field-box">
-                    <strong>Состав</strong>
-                    <p>Было: хлопок 100%</p>
-                    <p>Предложение: оставить, значение выглядит корректным.</p>
+                    <strong>Характеристики</strong>
+                    <p id="detail-characteristics-current">Было: нет в текущих данных</p>
+                    <p>Предложение: сверить обязательные характеристики в кабинете WB.</p>
                   </div>
                   <div class="field-box">
-                    <strong>Пол</strong>
-                    <p>Было: мальчики</p>
-                    <p>Предложение: проверить, нужен ли дополнительный вариант "дети" по правилам категории.</p>
+                    <strong>Категория</strong>
+                    <p id="detail-category-current">Было: Панамы</p>
+                    <p>Предложение: проверить соответствие предмету и текущей витрине.</p>
                   </div>
                   <div class="field-box">
                     <strong>Фото</strong>
-                    <p>Было: 1 ссылка</p>
-                    <p>Предложение: добавить фото на модели, крупный план ткани и завязок.</p>
+                    <p id="detail-photo-current">Было: 1 ссылка</p>
+                    <p>Предложение: проверить первое фото и комплектность медиа перед правками.</p>
                   </div>
                   <div class="field-box">
                     <strong>Цена</strong>
@@ -2389,6 +2451,44 @@
     const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
+    const detailEls = {
+      subtitle: document.querySelector("#detail-subtitle"),
+      wbLink: document.querySelector("#detail-wb-link"),
+      photo: document.querySelector("#detail-photo"),
+      subject: document.querySelector("#detail-subject"),
+      brand: document.querySelector("#detail-brand"),
+      nmID: document.querySelector("#detail-nmid"),
+      vendorCode: document.querySelector("#detail-vendor-code"),
+      photoStatus: document.querySelector("#detail-photo-status"),
+      status: document.querySelector("#detail-status"),
+      issueCount: document.querySelector("#detail-issue-count"),
+      primaryIssueTitle: document.querySelector("#detail-primary-issue-title"),
+      primaryIssueCopy: document.querySelector("#detail-primary-issue-copy"),
+      beforeTitle: document.querySelector("#detail-before-title"),
+      afterTitle: document.querySelector("#detail-after-title"),
+      afterTitleCount: document.querySelector("#detail-after-title-count"),
+      beforeDescription: document.querySelector("#detail-before-description"),
+      afterDescription: document.querySelector("#detail-after-description"),
+      descriptionNote: document.querySelector("#detail-description-note"),
+      characteristicsCurrent: document.querySelector("#detail-characteristics-current"),
+      categoryCurrent: document.querySelector("#detail-category-current"),
+      photoCurrent: document.querySelector("#detail-photo-current"),
+      optionTitles: [
+        document.querySelector("#detail-option-title-1"),
+        document.querySelector("#detail-option-title-2"),
+        document.querySelector("#detail-option-title-3")
+      ],
+      optionCounters: [
+        document.querySelector("#detail-option-count-1"),
+        document.querySelector("#detail-option-count-2"),
+        document.querySelector("#detail-option-count-3")
+      ],
+      optionCopies: [
+        document.querySelector("#detail-option-copy-1"),
+        document.querySelector("#detail-option-copy-2"),
+        document.querySelector("#detail-option-copy-3")
+      ]
+    };
     const hardcodedDirectoryFallback = [
       { login: "kristina", full_name: "Кристина", role: "Руководитель", access_level: "overview", user_role: "manager" },
       { login: "anastasia", full_name: "Анастасия", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" }
@@ -2456,6 +2556,8 @@
     let currentPortal = demoPortal;
     let userPortals = [];
     let backendPortalsLoaded = false;
+    let renderedCards = demoCards;
+    let selectedCard = demoCards[0];
 
     function getDisplayUsers() {
       if (!users.length) {
@@ -2474,6 +2576,106 @@
 
     function formatNumber(value) {
       return new Intl.NumberFormat("ru-RU").format(value);
+    }
+
+    function textOrDash(value) {
+      const text = String(value ?? "").trim();
+      return text || "—";
+    }
+
+    function setText(node, value) {
+      if (node) {
+        node.textContent = value;
+      }
+    }
+
+    function truncateText(value, limit = 60) {
+      const text = textOrDash(value);
+      if (text.length <= limit) {
+        return text;
+      }
+      return `${text.slice(0, Math.max(0, limit - 1)).trim()}…`;
+    }
+
+    function uniqueTexts(values) {
+      const seen = new Set();
+      return values
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .filter((value) => {
+          const key = value.toLowerCase();
+          if (seen.has(key)) {
+            return false;
+          }
+          seen.add(key);
+          return true;
+        });
+    }
+
+    function pluralRu(value, one, few, many) {
+      const number = Math.abs(Number(value) || 0);
+      const lastTwo = number % 100;
+      const last = number % 10;
+      if (lastTwo >= 11 && lastTwo <= 14) {
+        return many;
+      }
+      if (last === 1) {
+        return one;
+      }
+      if (last >= 2 && last <= 4) {
+        return few;
+      }
+      return many;
+    }
+
+    function wbCardUrl(card) {
+      if (!card?.nmID) {
+        return "https://www.wildberries.ru/";
+      }
+      return `https://www.wildberries.ru/catalog/${encodeURIComponent(card.nmID)}/detail.aspx?targetUrl=MI`;
+    }
+
+    function safeHttpsUrl(value) {
+      try {
+        const url = new URL(value);
+        return url.protocol === "https:" ? url.href : "";
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function issueCopy(issue) {
+      const copies = {
+        "Нет бренда": "WB API не вернул бренд. Нужно проверить бренд в кабинете и не подставлять его вручную без подтверждения.",
+        "Нет описания": "В текущем снимке нет описания. Перед правками нужно подтянуть описание или заполнить его вручную.",
+        "Пустые характеристики": "WB API не вернул характеристики. Нужно сверить обязательные поля категории перед публикацией.",
+        "Нет фото": "В текущем снимке нет фото. Нужно проверить медиа в кабинете WB перед аудитом.",
+        "Нет названия": "У карточки нет названия. Нужно заполнить заголовок до 60 символов.",
+        "Название длиннее 60": "Название превышает лимит WB. Нужно сократить его до 60 символов без потери смысла.",
+        "Габариты требуют проверки": "WB пометил габариты как требующие проверки. Перед публикацией нужно сверить размеры."
+      };
+      return copies[issue] || "Карточка требует ручной проверки по данным из WB API.";
+    }
+
+    function titleSuggestions(card) {
+      const title = textOrDash(card?.title);
+      const subject = String(card?.subjectName || "").trim();
+      const brand = String(card?.brand || "").trim();
+      const base = title === "—" ? (subject || "Карточка WB") : title;
+      const baseLower = base.toLowerCase();
+      const subjectMarker = subject.toLowerCase().slice(0, Math.max(0, subject.length - 1));
+      const hasSubject = subjectMarker.length >= 4 && baseLower.includes(subjectMarker);
+      const options = uniqueTexts([
+        base,
+        subject && !hasSubject ? `${subject} ${base}` : "",
+        brand && !baseLower.includes(brand.toLowerCase()) ? `${base} ${brand}` : "",
+        truncateText(base, 56)
+      ]).slice(0, 3);
+
+      while (options.length < 3) {
+        options.push(base);
+      }
+      return options.map((option) => truncateText(option, 60));
     }
 
     function uniqueLogins(logins) {
@@ -2790,7 +2992,90 @@
       loadPortalCards(currentPortal);
     }
 
-    function showCard() {
+    function updateCardDetail(card = selectedCard) {
+      const currentCard = card || demoCards[0];
+      selectedCard = currentCard;
+
+      const title = textOrDash(currentCard.title) === "—" ? "Карточка WB" : textOrDash(currentCard.title);
+      const subject = textOrDash(currentCard.subjectName);
+      const brand = textOrDash(currentCard.brand);
+      const nmID = textOrDash(currentCard.nmID);
+      const vendorCode = textOrDash(currentCard.vendorCode);
+      const status = textOrDash(currentCard.status);
+      const issue = currentCard.issue || "Нет критичных";
+      const issueCount = Number(currentCard.issueCount ?? (issue === "Нет критичных" ? 0 : 1));
+      const photoUrl = safeHttpsUrl(currentCard.photoUrl);
+      const suggestions = titleSuggestions(currentCard);
+
+      setText(detailEls.subtitle, `${title} · WB ${nmID} · артикул ${vendorCode}`);
+      setText(detailEls.subject, subject);
+      setText(detailEls.brand, brand);
+      setText(detailEls.nmID, nmID);
+      setText(detailEls.vendorCode, vendorCode);
+      setText(detailEls.photoStatus, photoUrl ? "есть" : "не передано");
+      setText(detailEls.status, status);
+      setText(detailEls.issueCount, issueCount
+        ? `${issueCount} ${pluralRu(issueCount, "проблема", "проблемы", "проблем")}`
+        : "нет проблем");
+      setText(detailEls.primaryIssueTitle, issueCount ? issue : "Критичных проблем нет");
+      setText(detailEls.primaryIssueCopy, issueCount
+        ? issueCopy(issue)
+        : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка.");
+
+      if (detailEls.issueCount) {
+        detailEls.issueCount.className = issueCount ? "tag amber" : "tag green";
+      }
+
+      if (detailEls.wbLink) {
+        detailEls.wbLink.href = wbCardUrl(currentCard);
+      }
+
+      if (detailEls.photo) {
+        detailEls.photo.style.backgroundImage = photoUrl ? `url("${photoUrl}")` : "";
+        detailEls.photo.classList.toggle("has-image", Boolean(photoUrl));
+      }
+
+      detailEls.optionTitles.forEach((node, index) => {
+        const option = suggestions[index] || suggestions[0];
+        setText(node, option);
+        const counter = detailEls.optionCounters[index];
+        setText(counter, `${option.length}/60`);
+        if (counter) {
+          counter.classList.toggle("ok", option.length <= 60);
+        }
+      });
+      [
+        "Сохраняет исходный смысл и держит заголовок в лимите WB.",
+        subject === "—"
+          ? "Вариант для ручной SEO-проверки после уточнения категории."
+          : `Учитывает категорию "${subject}" без автоматической публикации.`,
+        brand === "—"
+          ? "Резервный вариант для ручной доработки специалистом."
+          : `Добавляет бренд "${brand}", если это подтверждено кабинетом WB.`
+      ].forEach((copy, index) => setText(detailEls.optionCopies[index], copy));
+
+      setText(detailEls.beforeTitle, title);
+      if (detailEls.afterTitle) {
+        detailEls.afterTitle.value = suggestions[0];
+      }
+      setText(detailEls.afterTitleCount, `${suggestions[0].length}/60 символов`);
+      if (detailEls.afterTitleCount) {
+        detailEls.afterTitleCount.classList.toggle("ok", suggestions[0].length <= 60);
+      }
+      setText(detailEls.beforeDescription, "Описание не загружено в текущем read-only снимке WB.");
+      if (detailEls.afterDescription) {
+        detailEls.afterDescription.value = `${title}. Категория WB: ${subject}. Перед публикацией нужно проверить обязательные характеристики, фото и SEO-формулировки.`;
+      }
+      setText(detailEls.descriptionNote, "Черновик остается в OptiCards и не отправляется в WB без отдельного согласования.");
+      setText(detailEls.characteristicsCurrent, currentCard.issue === "Пустые характеристики"
+        ? "Было: пустые характеристики"
+        : "Было: данные не загружены в текущем снимке");
+      setText(detailEls.categoryCurrent, `Было: ${subject}`);
+      setText(detailEls.photoCurrent, photoUrl ? "Было: фото получено из WB" : "Было: фото не передано");
+    }
+
+    function showCard(card = selectedCard) {
+      updateCardDetail(card);
       showScreen("card");
     }
 
@@ -3008,7 +3293,7 @@
       sellerSourceFlow.innerHTML = "";
       rows.forEach(([label, value]) => {
         const row = document.createElement("div");
-        row.className = "list-row";
+        row.className = "list-row source-flow-row";
         const span = document.createElement("span");
         span.textContent = label;
         const strong = document.createElement("strong");
@@ -3025,11 +3310,12 @@
       return tag;
     }
 
-    function createIconButton() {
+    function createIconButton(cardIndex) {
       const button = document.createElement("button");
       button.className = "icon-btn";
       button.type = "button";
       button.dataset.openCard = "true";
+      button.dataset.cardIndex = String(cardIndex);
       button.setAttribute("aria-label", "Открыть детальную карточку");
       button.title = "Открыть детальную карточку";
       button.innerHTML = '<svg class="ico" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
@@ -3086,7 +3372,7 @@
       selectCell.append(checkbox);
 
       const detailsCell = document.createElement("td");
-      detailsCell.append(createIconButton());
+      detailsCell.append(createIconButton(index));
 
       row.append(productCell, nmCell, qualityCell, issueCell, statusCell, selectCell, detailsCell);
       return row;
@@ -3099,6 +3385,7 @@
       const cards = portal.realCards?.length ? portal.realCards : (portal.isDemo ? demoCards : []);
       cardsTableBody.innerHTML = "";
       if (!cards.length) {
+        renderedCards = [];
         const row = document.createElement("tr");
         const cell = document.createElement("td");
         cell.colSpan = 7;
@@ -3109,7 +3396,9 @@
         cardsTableBody.append(row);
         return;
       }
-      cards.slice(0, 20).forEach((card, index) => {
+      renderedCards = cards.slice(0, 20);
+      selectedCard = renderedCards[0] || selectedCard;
+      renderedCards.forEach((card, index) => {
         cardsTableBody.append(createCardTableRow(card, index));
       });
     }
@@ -3221,7 +3510,7 @@
         const login = team[roleKey];
         const user = findUser(login);
         const row = document.createElement("div");
-        row.className = "list-row";
+        row.className = "list-row project-member-row";
         row.dataset.memberLogin = login;
         row.dataset.projectRole = roleKey;
         row.innerHTML = `<span>${label}</span><strong>${user.full_name}</strong>`;
@@ -3391,8 +3680,11 @@
         return;
       }
 
-      if (event.target.closest("[data-open-card]")) {
-        showCard();
+      const openCardButton = event.target.closest("[data-open-card]");
+      if (openCardButton) {
+        const cardIndex = Number(openCardButton.dataset.cardIndex);
+        const card = Number.isInteger(cardIndex) ? renderedCards[cardIndex] : selectedCard;
+        showCard(card || selectedCard);
       }
     });
 
