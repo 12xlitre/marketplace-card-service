@@ -1240,6 +1240,11 @@ WB_DIRECTORY_MATCHERS = (
   ("seasons", "/content/v2/directory/seasons", ("сезон",)),
 )
 
+WB_DIRECTORY_FALLBACK_VALUES = {
+  "kinds": ["Женский", "Мужской", "Детский", "Унисекс"],
+  "seasons": ["Весна", "Лето", "Осень", "Зима", "Демисезон"],
+}
+
 
 def normalized_ru_text(value):
   return str(value or "").strip().lower().replace("ё", "е")
@@ -1280,6 +1285,8 @@ def fetch_wb_directory_values(token, cache_key, path):
     for value in (public_directory_value(item) for item in items)
     if value
   }, key=lambda value: value.lower())
+  if not values:
+    values = WB_DIRECTORY_FALLBACK_VALUES.get(cache_key, [])
   WB_DIRECTORY_CACHE[cache_key] = {
     "loaded_at": now,
     "values": values,
@@ -1295,7 +1302,7 @@ def attach_wb_directory_values(token, characteristics):
         try:
           characteristic["valueOptions"] = fetch_wb_directory_values(token, cache_key, path)
         except WbApiError:
-          characteristic["valueOptions"] = []
+          characteristic["valueOptions"] = WB_DIRECTORY_FALLBACK_VALUES.get(cache_key, [])
         break
 
 

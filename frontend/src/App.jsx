@@ -648,13 +648,40 @@ function draftCharacteristicsList(drafts) {
     }));
 }
 
+function normalizedCharacteristicOption(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("ё", "е");
+}
+
+function uniqueCharacteristicOptions(values) {
+  const byNormalizedValue = new Map();
+  values.map((value) => String(value).trim()).filter(Boolean).forEach((value) => {
+    const key = normalizedCharacteristicOption(value);
+    if (!byNormalizedValue.has(key) || value[0] === value[0]?.toUpperCase()) {
+      byNormalizedValue.set(key, value);
+    }
+  });
+  return [...byNormalizedValue.values()].sort((left, right) => left.localeCompare(right, "ru"));
+}
+
+function fallbackCharacteristicValueOptions(label) {
+  const normalizedLabel = normalizedCharacteristicOption(label);
+  const words = normalizedLabel.replaceAll("/", " ").replaceAll("-", " ").split(/\s+/);
+  if (words.includes("пол") || normalizedLabel.includes("гендер")) {
+    return ["Женский", "Мужской", "Детский", "Унисекс"];
+  }
+  if (normalizedLabel.includes("сезон")) {
+    return ["Весна", "Лето", "Осень", "Зима", "Демисезон"];
+  }
+  return [];
+}
+
 function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = []) {
   const options = {};
   const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
   currentRows.forEach((row) => {
     const meta = metaByKey[row.key] || {};
     const wbOptions = Array.isArray(meta.valueOptions) ? meta.valueOptions : [];
-    options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions];
+    options[row.key] = [...characteristicValueTokens(row.value), ...wbOptions, ...fallbackCharacteristicValueOptions(row.label)];
   });
   (portal?.realCards || []).forEach((item) => {
     characteristicRows(item?.characteristics || item?.rawFields?.characteristics || []).forEach((row) => {
@@ -666,11 +693,11 @@ function characteristicValueOptionsByKey(portal, currentRows, availableCharacter
     const key = characteristicKeyFromMeta(item);
     const current = options[key] || [];
     const wbOptions = Array.isArray(item.valueOptions) ? item.valueOptions : [];
-    options[key] = [...current, ...wbOptions];
+    options[key] = [...current, ...wbOptions, ...fallbackCharacteristicValueOptions(item.name)];
   });
   return Object.fromEntries(Object.entries(options).map(([key, values]) => [
     key,
-    [...new Set(values.map((value) => String(value).trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right, "ru")),
+    uniqueCharacteristicOptions(values),
   ]));
 }
 
@@ -2067,10 +2094,11 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, onAddValue,
   const values = draftCharacteristicValues(draft);
   const limit = characteristicValueLimit(meta);
   const isLimitReached = Boolean(limit && values.length >= limit);
-  const normalizedQuery = query.trim().toLowerCase();
+  const selectedValues = new Set(values.map(normalizedCharacteristicOption));
+  const normalizedQuery = normalizedCharacteristicOption(query);
   const availableValues = valueOptions
-    .filter((value) => !values.includes(value))
-    .filter((value) => !normalizedQuery || value.toLowerCase().includes(normalizedQuery))
+    .filter((value) => !selectedValues.has(normalizedCharacteristicOption(value)))
+    .filter((value) => !normalizedQuery || normalizedCharacteristicOption(value).includes(normalizedQuery))
     .slice(0, 6);
 
   function addValue(value) {
