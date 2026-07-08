@@ -56,6 +56,9 @@ WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 WB_MAX_CARDS_PER_SYNC = 1000
+WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
+WB_TOKEN_LIFETIME_DAYS = 180
+WB_CHARACTERISTICS_CACHE = {}
 
 
 def utc_now():
@@ -237,6 +240,18 @@ def decode_jwt_payload(token):
   return result if isinstance(result, dict) else {}
 
 
+def wb_effective_token_expiry(expires_at, issued_at=None):
+  if issued_at:
+    return min(expires_at, issued_at + dt.timedelta(days=WB_TOKEN_LIFETIME_DAYS))
+  return expires_at
+
+
+def wb_token_days_left(expires_at, now):
+  seconds_left = (expires_at - now).total_seconds()
+  raw_days_left = int((seconds_left + 86399) // 86400)
+  return max(0, min(WB_TOKEN_LIFETIME_DAYS, raw_days_left)), seconds_left
+
+
 def wb_token_meta(token):
   payload = decode_jwt_payload(token)
   exp = payload.get("exp")
@@ -248,13 +263,16 @@ def wb_token_meta(token):
     "daysLeft": None,
     "status": "unknown",
   }
+  issued_at = None
   if isinstance(iat, (int, float)):
-    meta["issuedAt"] = dt.datetime.fromtimestamp(iat, dt.timezone.utc).isoformat()
+    issued_at = dt.datetime.fromtimestamp(iat, dt.timezone.utc)
+    meta["issuedAt"] = issued_at.isoformat()
   if isinstance(exp, (int, float)):
     expires_at = dt.datetime.fromtimestamp(exp, dt.timezone.utc)
-    seconds_left = (expires_at - now).total_seconds()
+    effective_expires_at = wb_effective_token_expiry(expires_at, issued_at)
+    days_left, seconds_left = wb_token_days_left(effective_expires_at, now)
     meta["expiresAt"] = expires_at.isoformat()
-    meta["daysLeft"] = max(0, int((seconds_left + 86399) // 86400))
+    meta["daysLeft"] = days_left
     if seconds_left <= 0:
       meta["status"] = "expired"
     elif seconds_left <= 30 * 86400:
@@ -273,6 +291,15 @@ def wb_token_meta_from_dates(issued_at="", expires_at=""):
   }
   if not expires_at:
     return meta
+  issued_dt = None
+  try:
+    if issued_at:
+      normalized_issued = issued_at.replace("Z", "+00:00")
+      issued_dt = dt.datetime.fromisoformat(normalized_issued)
+      if issued_dt.tzinfo is None:
+        issued_dt = issued_dt.replace(tzinfo=dt.timezone.utc)
+  except ValueError:
+    issued_dt = None
   try:
     normalized = expires_at.replace("Z", "+00:00")
     expires_dt = dt.datetime.fromisoformat(normalized)
@@ -280,8 +307,9 @@ def wb_token_meta_from_dates(issued_at="", expires_at=""):
       expires_dt = expires_dt.replace(tzinfo=dt.timezone.utc)
   except ValueError:
     return meta
-  seconds_left = (expires_dt - utc_now()).total_seconds()
-  meta["daysLeft"] = max(0, int((seconds_left + 86399) // 86400))
+  effective_expires_dt = wb_effective_token_expiry(expires_dt, issued_dt)
+  days_left, seconds_left = wb_token_days_left(effective_expires_dt, utc_now())
+  meta["daysLeft"] = days_left
   if seconds_left <= 0:
     meta["status"] = "expired"
   elif seconds_left <= 30 * 86400:
@@ -821,6 +849,52 @@ def wb_request_json(token, path, payload, locale="ru", attempts=3):
   raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
 
 
+def wb_get_json(token, path, locale="ru", attempts=3):
+  separator = "&" if "?" in path else "?"
+  url = f"{WB_CONTENT_API_BASE.rstrip('/')}{path}{separator}locale={locale}"
+  headers = {
+    "Authorization": token,
+    "Accept": "application/json",
+    "User-Agent": "OptiCards/0.1 read-only",
+  }
+
+  for attempt in range(attempts):
+    request = urlrequest.Request(url, headers=headers, method="GET")
+    try:
+      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        response_body = response.read().decode("utf-8")
+        return json.loads(response_body) if response_body else {}
+    except urlerror.HTTPError as exc:
+      response_body = exc.read().decode("utf-8", errors="replace")
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      retryable = exc.code == 429 or 500 <= exc.code < 600
+      if retryable and attempt < attempts - 1:
+        time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
+        continue
+      message = response_body
+      try:
+        error_payload = json.loads(response_body)
+        message = (
+          error_payload.get("errorText")
+          or error_payload.get("detail")
+          or error_payload.get("title")
+          or error_payload.get("message")
+          or response_body
+        )
+      except json.JSONDecodeError:
+        pass
+      raise WbApiError(exc.code, message or HTTPStatus(exc.code).phrase, retryable=retryable) from exc
+    except (TimeoutError, urlerror.URLError) as exc:
+      if attempt < attempts - 1:
+        time.sleep(0.5 * (2 ** attempt))
+        continue
+      raise WbApiError(HTTPStatus.GATEWAY_TIMEOUT, "wb_request_timeout", retryable=True) from exc
+    except json.JSONDecodeError as exc:
+      raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_invalid_json", retryable=False) from exc
+
+  raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
+
+
 def get_wb_token_for_portal(portal_id):
   if str(portal_id) == "demo-wb":
     token = os.environ.get(WB_ENV_TOKEN, "").strip()
@@ -961,6 +1035,48 @@ def normalize_wb_card(card):
     "updatedAt": card.get("updatedAt") or "",
     "rawFields": public_wb_value(card),
   }
+
+
+def normalize_wb_characteristic(item):
+  return {
+    "charcID": item.get("charcID"),
+    "subjectID": item.get("subjectID"),
+    "subjectName": item.get("subjectName") or "",
+    "name": item.get("name") or "",
+    "required": bool(item.get("required")),
+    "unitName": item.get("unitName") or "",
+    "maxCount": item.get("maxCount"),
+    "popular": bool(item.get("popular")),
+    "charcType": item.get("charcType"),
+    "hasFilter": bool(item.get("hasFilter")),
+    "isVariable": bool(item.get("isVariable")),
+    "existNamedField": bool(item.get("existNamedField")),
+  }
+
+
+def fetch_wb_subject_characteristics(token, subject_id):
+  subject_id = int(subject_id)
+  cached = WB_CHARACTERISTICS_CACHE.get(subject_id)
+  now = time.time()
+  if cached and now - cached["loaded_at"] < WB_CHARCS_CACHE_TTL_SECONDS:
+    return cached["payload"]
+
+  response = wb_get_json(token, f"/content/v2/object/charcs/{subject_id}")
+  items = response.get("data") or []
+  characteristics = [normalize_wb_characteristic(item) for item in items if isinstance(item, dict)]
+  characteristics.sort(key=lambda item: (
+    not item["required"],
+    not item["popular"],
+    not item["hasFilter"],
+    item["name"].lower(),
+  ))
+  payload = {
+    "subjectID": subject_id,
+    "characteristics": characteristics,
+    "loadedAt": utc_now().isoformat(),
+  }
+  WB_CHARACTERISTICS_CACHE[subject_id] = {"loaded_at": now, "payload": payload}
+  return payload
 
 
 def most_common_nonempty(values):
@@ -1176,6 +1292,48 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         HTTPStatus.OK,
         {"portals": [public_portal_from_row(row) for row in list_portals()]},
       )
+      return
+
+    if path == "/api/wb/characteristics":
+      if not self.require_user():
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", ["demo-wb"])[0]
+      try:
+        subject_id = int(query.get("subject_id", ["0"])[0])
+      except ValueError:
+        subject_id = 0
+      if subject_id <= 0:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_subject_id"})
+        return
+      token, token_source = get_wb_token_for_portal(portal_id)
+      if not token:
+        self.send_json(
+          HTTPStatus.CONFLICT,
+          {
+            "error": "wb_token_missing",
+            "message": "WB token is required to load subject characteristics.",
+          },
+        )
+        return
+      try:
+        payload = fetch_wb_subject_characteristics(token, subject_id)
+      except WbApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "wb_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      payload = {**payload, "portalId": portal_id, "tokenSource": token_source}
+      self.send_json(HTTPStatus.OK, payload)
       return
 
     if path == "/api/wb/cards":

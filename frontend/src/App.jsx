@@ -5,6 +5,7 @@ import {
   CheckSquare,
   ChevronDown,
   ClipboardList,
+  Download,
   Eye,
   ExternalLink,
   LayoutDashboard,
@@ -12,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
   Settings,
   Upload,
@@ -118,6 +120,35 @@ function formatNumber(value) {
 function textOrDash(value) {
   const text = String(value ?? "").trim();
   return text || "Не указано";
+}
+
+function safeFilePart(value) {
+  return String(value || "card")
+    .trim()
+    .replace(/[^a-zA-Z0-9а-яА-Я_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "card";
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  if (/[",\n;]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function downloadCsv(filename, rows) {
+  const body = rows.map((row) => row.map(csvEscape).join(";")).join("\n");
+  const blob = new Blob([`\uFEFF${body}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function isEmptyValue(value) {
@@ -480,11 +511,150 @@ function descriptionSuggestion(card, description) {
     .join(". ");
 }
 
-function characteristicDraftSuggestion(characteristics) {
-  if (isEmptyValue(characteristics)) {
-    return "Проверить обязательные характеристики категории и заполнить отсутствующие значения.";
+function characteristicRows(items) {
+  if (!Array.isArray(items)) {
+    return [];
   }
-  return "Сверить заполненные характеристики с обязательными полями категории и убрать лишние технические значения.";
+  return items.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      return {
+        key: `characteristic-${index}`,
+        label: `Характеристика ${index + 1}`,
+        value: item,
+        charcID: null,
+      };
+    }
+    const label = item.name || item.charcName || item.id || item.charcID || `Характеристика ${index + 1}`;
+    const value = Object.prototype.hasOwnProperty.call(item, "value") ? item.value : (item.values ?? item);
+    const charcID = item.charcID || item.id || null;
+    return {
+      key: charcID ? `charc:${charcID}` : `${label}-${index}`,
+      label,
+      value,
+      charcID,
+    };
+  });
+}
+
+function editableCharacteristicValue(value) {
+  if (isEmptyValue(value)) {
+    return "";
+  }
+  if (Array.isArray(value) && value.every(isPrimitiveDisplayValue)) {
+    return value.filter((item) => !isEmptyValue(item)).map(String).join(", ");
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+}
+
+function characteristicDraftsFromRows(rows) {
+  return Object.fromEntries(rows.map((row) => [row.key, {
+    charcID: row.charcID,
+    label: row.label,
+    value: editableCharacteristicValue(row.value),
+  }]));
+}
+
+function characteristicKeyFromMeta(item) {
+  return item?.charcID ? `charc:${item.charcID}` : `charc-name:${String(item?.name || "").toLowerCase()}`;
+}
+
+function normalizeCharacteristicMeta(item) {
+  return {
+    charcID: item?.charcID || null,
+    label: item?.name || "Характеристика",
+    value: "",
+    required: Boolean(item?.required),
+    popular: Boolean(item?.popular),
+    hasFilter: Boolean(item?.hasFilter),
+    unitName: item?.unitName || "",
+    maxCount: item?.maxCount,
+    charcType: item?.charcType,
+  };
+}
+
+function draftCharacteristicsList(drafts) {
+  return Object.values(drafts || {})
+    .filter((item) => item?.label)
+    .map((item) => ({
+      charcID: item.charcID || "",
+      name: item.label,
+      value: item.value || "",
+      unitName: item.unitName || "",
+    }));
+}
+
+function buildContentExportRows(card, draftTitle, draftDescription, draftCharacteristics) {
+  const rows = [
+    ["nmID", "Артикул продавца", "Название", "Описание", "Характеристика", "charcID", "Значение"],
+  ];
+  const characteristics = draftCharacteristicsList(draftCharacteristics);
+  if (!characteristics.length) {
+    rows.push([
+      card?.nmID || "",
+      card?.vendorCode || "",
+      draftTitle || "",
+      draftDescription || "",
+      "",
+      "",
+      "",
+    ]);
+    return rows;
+  }
+  characteristics.forEach((item) => {
+    rows.push([
+      card?.nmID || "",
+      card?.vendorCode || "",
+      draftTitle || "",
+      draftDescription || "",
+      item.name,
+      item.charcID,
+      item.value,
+    ]);
+  });
+  return rows;
+}
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== "") ?? "";
+}
+
+function buildPricesExportRows(card) {
+  return [
+    ["nmID", "Артикул продавца", "Цена", "Скидка", "Цена со скидкой"],
+    [
+      card?.nmID || "",
+      card?.vendorCode || "",
+      firstDefined(card?.price, card?.rawFields?.price),
+      firstDefined(card?.discount, card?.rawFields?.discount),
+      firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
+    ],
+  ];
+}
+
+function buildStocksExportRows(card) {
+  const rows = [["nmID", "Артикул продавца", "Размер", "Баркод/SKU", "Склад", "Остаток"]];
+  const sizes = Array.isArray(card?.sizes) ? card.sizes : [];
+  if (!sizes.length) {
+    rows.push([card?.nmID || "", card?.vendorCode || "", "", "", "", ""]);
+    return rows;
+  }
+  sizes.forEach((size) => {
+    const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
+    skus.forEach((sku) => {
+      rows.push([
+        card?.nmID || "",
+        card?.vendorCode || "",
+        size?.techSize || size?.wbSize || size?.chrtID || "",
+        sku,
+        "",
+        "",
+      ]);
+    });
+  });
+  return rows;
 }
 
 function Tag({ children, tone = "amber" }) {
@@ -1052,20 +1222,23 @@ function SellerScreen({ portal, cards, displayUsers, findUser, onBack, onOpenCar
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
   const sourceRows = sourceFlowRows(portal);
   const workRoute = workRouteRows(portal);
-  const [projectRole, setProjectRole] = useState("lead");
   const team = getPortalTeam(portal);
-  const availableUsers = displayUsers.filter((user) => userCanFillProjectRole(user, projectRole));
-  const [memberLogin, setMemberLogin] = useState(availableUsers[0]?.login || "");
+  const [teamEditing, setTeamEditing] = useState(false);
+  const [teamDraft, setTeamDraft] = useState(team);
 
   useEffect(() => {
-    setMemberLogin((current) => availableUsers.some((user) => user.login === current) ? current : availableUsers[0]?.login || "");
-  }, [projectRole, displayUsers.length]);
-
-  function addMember() {
-    if (!memberLogin) {
-      return;
+    if (!teamEditing) {
+      setTeamDraft(team);
     }
-    onUpdateTeam({ ...team, [projectRole]: memberLogin });
+  }, [portal.id, team.lead, team.tech, team.manager, teamEditing]);
+
+  function updateTeamDraft(roleKey, login) {
+    setTeamDraft((current) => ({ ...current, [roleKey]: login }));
+  }
+
+  function saveTeamDraft() {
+    onUpdateTeam(teamDraft);
+    setTeamEditing(false);
   }
 
   return (
@@ -1157,33 +1330,47 @@ function SellerScreen({ portal, cards, displayUsers, findUser, onBack, onOpenCar
 
           <aside className="seller-aside">
             <section className="panel">
-              <h2>Состав проекта</h2>
-              <p>Участники выбираются из учетных записей сотрудников.</p>
-              <div className="panel-list">
-                {Object.entries(projectRoleLabels).map(([roleKey, label]) => (
-                  <div className="list-row project-member-row" key={roleKey}>
-                    <span>{label}</span>
-                    <strong>{findUser(team[roleKey])?.full_name}</strong>
+              <div className="panel-title-row">
+                <div>
+                  <h2>Состав проекта</h2>
+                  <p>Роли команды по этому кабинету.</p>
+                </div>
+                {!teamEditing ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
+              </div>
+
+              {!teamEditing ? (
+                <div className="project-team-list">
+                  {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                    const user = findUser(team[roleKey]);
+                    return (
+                      <div className="project-team-row" key={roleKey}>
+                        <span>{label}</span>
+                        <strong>{user?.full_name || "Не назначен"}</strong>
+                        <small>{user?.role || "Выберите сотрудника"}</small>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="team-editor">
+                  {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                    const users = displayUsers.filter((user) => userCanFillProjectRole(user, roleKey));
+                    return (
+                      <label className="team-editor-row" key={roleKey}>
+                        <span>{label}</span>
+                        <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)}>
+                          <option value="">Не назначен</option>
+                          {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
+                        </select>
+                      </label>
+                    );
+                  })}
+                  <div className="team-editor-actions">
+                    <button className="btn primary" type="button" onClick={saveTeamDraft}>Сохранить состав</button>
+                    <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }}>Отмена</button>
                   </div>
-                ))}
-              </div>
-              <div className="panel-actions member-picker">
-                <label className="picker-field">
-                  <span>1. Роль</span>
-                  <select className="select" value={projectRole} onChange={(event) => setProjectRole(event.target.value)}>
-                    <option value="lead">Руководитель</option>
-                    <option value="tech">Технический специалист</option>
-                    <option value="manager">Менеджер</option>
-                  </select>
-                </label>
-                <label className="picker-field">
-                  <span>2. Сотрудник</span>
-                  <select className="select" value={memberLogin} onChange={(event) => setMemberLogin(event.target.value)}>
-                    {availableUsers.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
-                  </select>
-                </label>
-                <button className="btn" type="button" onClick={addMember}>Добавить</button>
-              </div>
+                </div>
+              )}
             </section>
 
             <section className="panel">
@@ -1254,7 +1441,11 @@ function CardDetailScreen({ card, portal, onBack }) {
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
-  const [draftCharacteristics, setDraftCharacteristics] = useState("");
+  const [draftCharacteristics, setDraftCharacteristics] = useState({});
+  const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
+  const [subjectCharacteristicsStatus, setSubjectCharacteristicsStatus] = useState("idle");
+  const [characteristicSearch, setCharacteristicSearch] = useState("");
+  const [draftSavedAt, setDraftSavedAt] = useState("");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
@@ -1262,27 +1453,110 @@ function CardDetailScreen({ card, portal, onBack }) {
   const rawFields = rawFieldsForCard(card);
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
+  const characteristicItems = characteristicRows(characteristics);
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
   const dimensions = card?.dimensions || rawFields.dimensions || {};
   const auditDone = auditStatus === "done";
   const draftTitleLength = draftTitle.length;
+  const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${card?.nmID || card?.vendorCode || "card"}`;
+  const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
 
   useEffect(() => {
     setActiveTab("audit");
     setAuditStatus("idle");
     setDraftTitle("");
     setDraftDescription("");
-    setDraftCharacteristics("");
-  }, [card?.nmID, card?.vendorCode]);
+    setDraftCharacteristics({});
+    setCharacteristicSearch("");
+    setDraftSavedAt("");
+    try {
+      const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
+      if (saved) {
+        setDraftTitle(saved.title || "");
+        setDraftDescription(saved.description || "");
+        setDraftCharacteristics(saved.characteristics || {});
+        setAuditStatus(saved.auditStatus || "done");
+        setDraftSavedAt(saved.savedAt || "");
+        setActiveTab("changes");
+      }
+    } catch {
+      localStorage.removeItem(draftStorageKey);
+    }
+  }, [draftStorageKey, card?.nmID, card?.vendorCode]);
+
+  useEffect(() => {
+    const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
+    if (!subjectID || !portal?.id || portal.mode !== "api") {
+      setSubjectCharacteristics([]);
+      setSubjectCharacteristicsStatus(subjectID ? "unavailable" : "missing-subject");
+      return;
+    }
+    let active = true;
+    setSubjectCharacteristicsStatus("loading");
+    apiRequest(`/api/wb/characteristics?portal_id=${encodeURIComponent(portal.id)}&subject_id=${encodeURIComponent(subjectID)}`)
+      .then((payload) => {
+        if (!active) return;
+        setSubjectCharacteristics(payload.characteristics || []);
+        setSubjectCharacteristicsStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setSubjectCharacteristics([]);
+        setSubjectCharacteristicsStatus("error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [card?.subjectID, rawFields.subjectID, portal?.id, portal?.mode]);
 
   function runAuditStub() {
     const suggestions = titleSuggestions(card);
     setAuditStatus("done");
     setDraftTitle(suggestions[1] || suggestions[0] || "");
     setDraftDescription(descriptionSuggestion(card, description));
-    setDraftCharacteristics(characteristicDraftSuggestion(characteristics));
+    setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems));
     setActiveTab("changes");
+  }
+
+  function removeDraftCharacteristic(key) {
+    setDraftCharacteristics((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function addDraftCharacteristic(item) {
+    const key = characteristicKeyFromMeta(item);
+    const draft = normalizeCharacteristicMeta(item);
+    setDraftCharacteristics((current) => current[key] ? current : { ...current, [key]: draft });
+    setCharacteristicSearch("");
+  }
+
+  function saveDraft() {
+    const savedAt = new Date().toISOString();
+    localStorage.setItem(draftStorageKey, JSON.stringify({
+      version: 1,
+      savedAt,
+      auditStatus,
+      title: draftTitle,
+      description: draftDescription,
+      characteristics: draftCharacteristics,
+    }));
+    setDraftSavedAt(savedAt);
+  }
+
+  function downloadDraftTable(type) {
+    if (type === "content") {
+      downloadCsv(`${exportFileBase}-content.csv`, buildContentExportRows(card, draftTitle, draftDescription, draftCharacteristics));
+      return;
+    }
+    if (type === "prices") {
+      downloadCsv(`${exportFileBase}-prices.csv`, buildPricesExportRows(card));
+      return;
+    }
+    downloadCsv(`${exportFileBase}-stocks.csv`, buildStocksExportRows(card));
   }
 
   return (
@@ -1432,13 +1706,31 @@ function CardDetailScreen({ card, portal, onBack }) {
                     <strong>Стало: описание</strong>
                     <textarea value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} placeholder="После аудита здесь появится вариант описания." />
                   </div>
-                  <div className="field-box">
-                    <strong>Было: характеристики</strong>
-                    <p>{valueSummary(characteristics)}</p>
+                  <div className="field-box characteristics-diff-box">
+                    <strong>Характеристики</strong>
+                    <CharacteristicsDiffTable
+                      rows={characteristicItems}
+                      drafts={draftCharacteristics}
+                      auditDone={auditDone}
+                      availableCharacteristics={subjectCharacteristics}
+                      search={characteristicSearch}
+                      status={subjectCharacteristicsStatus}
+                      onSearch={setCharacteristicSearch}
+                      onAdd={addDraftCharacteristic}
+                      onRemove={removeDraftCharacteristic}
+                    />
                   </div>
-                  <div className="field-box">
-                    <strong>Стало: характеристики</strong>
-                    <textarea value={draftCharacteristics} onChange={(event) => setDraftCharacteristics(event.target.value)} placeholder="После аудита здесь появятся рекомендации по характеристикам." />
+                </div>
+                <div className="draft-actions">
+                  <div>
+                    <strong>Черновик изменений</strong>
+                    <p>{draftSavedAt ? `Сохранен ${new Date(draftSavedAt).toLocaleString("ru-RU")}` : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
+                  </div>
+                  <div className="draft-buttons">
+                    <button className="btn primary" type="button" onClick={saveDraft}><Save size={17} />Сохранить</button>
+                    <button className="btn" type="button" onClick={() => downloadDraftTable("content")}><Download size={17} />Контент</button>
+                    <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Цены</button>
+                    <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Остатки</button>
                   </div>
                 </div>
               </section>
@@ -1510,16 +1802,111 @@ function CharacteristicsBlock({ items }) {
   return <RawFieldValue value={items} />;
 }
 
+function CharacteristicsDiffTable({
+  rows,
+  drafts,
+  auditDone,
+  availableCharacteristics,
+  search,
+  status,
+  onSearch,
+  onAdd,
+  onRemove,
+}) {
+  const baseKeys = new Set(rows.map((row) => row.key));
+  const draftOnlyRows = Object.entries(drafts)
+    .filter(([key]) => !baseKeys.has(key))
+    .map(([key, draft]) => ({
+      key,
+      label: draft.label,
+      value: "",
+      charcID: draft.charcID,
+      draftOnly: true,
+    }));
+  const visibleRows = [...rows, ...draftOnlyRows];
+  const selectedKeys = new Set(Object.keys(drafts));
+  const normalizedSearch = search.trim().toLowerCase();
+  const availableOptions = (availableCharacteristics || [])
+    .filter((item) => {
+      const key = characteristicKeyFromMeta(item);
+      if (selectedKeys.has(key)) {
+        return false;
+      }
+      if (!normalizedSearch) {
+        return item.required || item.popular || item.hasFilter;
+      }
+      return String(item.name || "").toLowerCase().includes(normalizedSearch);
+    })
+    .slice(0, 8);
+
+  return (
+    <div className="characteristics-diff">
+      <div className="characteristics-diff-head">
+        <span>Характеристика</span>
+        <span>Было</span>
+        <span>Стало</span>
+      </div>
+      {!visibleRows.length ? <div className="empty-state"><span>Характеристики не заполнены</span></div> : null}
+      {visibleRows.map((row) => (
+        <div className="characteristics-diff-row" key={row.key}>
+          <strong>{row.label}</strong>
+          {row.draftOnly ? <span className="raw-field-value field-empty">Добавлено в черновик</span> : <RawFieldValue value={row.value} />}
+          <DraftCharacteristicChip draft={drafts[row.key]} auditDone={auditDone} onRemove={() => onRemove(row.key)} />
+        </div>
+      ))}
+      <div className="characteristics-search">
+        <label className="search">
+          <Search size={17} />
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => onSearch(event.target.value)}
+            placeholder="Найти характеристику WB для этой категории"
+          />
+        </label>
+        <div className="characteristics-options">
+          {status === "loading" ? <span className="field-empty">Загружаем характеристики категории...</span> : null}
+          {status === "error" ? <span className="field-empty">Не удалось загрузить характеристики WB</span> : null}
+          {status === "missing-subject" ? <span className="field-empty">У карточки нет subjectID</span> : null}
+          {status === "unavailable" ? <span className="field-empty">Справочник доступен после API-подключения кабинета</span> : null}
+          {status === "loaded" && !availableOptions.length ? <span className="field-empty">Ничего не найдено</span> : null}
+          {availableOptions.map((item) => (
+            <button className="characteristic-option" type="button" key={characteristicKeyFromMeta(item)} onClick={() => onAdd(item)}>
+              <span>{item.name}</span>
+              {item.required ? <Tag tone="amber">обязательная</Tag> : null}
+              {!item.required && item.popular ? <Tag tone="blue">популярная</Tag> : null}
+              {item.unitName ? <small>{item.unitName}</small> : null}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DraftCharacteristicChip({ draft, auditDone, onRemove }) {
+  if (!draft) {
+    return <span className="raw-field-value field-empty">{auditDone ? "Не выбрано" : "После аудита появится черновик"}</span>;
+  }
+  const value = String(draft.value || "").trim();
+  return (
+    <div className="draft-chip-list">
+      <button className={`draft-chip ${value ? "" : "empty"}`} type="button" onClick={onRemove} title="Убрать из черновика">
+        <span>{value || draft.label}</span>
+        <X size={14} />
+      </button>
+    </div>
+  );
+}
+
 function CharacteristicsList({ items }) {
   return (
     <div className="characteristics-list">
-      {items.map((item, index) => {
-        const label = item.name || item.charcName || item.id || item.charcID || `Характеристика ${index + 1}`;
-        const value = Object.prototype.hasOwnProperty.call(item, "value") ? item.value : (item.values ?? item);
+      {characteristicRows(items).map((row) => {
         return (
-          <div className="characteristic-row" key={`${label}-${index}`}>
-            <span>{label}</span>
-            <RawFieldValue value={value} />
+          <div className="characteristic-row" key={row.key}>
+            <span>{row.label}</span>
+            <RawFieldValue value={row.value} />
           </div>
         );
       })}
