@@ -1,4 +1,1 @@
 login,full_name,role,access_level
-dmitriy.admin,Сафиуллин Дмитрий,Администратор,all
-kristina.manager,Кристина Январева,Руководитель,overview
-anastasia.tech,Анастсия Руднева,Технический специалист,readonly_wb
