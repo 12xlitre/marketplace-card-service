@@ -9,6 +9,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -276,6 +277,13 @@ def user_can_manage_portals(row):
     return False
   marker = f"{row['user_role']} {row['access_level']} {row['role']}".lower()
   return any(part in marker for part in ("admin", "manager", "all", "полный", "админ", "руковод", "менедж"))
+
+
+def user_can_manage_users(row):
+  if not row:
+    return False
+  marker = f"{row['user_role']} {row['access_level']} {row['role']}".lower()
+  return any(part in marker for part in ("admin", "all", "полный", "админ", "руковод"))
 
 
 def user_has_global_portal_access(row):
@@ -1239,6 +1247,42 @@ def upsert_user(login, password, full_name, role, access_level, user_role):
       """,
       (login, password_hash, full_name, role, user_role, access_level),
     )
+
+
+def normalize_new_user_login(value):
+  login = re.sub(r"[^a-zA-Z0-9._-]+", "", str(value or "").strip().lower())
+  return login[:48]
+
+
+def generate_initial_password():
+  return f"Opti-{secrets.token_urlsafe(12)}1!"
+
+
+def create_user_account(payload, current_user):
+  if not user_can_manage_users(current_user):
+    raise PermissionError("forbidden")
+  login = normalize_new_user_login(payload.get("login"))
+  full_name = str(payload.get("fullName") or payload.get("full_name") or "").strip()
+  role = str(payload.get("role") or "").strip()
+  user_role = str(payload.get("userRole") or payload.get("user_role") or "manager").strip()
+  access_level = str(payload.get("accessLevel") or payload.get("access_level") or "overview").strip()
+  if user_role not in {"admin", "manager", "tech"}:
+    user_role = "manager"
+  if access_level not in {"all", "overview", "readonly_wb"}:
+    access_level = "overview"
+  if not login or len(login) < 3 or not full_name or not role:
+    raise ValueError("invalid_user")
+  password = str(payload.get("password") or "").strip() or generate_initial_password()
+  if len(password) < 12:
+    raise ValueError("weak_password")
+  upsert_user(login, password, full_name, role, access_level, user_role)
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT login, full_name, role, user_role, access_level FROM users WHERE login = ?",
+      (login,),
+    ).fetchone()
+  return public_user(row), password
 
 
 class WbApiError(Exception):
@@ -2417,6 +2461,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         HTTPStatus.CREATED,
         {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team)},
       )
+      return
+
+    if path == "/api/users":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        created_user, password = create_user_account(payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_user"})
+        return
+      self.send_json(HTTPStatus.CREATED, {"user": created_user, "password": password})
       return
 
     if path == "/api/integrations/mpstats":

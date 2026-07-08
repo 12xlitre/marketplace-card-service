@@ -21,17 +21,18 @@ import {
 } from "lucide-react";
 
 const hardcodedDirectoryFallback = [
-  { login: "kristina", full_name: "Кристина", role: "Руководитель", access_level: "overview", user_role: "manager" },
-  { login: "anastasia", full_name: "Анастасия", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" },
+  { login: "kristina", full_name: "Кристина Январева", role: "Руководитель отдела", access_level: "all", user_role: "manager" },
+  { login: "anastasia", full_name: "Анастасия Руднева", role: "Технический специалист", access_level: "readonly_wb", user_role: "tech" },
+  { login: "svetlana", full_name: "Светлана Дементьева", role: "Аккаунт-менеджер", access_level: "overview", user_role: "manager" },
 ];
 
 const appViewStorageKey = "opticards-active-view";
 const appScreens = new Set(["cabinets", "seller", "card", "settings"]);
 
 const projectRoleLabels = {
-  lead: "Руководитель проекта",
+  lead: "Руководитель отдела",
   tech: "Технический специалист",
-  manager: "Менеджер",
+  manager: "Аккаунт-менеджер",
 };
 
 const demoCards = [
@@ -557,12 +558,27 @@ function getUserRoleType(user) {
   return "manager";
 }
 
+function userCanManageUsers(user) {
+  const marker = `${user?.user_role || ""} ${user?.access_level || ""} ${user?.role || ""}`.toLowerCase();
+  return marker.includes("admin")
+    || marker.includes("all")
+    || marker.includes("полный")
+    || marker.includes("админ")
+    || marker.includes("руковод");
+}
+
 function userCanFillProjectRole(user, projectRole) {
   const roleType = getUserRoleType(user);
   if (projectRole === "tech") {
     return roleType === "tech" || roleType === "admin";
   }
   return roleType === "manager" || roleType === "admin";
+}
+
+function findPreferredUser(users, logins, fallbackRole) {
+  return users.find((user) => logins.includes(user.login))
+    || users.find((user) => getUserRoleType(user) === fallbackRole)
+    || users[0];
 }
 
 function normalizePortal(portal) {
@@ -603,9 +619,9 @@ function normalizeUserList(rawUsers) {
 
 function defaultTeamFromUsers(displayUsers) {
   const users = displayUsers.length ? displayUsers : hardcodedDirectoryFallback;
-  const lead = users.find((user) => userCanFillProjectRole(user, "lead")) || users[0];
-  const tech = users.find((user) => userCanFillProjectRole(user, "tech")) || users[0];
-  const manager = users.find((user) => userCanFillProjectRole(user, "manager")) || lead;
+  const lead = findPreferredUser(users, ["kristina", "kristina.yanvareva"], "admin");
+  const tech = findPreferredUser(users, ["anastasia", "anastasia.rudneva"], "tech");
+  const manager = findPreferredUser(users, ["svetlana", "svetlana.dementyeva"], "manager") || lead;
   return {
     lead: lead?.login || "manager",
     tech: tech?.login || "specialist",
@@ -1511,6 +1527,7 @@ export default function App() {
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
+  const canManageUsers = currentUser ? userCanManageUsers(currentUser) : false;
   const activeDemoPortal = { ...demoPortal, isActive: !demoPortalArchived };
   const allPortals = [activeDemoPortal, ...userPortals];
   const activePortals = allPortals.filter((portal) => portal.isActive !== false);
@@ -1608,6 +1625,13 @@ export default function App() {
     await loadWbDemoSnapshot();
   }
 
+  async function refreshUsers() {
+    const payload = await apiRequest("/api/users");
+    const nextUsers = normalizeUserList(payload.users || []);
+    setUsers(nextUsers);
+    return nextUsers;
+  }
+
   async function loadWbDemoSnapshot() {
     try {
       const payload = await apiRequest("/api/wb/cards?portal_id=demo-wb&limit=100");
@@ -1631,6 +1655,15 @@ export default function App() {
       body: JSON.stringify({ login, password, remember }),
     });
     await enterApp(payload.user);
+  }
+
+  async function createUserAccount(userPayload) {
+    const payload = await apiRequest("/api/users", {
+      method: "POST",
+      body: JSON.stringify(userPayload),
+    });
+    await refreshUsers();
+    return payload;
   }
 
   async function logout() {
@@ -1868,7 +1901,14 @@ export default function App() {
         ) : null}
 
         {screen === "audit" ? <PlaceholderScreen title="Аудит" copy="MPStats и полноценный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
-        {screen === "settings" ? <SettingsScreen users={displayUsers} canManage={canManagePortals} /> : null}
+        {screen === "settings" ? (
+          <SettingsScreen
+            users={displayUsers}
+            canManage={canManagePortals}
+            canManageUsers={canManageUsers}
+            onCreateUser={createUserAccount}
+          />
+        ) : null}
       </main>
 
       {portalModalOpen ? (
@@ -3366,10 +3406,10 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
             </label>
           </div>
           <div className="form-two">
-            <UserSelect label="Руководитель проекта" value={form.lead} users={users} onChange={(value) => update("lead", value)} />
+            <UserSelect label="Руководитель отдела" value={form.lead} users={users} onChange={(value) => update("lead", value)} />
             <UserSelect label="Технический специалист" value={form.tech} users={users} onChange={(value) => update("tech", value)} />
           </div>
-          <UserSelect label="Менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} />
+          <UserSelect label="Аккаунт-менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} />
           {mode === "api" ? (
             <label className="field-label">
               WB API ключ
@@ -3532,10 +3572,22 @@ function CardRecoveryScreen({ loading, onBack }) {
   );
 }
 
-function SettingsScreen({ users, canManage = false }) {
+const defaultNewUserForm = {
+  login: "svetlana",
+  fullName: "Светлана Дементьева",
+  role: "Аккаунт-менеджер",
+  userRole: "manager",
+  accessLevel: "overview",
+};
+
+function SettingsScreen({ users, canManage = false, canManageUsers = false, onCreateUser }) {
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
+  const [newUserForm, setNewUserForm] = useState(defaultNewUserForm);
+  const [newUserStatus, setNewUserStatus] = useState("idle");
+  const [newUserResult, setNewUserResult] = useState(null);
+  const [newUserError, setNewUserError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -3591,6 +3643,37 @@ function SettingsScreen({ users, canManage = false }) {
     }
   }
 
+  async function createUser(event) {
+    event.preventDefault();
+    if (!canManageUsers || !onCreateUser) {
+      return;
+    }
+    setNewUserStatus("saving");
+    setNewUserError("");
+    setNewUserResult(null);
+    try {
+      const payload = await onCreateUser(newUserForm);
+      setNewUserResult(payload);
+      setNewUserStatus("created");
+    } catch (error) {
+      setNewUserStatus("error");
+      if (error.message === "forbidden") {
+        setNewUserError("Создавать сотрудников может только руководитель отдела или администратор.");
+      } else if (error.message === "weak_password") {
+        setNewUserError("Пароль должен быть не короче 12 символов.");
+      } else {
+        setNewUserError("Не удалось создать сотрудника. Проверьте логин и поля формы.");
+      }
+    }
+  }
+
+  function updateNewUser(name, value) {
+    setNewUserForm((current) => ({ ...current, [name]: value }));
+    setNewUserResult(null);
+    setNewUserError("");
+    setNewUserStatus("idle");
+  }
+
   const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
   const mpstatsVerified = mpstatsIntegration?.status === "verified";
   const mpstatsUpdatedAt = mpstatsIntegration?.updatedAt
@@ -3628,6 +3711,86 @@ function SettingsScreen({ users, canManage = false }) {
                 </div>
               ))}
             </div>
+            <form className="integration-form user-create-form" onSubmit={createUser}>
+              <div>
+                <strong>Добавить сотрудника</strong>
+                <p>Создание доступно руководителю отдела и администратору. Пароль показывается один раз после сохранения.</p>
+              </div>
+              <div className="form-two">
+                <label className="field-label">
+                  Логин
+                  <input
+                    value={newUserForm.login}
+                    onChange={(event) => updateNewUser("login", event.target.value)}
+                    disabled={!canManageUsers}
+                    autoComplete="off"
+                    required
+                  />
+                </label>
+                <label className="field-label">
+                  ФИО
+                  <input
+                    value={newUserForm.fullName}
+                    onChange={(event) => updateNewUser("fullName", event.target.value)}
+                    disabled={!canManageUsers}
+                    autoComplete="off"
+                    required
+                  />
+                </label>
+              </div>
+              <label className="field-label">
+                Роль
+                <input
+                  value={newUserForm.role}
+                  onChange={(event) => updateNewUser("role", event.target.value)}
+                  disabled={!canManageUsers}
+                  autoComplete="off"
+                  required
+                />
+              </label>
+              <div className="form-two">
+                <label className="field-label">
+                  Тип доступа
+                  <select
+                    className="select"
+                    value={newUserForm.userRole}
+                    onChange={(event) => updateNewUser("userRole", event.target.value)}
+                    disabled={!canManageUsers}
+                  >
+                    <option value="manager">Менеджер</option>
+                    <option value="tech">Технический специалист</option>
+                    <option value="admin">Администратор</option>
+                  </select>
+                </label>
+                <label className="field-label">
+                  Уровень
+                  <select
+                    className="select"
+                    value={newUserForm.accessLevel}
+                    onChange={(event) => updateNewUser("accessLevel", event.target.value)}
+                    disabled={!canManageUsers}
+                  >
+                    <option value="overview">Проекты и обзор</option>
+                    <option value="readonly_wb">Карточки WB</option>
+                    <option value="all">Полный доступ</option>
+                  </select>
+                </label>
+              </div>
+              <div className="panel-actions">
+                <button className="btn primary" type="submit" disabled={!canManageUsers || newUserStatus === "saving"}><Save size={16} />Создать сотрудника</button>
+              </div>
+              {!canManageUsers ? <div className="integration-status">Создавать сотрудников может только руководитель отдела или администратор.</div> : null}
+              {newUserStatus === "saving" ? <div className="integration-status">Создаем сотрудника...</div> : null}
+              {newUserError ? <div className="form-error">{newUserError}</div> : null}
+              {newUserResult?.user ? (
+                <div className="created-user-secret">
+                  <span>Данные для входа</span>
+                  <strong>Логин: {newUserResult.user.login}</strong>
+                  <strong>Пароль: {newUserResult.password}</strong>
+                  <em>Сохраните пароль сейчас. Повторно он не показывается.</em>
+                </div>
+              ) : null}
+            </form>
           </section>
           <section className="panel">
             <h2>Интеграции</h2>
