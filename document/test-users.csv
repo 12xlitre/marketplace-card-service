@@ -1,4 +1,4 @@
-login,password,full_name,role,access_level
-dmitriy.admin,WO-demo-2026-admin,Сафиуллин Дмитрий,Администратор,all
-kristina.manager,WO-demo-2026-lead,Кристина Январева,Руководитель,overview
-anastasia.tech,WO-demo-2026-tech,Анастсия Руднева,Технический специалист,readonly_wb
+login,full_name,role,access_level
+dmitriy.admin,Сафиуллин Дмитрий,Администратор,all
+kristina.manager,Кристина Январева,Руководитель,overview
+anastasia.tech,Анастсия Руднева,Технический специалист,readonly_wb

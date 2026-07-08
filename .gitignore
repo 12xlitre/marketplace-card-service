@@ -2,9 +2,11 @@
 Thumbs.db
 
 node_modules/
+__pycache__/
 dist/
 build/
 coverage/
+var/
 
 .env
 .env.*

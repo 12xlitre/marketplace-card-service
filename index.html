@@ -193,30 +193,6 @@
       display: block;
     }
 
-    .demo-users {
-      border-top: 1px solid var(--line);
-      padding-top: 14px;
-      display: grid;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .demo-user {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface-soft);
-      padding: 9px;
-      color: var(--muted);
-      text-align: left;
-    }
-
-    .demo-user:hover {
-      color: var(--brand);
-      border-color: #c8d6ff;
-      background: var(--brand-soft);
-    }
-
     .app {
       min-height: 100vh;
       display: grid;
@@ -1053,6 +1029,23 @@
       line-height: 1.4;
     }
 
+    .source-flow {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      overflow: hidden;
+    }
+
+    .source-flow .list-row {
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+    }
+
+    .source-flow .list-row:last-child {
+      border-bottom: 0;
+    }
+
     .modal-actions {
       padding: 0 18px 18px;
       display: flex;
@@ -1400,7 +1393,7 @@
       <form class="login-card" id="login-form">
         <div>
           <h2>Авторизация</h2>
-          <p>Тестовые пользователи лежат в `document/test-users.csv`.</p>
+          <p>Введите выданные учетные данные. Пароли проверяются на сервере.</p>
         </div>
 
         <div class="form-grid">
@@ -1414,16 +1407,9 @@
           </label>
         </div>
 
-        <div class="login-error" id="login-error">Логин или пароль не совпали с тестовой таблицей.</div>
+        <div class="login-error" id="login-error">Логин или пароль не совпали.</div>
 
         <button class="btn primary" type="submit">Войти</button>
-
-        <div class="demo-users" id="demo-users">
-          <strong>Тестовые учетные записи</strong>
-          <button class="demo-user" type="button" data-fill-login="dmitriy.admin">dmitriy.admin · Администратор</button>
-          <button class="demo-user" type="button" data-fill-login="kristina.manager">kristina.manager · Руководитель</button>
-          <button class="demo-user" type="button" data-fill-login="anastasia.tech">anastasia.tech · Технический специалист</button>
-        </div>
       </form>
     </div>
   </section>
@@ -1607,7 +1593,7 @@
           <div class="settings-grid">
             <section class="panel">
               <h2>Пользователи</h2>
-              <p>Тестовые учетные записи из `document/test-users.csv`.</p>
+              <p>Пользователи хранятся в серверной SQLite-базе. Пароли сохраняются только как PBKDF2-хеши.</p>
               <div class="panel-list">
                 <div class="list-row"><span>Сафиуллин Дмитрий</span><strong>Администратор</strong></div>
                 <div class="list-row"><span>Кристина Январева</span><strong>Руководитель</strong></div>
@@ -1620,7 +1606,7 @@
               <p>WB API подключается в режиме только чтения до отдельного решения о записи изменений.</p>
               <div class="panel-list">
                 <div class="list-row"><span>Wildberries Content API</span><strong>read-only</strong></div>
-                <div class="list-row"><span>MPStats</span><strong>следующий этап</strong></div>
+                <div class="list-row"><span>MPStats</span><strong>витрина и SEO</strong></div>
                 <div class="list-row"><span>Хранение токенов</span><strong>только сервер</strong></div>
               </div>
             </section>
@@ -1697,6 +1683,12 @@
                   <button class="btn readonly">Загрузить свежие данные</button>
                   <button class="btn" data-open-portal-modal data-start-mode="api">Подключить API</button>
                   <button class="btn">Добавить таблицу</button>
+                </div>
+                <div class="source-flow" id="seller-source-flow">
+                  <div class="list-row"><span>Проверка WB API ключа</span><strong>готово</strong></div>
+                  <div class="list-row"><span>Карточки из кабинета</span><strong>1 284</strong></div>
+                  <div class="list-row"><span>MPStats</span><strong>витрина и SEO</strong></div>
+                  <div class="list-row"><span>Запись в WB</span><strong>отключена</strong></div>
                 </div>
               </section>
 
@@ -2167,11 +2159,11 @@
         <div class="connect-mode" aria-label="Способ подключения">
           <button class="active" type="button" data-connect-mode="api">
             <strong>Через API</strong>
-            <span>Для кабинета, где уже есть WB API ключ. В прототипе ключ не сохраняется.</span>
+            <span>Первый рабочий вариант: ключ подтверждает кабинет и дает загрузить карточки WB.</span>
           </button>
           <button type="button" data-connect-mode="manual">
             <strong>Вручную</strong>
-            <span>Для старта с Excel, таблицей, списком nmID или ссылками на карточки.</span>
+            <span>Для старта с Excel, списком nmID, SKU или ссылками, когда API еще нет.</span>
           </button>
         </div>
 
@@ -2213,13 +2205,24 @@
             <input id="portal-api-key" name="portal-api-key" type="password" placeholder="Вставьте ключ кабинета">
           </label>
           <div class="form-note">В статическом прототипе ключ не пишется в localStorage и не отправляется в WB напрямую. Следующий серверный шаг: принять ключ на backend, сохранить зашифрованно и проверить read-only доступ.</div>
+          <div class="source-flow" aria-label="Что произойдет после подключения API">
+            <div class="list-row"><span>1. Проверка токена WB</span><strong>read-only</strong></div>
+            <div class="list-row"><span>2. Определение кабинета и брендов</span><strong>WB API</strong></div>
+            <div class="list-row"><span>3. Загрузка списка карточек</span><strong>nmID</strong></div>
+            <div class="list-row"><span>4. Снапшот перед аудитом</span><strong>без записи в WB</strong></div>
+          </div>
         </div>
 
         <div id="manual-fields" hidden>
           <label class="field-label">
-            Что добавим первым
-            <textarea id="portal-manual-note" name="portal-manual-note" placeholder="Excel WB, список nmID, ссылки на карточки, комментарий по задаче"></textarea>
+            Ссылка на магазин или первую карточку
+            <input id="portal-store-url" name="portal-store-url" placeholder="Опционально: ссылка WB для ручной сверки">
           </label>
+          <label class="field-label">
+            Первичный источник карточек
+            <textarea id="portal-manual-source" name="portal-manual-source" placeholder="Excel WB, список nmID/SKU, артикулы продавца, ссылки на карточки"></textarea>
+          </label>
+          <div class="form-note">Ссылка помогает человеку сверить магазин, но сама по себе не дает полный список карточек. Для автоматической загрузки нужен API-ключ WB.</div>
         </div>
       </div>
 
@@ -2271,6 +2274,7 @@
     const sellerMemberCount = document.querySelector("#seller-member-count");
     const sellerSourceCopy = document.querySelector("#seller-source-copy");
     const sellerSourceTag = document.querySelector("#seller-source-tag");
+    const sellerSourceFlow = document.querySelector("#seller-source-flow");
     const projectMembers = document.querySelector("#project-members");
     const memberSelect = document.querySelector("#member-select");
     const addMemberButton = document.querySelector("#add-member-button");
@@ -2281,15 +2285,23 @@
     const portalOwner = document.querySelector("#portal-owner");
     const portalScope = document.querySelector("#portal-scope");
     const portalApiKey = document.querySelector("#portal-api-key");
+    const portalStoreUrl = document.querySelector("#portal-store-url");
+    const portalManualSource = document.querySelector("#portal-manual-source");
     const connectModeButtons = document.querySelectorAll("[data-connect-mode]");
     const apiFields = document.querySelector("#api-fields");
     const manualFields = document.querySelector("#manual-fields");
     const fallbackUsers = [
-      { login: "dmitriy.admin", password: "WO-demo-2026-admin", full_name: "Сафиуллин Дмитрий", role: "Администратор", access_level: "all" },
-      { login: "kristina.manager", password: "WO-demo-2026-lead", full_name: "Кристина Январева", role: "Руководитель", access_level: "overview" },
-      { login: "anastasia.tech", password: "WO-demo-2026-tech", full_name: "Анастсия Руднева", role: "Технический специалист", access_level: "readonly_wb" }
+      { login: "dmitriy.admin", full_name: "Сафиуллин Дмитрий", role: "Администратор", access_level: "all" },
+      { login: "kristina.manager", full_name: "Кристина Январева", role: "Руководитель", access_level: "overview" },
+      { login: "anastasia.tech", full_name: "Анастсия Руднева", role: "Технический специалист", access_level: "readonly_wb" }
     ];
-    let testUsers = [...fallbackUsers];
+    const staticAuthUsers = [
+      { ...fallbackUsers[0], password_hash: "pbkdf2_sha256$240000$f477fc3fe802e575f01da0ed3442862c$4b37ffd46167daee9f9db632b77565dee354ea3908294b6f2574de5cdccb58b4" },
+      { ...fallbackUsers[1], password_hash: "pbkdf2_sha256$240000$fbf2a62d71c3b03051d63cfdb3ebf60a$bd3d33bc4eb0b06a6a3da022fc6ecc2ea645ac4327c8d12cb486557261177444" },
+      { ...fallbackUsers[2], password_hash: "pbkdf2_sha256$240000$ffd06404ba2295d304f53eb3f223a9a7$5b4868dbae93b71ee0248baffe0d7fa0aa23447989c0a0cf5fe4edc46b6ff98e" }
+    ];
+    let users = [];
+    let currentUser = null;
     let connectMode = "api";
     const demoPortal = {
       id: "demo-wb",
@@ -2308,23 +2320,10 @@
     let currentPortal = demoPortal;
     let userPortals = [];
 
-    function parseCsv(text) {
-      const [headerLine, ...lines] = text.trim().split(/\r?\n/);
-      const headers = headerLine.split(",").map((item) => item.trim());
-      return lines
-        .filter(Boolean)
-        .map((line) => {
-          const values = line.split(",").map((item) => item.trim());
-          return headers.reduce((row, header, index) => {
-            row[header] = values[index] || "";
-            return row;
-          }, {});
-        });
-    }
-
     function findUser(login) {
-      return testUsers.find((item) => item.login === login)
+      return users.find((item) => item.login === login)
         || fallbackUsers.find((item) => item.login === login)
+        || currentUser
         || fallbackUsers[0];
     }
 
@@ -2332,18 +2331,75 @@
       return new Intl.NumberFormat("ru-RU").format(value);
     }
 
-    async function loadTestUsers() {
+    async function apiRequest(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers || {})
+        },
+        ...options
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "request_failed");
+      }
+      return payload;
+    }
+
+    function publicUser(user) {
+      return {
+        login: user.login,
+        full_name: user.full_name,
+        role: user.role,
+        access_level: user.access_level
+      };
+    }
+
+    async function verifyStaticPassword(password, passwordHash) {
+      const [algorithm, iterations, saltHex, expectedHex] = passwordHash.split("$");
+      if (algorithm !== "pbkdf2_sha256" || !window.crypto?.subtle) {
+        return false;
+      }
+      const passwordKey = await window.crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(password),
+        "PBKDF2",
+        false,
+        ["deriveBits"]
+      );
+      const saltBytes = new Uint8Array(saltHex.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
+      const derivedBits = await window.crypto.subtle.deriveBits(
+        {
+          name: "PBKDF2",
+          hash: "SHA-256",
+          salt: saltBytes,
+          iterations: Number(iterations)
+        },
+        passwordKey,
+        256
+      );
+      const digestHex = Array.from(new Uint8Array(derivedBits))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      return digestHex === expectedHex;
+    }
+
+    async function staticLogin(login, password) {
+      const user = staticAuthUsers.find((item) => item.login === login);
+      if (!user || !(await verifyStaticPassword(password, user.password_hash))) {
+        return null;
+      }
+      users = staticAuthUsers.map(publicUser);
+      return publicUser(user);
+    }
+
+    async function loadUsers() {
       try {
-        const response = await fetch("document/test-users.csv");
-        if (!response.ok) {
-          throw new Error("users file unavailable");
-        }
-        const text = await response.text();
-        testUsers = parseCsv(text);
+        const payload = await apiRequest("/api/users");
+        users = payload.users || [];
       } catch (error) {
-        testUsers = [...fallbackUsers];
-        loginError.textContent = "Не удалось загрузить document/test-users.csv, использую встроенные тестовые учетные записи.";
-        loginError.classList.add("active");
+        users = users.length ? users : (currentUser ? [currentUser] : []);
       }
       fillEmployeeSelects();
       renderProjectMembers();
@@ -2353,13 +2409,14 @@
       [portalOwner, memberSelect].forEach((select) => {
         const selected = select.value;
         select.innerHTML = "";
-        testUsers.forEach((user) => {
+        const userOptions = users.length ? users : fallbackUsers;
+        userOptions.forEach((user) => {
           const option = document.createElement("option");
           option.value = user.login;
           option.textContent = user.full_name;
           select.append(option);
         });
-        select.value = testUsers.some((user) => user.login === selected)
+        select.value = userOptions.some((user) => user.login === selected)
           ? selected
           : select.options[0]?.value || "";
       });
@@ -2375,12 +2432,14 @@
         .toUpperCase();
     }
 
-    function enterApp(user) {
+    async function enterApp(user) {
+      currentUser = user;
       userAvatar.textContent = initials(user.full_name);
       userName.textContent = user.full_name;
       userRole.textContent = user.role;
       loginScreen.classList.add("is-hidden");
       appShell.classList.remove("is-hidden");
+      await loadUsers();
       showScreen("employees");
     }
 
@@ -2522,6 +2581,35 @@
       metricManual.textContent = formatNumber(allPortals.length - apiCount);
     }
 
+    function renderSourceFlow(portal) {
+      const isApi = portal.mode === "api";
+      const rows = isApi
+        ? [
+            ["Проверка WB API ключа", portal.isDemo ? "готово" : "ожидает backend"],
+            ["Карточки из кабинета", portal.isDemo ? formatNumber(portal.cardCount) : "после проверки"],
+            ["MPStats", "витрина/аналитика позже"],
+            ["Запись в WB", "отключена"]
+          ]
+        : [
+            ["Ссылка на магазин/карточку", portal.storeUrl ? "добавлена" : "не указана"],
+            ["Первичный источник", portal.manualSource ? "описан" : "ожидает таблицу"],
+            ["Автозагрузка карточек", "нужен API"],
+            ["MPStats", "может подтянуть витрину"]
+          ];
+
+      sellerSourceFlow.innerHTML = "";
+      rows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        row.className = "list-row";
+        const span = document.createElement("span");
+        span.textContent = label;
+        const strong = document.createElement("strong");
+        strong.textContent = value;
+        row.append(span, strong);
+        sellerSourceFlow.append(row);
+      });
+    }
+
     function updateSellerView() {
       const owner = findUser(currentPortal.ownerLogin);
       const isApi = currentPortal.mode === "api";
@@ -2537,8 +2625,9 @@
       sellerSourceTag.className = isApi ? "tag blue" : "tag amber";
       sellerSourceTag.textContent = isApi ? "API ожидает серверной проверки" : "таблицы и ручной ввод";
       sellerSourceCopy.textContent = isApi
-        ? "API ключ принят в интерфейсе прототипа, но не сохраняется в браузере. Серверная проверка read-only доступа будет следующим техническим шагом."
-        : "Портал создан без API: можно добавлять Excel, списки nmID, ссылки на карточки и подключить API позже.";
+        ? "API ключ принят в интерфейсе прототипа, но не сохраняется в браузере. Первый backend-шаг: проверить токен, определить кабинет WB и загрузить список карточек без записи изменений."
+        : "Портал создан без API: ссылка на магазин нужна только для ручной сверки, а карточки добавляются через Excel, nmID, SKU, артикулы продавца или ссылки. API можно подключить позже.";
+      renderSourceFlow(currentPortal);
       renderProjectMembers();
       setScope(currentPortal.scope);
     }
@@ -2583,34 +2672,34 @@
 
     loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!testUsers.length) {
-        await loadTestUsers();
-      }
-
       const login = loginInput.value.trim();
       const password = passwordInput.value;
-      const user = testUsers.find((item) => item.login === login && item.password === password);
-
-      if (!user) {
-        loginError.classList.add("active");
-        return;
-      }
-
-      loginError.classList.remove("active");
-      enterApp(user);
-    });
-
-    document.querySelectorAll("[data-fill-login]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const user = testUsers.find((item) => item.login === button.dataset.fillLogin)
-          || fallbackUsers.find((item) => item.login === button.dataset.fillLogin);
-        if (!user) {
+      try {
+        const payload = await apiRequest("/api/login", {
+          method: "POST",
+          body: JSON.stringify({
+            login,
+            password
+          })
+        });
+        loginError.classList.remove("active");
+        passwordInput.value = "";
+        await enterApp(payload.user);
+      } catch (error) {
+        if (error.message === "invalid_credentials") {
+          loginError.classList.add("active");
           return;
         }
-        loginInput.value = user.login;
-        passwordInput.value = user.password;
+
+        const user = await staticLogin(login, password);
+        if (!user) {
+          loginError.classList.add("active");
+          return;
+        }
         loginError.classList.remove("active");
-      });
+        passwordInput.value = "";
+        await enterApp(user);
+      }
     });
 
     function setScope(scope) {
@@ -2651,6 +2740,8 @@
         workCount: 0,
         problemCount: 0,
         memberLogins: [portalOwner.value],
+        storeUrl: connectMode === "manual" ? portalStoreUrl.value.trim() : "",
+        manualSource: connectMode === "manual" ? portalManualSource.value.trim() : "",
         isDemo: false
       };
 
@@ -2715,9 +2806,21 @@
       }
     });
 
+    async function restoreSession() {
+      try {
+        const payload = await apiRequest("/api/session");
+        if (payload.user) {
+          await enterApp(payload.user);
+        }
+      } catch (error) {
+        loginScreen.classList.remove("is-hidden");
+        appShell.classList.add("is-hidden");
+      }
+    }
+
     loadUserPortals();
     updateSellerView();
-    loadTestUsers();
+    restoreSession();
   </script>
 </body>
 </html>

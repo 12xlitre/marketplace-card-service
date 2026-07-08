@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "python3 -m http.server 5173 -d .",
-    "prototype": "python3 -m http.server 5173 -d ."
+    "start": "python3 server.py serve",
+    "prototype": "python3 server.py serve",
+    "create-user": "python3 server.py create-user",
+    "list-users": "python3 server.py list-users"
   }
 }
