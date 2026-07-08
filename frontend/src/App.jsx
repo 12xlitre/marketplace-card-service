@@ -152,6 +152,19 @@ function valueSummary(value) {
   return String(value);
 }
 
+function valueCount(value) {
+  if (isEmptyValue(value)) {
+    return 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  if (typeof value === "object") {
+    return Object.keys(value).length;
+  }
+  return 1;
+}
+
 function pluralRu(value, one, few, many) {
   const number = Math.abs(Number(value) || 0);
   const lastTwo = number % 100;
@@ -256,6 +269,14 @@ function orderedFieldEntries(fields) {
 
 function fieldLabel(key) {
   return fieldLabels[key] || key;
+}
+
+function isKnownField(key) {
+  return Boolean(fieldLabels[key]);
+}
+
+function isPrimitiveDisplayValue(value) {
+  return value === null || value === undefined || ["string", "number", "boolean"].includes(typeof value);
 }
 
 function initials(name) {
@@ -1181,6 +1202,10 @@ function CardDetailScreen({ card, portal, onBack }) {
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
   const rawFields = rawFieldsForCard(card);
   const description = card?.description || rawFields.description || "";
+  const characteristics = card?.characteristics || rawFields.characteristics || [];
+  const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
+  const sizes = card?.sizes || rawFields.sizes || [];
+  const dimensions = card?.dimensions || rawFields.dimensions || {};
   return (
     <section className="screen active">
       <header className="topbar">
@@ -1203,16 +1228,15 @@ function CardDetailScreen({ card, portal, onBack }) {
               <h2>Данные карточки</h2>
               <div className="panel-list">
                 <div className="list-row"><span>Кабинет</span><strong>{portal?.name}</strong></div>
-                <div className="list-row"><span>nmID</span><strong>{valueSummary(card?.nmID)}</strong></div>
-                <div className="list-row"><span>imtID</span><strong>{valueSummary(card?.imtID)}</strong></div>
+                <div className="list-row"><span>WB ID</span><strong>{valueSummary(card?.nmID)}</strong></div>
                 <div className="list-row"><span>Артикул продавца</span><strong>{valueSummary(card?.vendorCode)}</strong></div>
                 <div className="list-row"><span>Категория</span><strong>{valueSummary(card?.subjectName)}</strong></div>
                 <div className="list-row"><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
                 <div className="list-row"><span>Описание</span><strong>{isEmptyValue(description) ? "Пусто" : "есть"}</strong></div>
-                <div className="list-row"><span>Характеристики</span><strong>{valueSummary(card?.characteristics || rawFields.characteristics)}</strong></div>
-                <div className="list-row"><span>Фото</span><strong>{valueSummary(card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []))}</strong></div>
-                <div className="list-row"><span>Размеры</span><strong>{valueSummary(card?.sizes || rawFields.sizes)}</strong></div>
-                <div className="list-row"><span>Габариты</span><strong>{valueSummary(card?.dimensions || rawFields.dimensions)}</strong></div>
+                <div className="list-row"><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
+                <div className="list-row"><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
+                <div className="list-row"><span>Размеры</span><strong>{valueSummary(sizes)}</strong></div>
+                <div className="list-row"><span>Габариты</span><strong>{valueSummary(dimensions)}</strong></div>
                 <div className="list-row"><span>Статус</span><strong>{valueSummary(card?.status)}</strong></div>
               </div>
             </section>
@@ -1241,12 +1265,12 @@ function CardDetailScreen({ card, portal, onBack }) {
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
-                  <h2>Все поля WB API</h2>
-                  <p>Показываем полный снимок карточки, который вернул backend. Пустые поля отмечены явно.</p>
+                  <h2>Характеристики</h2>
+                  <p>Значения из карточки WB без технического JSON-формата.</p>
                 </div>
-                <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
+                <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
               </div>
-              <RawFieldsView fields={rawFields} />
+              <CharacteristicsBlock items={characteristics} />
             </section>
 
             <section className="workspace-strip">
@@ -1304,6 +1328,14 @@ function CardDetailScreen({ card, portal, onBack }) {
                 </div>
               </div>
             </section>
+
+            <details className="workspace-strip technical-fields">
+              <summary>
+                <span>Служебные данные WB</span>
+                <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
+              </summary>
+              <RawFieldsView fields={rawFields} />
+            </details>
           </div>
         </div>
       </div>
@@ -1319,7 +1351,7 @@ function RawFieldsView({ fields }) {
         <div className="raw-field-row" key={key}>
           <div className="raw-field-name">
             <strong>{fieldLabel(key)}</strong>
-            <span>{key}</span>
+            {!isKnownField(key) ? <span>{key}</span> : null}
           </div>
           <RawFieldValue value={value} />
         </div>
@@ -1338,10 +1370,37 @@ function RawFieldValue({ value }) {
   if (typeof value !== "object") {
     return <span className="raw-field-value">{String(value)}</span>;
   }
+  if (Array.isArray(value) && value.every(isPrimitiveDisplayValue)) {
+    return <PrimitiveValueList values={value} />;
+  }
   if (Array.isArray(value) && value.every((item) => item && typeof item === "object" && ("name" in item || "charcName" in item))) {
     return <CharacteristicsList items={value} />;
   }
   return <pre className="json-value">{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function PrimitiveValueList({ values }) {
+  const visibleValues = values.filter((item) => !isEmptyValue(item));
+  if (!visibleValues.length) {
+    return <span className="raw-field-value field-empty">Пусто</span>;
+  }
+  return (
+    <div className="value-chip-list">
+      {visibleValues.map((value, index) => (
+        <span className="value-chip" key={`${String(value)}-${index}`}>{String(value)}</span>
+      ))}
+    </div>
+  );
+}
+
+function CharacteristicsBlock({ items }) {
+  if (isEmptyValue(items)) {
+    return <div className="empty-state"><span>Характеристики не заполнены</span></div>;
+  }
+  if (Array.isArray(items) && items.every((item) => item && typeof item === "object" && ("name" in item || "charcName" in item))) {
+    return <CharacteristicsList items={items} />;
+  }
+  return <RawFieldValue value={items} />;
 }
 
 function CharacteristicsList({ items }) {

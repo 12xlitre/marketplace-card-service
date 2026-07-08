@@ -1017,6 +1017,30 @@ tr:last-child td {
   gap: 10px;
 }
 
+.technical-fields {
+  background: var(--surface-soft);
+}
+
+.technical-fields summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.technical-fields summary::-webkit-details-marker {
+  display: none;
+}
+
+.technical-fields[open] summary {
+  padding-bottom: 12px;
+}
+
 .raw-field-row {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1057,6 +1081,25 @@ tr:last-child td {
 .field-empty {
   color: var(--muted);
   font-style: italic;
+}
+
+.value-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.value-chip {
+  min-height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 5px 9px;
+  font-size: 12px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .json-value {
