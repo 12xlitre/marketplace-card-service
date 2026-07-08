@@ -2624,9 +2624,9 @@ function CardDetailScreen({ card, portal, onBack }) {
     });
   }
 
-  function addDraftCharacteristicValue(row, value) {
+  function addDraftCharacteristicValue(row, value, options = {}) {
     const currentValues = draftCharacteristicValues(draftCharacteristics[row.key]);
-    setDraftCharacteristicValues(row, [...currentValues, value], "manual");
+    setDraftCharacteristicValues(row, options.replace ? [value] : [...currentValues, value], "manual");
   }
 
   function removeDraftCharacteristicValue(row, value) {
@@ -3085,6 +3085,7 @@ function CharacteristicsDiffTable({
             mpstatsStats={mpstatsValueStatsForCharacteristic(row.meta, mpstatsCharacteristics)}
             mpstatsNearbyNames={nearbyMpstatsCharacteristicNames(row.meta, mpstatsCharacteristics)}
             onAddValue={(value) => onAddValue(row, value)}
+            onReplaceValue={(value) => onAddValue(row, value, { replace: true })}
             onRemoveValue={(value) => onRemoveValue(row, value)}
             onRemove={() => onRemove(row.key)}
           />
@@ -3121,13 +3122,14 @@ function CharacteristicsDiffTable({
   );
 }
 
-function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsStats = [], mpstatsNearbyNames = [], onAddValue, onRemoveValue, onRemove }) {
+function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValues = [], mpstatsStats = [], mpstatsNearbyNames = [], onAddValue, onReplaceValue, onRemoveValue, onRemove }) {
   const [query, setQuery] = useState("");
   const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const isAuditSuggestion = draft?.source === "audit";
   const values = draftCharacteristicValues(draft);
   const limit = characteristicValueLimit(meta);
   const isLimitReached = Boolean(limit && values.length >= limit);
+  const canReplaceSingleValue = Boolean(limit === 1 && values.length >= 1);
   const strictValues = characteristicUsesStrictValues(meta);
   const selectedValues = new Set(values.map(normalizedCharacteristicOption));
   const normalizedQuery = normalizedCharacteristicOption(query);
@@ -3141,13 +3143,18 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
   const canAddCustomValue = Boolean(
     customValue
     && !strictValues
-    && !isLimitReached
+    && (!isLimitReached || canReplaceSingleValue)
     && !selectedValues.has(normalizedCharacteristicOption(customValue))
     && !availableValues.some((value) => normalizedCharacteristicOption(value) === normalizedCharacteristicOption(customValue))
   );
 
   function addValue(value) {
     if (isLimitReached) {
+      if (canReplaceSingleValue) {
+        onReplaceValue(value);
+        setQuery("");
+        setIsOptionsOpen(false);
+      }
       return;
     }
     onAddValue(value);
@@ -3179,8 +3186,8 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
           onChange={(event) => setQuery(event.target.value)}
           onFocus={() => setIsOptionsOpen(true)}
           onBlur={() => setIsOptionsOpen(false)}
-          disabled={isLimitReached}
-          placeholder={isLimitReached ? "Лимит значений достигнут" : (strictValues ? "Выбрать из списка WB" : "Подсказки или свое значение")}
+          disabled={isLimitReached && !canReplaceSingleValue}
+          placeholder={isLimitReached ? "Выбрать замену" : (strictValues ? "Выбрать из списка WB" : "Подсказки или свое значение")}
         />
       </label>
       {isOptionsOpen ? (
@@ -3190,22 +3197,24 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
               {mpstatsValues.length ? `Подсказки из карточек + MPStats (${mpstatsValues.length})` : "Ниже не полный список WB, а подсказки из карточек"}
             </span>
           ) : null}
-          {isLimitReached ? <span className="field-empty">Сначала удалите одно значение</span> : null}
-          {!isLimitReached && canAddCustomValue ? (
+          {isLimitReached && canReplaceSingleValue ? <span className="field-empty">Лимит 1/1: выбранный вариант заменит текущее значение</span> : null}
+          {isLimitReached && !canReplaceSingleValue ? <span className="field-empty">Сначала удалите одно значение</span> : null}
+          {canAddCustomValue ? (
             <button className="characteristic-option custom-option" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(customValue)}>
               <Plus size={14} />
-              <span>Добавить свое: {customValue}</span>
+              <span>{canReplaceSingleValue ? "Заменить на свое" : "Добавить свое"}: {customValue}</span>
             </button>
           ) : null}
-          {!isLimitReached && availableValues.length ? availableValues.map((value) => (
+          {(!isLimitReached || canReplaceSingleValue) && availableValues.length ? availableValues.map((value) => (
             <button className="characteristic-option" type="button" key={value} onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(value)}>
               <span>{value}</span>
               {formatMarketShare(mpstatsStatsByValue[normalizedCharacteristicOption(value)]?.share) ? (
                 <small>топ {formatMarketShare(mpstatsStatsByValue[normalizedCharacteristicOption(value)]?.share)}</small>
               ) : null}
+              {canReplaceSingleValue ? <small>замена</small> : null}
             </button>
           )) : null}
-          {!isLimitReached && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
+          {(!isLimitReached || canReplaceSingleValue) && !availableValues.length && !canAddCustomValue ? <span className="field-empty">{strictValues ? "Можно выбрать только из списка WB" : "Введите свое значение"}</span> : null}
         </div>
       ) : null}
       <div className="draft-editor-meta" title={characteristicValueMetaTitle(meta, hasKnownOptions, values.length, isAuditSuggestion, Boolean(draft), mpstatsValues.length)}>
