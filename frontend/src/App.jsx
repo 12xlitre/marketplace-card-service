@@ -719,7 +719,10 @@ function titleSuggestions(card) {
     .replace(/\s+/g, " ")
     .replace(/[|/]+/g, " ")
     .trim();
+  const signals = contentAuditSignals(card);
+  const generatedTitle = buildContentTitleCandidate(compactBase, subject, brand, signals);
   const values = [
+    generatedTitle,
     compactBase,
     subject && !compactBase.toLowerCase().includes(subject.toLowerCase().slice(0, -1)) ? `${subject} ${compactBase}` : "",
     brand && !compactBase.toLowerCase().includes(brand.toLowerCase()) ? `${compactBase} ${brand}` : "",
@@ -729,6 +732,111 @@ function titleSuggestions(card) {
     unique.push(compactBase.slice(0, 60));
   }
   return unique.slice(0, 3);
+}
+
+function rawCharacteristicItems(card) {
+  const raw = card?.characteristics || card?.rawFields?.characteristics || [];
+  return Array.isArray(raw) ? raw : [];
+}
+
+function rawCharacteristicValueTokens(value) {
+  if (isEmptyValue(value)) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(rawCharacteristicValueTokens);
+  }
+  if (typeof value === "object") {
+    return rawCharacteristicValueTokens(value.value || value.name || value.charcName || value.values || "");
+  }
+  return String(value)
+    .split(/[,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function characteristicValuesByAliases(card, aliases) {
+  const normalizedAliases = aliases.map(normalizedCharacteristicOption);
+  const values = [];
+  for (const item of rawCharacteristicItems(card)) {
+    const label = normalizedCharacteristicOption(item?.name || item?.charcName || "");
+    if (!label || !normalizedAliases.some((alias) => label.includes(alias))) {
+      continue;
+    }
+    values.push(...rawCharacteristicValueTokens(item.value ?? item.values ?? item));
+  }
+  return [...new Set(values)].slice(0, 4);
+}
+
+function materialAdjective(value) {
+  const normalized = normalizedCharacteristicOption(value);
+  if (normalized.includes("хлоп")) return "хлопковая";
+  if (normalized.includes("трикотаж")) return "трикотажная";
+  if (normalized.includes("шелк") || normalized.includes("шёлк")) return "шелковая";
+  if (normalized.includes("вискоз")) return "вискозная";
+  if (normalized.includes("фланел")) return "фланелевая";
+  if (normalized.includes("махр")) return "махровая";
+  return String(value || "").trim();
+}
+
+function genderAdjective(value) {
+  const normalized = normalizedCharacteristicOption(value);
+  if (normalized.includes("жен")) return "женская";
+  if (normalized.includes("муж")) return "мужская";
+  if (normalized.includes("дет")) return "детская";
+  if (normalized.includes("унисекс")) return "унисекс";
+  return "";
+}
+
+function subjectForTitle(subject, fallbackTitle) {
+  const normalizedSubject = normalizedCharacteristicOption(subject);
+  if (normalizedSubject.includes("пижам")) {
+    return "Пижама";
+  }
+  if (subject) {
+    return subject.replace(/\s+/g, " ").trim();
+  }
+  return fallbackTitle.split(/\s+/).slice(0, 2).join(" ");
+}
+
+function contentAuditSignals(card) {
+  return {
+    gender: characteristicValuesByAliases(card, ["пол", "гендер"])[0] || "",
+    material: characteristicValuesByAliases(card, ["состав", "материал", "ткань"])[0] || "",
+    color: characteristicValuesByAliases(card, ["цвет"])[0] || "",
+    texture: characteristicValuesByAliases(card, ["фактура"])[0] || "",
+    kit: characteristicValuesByAliases(card, ["комплектация", "комплект"])[0] || "",
+    sleeve: characteristicValuesByAliases(card, ["длина рукава", "рукав"])[0] || "",
+    features: characteristicValuesByAliases(card, ["особенности", "назначение"]).slice(0, 3),
+  };
+}
+
+function buildContentTitleCandidate(currentTitle, subject, brand, signals) {
+  const title = currentTitle || "";
+  const titleLower = title.toLowerCase();
+  const base = subjectForTitle(subject, title);
+  const parts = [
+    base,
+    genderAdjective(signals.gender),
+    materialAdjective(signals.material),
+  ].filter(Boolean);
+  const kit = normalizedCharacteristicOption(signals.kit || title).includes("штан")
+    ? "со штанами"
+    : "";
+  if (kit) {
+    parts.push(kit);
+  }
+  if (signals.color && !titleLower.includes(String(signals.color).toLowerCase())) {
+    parts.push(signals.color);
+  }
+  if (brand && !parts.join(" ").toLowerCase().includes(brand.toLowerCase()) && !titleLower.includes(brand.toLowerCase())) {
+    parts.push(brand);
+  }
+  const candidate = parts
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return candidate && candidate.length >= 8 ? candidate : title;
 }
 
 function descriptionQualityIssues(description, card) {
@@ -768,27 +876,36 @@ function descriptionQualityIssues(description, card) {
 function descriptionSuggestion(card, description) {
   const current = String(description || "").trim();
   const issues = descriptionQualityIssues(current, card);
-  if (current && !issues.length) {
-    return current;
-  }
   const subject = String(card?.subjectName || "").trim();
   const brand = String(card?.brand || "").trim();
   const title = textOrDash(card?.title);
+  const signals = contentAuditSignals(card);
+  const detailParts = [
+    signals.material ? `материал: ${signals.material}` : "",
+    signals.color ? `цвет: ${signals.color}` : "",
+    signals.texture ? `фактура: ${signals.texture}` : "",
+    signals.kit ? `комплектация: ${signals.kit}` : "",
+    signals.sleeve ? `рукав: ${signals.sleeve}` : "",
+    signals.features.length ? `особенности: ${signals.features.join(", ")}` : "",
+  ].filter(Boolean);
+  const structuredDraft = [
+    [title, brand, subject].filter((value, index, list) => value && value !== "Не указано" && list.indexOf(value) === index).join(". "),
+    detailParts.length ? `В карточке стоит усилить покупательские детали: ${detailParts.join("; ")}.` : "",
+    "Опишите посадку, состав, ощущения от ткани, комплектацию, сезонность, уход и сценарии использования простым языком для покупателя.",
+  ].filter(Boolean).join("\n\n");
+  if (current && !issues.length) {
+    return [current, structuredDraft].filter(Boolean).join("\n\n");
+  }
   if (current) {
     const additions = [
       subject ? `Подходит для категории: ${subject}.` : "",
       brand && !current.toLowerCase().includes(brand.toLowerCase()) ? `Бренд: ${brand}.` : "",
+      detailParts.length ? `Добавьте в текст: ${detailParts.join("; ")}.` : "",
       "Проверьте состав, посадку, комплектацию, уход и сценарии использования перед публикацией.",
     ].filter(Boolean);
     return [current, ...additions].join("\n\n");
   }
-  const intro = [title, brand, subject]
-    .filter((value, index, list) => value && value !== "Не указано" && list.indexOf(value) === index)
-    .join(". ");
-  return [
-    intro,
-    "Добавьте ключевые свойства товара: состав, посадку, сезон, комплектацию, уход и сценарии использования.",
-  ].filter(Boolean).join("\n\n");
+  return structuredDraft;
 }
 
 function titleAuditReason(card, currentTitle, draftTitle) {
@@ -802,7 +919,7 @@ function titleAuditReason(card, currentTitle, draftTitle) {
     return "Название длиннее лимита WB 60 символов, поэтому аудит предлагает укоротить его.";
   }
   if (draftTitle !== currentTitle) {
-    return "Аудит добавил категорию или бренд, потому что их не было в текущем названии.";
+    return "Аудит пересобрал заголовок из текущей категории и характеристик WB, чтобы получить более содержательный вариант в лимите 60 символов.";
   }
   return "Название уже укладывается в лимит WB, поэтому аудит оставил его без изменения.";
 }
@@ -813,7 +930,7 @@ function descriptionAuditReason(description, card) {
     if (issues.length) {
       return `Описание есть, но аудит нашел зоны улучшения: ${issues.join(", ")}. Черновик добавляет структуру и детали для ручной доработки.`;
     }
-    return "Описание выглядит достаточно полным по базовым правилам, поэтому аудит оставил его без изменения.";
+    return "Описание проходит базовую проверку, но аудит добавил блок с покупательскими деталями из текущих характеристик WB.";
   }
   return "В WB нет описания, поэтому аудит собрал базовый черновик из названия, бренда и категории.";
 }
@@ -2765,7 +2882,7 @@ function CardDetailScreen({ card, portal, onBack, onDraftSaved, onDraftActivity,
     const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: false });
     const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
     const suggestions = titleSuggestions(card);
-    const nextTitle = suggestions[1] || suggestions[0] || "";
+    const nextTitle = suggestions.find((value) => normalizedCharacteristicOption(value) !== normalizedCharacteristicOption(currentTitle)) || suggestions[0] || "";
     const nextDescription = descriptionSuggestion(card, description);
     const nextTitleReason = titleAuditReason(card, currentTitle, nextTitle);
     const nextDescriptionReason = descriptionAuditReason(description, card);
