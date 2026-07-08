@@ -825,9 +825,6 @@ function cardProblemReasons(card) {
   if (!String(card?.description || "").trim()) {
     reasons.push("нет описания");
   }
-  if (!String(card?.brand || "").trim()) {
-    reasons.push("нет бренда");
-  }
   if (!rawCharacteristicItems(card).length) {
     reasons.push("пустые характеристики");
   }
@@ -838,10 +835,36 @@ function cardProblemReasons(card) {
   if (card?.dimensions?.isValid === false) {
     reasons.push("габариты требуют проверки");
   }
-  if (!reasons.length && Number(card?.issueCount || 0) > 0 && card?.issue && card.issue !== "Нет критичных") {
+  if (!reasons.length && Number(card?.issueCount || 0) > 0 && card?.issue && !["Нет критичных", "Нет бренда"].includes(card.issue)) {
     reasons.push(String(card.issue).toLowerCase());
   }
   return [...new Set(reasons)];
+}
+
+function cardDataSignals(card) {
+  const signals = [];
+  if (!String(card?.brand || "").trim()) {
+    signals.push("бренд не указан в WB");
+  }
+  return signals;
+}
+
+function cardCompleteness(card) {
+  const issues = cardProblemReasons(card);
+  if (!issues.length) {
+    return { label: "Достаточная", tone: "green" };
+  }
+  if (issues.length === 1) {
+    return { label: "Есть пробел", tone: "amber" };
+  }
+  return { label: "Есть пробелы", tone: "red" };
+}
+
+function cardWorkState(card, selectedSet) {
+  if (selectedSet.has(cardStableKey(card))) {
+    return { label: "В наборе", tone: "blue" };
+  }
+  return { label: "Нет задачи", tone: "green" };
 }
 
 function normalizedCardSearchText(card) {
@@ -853,6 +876,7 @@ function normalizedCardSearchText(card) {
     card?.subjectName,
     card?.status,
     card?.issue,
+    ...cardDataSignals(card),
   ].map((value) => String(value || "").toLowerCase()).join(" ");
 }
 
@@ -3007,8 +3031,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 function CardsTable({ cards, portal, onOpenCard }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
-  const [issueFilter, setIssueFilter] = useState("problems");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [issueFilter, setIssueFilter] = useState("all");
+  const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
   const cardKeySignature = cards.map(cardStableKey).join("|");
@@ -3038,10 +3062,10 @@ function CardsTable({ cards, portal, onOpenCard }) {
   const normalizedQuery = query.trim().toLowerCase();
   const categories = [...new Set(cards.map((card) => String(card.subjectName || "категория не указана").trim()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "ru"));
-  const statuses = [...new Set(cards.map((card) => String(card.status || "Статус не указан").trim()).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right, "ru"));
   const selectedSet = new Set(selectedKeys);
   const problemCards = cards.filter((card) => cardProblemReasons(card).length);
+  const signalCards = cards.filter((card) => cardDataSignals(card).length);
+  const signalOnlyCards = signalCards.filter((card) => !cardProblemReasons(card).length);
   const cleanCards = cards.length - problemCards.length;
   const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
   const visibleCards = cards.filter((card) => {
@@ -3056,7 +3080,13 @@ function CardsTable({ cards, portal, onOpenCard }) {
     if (issueFilter === "selected" && !selectedSet.has(key)) {
       return false;
     }
-    if (statusFilter !== "all" && String(card.status || "Статус не указан") !== statusFilter) {
+    if (issueFilter === "signals" && !cardDataSignals(card).length) {
+      return false;
+    }
+    if (workFilter === "selected" && !selectedSet.has(key)) {
+      return false;
+    }
+    if (workFilter === "none" && selectedSet.has(key)) {
       return false;
     }
     if (categoryFilter !== "all" && String(card.subjectName || "категория не указана") !== categoryFilter) {
@@ -3097,8 +3127,8 @@ function CardsTable({ cards, portal, onOpenCard }) {
 
   function resetFilters() {
     setQuery("");
-    setIssueFilter("problems");
-    setStatusFilter("all");
+    setIssueFilter("all");
+    setWorkFilter("all");
     setCategoryFilter("all");
   }
 
@@ -3106,11 +3136,15 @@ function CardsTable({ cards, portal, onOpenCard }) {
     <div className="cards-workspace">
       <div className="cards-work-summary">
         <div className="work-summary-item">
-          <span>Найдено проблем</span>
+          <span>Требуют внимания</span>
           <strong>{formatNumber(problemCards.length)}</strong>
         </div>
         <div className="work-summary-item">
-          <span>Можно оставить</span>
+          <span>Только сигналы WB</span>
+          <strong>{formatNumber(signalOnlyCards.length)}</strong>
+        </div>
+        <div className="work-summary-item">
+          <span>Без пробелов</span>
           <strong>{formatNumber(cleanCards)}</strong>
         </div>
         <div className="work-summary-item active">
@@ -3129,14 +3163,16 @@ function CardsTable({ cards, portal, onOpenCard }) {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, nmID, артикулу, бренду" />
         </label>
         <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
-          <option value="problems">Только с проблемами</option>
           <option value="all">Все карточки</option>
-          <option value="clean">Без критичных проблем</option>
+          <option value="problems">Требуют внимания</option>
+          <option value="signals">Есть сигналы WB</option>
+          <option value="clean">Без пробелов</option>
           <option value="selected">Рабочий набор</option>
         </select>
-        <select className="select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-          <option value="all">Все статусы</option>
-          {statuses.map((status) => <option value={status} key={status}>{status}</option>)}
+        <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>
+          <option value="all">Любая работа</option>
+          <option value="selected">В рабочем наборе</option>
+          <option value="none">Нет задачи</option>
         </select>
         <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
           <option value="all">Все категории</option>
@@ -3165,9 +3201,9 @@ function CardsTable({ cards, portal, onOpenCard }) {
                 </th>
                 <th>Карточка</th>
                 <th>nmID</th>
-                <th>Качество</th>
-                <th>Причины проверки</th>
-                <th>Статус</th>
+                <th>Заполненность</th>
+                <th>Сигналы WB</th>
+                <th>Работа</th>
                 <th>Детали</th>
               </tr>
             </thead>
@@ -3175,6 +3211,9 @@ function CardsTable({ cards, portal, onOpenCard }) {
               {visibleCards.map((card, index) => {
                 const key = cardStableKey(card);
                 const reasons = cardProblemReasons(card);
+                const signals = cardDataSignals(card);
+                const completeness = cardCompleteness(card);
+                const workState = cardWorkState(card, selectedSet);
                 return (
                   <tr key={key || `${card.nmID || index}-${card.title}`} className={selectedSet.has(key) ? "selected-row" : ""}>
                     <td className="select-col">
@@ -3190,14 +3229,15 @@ function CardsTable({ cards, portal, onOpenCard }) {
                       </div>
                     </td>
                     <td>{card.nmID || "Не указано"}</td>
-                    <td><Tag tone={card.qualityClass || "amber"}>{card.quality || "Средняя"}</Tag></td>
+                    <td><Tag tone={completeness.tone}>{completeness.label}</Tag></td>
                     <td>
                       <div className="problem-reasons">
-                        {reasons.length ? reasons.slice(0, 3).map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>) : <Tag tone="green">нет критичных</Tag>}
-                        {reasons.length > 3 ? <span>+{reasons.length - 3}</span> : null}
+                        {reasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
+                        {!reasons.length && signals.length ? signals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>) : null}
+                        {!reasons.length && !signals.length ? <Tag tone="green">нет сигналов</Tag> : null}
                       </div>
                     </td>
-                    <td><Tag tone={card.statusClass || "amber"}>{card.status || "Нужна проверка"}</Tag></td>
+                    <td><Tag tone={workState.tone}>{workState.label}</Tag></td>
                     <td><IconButton icon={Eye} label="Открыть детальную карточку" onClick={() => onOpenCard(card)} /></td>
                   </tr>
                 );

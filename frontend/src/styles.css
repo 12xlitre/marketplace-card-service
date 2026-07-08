@@ -516,7 +516,7 @@ a {
 
 .cards-work-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 150px)) minmax(220px, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 140px)) minmax(220px, 1fr);
   gap: 10px;
 }
 

@@ -2355,8 +2355,6 @@ def card_issue(card):
     issues.append("Название длиннее 60")
   if not str(card.get("description") or "").strip():
     issues.append("Нет описания")
-  if not card.get("brand"):
-    issues.append("Нет бренда")
   if not card.get("characteristics"):
     issues.append("Пустые характеристики")
   if not card.get("photos"):
@@ -2369,16 +2367,16 @@ def card_issue(card):
 
 def normalize_wb_card(card):
   issues = card_issue(card)
-  quality = "Хорошая"
+  quality = "Достаточная"
   quality_class = "green"
   if len(issues) == 1:
-    quality = "Средняя"
+    quality = "Есть пробел"
     quality_class = "amber"
   elif len(issues) > 1:
-    quality = "Низкая"
+    quality = "Есть пробелы"
     quality_class = "red"
 
-  status = "Можно оставить" if not issues else "Нужна проверка"
+  status = "Без сигналов" if not issues else "Автосигнал"
   status_class = "green" if not issues else "amber"
   title = str(card.get("title") or "").strip() or str(card.get("vendorCode") or "Карточка WB")
   return {
