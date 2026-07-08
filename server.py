@@ -103,6 +103,7 @@ def init_db():
         marketplace TEXT NOT NULL DEFAULT 'Wildberries',
         scope TEXT NOT NULL DEFAULT 'full',
         status TEXT NOT NULL DEFAULT 'draft',
+        is_active INTEGER NOT NULL DEFAULT 1,
         api_connected INTEGER NOT NULL DEFAULT 0,
         card_count INTEGER NOT NULL DEFAULT 0,
         work_count INTEGER NOT NULL DEFAULT 0,
@@ -142,6 +143,8 @@ def init_db():
     for column_name in ("card_count", "work_count", "problem_count"):
       if column_name not in portal_columns:
         db.execute(f"ALTER TABLE portals ADD COLUMN {column_name} INTEGER NOT NULL DEFAULT 0")
+    if "is_active" not in portal_columns:
+      db.execute("ALTER TABLE portals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
 
 
 def hash_password(password, salt=None):
@@ -180,6 +183,13 @@ def public_user(row):
     "user_role": row["user_role"],
     "access_level": row["access_level"],
   }
+
+
+def user_can_manage_portals(row):
+  if not row:
+    return False
+  marker = f"{row['user_role']} {row['access_level']} {row['role']}".lower()
+  return any(part in marker for part in ("admin", "manager", "all", "полный", "админ", "руковод", "менедж"))
 
 
 def token_digest(token):
@@ -347,6 +357,7 @@ def list_portals():
         portals.marketplace,
         portals.scope,
         portals.status,
+        portals.is_active,
         portals.api_connected,
         portals.card_count,
         portals.work_count,
@@ -386,6 +397,7 @@ def public_portal_from_row(row):
     "mode": mode,
     "scope": row["scope"],
     "status": row["status"],
+    "isActive": bool(row["is_active"]),
     "ownerLogin": team.get("lead", ""),
     "cardCount": row["card_count"],
     "workCount": row["work_count"],
@@ -411,6 +423,7 @@ def get_portal_row(portal_id):
         portals.marketplace,
         portals.scope,
         portals.status,
+        portals.is_active,
         portals.api_connected,
         portals.card_count,
         portals.work_count,
@@ -447,6 +460,23 @@ def update_portal_team(portal_id, team):
     db.execute(
       "UPDATE portals SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
       (portal_id,),
+    )
+  return get_portal_row(portal_id)
+
+
+def set_portal_active(portal_id, is_active):
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    if not portal:
+      return None
+    db.execute(
+      """
+      UPDATE portals
+      SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (1 if is_active else 0, portal_id),
     )
   return get_portal_row(portal_id)
 
@@ -793,6 +823,7 @@ def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snaps
     "mode": mode,
     "scope": scope,
     "status": "WB read-only" if mode == "api" else "Ручной режим",
+    "isActive": True,
     "ownerLogin": team.get("lead", ""),
     "cardCount": stats.get("cardCount", 0),
     "workCount": stats.get("workCount", 0),
@@ -1065,6 +1096,30 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         {"ok": True},
         {"Set-Cookie": self.session_cookie_header("", max_age=0)},
       )
+      return
+
+    if path.startswith("/api/portals/") and (path.endswith("/archive") or path.endswith("/restore")):
+      user = self.require_user()
+      if not user:
+        return
+      if not user_can_manage_portals(user):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+
+      action = "restore" if path.endswith("/restore") else "archive"
+      suffix = f"/{action}"
+      portal_id_text = path[len("/api/portals/"):-len(suffix)].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+
+      row = set_portal_active(portal_id, action == "restore")
+      if not row:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
       return
 
     if path.startswith("/api/portals/") and path.endswith("/team"):

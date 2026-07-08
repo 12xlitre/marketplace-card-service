@@ -493,6 +493,11 @@
       box-shadow: var(--shadow);
     }
 
+    .workspace-card.inactive {
+      border-style: dashed;
+      background: #fbfcfb;
+    }
+
     .card-head {
       display: flex;
       align-items: flex-start;
@@ -612,6 +617,18 @@
       align-items: center;
       justify-content: space-between;
       gap: 10px;
+    }
+
+    .portal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .card-actions .btn {
+      min-height: 34px;
+      padding: 0 10px;
     }
 
     .workspace-card.add-card {
@@ -761,6 +778,15 @@
     .step.active {
       border-color: #b8ddcc;
       background: var(--green-soft);
+    }
+
+    .step.paused {
+      border-color: #eccd9e;
+      background: var(--amber-soft);
+    }
+
+    .step.off {
+      color: var(--muted);
     }
 
     .step strong {
@@ -1617,11 +1643,10 @@
                 <option>Полный магазин</option>
                 <option>Выбранные карточки</option>
               </select>
-              <select class="select" aria-label="Статус">
-                <option>Все статусы</option>
-                <option>Аудит</option>
-                <option>Согласование</option>
-                <option>Ошибки</option>
+              <select class="select" id="portal-status-filter" aria-label="Статус кабинета">
+                <option value="active">Активные</option>
+                <option value="inactive">Неактивные</option>
+                <option value="all">Все кабинеты</option>
               </select>
             </div>
           </div>
@@ -1655,7 +1680,10 @@
               </div>
               <div class="card-actions">
                 <span class="tag blue">Просмотр данных</span>
-                <button class="btn primary" data-open-seller>Открыть</button>
+                <div class="portal-actions">
+                  <button class="btn" data-archive-portal>В архив</button>
+                  <button class="btn primary" data-open-seller>Открыть</button>
+                </div>
               </div>
             </article>
 
@@ -1779,7 +1807,7 @@
                     <strong id="seller-total-cards">1 284</strong>
                   </div>
                   <div class="metric">
-                    <span>В работе</span>
+                    <span>К проверке</span>
                     <strong id="seller-work-cards">211</strong>
                   </div>
                   <div class="metric">
@@ -1835,7 +1863,7 @@
                     <strong id="scope-source">API</strong>
                   </div>
                   <div class="metric">
-                    <span>Готово к правкам</span>
+                    <span>К проверке</span>
                     <strong id="scope-ready">211</strong>
                   </div>
                   <div class="metric">
@@ -1849,16 +1877,16 @@
                 <div class="strip-head">
                   <div>
                     <h2>Маршрут работы</h2>
-                    <p>Загрузка, аудит, правки, согласование и публикация.</p>
+                    <p id="work-route-copy">Показываем только фактически подключенные этапы.</p>
                   </div>
-                  <span class="tag blue">Шаг 2 из 5</span>
+                  <span class="tag blue" id="work-route-tag">Факт: 1 из 5</span>
                 </div>
-                <div class="pipeline">
+                <div class="pipeline" id="work-route">
                   <div class="step active"><strong>Загрузка</strong><span>данные получены</span></div>
-                  <div class="step active"><strong>Аудит</strong><span>в работе</span></div>
-                  <div class="step"><strong>Правки</strong><span>211 черновиков</span></div>
-                  <div class="step"><strong>Согласование</strong><span>ожидает</span></div>
-                  <div class="step"><strong>Обновление</strong><span>не начато</span></div>
+                  <div class="step paused"><strong>Аудит</strong><span>MPStats не подключен</span></div>
+                  <div class="step off"><strong>Правки</strong><span>0 черновиков</span></div>
+                  <div class="step off"><strong>Согласование</strong><span>нет правок</span></div>
+                  <div class="step off"><strong>Публикация</strong><span>запись в WB отключена</span></div>
                 </div>
               </section>
 
@@ -2415,6 +2443,7 @@
     const asideScope = document.querySelector("#aside-scope");
     const emptyCopy = document.querySelector("#empty-copy");
     const portalList = document.querySelector("#portal-list");
+    const portalStatusFilter = document.querySelector("#portal-status-filter");
     const metricPortals = document.querySelector("#metric-portals");
     const metricCards = document.querySelector("#metric-cards");
     const metricApi = document.querySelector("#metric-api");
@@ -2429,6 +2458,9 @@
     const sellerSourceCopy = document.querySelector("#seller-source-copy");
     const sellerSourceTag = document.querySelector("#seller-source-tag");
     const sellerSourceFlow = document.querySelector("#seller-source-flow");
+    const workRouteCopy = document.querySelector("#work-route-copy");
+    const workRouteTag = document.querySelector("#work-route-tag");
+    const workRoute = document.querySelector("#work-route");
     const cardsTableBody = document.querySelector("#cards-table-body");
     const projectMembers = document.querySelector("#project-members");
     const memberRoleSelect = document.querySelector("#member-role-select");
@@ -2508,6 +2540,7 @@
       workCount: 211,
       problemCount: 38,
       apiConnected: true,
+      isActive: true,
       teamRoles: {
         lead: "manager",
         tech: "specialist",
@@ -2558,6 +2591,7 @@
     let backendPortalsLoaded = false;
     let renderedCards = demoCards;
     let selectedCard = demoCards[0];
+    let demoPortalArchived = localStorage.getItem("opticards-demo-archived") === "1";
 
     function getDisplayUsers() {
       if (!users.length) {
@@ -2746,6 +2780,34 @@
         return roleType === "manager" || roleType === "admin";
       }
       return roleType === "manager" || roleType === "admin";
+    }
+
+    function currentUserCanManagePortals() {
+      if (!currentUser) {
+        return false;
+      }
+      return ["admin", "manager"].includes(getUserRoleType(currentUser));
+    }
+
+    function activePortalFilter() {
+      return portalStatusFilter?.value || "active";
+    }
+
+    function portalMatchesStatusFilter(portal) {
+      const mode = activePortalFilter();
+      if (mode === "all") {
+        return true;
+      }
+      const isActive = portal.isActive !== false;
+      return mode === "active" ? isActive : !isActive;
+    }
+
+    function visiblePortals() {
+      const demo = {
+        ...demoPortal,
+        isActive: !demoPortalArchived
+      };
+      return [demo, ...userPortals].filter(portalMatchesStatusFilter);
     }
 
     function getPortalTeam(portal) {
@@ -2980,6 +3042,7 @@
 
     function getPortalById(id) {
       if (id === demoPortal.id) {
+        demoPortal.isActive = !demoPortalArchived;
         return demoPortal;
       }
       return userPortals.find((portal) => String(portal.id) === String(id)) || demoPortal;
@@ -3095,6 +3158,7 @@
       return {
         ...portal,
         apiConnected: Boolean(portal.apiConnected),
+        isActive: portal.isActive !== false,
         status: portal.mode === "api" && !portal.apiConnected ? "API ожидает подключения" : portal.status,
         ownerLogin: teamRoles.lead,
         teamRoles,
@@ -3155,6 +3219,7 @@
     function createPortalCard(portal) {
       const article = document.createElement("article");
       article.className = "workspace-card";
+      article.classList.toggle("inactive", portal.isActive === false);
       article.dataset.portalId = portal.id;
       article.dataset.userCard = "true";
 
@@ -3178,8 +3243,8 @@
       seller.append(logo, text);
 
       const tag = document.createElement("span");
-      tag.className = portal.mode === "api" ? "tag blue" : "tag amber";
-      tag.textContent = portal.status;
+      tag.className = portal.isActive === false ? "tag amber" : (portal.mode === "api" ? "tag blue" : "tag amber");
+      tag.textContent = portal.isActive === false ? "Неактивен" : portal.status;
       head.append(seller, tag);
 
       const scope = document.createElement("div");
@@ -3204,16 +3269,40 @@
       const actions = document.createElement("div");
       actions.className = "card-actions";
       const mode = document.createElement("span");
-      mode.className = portal.mode === "api" ? "tag blue" : "tag amber";
-      mode.textContent = portal.apiConnected
+      mode.className = portal.isActive === false ? "tag amber" : (portal.mode === "api" ? "tag blue" : "tag amber");
+      mode.textContent = portal.isActive === false
+        ? "В архиве"
+        : (portal.apiConnected
         ? "API подключен"
-        : (portal.mode === "api" ? "API ожидает подключения" : "Ручное наполнение");
-      const button = document.createElement("button");
-      button.className = "btn primary";
-      button.type = "button";
-      button.dataset.openSeller = "true";
-      button.textContent = "Открыть";
-      actions.append(mode, button);
+        : (portal.mode === "api" ? "API ожидает подключения" : "Ручное наполнение"));
+      const buttons = document.createElement("div");
+      buttons.className = "portal-actions";
+      if (portal.isActive === false) {
+        if (currentUserCanManagePortals()) {
+          const restoreButton = document.createElement("button");
+          restoreButton.className = "btn primary";
+          restoreButton.type = "button";
+          restoreButton.dataset.restorePortal = "true";
+          restoreButton.textContent = "Вернуть";
+          buttons.append(restoreButton);
+        }
+      } else {
+        if (currentUserCanManagePortals()) {
+          const archiveButton = document.createElement("button");
+          archiveButton.className = "btn";
+          archiveButton.type = "button";
+          archiveButton.dataset.archivePortal = "true";
+          archiveButton.textContent = "В архив";
+          buttons.append(archiveButton);
+        }
+        const openButton = document.createElement("button");
+        openButton.className = "btn primary";
+        openButton.type = "button";
+        openButton.dataset.openSeller = "true";
+        openButton.textContent = "Открыть";
+        buttons.append(openButton);
+      }
+      actions.append(mode, buttons);
 
       article.append(head, scope, stats, teamSummary, actions);
       return article;
@@ -3222,9 +3311,12 @@
     function renderUserPortals() {
       portalList.querySelectorAll("[data-user-card]").forEach((card) => card.remove());
       const addCard = portalList.querySelector(".add-card");
-      userPortals.forEach((portal) => {
+      userPortals.filter(portalMatchesStatusFilter).forEach((portal) => {
         portalList.insertBefore(createPortalCard(portal), addCard);
       });
+      if (addCard) {
+        addCard.hidden = activePortalFilter() === "inactive";
+      }
       updateDemoPortalCard();
     }
 
@@ -3233,10 +3325,14 @@
       if (!card) {
         return;
       }
+      demoPortal.isActive = !demoPortalArchived;
+      card.hidden = !portalMatchesStatusFilter(demoPortal);
+      card.classList.toggle("inactive", !demoPortal.isActive);
       const title = card.querySelector(".seller h2");
       const copy = card.querySelector(".seller p");
       const headTag = card.querySelector(".card-head .tag");
       const actionTag = card.querySelector(".card-actions .tag");
+      const actions = card.querySelector(".portal-actions");
       const stats = card.querySelectorAll(".mini-stat strong");
       if (title) {
         title.textContent = demoPortal.name;
@@ -3245,12 +3341,40 @@
         copy.textContent = `${demoPortal.marketplace} · кабинет продавца · ${demoPortal.syncStatus === "loaded" ? "WB API read-only" : "просмотр данных"}`;
       }
       if (headTag) {
-        headTag.className = demoPortal.apiConnected ? "tag blue" : "tag amber";
-        headTag.textContent = demoPortal.status;
+        headTag.className = demoPortal.isActive ? (demoPortal.apiConnected ? "tag blue" : "tag amber") : "tag amber";
+        headTag.textContent = demoPortal.isActive ? demoPortal.status : "Неактивен";
       }
       if (actionTag) {
-        actionTag.className = demoPortal.apiConnected ? "tag blue" : "tag amber";
-        actionTag.textContent = demoPortal.apiConnected ? "Просмотр данных" : "Ожидает токен";
+        actionTag.className = demoPortal.isActive ? (demoPortal.apiConnected ? "tag blue" : "tag amber") : "tag amber";
+        actionTag.textContent = demoPortal.isActive
+          ? (demoPortal.apiConnected ? "Просмотр данных" : "Ожидает токен")
+          : "В архиве";
+      }
+      if (actions) {
+        actions.innerHTML = "";
+        if (demoPortal.isActive) {
+          if (currentUserCanManagePortals()) {
+            const archiveButton = document.createElement("button");
+            archiveButton.className = "btn";
+            archiveButton.type = "button";
+            archiveButton.dataset.archivePortal = "true";
+            archiveButton.textContent = "В архив";
+            actions.append(archiveButton);
+          }
+          const openButton = document.createElement("button");
+          openButton.className = "btn primary";
+          openButton.type = "button";
+          openButton.dataset.openSeller = "true";
+          openButton.textContent = "Открыть";
+          actions.append(openButton);
+        } else if (currentUserCanManagePortals()) {
+          const restoreButton = document.createElement("button");
+          restoreButton.className = "btn primary";
+          restoreButton.type = "button";
+          restoreButton.dataset.restorePortal = "true";
+          restoreButton.textContent = "Вернуть";
+          actions.append(restoreButton);
+        }
       }
       [demoPortal.cardCount, demoPortal.workCount, demoPortal.problemCount].forEach((value, index) => {
         if (stats[index]) {
@@ -3266,7 +3390,10 @@
     }
 
     function updateDashboardMetrics() {
-      const allPortals = [demoPortal, ...userPortals];
+      const allPortals = [
+        { ...demoPortal, isActive: !demoPortalArchived },
+        ...userPortals
+      ].filter((portal) => portal.isActive !== false);
       const apiCount = allPortals.filter((portal) => portal.apiConnected).length;
       metricPortals.textContent = formatNumber(allPortals.length);
       metricCards.textContent = formatNumber(allPortals.reduce((sum, portal) => sum + portal.cardCount, 0));
@@ -3301,6 +3428,64 @@
         row.append(span, strong);
         sellerSourceFlow.append(row);
       });
+    }
+
+    function renderWorkRoute(portal) {
+      if (!workRoute) {
+        return;
+      }
+      const hasCards = Number(portal.cardCount || 0) > 0 || Boolean(portal.realCards?.length);
+      const hasSource = portal.apiConnected || portal.mode === "manual";
+      const route = [
+        {
+          title: "Загрузка",
+          status: hasCards ? "данные получены" : (hasSource ? "ожидает загрузку" : "ожидает источник"),
+          className: hasCards ? "active" : "paused"
+        },
+        {
+          title: "Аудит",
+          status: "MPStats не подключен",
+          className: "paused"
+        },
+        {
+          title: "Правки",
+          status: "0 черновиков",
+          className: "off"
+        },
+        {
+          title: "Согласование",
+          status: "нет правок",
+          className: "off"
+        },
+        {
+          title: "Публикация",
+          status: "запись в WB отключена",
+          className: "off"
+        }
+      ];
+
+      workRoute.innerHTML = "";
+      route.forEach((step) => {
+        const item = document.createElement("div");
+        item.className = `step ${step.className}`;
+        const title = document.createElement("strong");
+        title.textContent = step.title;
+        const status = document.createElement("span");
+        status.textContent = step.status;
+        item.append(title, status);
+        workRoute.append(item);
+      });
+
+      const doneCount = route.filter((step) => step.className === "active").length;
+      if (workRouteTag) {
+        workRouteTag.className = doneCount ? "tag blue" : "tag amber";
+        workRouteTag.textContent = doneCount ? `Факт: ${doneCount} из 5` : "Ожидает данные";
+      }
+      if (workRouteCopy) {
+        workRouteCopy.textContent = hasCards
+          ? "Данные WB загружены. Аудит MPStats, черновики правок, согласование и запись в WB пока не подключены."
+          : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.";
+      }
     }
 
     function createTag(label, className) {
@@ -3449,6 +3634,45 @@
       saveUserPortals();
     }
 
+    async function setPortalActive(portal, isActive) {
+      if (!currentUserCanManagePortals() || !portal) {
+        return;
+      }
+
+      if (portal.isDemo) {
+        demoPortalArchived = !isActive;
+        localStorage.setItem("opticards-demo-archived", demoPortalArchived ? "1" : "0");
+        demoPortal.isActive = isActive;
+        if (!isActive && currentPortal.id === demoPortal.id) {
+          currentPortal = userPortals.find((item) => item.isActive !== false) || demoPortal;
+        }
+        renderUserPortals();
+        updateDashboardMetrics();
+        return;
+      }
+
+      const action = isActive ? "restore" : "archive";
+      try {
+        const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/${action}`, {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        const updatedPortal = normalizePortal({
+          ...portal,
+          ...response.portal,
+          realCards: portal.realCards || response.portal.realCards || []
+        });
+        replaceUserPortal(updatedPortal);
+        if (String(currentPortal.id) === String(updatedPortal.id)) {
+          currentPortal = updatedPortal;
+        }
+      } catch (error) {
+        return;
+      }
+      renderUserPortals();
+      updateDashboardMetrics();
+    }
+
     async function loadPortalCards(portal) {
       if (!portal || portal.isDemo || !portal.apiConnected || portal.realCards?.length) {
         return;
@@ -3477,7 +3701,7 @@
       sellerModeTag.className = isApi ? "tag blue" : "tag amber";
       sellerModeTag.textContent = currentPortal.apiConnected ? "API подключен" : (isApi ? "API ожидает подключения" : "ручной режим");
       sellerTotalCards.textContent = formatNumber(currentPortal.cardCount);
-      sellerWorkCards.textContent = formatNumber(currentPortal.workCount);
+      sellerWorkCards.textContent = formatNumber(currentPortal.problemCount);
       sellerProblemCards.textContent = formatNumber(currentPortal.problemCount);
       sellerSourceTag.className = isApi ? "tag blue" : "tag amber";
       sellerSourceTag.textContent = currentPortal.apiConnected ? "API подключен" : (isApi ? "API ожидает подключения" : "таблицы и ручной ввод");
@@ -3494,6 +3718,7 @@
         sellerSourceCopy.textContent = "Backend готов к read-only WB API. Добавьте WB_API_TOKEN в .env.local или сохраните токен через серверную команду, затем перезапустите прототип.";
       }
       renderSourceFlow(currentPortal);
+      renderWorkRoute(currentPortal);
       renderCardsTable(currentPortal);
       renderProjectMembers();
       setScope(currentPortal.scope);
@@ -3578,7 +3803,7 @@
       const selected = scope === "selected";
       scopeCount.textContent = selected ? "46" : formatNumber(currentPortal.cardCount);
       scopeSource.textContent = selected ? "Таблица" : (currentPortal.apiConnected ? "API" : "Ручной");
-      scopeReady.textContent = selected ? "19" : formatNumber(currentPortal.workCount);
+      scopeReady.textContent = selected ? "19" : formatNumber(currentPortal.problemCount);
       scopeAlerts.textContent = selected ? "6" : formatNumber(currentPortal.problemCount);
       asideScope.textContent = selected ? "выбранные карточки" : "весь магазин";
       emptyCopy.textContent = selected
@@ -3673,6 +3898,20 @@
         return;
       }
 
+      const archivePortalButton = event.target.closest("[data-archive-portal]");
+      if (archivePortalButton) {
+        const card = archivePortalButton.closest(".workspace-card");
+        setPortalActive(getPortalById(card?.dataset.portalId || "demo-wb"), false);
+        return;
+      }
+
+      const restorePortalButton = event.target.closest("[data-restore-portal]");
+      if (restorePortalButton) {
+        const card = restorePortalButton.closest(".workspace-card");
+        setPortalActive(getPortalById(card?.dataset.portalId || "demo-wb"), true);
+        return;
+      }
+
       const openSellerButton = event.target.closest("[data-open-seller]");
       if (openSellerButton) {
         const card = openSellerButton.closest(".workspace-card");
@@ -3705,6 +3944,9 @@
     });
     scopeButtons.forEach((button) => {
       button.addEventListener("click", () => setScope(button.dataset.scope));
+    });
+    portalStatusFilter.addEventListener("change", () => {
+      renderUserPortals();
     });
     memberRoleSelect.addEventListener("change", fillMemberSelect);
     addMemberButton.addEventListener("click", async () => {
