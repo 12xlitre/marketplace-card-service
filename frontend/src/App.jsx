@@ -5978,12 +5978,13 @@ function AuditCompetitorSelection({ selection }) {
   const rejected = Array.isArray(selection?.manualRejected) ? selection.manualRejected : [];
   const accepted = Array.isArray(selection?.manualAccepted) ? selection.manualAccepted : [];
   const autoSelected = Array.isArray(selection?.autoSelected) ? selection.autoSelected : [];
+  const autoSkippedReason = selection?.autoSkippedReason || "";
   return (
     <>
       <p>
         {accepted.length ? `${accepted.length} ручн. принято. ` : ""}
         {rejected.length ? `${rejected.length} ручн. отклонено. ` : ""}
-        {autoSelected.length ? `${autoSelected.length} добран(о) через MPStats.` : "Автодобор MPStats не потребовался."}
+        {autoSelected.length ? `${autoSelected.length} добран(о) через MPStats.` : autoSkippedReason || "Автодобор MPStats не потребовался."}
       </p>
       {finalCompetitors.length ? (
         <div className="audit-competitor-rows">

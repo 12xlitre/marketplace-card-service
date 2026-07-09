@@ -4348,35 +4348,39 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
       break
 
   auto_candidates = []
-  for item in market_data.get("nicheItems", []):
-    if str(item.get("nmId")) in seen:
-      continue
-    candidate = {
-      **item,
-      "subjectName": item.get("subjectName") or card.get("subjectName") or "",
-      "subjectPath": market_data.get("subjectPath"),
-      "selectionSource": "mpstats",
-      "source": "mpstats",
-    }
-    score, reasons = audit_competitor_similarity(card, market_data, candidate)
-    candidate["similarityScore"] = score
-    candidate["similarityReasons"] = reasons
-    revenue = audit_number(candidate.get("revenue"), 0) or 0
-    auto_candidates.append((score, revenue, candidate))
-  auto_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+  manual_set_complete = len(selection["manualRequested"]) >= 3
+  if manual_set_complete:
+    selection["autoSkippedReason"] = "Пользователь указал 3 конкурента для аудита, поэтому автодобор MPStats не выполнялся."
+  else:
+    for item in market_data.get("nicheItems", []):
+      if str(item.get("nmId")) in seen:
+        continue
+      candidate = {
+        **item,
+        "subjectName": item.get("subjectName") or card.get("subjectName") or "",
+        "subjectPath": market_data.get("subjectPath"),
+        "selectionSource": "mpstats",
+        "source": "mpstats",
+      }
+      score, reasons = audit_competitor_similarity(card, market_data, candidate)
+      candidate["similarityScore"] = score
+      candidate["similarityReasons"] = reasons
+      revenue = audit_number(candidate.get("revenue"), 0) or 0
+      auto_candidates.append((score, revenue, candidate))
+    auto_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
-  for _, _, item in auto_candidates:
-    if len(competitors) >= 5:
-      break
-    seen.add(str(item.get("nmId")))
-    item["whyRelevant"] = (
-      "Добран автоматически из MPStats по нише: "
-      f"{', '.join((item.get('similarityReasons') or [])[:3]) or 'коммерчески похожий товар'}."
-    )
-    competitors.append(item)
-    selection["autoSelected"].append(
-      audit_competitor_selection_item(item, "mpstats", "selected", item["whyRelevant"], item.get("similarityReasons"))
-    )
+    for _, _, item in auto_candidates:
+      if len(competitors) >= 5:
+        break
+      seen.add(str(item.get("nmId")))
+      item["whyRelevant"] = (
+        "Добран автоматически из MPStats по нише: "
+        f"{', '.join((item.get('similarityReasons') or [])[:3]) or 'коммерчески похожий товар'}."
+      )
+      competitors.append(item)
+      selection["autoSelected"].append(
+        audit_competitor_selection_item(item, "mpstats", "selected", item["whyRelevant"], item.get("similarityReasons"))
+      )
 
   for competitor in competitors:
     if not competitor.get("descriptionLength") or not competitor.get("characteristics"):
@@ -4406,22 +4410,121 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
   return competitors, selection
 
 
-def audit_title_candidate(card, keywords):
+AUDIT_TITLE_STOPWORDS = {
+  "для",
+  "без",
+  "под",
+  "над",
+  "при",
+  "или",
+  "это",
+  "как",
+  "что",
+  "женская",
+  "женские",
+  "женский",
+  "мужская",
+  "мужские",
+  "мужской",
+}
+
+
+def audit_title_token_key(token):
+  token = audit_normalized(token)
+  if token.startswith("пижам"):
+    return "пижам"
+  if token.startswith("штан") or token.startswith("брюк"):
+    return "брюк"
+  if token.startswith("хлоп"):
+    return "хлоп"
+  if token.startswith("полоск"):
+    return "полоск"
+  if token.startswith("костюм"):
+    return "костюм"
+  return audit_stem_characteristic_token(token)
+
+
+def audit_title_add_token(candidate, token, used_keys):
+  token = audit_str(token)
+  key = audit_title_token_key(token)
+  if len(token) < 4 or token in AUDIT_TITLE_STOPWORDS or not key or key in used_keys:
+    return candidate, False
+  next_candidate = f"{candidate} {token}".strip()
+  if len(next_candidate) > 60:
+    return candidate, False
+  used_keys.add(key)
+  return next_candidate, True
+
+
+def audit_title_candidate(card, keywords, competitors=None):
   current = audit_str(card.get("title") or "")
   subject = audit_str(card.get("subjectName") or "")
   brand = audit_str(card.get("brand") or "")
-  top_missing = [item for item in keywords if item.get("wbCount") and not audit_contains_phrase(current, item.get("query"))]
-  phrase = top_missing[0]["query"] if top_missing else ""
-  base = phrase or current or subject or "Карточка WB"
-  extras = []
-  if subject and not audit_contains_phrase(base, subject):
-    extras.append(subject)
-  if brand and len(base) + len(brand) + 1 <= 60 and not audit_contains_phrase(base, brand):
-    extras.append(brand)
-  candidate = " ".join([base, *extras]).replace("  ", " ").strip()
+  base = current or subject or "Карточка WB"
+  candidate_parts = audit_unique(re.split(r"\s+", base), limit=10)
+  candidate = " ".join(candidate_parts)
+  used_keys = {audit_title_token_key(token) for token in audit_tokens(candidate)}
+  current_traits = audit_commercial_traits(card)
+  current_text = audit_commercial_text(card)
+  competitor_titles = [
+    audit_str(item.get("title") or item.get("name") or "")
+    for item in (competitors or [])[:5]
+    if isinstance(item, dict)
+  ]
+  competitor_text = " ".join(competitor_titles)
+
+  relevant_keywords = []
+  for item in keywords[:20]:
+    query = audit_str(item.get("query") if isinstance(item, dict) else "")
+    if not query or audit_contains_phrase(candidate, query):
+      continue
+    query_traits = audit_commercial_traits({"title": query})
+    if audit_trait_conflict(current_traits, query_traits, "gender") or audit_trait_conflict(current_traits, query_traits, "age"):
+      continue
+    if current_traits.get("product") and query_traits.get("product") and not audit_trait_overlap(current_traits, query_traits, "product"):
+      continue
+    overlap = audit_token_overlap_score(current_text, query)
+    if overlap < 0.25 and not audit_trait_overlap(current_traits, query_traits, "product"):
+      continue
+    competitor_overlap = audit_token_overlap_score(competitor_text, query) if competitor_text else 0
+    demand = audit_int(item.get("wbCount"), 0) if isinstance(item, dict) else 0
+    relevant_keywords.append((competitor_overlap, overlap, demand, query))
+
+  relevant_keywords.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+  for _, _, _, query in relevant_keywords:
+    for token in audit_tokens(query):
+      candidate, _ = audit_title_add_token(candidate, token, used_keys)
+    if len(candidate) >= 52:
+      break
+
+  if brand and len(candidate) + len(brand) + 1 <= 60 and not audit_contains_phrase(candidate, brand):
+    candidate = f"{candidate} {brand}".strip()
   if len(candidate) > 60:
     candidate = candidate[:60].rsplit(" ", 1)[0].strip() or candidate[:60].strip()
   return candidate or current[:60]
+
+
+def audit_title_change_reason(card, current_title, recommended_title, keywords, competitors):
+  competitor_titles = [audit_str(item.get("title") or item.get("name") or "") for item in (competitors or [])[:5] if item.get("title") or item.get("name")]
+  competitor_overlap = sum(1 for title in competitor_titles if audit_token_overlap_score(recommended_title, title) >= 0.35)
+  if audit_normalized(current_title) == audit_normalized(recommended_title):
+    competitor_part = f", сверив ее с {competitor_overlap} заголовками конкурентов" if competitor_overlap else ""
+    return f"Заголовок оставлен без изменений: аудит проверил текущую формулировку{competitor_part} и не нашел релевантного усиления без потери смысла товара."
+  current_keys = {audit_title_token_key(token) for token in audit_tokens(current_title)}
+  used_tokens = [
+    token
+    for token in audit_tokens(recommended_title)
+    if audit_title_token_key(token) not in current_keys
+  ]
+  keyword = next((item for item in keywords[:10] if isinstance(item, dict) and audit_contains_phrase(recommended_title, item.get("query"))), None)
+  parts = []
+  if used_tokens:
+    parts.append(f"добавлены релевантные слова: {', '.join(audit_unique(used_tokens, limit=4))}")
+  if keyword:
+    parts.append(f"учтен поисковый запрос «{keyword.get('query')}»")
+  if competitor_overlap:
+    parts.append(f"сверено с {competitor_overlap} заголовками конкурентов")
+  return "Аудит переписал заголовок: " + "; ".join(parts or ["сохранил товарную суть и усилил формулировку"]) + "."
 
 
 AUDIT_DESCRIPTION_ADVICE_PATTERNS = (
@@ -4621,19 +4724,15 @@ def audit_build_characteristics(card, subject_characteristics, mpstats_character
 def audit_build_result(card, market_data, competitors, characteristics, warnings, period):
   keywords = market_data.get("keywords", [])
   current_title = audit_str(card.get("title") or "")
-  recommended_title = audit_title_candidate(card, keywords)
+  recommended_title = audit_title_candidate(card, keywords, competitors)
   missing_keywords = [item for item in keywords[:8] if not audit_contains_phrase(current_title, item.get("query"))]
-  title_reason = "Название собрано по текущим данным WB."
+  title_reason = audit_title_change_reason(card, current_title, recommended_title, keywords, competitors)
   title_priority = "low"
-  if missing_keywords:
-    top = missing_keywords[0]
-    pos = top.get("orgPos")
-    pos_text = f", органическая позиция {pos}" if pos not in (None, "", 0, "0") else ", в органике не найдено"
-    title_reason = f"Запрос «{top['query']}» ({audit_format_count(top.get('wbCount'))} показов/мес){pos_text}; его нет в текущем заголовке."
-    title_priority = "high" if audit_int(top.get("wbCount"), 0) >= 1000 else "medium"
-  elif len(current_title) > 60:
+  if len(current_title) > 60:
     title_reason = "Название длиннее лимита WB 60 символов; аудит предлагает укоротить без потери предмета."
     title_priority = "high"
+  elif audit_normalized(recommended_title) != audit_normalized(current_title):
+    title_priority = "medium"
 
   description = audit_str(card.get("description") or "", 7000)
   recommended_description = audit_description_candidate(card, keywords, competitors, characteristics)
@@ -4671,7 +4770,7 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   high_characteristics = [item for item in characteristics if item.get("priority") == "high"]
   quick_wins = []
   if title_priority in {"high", "medium"} and recommended_title != current_title:
-    quick_wins.append(f"Переписать заголовок под частотный запрос: {recommended_title}.")
+    quick_wins.append(f"Переписать заголовок по аудиту: {recommended_title}.")
   quick_wins.extend(
     f"Заполнить «{item['name']}»: {', '.join(item.get('recommendedValues') or [])}."
     for item in high_characteristics[:3]
