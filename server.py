@@ -191,6 +191,27 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS card_competitors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        nm_id TEXT NOT NULL DEFAULT '',
+        vendor_code TEXT NOT NULL DEFAULT '',
+        competitor_nm_id TEXT NOT NULL,
+        competitor_url TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        position INTEGER NOT NULL DEFAULT 0,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        previous_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        changed_fields_json TEXT NOT NULL DEFAULT '[]',
+        last_checked_at TEXT,
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, card_key, competitor_nm_id)
+      );
+
       CREATE TABLE IF NOT EXISTS portal_workset_cards (
         portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
         card_key TEXT NOT NULL,
@@ -275,6 +296,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_approval_events_portal_card
       ON card_approval_events(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_card_competitors_portal_card
+      ON card_competitors(portal_id, card_key, position)
       """
     )
     db.execute(
@@ -1965,6 +1992,374 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
         event,
       )
   return get_card_draft(numeric_portal_id, card_key, user)
+
+
+def parse_competitor_nm_id(value):
+  text = str(value or "").strip()
+  if not text:
+    return ""
+  matches = re.findall(r"\d{6,12}", text)
+  return matches[-1] if matches else ""
+
+
+def wb_public_card_url(nm_id):
+  nm_id = parse_competitor_nm_id(nm_id)
+  return f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx" if nm_id else ""
+
+
+def safe_json_object(value):
+  if isinstance(value, dict):
+    return value
+  try:
+    parsed = json.loads(value or "{}")
+  except (TypeError, json.JSONDecodeError):
+    return {}
+  return parsed if isinstance(parsed, dict) else {}
+
+
+def safe_json_list(value):
+  if isinstance(value, list):
+    return value
+  try:
+    parsed = json.loads(value or "[]")
+  except (TypeError, json.JSONDecodeError):
+    return []
+  return parsed if isinstance(parsed, list) else []
+
+
+def wb_public_price(value):
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return None
+  if number <= 0:
+    return None
+  return round(number / 100, 2) if number > 10000 else round(number, 2)
+
+
+def wb_public_product_price(product, keys):
+  if not isinstance(product, dict):
+    return None
+  for key in keys:
+    value = product.get(key)
+    price = wb_public_price(value)
+    if price is not None:
+      return price
+  for size in product.get("sizes") or []:
+    if not isinstance(size, dict):
+      continue
+    price_meta = size.get("price") if isinstance(size.get("price"), dict) else {}
+    for key in keys:
+      price = wb_public_price(size.get(key) or price_meta.get(key))
+      if price is not None:
+        return price
+  return None
+
+
+def fetch_wb_public_product(nm_id, warnings):
+  nm_id = parse_competitor_nm_id(nm_id)
+  if not nm_id:
+    return {}
+  params = urlencode({
+    "appType": "1",
+    "curr": "rub",
+    "dest": "-1257786",
+    "spp": "30",
+    "nm": nm_id,
+  })
+  last_error = ""
+  for version in ("v4", "v2"):
+    url = f"https://card.wb.ru/cards/{version}/detail?{params}"
+    try:
+      request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 OptiCards/0.1 competitors-wb-public"})
+      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
+      last_error = f"{type(exc).__name__}{f' {exc.code}' if isinstance(exc, urlerror.HTTPError) else ''}"
+      continue
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    products = payload.get("products") if isinstance(payload, dict) else []
+    if not isinstance(products, list) or not products:
+      products = data.get("products") if isinstance(data, dict) else []
+    if isinstance(products, list) and products:
+      product = products[0]
+      return product if isinstance(product, dict) else {}
+  warnings.append(f"WB public detail недоступен для {nm_id}: {last_error or 'empty response'}")
+  return {}
+
+
+def competitor_characteristic_signature(characteristics):
+  rows = audit_card_characteristics({"characteristics": characteristics})
+  return "|".join(
+    f"{audit_str(row.get('name')).lower()}={audit_str(row.get('value')).lower()}"
+    for row in rows[:80]
+  )
+
+
+def competitor_snapshot_from_sources(nm_id):
+  warnings = []
+  product = fetch_wb_public_product(nm_id, warnings)
+  cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  merged = audit_merge_card_content({}, cdn_card)
+  title = audit_str(product.get("name") or merged.get("title") or "")
+  brand = audit_str(product.get("brand") or merged.get("brand") or "")
+  subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or "")
+  characteristics = audit_card_characteristics(merged)
+  price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
+  extended = product.get("extended") if isinstance(product.get("extended"), dict) else {}
+  discounted_price = wb_public_product_price(product, ("salePriceU", "salePrice", "clientSalePriceU", "product", "total"))
+  if discounted_price is None:
+    discounted_price = wb_public_price(extended.get("clientPriceU"))
+  if discounted_price is None:
+    discounted_price = price
+  snapshot = {
+    "nmID": parse_competitor_nm_id(nm_id),
+    "url": wb_public_card_url(nm_id),
+    "title": title,
+    "brand": brand,
+    "subjectName": subject,
+    "price": price,
+    "discountedPrice": discounted_price,
+    "discount": product.get("sale") or product.get("clientSale") or None,
+    "rating": product.get("reviewRating") or product.get("rating") or None,
+    "feedbacks": product.get("feedbacks") or product.get("comments") or None,
+    "photosCount": product.get("pics") or product.get("photosCount") or None,
+    "descriptionLength": len(audit_str(merged.get("description") or "")),
+    "characteristicsCount": len(characteristics),
+    "characteristicsSignature": competitor_characteristic_signature(merged.get("characteristics") or []),
+    "checkedAt": utc_now().isoformat(),
+    "warnings": audit_public_warnings(warnings),
+  }
+  return snapshot
+
+
+def competitor_snapshot_value(snapshot, key):
+  value = snapshot.get(key) if isinstance(snapshot, dict) else None
+  if value is None:
+    return ""
+  return str(value)
+
+
+def competitor_snapshot_changes(previous, current):
+  previous = previous if isinstance(previous, dict) else {}
+  current = current if isinstance(current, dict) else {}
+  if not previous:
+    return []
+  fields = [
+    ("title", "Заголовок"),
+    ("brand", "Бренд"),
+    ("subjectName", "Категория"),
+    ("discountedPrice", "Цена со скидкой"),
+    ("price", "Цена до скидки"),
+    ("photosCount", "Фото"),
+    ("descriptionLength", "Длина описания"),
+    ("characteristicsCount", "Характеристики"),
+    ("characteristicsSignature", "Состав характеристик"),
+  ]
+  changes = []
+  for key, label in fields:
+    before = competitor_snapshot_value(previous, key)
+    after = competitor_snapshot_value(current, key)
+    if before == after:
+      continue
+    change = {
+      "field": key,
+      "label": label,
+      "previous": previous.get(key),
+      "current": current.get(key),
+      "critical": key in {"title", "discountedPrice", "photosCount", "descriptionLength", "characteristicsSignature"},
+    }
+    if key == "discountedPrice":
+      old_price = audit_number(previous.get(key), None)
+      new_price = audit_number(current.get(key), None)
+      if old_price and new_price:
+        change["deltaPercent"] = round((new_price - old_price) / old_price * 100, 1)
+        change["critical"] = new_price < old_price * 0.97
+    changes.append(change)
+  return changes[:12]
+
+
+def public_card_competitor(row):
+  snapshot = safe_json_object(row["snapshot_json"])
+  previous_snapshot = safe_json_object(row["previous_snapshot_json"])
+  changes = safe_json_list(row["changed_fields_json"])
+  return {
+    "id": row["id"],
+    "portalId": str(row["portal_id"]),
+    "cardKey": row["card_key"],
+    "nmID": row["nm_id"],
+    "vendorCode": row["vendor_code"],
+    "competitorNmID": row["competitor_nm_id"],
+    "url": row["competitor_url"] or wb_public_card_url(row["competitor_nm_id"]),
+    "note": row["note"] or "",
+    "position": row["position"],
+    "snapshot": snapshot,
+    "previousSnapshot": previous_snapshot,
+    "changes": changes,
+    "hasCriticalChanges": any(bool(item.get("critical")) for item in changes if isinstance(item, dict)),
+    "lastCheckedAt": row["last_checked_at"] or "",
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def list_card_competitors(portal_id, card_key, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM card_competitors
+      WHERE portal_id = ? AND card_key = ?
+      ORDER BY position, updated_at DESC, id
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchall()
+  return [public_card_competitor(row) for row in rows]
+
+
+def save_card_competitors(portal_id, card_key, nm_id, vendor_code, competitors, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  if not isinstance(competitors, list):
+    raise ValueError("invalid_competitors")
+  cleaned = []
+  seen = set()
+  for index, item in enumerate(competitors[:3]):
+    raw_value = (item.get("url") or item.get("competitorNmID") or item.get("nmID")) if isinstance(item, dict) else item
+    competitor_nm_id = parse_competitor_nm_id(raw_value)
+    if not competitor_nm_id or competitor_nm_id in seen:
+      continue
+    seen.add(competitor_nm_id)
+    note = str(item.get("note") or "")[:500] if isinstance(item, dict) else ""
+    cleaned.append({
+      "competitorNmID": competitor_nm_id,
+      "url": wb_public_card_url(competitor_nm_id),
+      "note": note,
+      "position": index,
+    })
+  with connect_db() as db:
+    existing_rows = db.execute(
+      """
+      SELECT competitor_nm_id
+      FROM card_competitors
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchall()
+    existing_ids = {row["competitor_nm_id"] for row in existing_rows}
+    next_ids = {item["competitorNmID"] for item in cleaned}
+    for competitor_nm_id in existing_ids - next_ids:
+      db.execute(
+        "DELETE FROM card_competitors WHERE portal_id = ? AND card_key = ? AND competitor_nm_id = ?",
+        (numeric_portal_id, card_key, competitor_nm_id),
+      )
+    for item in cleaned:
+      db.execute(
+        """
+        INSERT INTO card_competitors (
+          portal_id, card_key, nm_id, vendor_code, competitor_nm_id,
+          competitor_url, note, position, created_by, updated_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(portal_id, card_key, competitor_nm_id) DO UPDATE SET
+          nm_id = excluded.nm_id,
+          vendor_code = excluded.vendor_code,
+          competitor_url = excluded.competitor_url,
+          note = excluded.note,
+          position = excluded.position,
+          updated_by = excluded.updated_by,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+          numeric_portal_id,
+          card_key,
+          str(nm_id or "")[:80],
+          str(vendor_code or "")[:120],
+          item["competitorNmID"],
+          item["url"],
+          item["note"],
+          item["position"],
+          user["login"],
+          user["login"],
+        ),
+      )
+  return list_card_competitors(numeric_portal_id, card_key, user)
+
+
+def refresh_card_competitors(portal_id, card_key, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  checked_at = utc_now().isoformat()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM card_competitors
+      WHERE portal_id = ? AND card_key = ?
+      ORDER BY position, id
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchall()
+    for row in rows:
+      previous_snapshot = safe_json_object(row["snapshot_json"])
+      current_snapshot = competitor_snapshot_from_sources(row["competitor_nm_id"])
+      has_current_data = bool(current_snapshot.get("title") or current_snapshot.get("price") or current_snapshot.get("discountedPrice"))
+      if previous_snapshot and not has_current_data:
+        current_snapshot = {
+          **previous_snapshot,
+          "checkedAt": current_snapshot.get("checkedAt") or checked_at,
+          "warnings": current_snapshot.get("warnings") or ["Публичный снимок WB временно не обновился"],
+        }
+        changes = []
+      else:
+        changes = competitor_snapshot_changes(previous_snapshot, current_snapshot)
+      db.execute(
+        """
+        UPDATE card_competitors
+        SET snapshot_json = ?,
+            previous_snapshot_json = ?,
+            changed_fields_json = ?,
+            last_checked_at = ?,
+            updated_by = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+          json.dumps(current_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
+          checked_at,
+          user["login"],
+          row["id"],
+        ),
+      )
+  return list_card_competitors(numeric_portal_id, card_key, user)
 
 
 def public_service_integration(row):
@@ -4555,6 +4950,27 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, {"draft": draft})
       return
 
+    if path == "/api/card-competitors":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      card_key = query.get("card_key", [""])[0]
+      if not portal_id or not card_key:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_competitor_request"})
+        return
+      try:
+        competitors = list_card_competitors(portal_id, card_key, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitor_request"})
+        return
+      self.send_json(HTTPStatus.OK, {"competitors": competitors})
+      return
+
     if path == "/api/wb/characteristics":
       user = self.require_user()
       if not user:
@@ -5034,6 +5450,49 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
         return
       self.send_json(HTTPStatus.OK, {"draft": draft})
+      return
+
+    if path == "/api/card-competitors":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        competitors = save_card_competitors(
+          payload.get("portalId"),
+          payload.get("cardKey"),
+          payload.get("nmID"),
+          payload.get("vendorCode"),
+          payload.get("competitors"),
+          user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitors"})
+        return
+      self.send_json(HTTPStatus.OK, {"competitors": competitors})
+      return
+
+    if path == "/api/card-competitors/refresh":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        competitors = refresh_card_competitors(
+          payload.get("portalId"),
+          payload.get("cardKey"),
+          user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitors"})
+        return
+      self.send_json(HTTPStatus.OK, {"competitors": competitors})
       return
 
     if path == "/api/card-workset":

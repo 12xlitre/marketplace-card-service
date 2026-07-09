@@ -1575,7 +1575,7 @@ tr:last-child td {
   backdrop-filter: blur(14px);
   padding: 6px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1608,6 +1608,202 @@ tr:last-child td {
   border-color: var(--line);
   background: var(--brand-soft);
   color: var(--brand);
+}
+
+.competitors-strip {
+  display: grid;
+  gap: 14px;
+}
+
+.competitor-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.competitor-input {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.competitor-input input {
+  width: 100%;
+  min-width: 0;
+}
+
+.competitor-status {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 9px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.competitor-status.status-invalid,
+.competitor-status.status-duplicate,
+.competitor-status.status-limit,
+.competitor-status.status-error {
+  border-color: #ead08f;
+  background: #fff9e8;
+  color: #7b5a00;
+}
+
+.competitor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.competitor-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.competitor-card.critical {
+  border-color: #e7c46c;
+  background: #fffaf0;
+}
+
+.competitor-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.competitor-card-head strong,
+.competitor-card-head span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.competitor-card-head strong {
+  color: var(--blue);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.competitor-card-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.competitor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.icon-link {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--blue);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.icon-link:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.competitor-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--line);
+  gap: 1px;
+}
+
+.competitor-metrics div {
+  background: var(--surface-soft);
+  padding: 8px;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.competitor-metrics span,
+.competitor-changes span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+
+.competitor-metrics strong {
+  min-width: 0;
+  color: var(--blue);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.competitor-changes {
+  display: grid;
+  gap: 6px;
+}
+
+.competitor-changes p {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+  display: grid;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.competitor-changes strong {
+  color: var(--blue);
+}
+
+.competitor-changes em {
+  color: var(--red);
+  font-style: normal;
+  font-weight: 800;
+}
+
+.competitor-changes small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.competitor-changes.empty p {
+  color: var(--muted);
+}
+
+.competitor-warning {
+  border-left: 3px solid #e7c46c;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .changes-context {
@@ -2741,6 +2937,10 @@ tr:last-child td {
   .content-audit-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .competitor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
@@ -2778,6 +2978,7 @@ tr:last-child td {
 
   .detail-tabs {
     top: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .content {
@@ -2839,6 +3040,8 @@ tr:last-child td {
     .approval-event-row,
     .semantic-core-grid,
     .settings-grid,
+  .competitor-toolbar,
+  .competitor-grid,
   .form-two,
   .connect-mode,
   .before-after,

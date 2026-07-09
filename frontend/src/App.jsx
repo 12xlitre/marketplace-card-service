@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Archive,
+  AlertTriangle,
   ArrowLeft,
   CheckSquare,
   ClipboardList,
@@ -17,6 +18,7 @@ import {
   Search,
   Settings,
   Tags,
+  Trash2,
   Upload,
   Warehouse,
   X,
@@ -3887,6 +3889,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
+  const [competitors, setCompetitors] = useState([]);
+  const [competitorInput, setCompetitorInput] = useState("");
+  const [competitorStatus, setCompetitorStatus] = useState("idle");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
@@ -3911,6 +3916,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const draftCardKey = cardDraftKey(card);
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
+  const competitorsEnabled = backendDraftEnabled;
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
   const mpstatsMatches = countMpstatsMatches(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
   const promotionRelevantCount = countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
@@ -4026,6 +4032,36 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       active = false;
     };
   }, [draftStorageKey, draftCardKey, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
+
+  useEffect(() => {
+    let active = true;
+    setCompetitors([]);
+    setCompetitorInput("");
+    setCompetitorStatus(competitorsEnabled ? "loading" : "unavailable");
+    if (!competitorsEnabled || !draftCardKey) {
+      return () => {
+        active = false;
+      };
+    }
+    const params = new URLSearchParams({
+      portal_id: String(portal.id),
+      card_key: String(draftCardKey),
+    });
+    apiRequest(`/api/card-competitors?${params.toString()}`)
+      .then((payload) => {
+        if (!active) return;
+        setCompetitors(Array.isArray(payload.competitors) ? payload.competitors : []);
+        setCompetitorStatus("idle");
+      })
+      .catch(() => {
+        if (!active) return;
+        setCompetitors([]);
+        setCompetitorStatus("error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [competitorsEnabled, portal?.id, draftCardKey]);
 
   useEffect(() => {
     const subjectID = Number(card?.subjectID || rawFields.subjectID || 0);
@@ -4384,6 +4420,95 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }));
   }
 
+  function competitorRequestBody(nextCompetitors) {
+    return {
+      portalId: portal?.id,
+      cardKey: draftCardKey,
+      nmID: card?.nmID || "",
+      vendorCode: card?.vendorCode || "",
+      competitors: nextCompetitors.slice(0, 3).map((item, index) => ({
+        competitorNmID: item.competitorNmID || item.nmID || "",
+        url: item.url || item.competitorUrl || "",
+        note: item.note || "",
+        position: index,
+      })),
+    };
+  }
+
+  async function saveCompetitorList(nextCompetitors, { refreshAfter = false } = {}) {
+    if (!competitorsEnabled) {
+      setCompetitorStatus("unavailable");
+      return;
+    }
+    setCompetitorStatus("saving");
+    try {
+      const payload = await apiRequest("/api/card-competitors", {
+        method: "POST",
+        body: JSON.stringify(competitorRequestBody(nextCompetitors)),
+      });
+      const savedCompetitors = Array.isArray(payload.competitors) ? payload.competitors : [];
+      setCompetitors(savedCompetitors);
+      setCompetitorStatus("saved");
+      if (refreshAfter && savedCompetitors.length) {
+        await refreshCompetitors({ statusOnDone: "saved", force: true });
+      }
+    } catch {
+      setCompetitorStatus("error");
+    }
+  }
+
+  async function addCompetitor() {
+    const nmID = competitorNmIdFromInput(competitorInput);
+    if (!nmID) {
+      setCompetitorStatus("invalid");
+      return;
+    }
+    if (competitors.some((item) => String(item.competitorNmID) === nmID)) {
+      setCompetitorStatus("duplicate");
+      return;
+    }
+    if (competitors.length >= 3) {
+      setCompetitorStatus("limit");
+      return;
+    }
+    const nextCompetitors = [
+      ...competitors,
+      {
+        competitorNmID: nmID,
+        url: wbCompetitorUrl(nmID),
+        note: "",
+      },
+    ];
+    setCompetitorInput("");
+    await saveCompetitorList(nextCompetitors, { refreshAfter: true });
+  }
+
+  async function removeCompetitor(competitor) {
+    const nextCompetitors = competitors.filter((item) => item.competitorNmID !== competitor.competitorNmID);
+    await saveCompetitorList(nextCompetitors);
+  }
+
+  async function refreshCompetitors({ statusOnDone = "refreshed", force = false } = {}) {
+    if (!competitorsEnabled || (!force && !competitors.length)) {
+      setCompetitorStatus(competitorsEnabled ? "empty" : "unavailable");
+      return;
+    }
+    setCompetitorStatus("refreshing");
+    try {
+      const payload = await apiRequest("/api/card-competitors/refresh", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal?.id,
+          cardKey: draftCardKey,
+        }),
+      });
+      setCompetitors(Array.isArray(payload.competitors) ? payload.competitors : []);
+      setCompetitorStatus(statusOnDone);
+    } catch {
+      setCompetitorStatus("error");
+    }
+  }
+
   async function applySemanticKeyword(item, targetOverride = "") {
     const query = String(item?.query || "").trim();
     if (!query) return;
@@ -4675,7 +4800,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       </header>
 
       <div className="content">
-        <div className={`detail-layout ${activeTab === "changes" ? "wide-changes" : ""}`}>
+        <div className={`detail-layout ${activeTab === "changes" || activeTab === "competitors" ? "wide-changes" : ""}`}>
           <aside className="detail-aside">
             <div className={`photo-preview ${photoUrl ? "has-image" : ""}`}>
               {photoUrl ? <img src={photoUrl} alt={currentTitle} loading="eager" decoding="async" /> : null}
@@ -4703,6 +4828,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
               <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => setActiveTab("card")}>Карточка</button>
               <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Аудит</button>
               <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
+              <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => setActiveTab("competitors")}>ТОП конкурентов</button>
             </nav>
 
             {activeTab === "audit" ? (
@@ -4881,6 +5007,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <RawFieldsView fields={rawFields} />
                 </details>
               </>
+            ) : null}
+
+            {activeTab === "competitors" ? (
+              <TopCompetitorsPanel
+                competitors={competitors}
+                competitorInput={competitorInput}
+                status={competitorStatus}
+                enabled={competitorsEnabled}
+                onInput={setCompetitorInput}
+                onAdd={addCompetitor}
+                onRefresh={() => refreshCompetitors()}
+                onRemove={removeCompetitor}
+              />
             ) : null}
 
             {activeTab === "changes" ? (
@@ -5172,6 +5311,164 @@ function RawFieldsView({ fields }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function competitorNmIdFromInput(value) {
+  const matches = String(value || "").match(/\d{6,12}/g);
+  return matches?.length ? matches[matches.length - 1] : "";
+}
+
+function wbCompetitorUrl(nmID) {
+  const id = competitorNmIdFromInput(nmID);
+  return id ? `https://www.wildberries.ru/catalog/${id}/detail.aspx` : "";
+}
+
+function competitorPriceText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "нет данных";
+  }
+  return `${formatNumber(Math.round(number))} ₽`;
+}
+
+function competitorDateText(value) {
+  return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
+}
+
+function competitorStatusText(status, enabled) {
+  if (!enabled) return "Сохранение конкурентов доступно для backend-кабинета.";
+  return {
+    loading: "Загружаем конкурентов...",
+    saving: "Сохраняем список...",
+    refreshing: "Обновляем снимки WB...",
+    saved: "Список сохранен.",
+    refreshed: "Снимки обновлены.",
+    invalid: "Вставьте ссылку WB или nmID конкурента.",
+    duplicate: "Этот конкурент уже добавлен.",
+    limit: "Можно добавить до 3 конкурентов.",
+    empty: "Добавьте конкурентов перед обновлением.",
+    error: "Не удалось обновить конкурентов. Попробуйте еще раз.",
+  }[status] || "";
+}
+
+function competitorChangeValue(change, key = "current") {
+  if (change?.field === "characteristicsSignature") {
+    return "изменился состав";
+  }
+  if (change?.field === "discountedPrice" || change?.field === "price") {
+    return competitorPriceText(change?.[key]);
+  }
+  return textOrDash(change?.[key]);
+}
+
+function TopCompetitorsPanel({
+  competitors,
+  competitorInput,
+  status,
+  enabled,
+  onInput,
+  onAdd,
+  onRefresh,
+  onRemove,
+}) {
+  const busy = ["loading", "saving", "refreshing"].includes(status);
+  const criticalCount = competitors.filter((item) => item.hasCriticalChanges).length;
+  const statusText = competitorStatusText(status, enabled);
+  return (
+    <section className="workspace-strip competitors-strip">
+      <div className="strip-head">
+        <div>
+          <h2>ТОП конкурентов</h2>
+          <p>До 3 выбранных вручную карточек WB для контроля цены, контента, фото и характеристик.</p>
+        </div>
+        <Tag tone={criticalCount ? "amber" : competitors.length ? "blue" : "green"}>
+          {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/3`}
+        </Tag>
+      </div>
+      <div className="competitor-toolbar">
+        <label className="competitor-input">
+          <span>Ссылка или nmID конкурента</span>
+          <input
+            value={competitorInput}
+            onChange={(event) => onInput(event.target.value)}
+            disabled={!enabled || busy || competitors.length >= 3}
+            placeholder="https://www.wildberries.ru/catalog/123456789/detail.aspx"
+          />
+        </label>
+        <button className="btn primary" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= 3}>
+          <Plus size={17} />Добавить
+        </button>
+        <button className="btn" type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length}>
+          <RefreshCw size={17} />Обновить снимки
+        </button>
+      </div>
+      {statusText ? <div className={`competitor-status status-${status}`}>{statusText}</div> : null}
+      {competitors.length ? (
+        <div className="competitor-grid">
+          {competitors.map((item) => (
+            <CompetitorCard key={item.competitorNmID} competitor={item} busy={busy} onRemove={onRemove} />
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state"><span>Добавьте 1-3 ссылки на карточки конкурентов. После обновления появится первый снимок WB.</span></div>
+      )}
+    </section>
+  );
+}
+
+function CompetitorCard({ competitor, busy, onRemove }) {
+  const snapshot = competitor.snapshot || {};
+  const changes = Array.isArray(competitor.changes) ? competitor.changes : [];
+  const criticalChanges = changes.filter((item) => item?.critical);
+  const title = snapshot.title || `WB ${competitor.competitorNmID}`;
+  const price = snapshot.discountedPrice || snapshot.price;
+  return (
+    <article className={`competitor-card ${competitor.hasCriticalChanges ? "critical" : ""}`}>
+      <div className="competitor-card-head">
+        <div>
+          <strong>{title}</strong>
+          <span>WB {competitor.competitorNmID} · {competitorDateText(competitor.lastCheckedAt || snapshot.checkedAt)}</span>
+        </div>
+        <div className="competitor-actions">
+          {competitor.hasCriticalChanges ? <Tag tone="amber"><AlertTriangle size={13} />важно</Tag> : <Tag tone="green">спокойно</Tag>}
+          <a className="icon-link" href={competitor.url || wbCompetitorUrl(competitor.competitorNmID)} target="_blank" rel="noreferrer" title="Открыть WB">
+            <ExternalLink size={16} />
+          </a>
+          <button className="icon-link" type="button" onClick={() => onRemove(competitor)} disabled={busy} title="Удалить конкурента">
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+      <div className="competitor-metrics">
+        <div><span>Цена</span><strong>{competitorPriceText(price)}</strong></div>
+        <div><span>Рейтинг</span><strong>{valueSummary(snapshot.rating)}</strong></div>
+        <div><span>Отзывы</span><strong>{valueSummary(snapshot.feedbacks)}</strong></div>
+        <div><span>Фото</span><strong>{valueSummary(snapshot.photosCount)}</strong></div>
+        <div><span>Описание</span><strong>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.` : "нет данных"}</strong></div>
+        <div><span>Характеристики</span><strong>{valueSummary(snapshot.characteristicsCount)}</strong></div>
+      </div>
+      {changes.length ? (
+        <div className="competitor-changes">
+          <span>{criticalChanges.length ? "Критичные изменения" : "Изменения после прошлого снимка"}</span>
+          {changes.slice(0, 5).map((change, index) => (
+            <p key={`${change.field}-${index}`}>
+              <strong>{change.label}</strong>
+              {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
+              <small>{competitorChangeValue(change, "previous")} → {competitorChangeValue(change, "current")}</small>
+            </p>
+          ))}
+        </div>
+      ) : (
+        <div className="competitor-changes empty">
+          <span>Изменений нет</span>
+          <p>После второго обновления система покажет, что изменилось у конкурента.</p>
+        </div>
+      )}
+      {Array.isArray(snapshot.warnings) && snapshot.warnings.length ? (
+        <div className="competitor-warning">{snapshot.warnings[0]}</div>
+      ) : null}
+    </article>
   );
 }
 
