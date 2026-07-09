@@ -1673,16 +1673,43 @@ tr:last-child td {
 }
 
 .audit-competitor-row strong,
-.audit-competitor-row span {
+.audit-competitor-row span,
+.audit-competitor-row a {
   display: block;
 }
 
+.audit-competitor-title {
+  color: var(--ink);
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  display: inline-flex;
+}
+
+.audit-competitor-title svg {
+  flex: none;
+  color: var(--blue);
+}
+
+.audit-competitor-title:hover,
+.audit-competitor-meta:hover,
+.audit-competitor-rejected a:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
 .audit-competitor-row span,
+.audit-competitor-meta,
 .audit-competitor-side em,
 .audit-competitor-rejected span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.audit-competitor-meta {
+  margin-top: 2px;
+  text-decoration: none;
 }
 
 .audit-competitor-row p {
@@ -1708,6 +1735,12 @@ tr:last-child td {
 
 .audit-competitor-rejected p {
   margin: 0;
+}
+
+.audit-competitor-rejected a {
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
 }
 
 .detail-tabs {

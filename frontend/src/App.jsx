@@ -5976,19 +5976,27 @@ function AuditCompetitorSelection({ selection }) {
       </p>
       {finalCompetitors.length ? (
         <div className="audit-competitor-rows">
-          {finalCompetitors.map((item) => (
-            <div className="audit-competitor-row" key={`final-${item.nmId}`}>
-              <div>
-                <strong>{item.title || `WB ${item.nmId}`}</strong>
-                <span>WB {item.nmId} · {auditCompetitorSourceText(item.source)}{item.subjectName ? ` · ${item.subjectName}` : ""}</span>
-                {item.reason ? <p>{item.reason}</p> : null}
+          {finalCompetitors.map((item) => {
+            const url = item.url || wbCompetitorUrl(item.nmId);
+            return (
+              <div className="audit-competitor-row" key={`final-${item.nmId}`}>
+                <div>
+                  <a className="audit-competitor-title" href={url} target="_blank" rel="noreferrer">
+                    <strong>{item.title || `WB ${item.nmId}`}</strong>
+                    <ExternalLink size={15} />
+                  </a>
+                  <a className="audit-competitor-meta" href={url} target="_blank" rel="noreferrer">
+                    WB {item.nmId} · {auditCompetitorSourceText(item.source)}{item.subjectName ? ` · ${item.subjectName}` : ""}
+                  </a>
+                  {item.reason ? <p>{item.reason}</p> : null}
+                </div>
+                <div className="audit-competitor-side">
+                  <Tag tone={item.source === "manual" ? "blue" : "green"}>{auditCompetitorSourceText(item.source)}</Tag>
+                  <em>{auditCompetitorMetricText(item)}</em>
+                </div>
               </div>
-              <div className="audit-competitor-side">
-                <Tag tone={item.source === "manual" ? "blue" : "green"}>{auditCompetitorSourceText(item.source)}</Tag>
-                <em>{auditCompetitorMetricText(item)}</em>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <p>Итоговый список конкурентов не собран. Проверьте MPStats и категорию карточки.</p>
@@ -5996,11 +6004,14 @@ function AuditCompetitorSelection({ selection }) {
       {rejected.length ? (
         <div className="audit-competitor-rejected">
           <span>Отклонены из ручного ввода</span>
-          {rejected.map((item) => (
-            <p key={`rejected-${item.nmId}`}>
-              <strong>WB {item.nmId}</strong> · {item.reason || "не прошел проверку схожести"}
-            </p>
-          ))}
+          {rejected.map((item) => {
+            const url = item.url || wbCompetitorUrl(item.nmId);
+            return (
+              <p key={`rejected-${item.nmId}`}>
+                <a href={url} target="_blank" rel="noreferrer">WB {item.nmId}</a> · {item.reason || "не прошел проверку схожести"}
+              </p>
+            );
+          })}
         </div>
       ) : null}
     </>
