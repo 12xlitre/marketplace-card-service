@@ -1341,6 +1341,76 @@ tr.selected-row td {
   line-height: 1.5;
 }
 
+.commerce-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--line);
+  gap: 1px;
+}
+
+.commerce-summary div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  background: var(--surface-soft);
+}
+
+.commerce-summary span,
+.commerce-size-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.commerce-summary strong,
+.commerce-size-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.commerce-size-scroll {
+  overflow-x: auto;
+}
+
+.commerce-size-table {
+  min-width: 860px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.commerce-size-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(150px, 1.2fr) repeat(6, minmax(88px, 0.75fr));
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.commerce-size-row:last-child {
+  border-bottom: 0;
+}
+
+.commerce-size-head {
+  min-height: 36px;
+  background: var(--surface-soft);
+}
+
+.commerce-size-head span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
 .approval-analytics-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3034,6 +3104,7 @@ tr:last-child td {
   .security-inline-list,
   .card-snapshot-main,
   .snapshot-facts,
+  .commerce-summary,
   .pipeline,
   .approval-analytics-grid,
     .approval-events-head,

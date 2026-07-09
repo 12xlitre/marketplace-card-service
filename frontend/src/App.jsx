@@ -2071,6 +2071,23 @@ function sizeStockText(size) {
   return parts.join(" · ");
 }
 
+function sizeCommercialRows(sizes) {
+  return (Array.isArray(sizes) ? sizes : []).map((size, index) => {
+    const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
+    return {
+      key: `${size?.chrtID || size?.chrtId || size?.sizeID || index}:${skus.join("-") || index}`,
+      sizeName: size?.techSize || size?.wbSize || `Размер ${index + 1}`,
+      skus,
+      price: firstDefined(size?.price),
+      discountedPrice: firstDefined(size?.discountedPrice),
+      clubDiscountedPrice: firstDefined(size?.clubDiscountedPrice),
+      stock: sizeStockValue(size),
+      sellerStock: firstDefined(size?.sellerStock),
+      wbStock: firstDefined(size?.wbStock),
+    };
+  });
+}
+
 function numberFromInput(value) {
   if (value === "" || value === null || value === undefined) {
     return "";
@@ -3907,6 +3924,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const priceValue = firstDefined(card?.price, rawFields.price);
   const discountValue = firstDefined(card?.discount, rawFields.discount);
   const discountedPriceValue = firstDefined(card?.discountedPrice, rawFields.discountedPrice);
+  const clubDiscountedPriceValue = firstDefined(card?.clubDiscountedPrice, rawFields.clubDiscountedPrice);
+  const stockValue = firstDefined(card?.stock, rawFields.stock);
+  const sellerStockValue = firstDefined(card?.sellerStock, rawFields.sellerStock);
+  const wbStockValue = firstDefined(card?.wbStock, rawFields.wbStock);
+  const commercialSizeRows = sizeCommercialRows(sizes);
+  const hasCommercialData = [priceValue, discountValue, discountedPriceValue, clubDiscountedPriceValue, stockValue, sellerStockValue, wbStockValue]
+    .some((value) => !isEmptyValue(value))
+    || commercialSizeRows.some((row) => [row.price, row.discountedPrice, row.clubDiscountedPrice, row.stock, row.sellerStock, row.wbStock].some((value) => !isEmptyValue(value)));
   const draftDiscountedPriceValue = discountedPriceFromValues(draftPrices.price, draftPrices.discount);
   const draftStockRows = Array.isArray(draftStocks.rows) ? draftStocks.rows : normalizeDraftStocks(draftStocks, card).rows;
   const auditDone = auditStatus === "done";
@@ -4817,6 +4842,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="list-row"><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
                 <div className="list-row"><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
                 <div className="list-row"><span>Размеры</span><strong>{valueSummary(sizes)}</strong></div>
+                <div className="list-row"><span>Цена</span><strong>{valueSummary(priceValue)}</strong></div>
+                <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+                <div className="list-row"><span>Остаток всего</span><strong>{valueSummary(stockValue)}</strong></div>
+                <div className="list-row"><span>FBO / WB</span><strong>{valueSummary(wbStockValue)}</strong></div>
+                <div className="list-row"><span>FBS / продавец</span><strong>{valueSummary(sellerStockValue)}</strong></div>
                 <div className="list-row"><span>Габариты</span><strong>{valueSummary(dimensions)}</strong></div>
                 <div className="list-row"><span>Статус</span><strong>{valueSummary(card?.status)}</strong></div>
               </div>
@@ -4964,11 +4994,62 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         <div><span>Цена</span><strong>{valueSummary(priceValue)}</strong></div>
                         <div><span>Скидка</span><strong>{valueSummary(discountValue)}</strong></div>
                         <div><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+                        <div><span>Остаток всего</span><strong>{valueSummary(stockValue)}</strong></div>
+                        <div><span>FBO / WB</span><strong>{valueSummary(wbStockValue)}</strong></div>
+                        <div><span>FBS / продавец</span><strong>{valueSummary(sellerStockValue)}</strong></div>
                       </div>
                       <div className="snapshot-description">
                         <span>Описание</span>
                         <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                       </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="workspace-strip commerce-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Цены и остатки</h2>
+                      <p>Текущие данные из WB API: цена, скидка и остатки по складам и размерам.</p>
+                    </div>
+                    <Tag tone={hasCommercialData ? "blue" : "amber"}>{hasCommercialData ? "данные WB" : "нет данных"}</Tag>
+                  </div>
+                  <div className="commerce-summary">
+                    <div><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
+                    <div><span>Скидка продавца</span><strong>{valueSummary(discountValue)}</strong></div>
+                    <div><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+                    <div><span>СПП / клубная</span><strong>{valueSummary(clubDiscountedPriceValue)}</strong></div>
+                    <div><span>FBO / WB</span><strong>{valueSummary(wbStockValue)}</strong></div>
+                    <div><span>FBS / продавец</span><strong>{valueSummary(sellerStockValue)}</strong></div>
+                    <div><span>Остаток всего</span><strong>{valueSummary(stockValue)}</strong></div>
+                    <div><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
+                  </div>
+                  <div className="commerce-size-scroll">
+                    <div className="commerce-size-table">
+                      <div className="commerce-size-row commerce-size-head">
+                        <span>Размер</span>
+                        <span>Баркод</span>
+                        <span>Цена</span>
+                        <span>Со скидкой</span>
+                        <span>СПП</span>
+                        <span>FBO / WB</span>
+                        <span>FBS</span>
+                        <span>Всего</span>
+                      </div>
+                      {commercialSizeRows.length ? commercialSizeRows.map((row) => (
+                        <div className="commerce-size-row" key={row.key}>
+                          <strong>{row.sizeName}</strong>
+                          <span>{row.skus.filter(Boolean).join(", ") || "Баркод не указан"}</span>
+                          <span>{valueSummary(row.price)}</span>
+                          <span>{valueSummary(row.discountedPrice)}</span>
+                          <span>{valueSummary(row.clubDiscountedPrice)}</span>
+                          <span>{valueSummary(row.wbStock)}</span>
+                          <span>{valueSummary(row.sellerStock)}</span>
+                          <span>{valueSummary(row.stock)}</span>
+                        </div>
+                      )) : (
+                        <div className="empty-state"><span>WB не вернул размерные строки с ценами и остатками.</span></div>
+                      )}
                     </div>
                   </div>
                 </section>
