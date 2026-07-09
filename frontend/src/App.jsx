@@ -5224,12 +5224,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 </div>
                 <div className="strip-head">
                   <div>
-                    <h2>Было / стало</h2>
+                    <h2>Текущее / черновик</h2>
                     <p>{auditDone
                       ? "Рекомендации аудита помечены, но любые поля можно править вручную."
                       : auditStale
                         ? "Черновик и задача сохранены после обновления WB. Аудит сброшен, поэтому для новых рекомендаций запустите его заново."
-                        : "Заполняйте колонку Стало вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
+                        : "Заполняйте колонку Черновик вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
                   </div>
                   <div className="strip-actions">
                     <button
@@ -5274,11 +5274,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                />
 	                <div className="before-after">
                   <div className="field-box">
-                    <strong>Было: заголовок</strong>
+                    <strong>Текущий заголовок</strong>
                     <p>{currentTitle}</p>
                   </div>
                   <div className="field-box">
-                    <strong>Стало: заголовок</strong>
+                    <strong>Черновик заголовка</strong>
                     <textarea
                       className={draftTitleSource === "audit" ? "short audit-suggestion-field" : "short"}
                       value={draftTitle}
@@ -5297,11 +5297,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <DraftReason reason={draftTitleReason} />
                   </div>
                   <div className="field-box description-box">
-                    <strong>Было: описание</strong>
+                    <strong>Текущее описание</strong>
                     <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                   </div>
                   <div className="field-box description-box">
-                    <strong>Стало: описание</strong>
+                    <strong>Черновик описания</strong>
                     <textarea
                       className={`description-editor ${draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}`}
                       value={draftDescription}
@@ -5344,7 +5344,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                {changesTab === "prices" ? (
 	                  <div className="before-after">
 	                    <div className="field-box">
-	                      <strong>Было: цены</strong>
+	                      <strong>Текущие цены</strong>
 	                      <div className="panel-list compact-list">
 	                        <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
 	                        <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(discountValue)}</strong></div>
@@ -5353,7 +5353,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                      </div>
 	                    </div>
 	                    <div className="field-box">
-	                      <strong>Стало: цены</strong>
+	                      <strong>Черновик цен</strong>
 	                      <label className="field-label">
 	                        Цена до скидки
 	                        <input
@@ -5398,7 +5398,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 {changesTab === "stocks" ? (
                   <div className="before-after">
                     <div className="field-box">
-                      <strong>Было: размеры и баркоды</strong>
+                      <strong>Текущие размеры и баркоды</strong>
                       <div className="panel-list compact-list">
                         {(Array.isArray(sizes) && sizes.length ? sizes : [{}]).slice(0, 8).map((size, index) => (
                           <div className="list-row" key={`${size?.chrtID || index}-${size?.techSize || ""}`}>
@@ -5409,7 +5409,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       </div>
                     </div>
 	                    <div className="field-box">
-	                      <strong>Стало: остатки</strong>
+	                      <strong>Черновик остатков</strong>
 	                      <div className="panel-list compact-list">
 	                        {(draftStockRows.length ? draftStockRows : [{}]).slice(0, 12).map((row, index) => (
 	                          <div className="list-row" key={row.key || index}>
@@ -5448,11 +5448,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <strong>Черновик изменений</strong>
                     <p>{draftSavedAt
                       ? `Сохранен ${new Date(draftSavedAt).toLocaleString("ru-RU")}${draftSaveStatus === "backend" ? " на backend" : " локально"}`
-                      : "Не сохранен. Сохраните перед выходом, чтобы не потерять колонку Стало."}</p>
+                      : "Не сохранен. Сохраните перед выходом, чтобы не потерять черновик."}</p>
                     {draftSaveStatus === "local-fallback" ? <p>Backend недоступен для черновика, временно сохранено в этом браузере.</p> : null}
                     {draftSaveStatus === "saving" ? <p>Сохраняем копию на backend.</p> : null}
                     {draftSaveStatus === "resetting" ? <p>Сбрасываем черновик.</p> : null}
-                    {draftSaveStatus === "reset" ? <p>Черновик сброшен. В колонке Стало снова текущие данные WB.</p> : null}
+                    {draftSaveStatus === "reset" ? <p>Черновик сброшен. В черновике снова текущие данные WB.</p> : null}
                     {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "approval-submitted" ? <p>Задача отправлена аккаунт-менеджеру на согласование.</p> : null}
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
@@ -6007,8 +6007,8 @@ function CharacteristicsDiffTable({
     <div className="characteristics-diff">
       <div className="characteristics-diff-head">
         <span>Характеристика</span>
-        <span>Было</span>
-        <span>Стало</span>
+        <span>Текущее</span>
+        <span>Черновик</span>
       </div>
       {!visibleRows.length ? <div className="empty-state"><span>Характеристики не заполнены</span></div> : null}
       {visibleRows.map((row) => {
