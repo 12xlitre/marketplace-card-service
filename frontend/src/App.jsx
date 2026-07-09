@@ -1892,6 +1892,8 @@ function buildStructuredCardDraft({
   descriptionSource,
   descriptionReason,
   characteristics,
+  prices,
+  stocks,
   card,
   auditResult,
   evidenceSummary,
@@ -1912,8 +1914,8 @@ function buildStructuredCardDraft({
       },
       characteristics: characteristics || {},
     },
-    prices: {},
-    stocks: {},
+    prices: prices || {},
+    stocks: stocks || {},
     meta: {
       approval: normalizeApprovalState(approval),
       auditContract: {
@@ -1935,7 +1937,7 @@ function buildStructuredCardDraft({
   };
 }
 
-function contentFromStoredDraft(storedDraft) {
+function contentFromStoredDraft(storedDraft, card = {}) {
   const payload = storedDraft?.draft || storedDraft || {};
   const content = payload.content || payload;
   const title = content.title || {};
@@ -1950,6 +1952,8 @@ function contentFromStoredDraft(storedDraft) {
     titleReason: typeof title === "object" ? title.reason || "" : payload.titleReason || "",
     descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
+    prices: normalizeDraftPrices(payload.prices, card),
+    stocks: normalizeDraftStocks(payload.stocks, card),
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: normalizeApprovalState(meta.approval),
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
@@ -2000,7 +2004,88 @@ function sizeStockText(size) {
   return parts.join(" · ");
 }
 
-function buildPricesExportSheets(card) {
+function numberFromInput(value) {
+  if (value === "" || value === null || value === undefined) {
+    return "";
+  }
+  const normalized = String(value).replace(",", ".").trim();
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : "";
+}
+
+function priceDraftFromCard(card) {
+  return {
+    price: firstDefined(card?.price, card?.rawFields?.price),
+    discount: firstDefined(card?.discount, card?.rawFields?.discount),
+  };
+}
+
+function normalizeDraftPrices(value, card) {
+  const base = priceDraftFromCard(card);
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    price: firstDefined(source.price, source.basePrice, base.price),
+    discount: firstDefined(source.discount, base.discount),
+  };
+}
+
+function discountedPriceFromValues(price, discount) {
+  const priceNumber = numberFromInput(price);
+  const discountNumber = numberFromInput(discount);
+  if (priceNumber === "") {
+    return "";
+  }
+  if (discountNumber === "") {
+    return priceNumber;
+  }
+  return Math.round(priceNumber * (100 - discountNumber)) / 100;
+}
+
+function stockDraftRowsFromCard(card) {
+  const sizes = Array.isArray(card?.sizes) ? card.sizes : [];
+  if (!sizes.length) {
+    return [];
+  }
+  return sizes.flatMap((size, sizeIndex) => {
+    const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
+    return skus.map((sku, skuIndex) => {
+      const key = `${size?.chrtID || size?.chrtId || size?.sizeID || sizeIndex}:${sku || skuIndex}`;
+      const currentAmount = sizeStockValue(size);
+      return {
+        key,
+        sku,
+        chrtID: size?.chrtID || size?.chrtId || size?.sizeID || "",
+        sizeName: size?.techSize || size?.wbSize || `Размер ${sizeIndex + 1}`,
+        currentAmount,
+        amount: currentAmount,
+        sellerStock: firstDefined(size?.sellerStock),
+        wbStock: firstDefined(size?.wbStock),
+      };
+    });
+  });
+}
+
+function normalizeDraftStocks(value, card) {
+  const baseRows = stockDraftRowsFromCard(card);
+  const rowsByKey = {};
+  const sourceRows = Array.isArray(value?.rows) ? value.rows : [];
+  sourceRows.forEach((row) => {
+    if (row?.key) {
+      rowsByKey[row.key] = row;
+    }
+  });
+  return {
+    rows: baseRows.map((row) => ({
+      ...row,
+      amount: firstDefined(rowsByKey[row.key]?.amount, row.amount),
+    })),
+  };
+}
+
+function buildPricesExportSheets(card, draftPrices = {}) {
+  const price = firstDefined(draftPrices.price, card?.price, card?.rawFields?.price);
+  const discount = firstDefined(draftPrices.discount, card?.discount, card?.rawFields?.discount);
+  const discountedPrice = discountedPriceFromValues(price, discount) || firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice);
   return [
     {
       name: "Цены и скидки",
@@ -2012,9 +2097,9 @@ function buildPricesExportSheets(card) {
           card?.nmID || "",
           card?.vendorCode || "",
           firstSku(card),
-          firstDefined(card?.price, card?.rawFields?.price),
-          firstDefined(card?.discount, card?.rawFields?.discount),
-          firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
+          price,
+          discount,
+          discountedPrice,
         ],
       ],
     },
@@ -2031,29 +2116,26 @@ function buildPricesExportSheets(card) {
   ];
 }
 
-function buildStocksExportSheets(card) {
-  const sizes = Array.isArray(card?.sizes) ? card.sizes : [];
+function buildStocksExportSheets(card, draftStocks = {}) {
+  const stockRows = normalizeDraftStocks(draftStocks, card).rows;
   const uploadRows = [["Баркод", "Количество"]];
-  const referenceRows = [["Баркод", "Артикул продавца", "Номенклатура WB", "Размер", "ID размера WB", "Количество"]];
+  const referenceRows = [["Баркод", "Артикул продавца", "Номенклатура WB", "Размер", "ID размера WB", "Текущий остаток", "Новый остаток"]];
 
-  if (!sizes.length) {
+  if (!stockRows.length) {
     uploadRows.push(["", ""]);
     referenceRows.push(["", card?.vendorCode || "", card?.nmID || "", "", "", ""]);
   } else {
-    sizes.forEach((size) => {
-      const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
-      const stockValue = sizeStockValue(size);
-      skus.forEach((sku) => {
-        uploadRows.push([sku, ""]);
-        referenceRows.push([
-          sku,
-          card?.vendorCode || "",
-          card?.nmID || "",
-          size?.techSize || size?.wbSize || "",
-          size?.chrtID || "",
-          stockValue,
-        ]);
-      });
+    stockRows.forEach((row) => {
+      uploadRows.push([row.sku, row.amount]);
+      referenceRows.push([
+        row.sku,
+        card?.vendorCode || "",
+        card?.nmID || "",
+        row.sizeName,
+        row.chrtID,
+        row.currentAmount,
+        row.amount,
+      ]);
     });
   }
 
@@ -3667,6 +3749,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [draftTitleReason, setDraftTitleReason] = useState("");
   const [draftDescriptionReason, setDraftDescriptionReason] = useState("");
   const [draftCharacteristics, setDraftCharacteristics] = useState({});
+  const [draftPrices, setDraftPrices] = useState(() => priceDraftFromCard(card));
+  const [draftStocks, setDraftStocks] = useState(() => normalizeDraftStocks({}, card));
   const [approval, setApproval] = useState(defaultApprovalState());
   const [approvalComment, setApprovalComment] = useState("");
   const [auditHistory, setAuditHistory] = useState([]);
@@ -3694,6 +3778,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const priceValue = firstDefined(card?.price, rawFields.price);
   const discountValue = firstDefined(card?.discount, rawFields.discount);
   const discountedPriceValue = firstDefined(card?.discountedPrice, rawFields.discountedPrice);
+  const draftDiscountedPriceValue = discountedPriceFromValues(draftPrices.price, draftPrices.discount);
+  const draftStockRows = Array.isArray(draftStocks.rows) ? draftStocks.rows : normalizeDraftStocks(draftStocks, card).rows;
   const auditDone = auditStatus === "done";
   const auditRunning = auditStatus === "loading";
   const auditStale = auditStatus === "stale";
@@ -3753,6 +3839,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setDraftTitleReason("");
     setDraftDescriptionReason("");
     setDraftCharacteristics({});
+    setDraftPrices(priceDraftFromCard(card));
+    setDraftStocks(normalizeDraftStocks({}, card));
     setApproval(defaultApprovalState());
     setApprovalComment("");
     setAuditHistory([]);
@@ -3764,7 +3852,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setDraftSavedAt("");
     setDraftSaveStatus("");
     const applyDraft = (storedDraft) => {
-      const normalized = contentFromStoredDraft(storedDraft);
+      const normalized = contentFromStoredDraft(storedDraft, card);
       setDraftTitle(normalized.title);
       setDraftDescription(normalized.description);
       setDraftTitleSource(normalized.titleSource);
@@ -3772,6 +3860,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftTitleReason(normalized.titleReason);
       setDraftDescriptionReason(normalized.descriptionReason);
       setDraftCharacteristics(normalized.characteristics);
+      setDraftPrices(normalized.prices);
+      setDraftStocks(normalized.stocks);
       setApproval(normalized.approval);
       setApprovalComment("");
       setAuditHistory(normalized.auditHistory);
@@ -3976,6 +4066,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         titleReason: nextTitleReason,
         descriptionReason: nextDescriptionReason,
         characteristics: nextDraftCharacteristics,
+        prices: draftPrices,
+        stocks: draftStocks,
         card,
         auditResult: payload.auditResult,
         evidenceSummary: payload.evidenceSummary,
@@ -4050,6 +4142,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       titleReason: nextTitleReason,
       descriptionReason: nextDescriptionReason,
       characteristics: nextDraftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
       card,
     });
     setDraftTitle(nextTitle);
@@ -4118,6 +4212,24 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setCharacteristicSearch("");
   }
 
+  function updateDraftPrice(field, value) {
+    setDraftPrices((current) => ({
+      ...current,
+      [field]: value,
+      source: "manual",
+    }));
+  }
+
+  function updateDraftStock(rowKey, value) {
+    setDraftStocks((current) => ({
+      rows: (current.rows || []).map((row) => (
+        row.key === rowKey
+          ? { ...row, amount: value, source: "manual" }
+          : row
+      )),
+    }));
+  }
+
   async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
     let savedLocally = false;
@@ -4172,6 +4284,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       titleReason: draftTitleReason,
       descriptionReason: draftDescriptionReason,
       characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
       card,
     });
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
@@ -4189,6 +4303,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       titleReason: draftTitleReason,
       descriptionReason: draftDescriptionReason,
       characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
       card,
     });
   }
@@ -4291,6 +4407,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftTitleReason("");
       setDraftDescriptionReason("");
       setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
+      setDraftPrices(priceDraftFromCard(card));
+      setDraftStocks(normalizeDraftStocks({}, card));
       setApproval(defaultApprovalState());
       setApprovalComment("");
       setDraftSavedAt("");
@@ -4313,10 +4431,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       return;
     }
     if (type === "prices") {
-      downloadXlsx(`${exportFileBase}-prices-wb.xlsx`, buildPricesExportSheets(card));
+      downloadXlsx(`${exportFileBase}-prices-wb.xlsx`, buildPricesExportSheets(card, draftPrices));
       return;
     }
-    downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card));
+    downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
   return (
@@ -4658,24 +4776,47 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 </div>
                 </>
                 ) : null}
-                {changesTab === "prices" ? (
-                  <div className="before-after">
-                    <div className="field-box">
-                      <strong>Было: цены</strong>
-                      <div className="panel-list compact-list">
-                        <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(firstDefined(card?.price, card?.rawFields?.price))}</strong></div>
-                        <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(firstDefined(card?.discount, card?.rawFields?.discount))}</strong></div>
-                        <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice))}</strong></div>
-                        <div className="list-row"><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
-                      </div>
-                    </div>
-                    <div className="field-box">
-                      <strong>Стало: цены</strong>
-                      <p>Редактирование цен вынесено в отдельный черновик. Сейчас можно скачать WB-таблицу и заполнить значения в Excel.</p>
-                      <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
-                    </div>
-                  </div>
-                ) : null}
+	                {changesTab === "prices" ? (
+	                  <div className="before-after">
+	                    <div className="field-box">
+	                      <strong>Было: цены</strong>
+	                      <div className="panel-list compact-list">
+	                        <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
+	                        <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(discountValue)}</strong></div>
+	                        <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+	                        <div className="list-row"><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
+	                      </div>
+	                    </div>
+	                    <div className="field-box">
+	                      <strong>Стало: цены</strong>
+	                      <label className="field-label">
+	                        Цена до скидки
+	                        <input
+	                          type="number"
+	                          min="0"
+	                          value={draftPrices.price ?? ""}
+	                          disabled={approvalReadOnly}
+	                          onChange={(event) => updateDraftPrice("price", event.target.value)}
+	                        />
+	                      </label>
+	                      <label className="field-label">
+	                        Скидка продавца, %
+	                        <input
+	                          type="number"
+	                          min="0"
+	                          max="99"
+	                          value={draftPrices.discount ?? ""}
+	                          disabled={approvalReadOnly}
+	                          onChange={(event) => updateDraftPrice("discount", event.target.value)}
+	                        />
+	                      </label>
+	                      <div className="panel-list compact-list">
+	                        <div className="list-row"><span>Расчетная цена со скидкой</span><strong>{valueSummary(draftDiscountedPriceValue)}</strong></div>
+	                      </div>
+	                      <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
+	                    </div>
+	                  </div>
+	                ) : null}
                 {changesTab === "stocks" ? (
                   <div className="before-after">
                     <div className="field-box">
@@ -4689,11 +4830,24 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         ))}
                       </div>
                     </div>
-                    <div className="field-box">
-                      <strong>Стало: остатки</strong>
-                      <p>Остатки загружаются отдельной WB-таблицей по баркоду. Заполните количество в скачанном файле перед загрузкой в ЛК WB.</p>
-                      <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Скачать остатки</button>
-                    </div>
+	                    <div className="field-box">
+	                      <strong>Стало: остатки</strong>
+	                      <div className="panel-list compact-list">
+	                        {(draftStockRows.length ? draftStockRows : [{}]).slice(0, 12).map((row, index) => (
+	                          <div className="list-row" key={row.key || index}>
+	                            <span>{row.sizeName || `Размер ${index + 1}`} · {row.sku || "без баркода"}</span>
+	                            <input
+	                              type="number"
+	                              min="0"
+	                              value={row.amount ?? ""}
+	                              disabled={approvalReadOnly || !row.key}
+	                              onChange={(event) => updateDraftStock(row.key, event.target.value)}
+	                            />
+	                          </div>
+	                        ))}
+	                      </div>
+	                      <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Скачать остатки</button>
+	                    </div>
                   </div>
                 ) : null}
                 <ApprovalPanel

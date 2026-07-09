@@ -933,6 +933,17 @@ tr.selected-row td {
   text-align: right;
 }
 
+.list-row input {
+  width: 120px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 10px;
+  text-align: right;
+}
+
 .user-list-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
