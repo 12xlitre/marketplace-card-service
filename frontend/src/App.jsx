@@ -4586,6 +4586,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   async function runAudit(nextTab = "changes") {
+    const targetTab = typeof nextTab === "string" ? nextTab : "changes";
     setAuditStatus("loading");
     try {
       const payload = await apiRequest("/api/card-audit", {
@@ -4677,14 +4678,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         onDraftActivity({ audit: true, draft: true });
       }
       const persistPromise = persistStructuredDraft(structuredDraft, { auditDone: true });
-      setActiveTab(nextTab);
+      setActiveTab(targetTab);
       await persistPromise;
     } catch (error) {
-      await runAuditLocalStub(nextTab);
+      await runAuditLocalStub(targetTab);
     }
   }
 
   async function runAuditLocalStub(nextTab = "changes") {
+    const targetTab = typeof nextTab === "string" ? nextTab : "changes";
     setAuditStatus("loading");
     const mpstatsPayload = await loadMpstatsCharacteristicHints({ forceRefresh: false });
     const auditMpstatsCharacteristics = mpstatsPayload?.characteristics || mpstatsCharacteristics;
@@ -4754,7 +4756,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       onDraftActivity({ audit: true, draft: true });
     }
     const persistPromise = persistStructuredDraft(structuredDraft, { auditDone: true });
-    setActiveTab(nextTab);
+    setActiveTab(targetTab);
     await persistPromise;
   }
 
@@ -5462,7 +5464,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 </div>
                 <div className="tab-actions">
-                  <button className="btn primary" type="button" onClick={runAudit} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
+                  <button className="btn primary" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
                 </div>
               </section>
             ) : null}
