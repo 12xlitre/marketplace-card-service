@@ -1968,6 +1968,7 @@ function buildStructuredCardDraft({
   prices,
   stocks,
   semanticCoreSelected,
+  semanticCoreReports,
   card,
   auditResult,
   evidenceSummary,
@@ -2001,6 +2002,7 @@ function buildStructuredCardDraft({
       },
       auditHistory: sanitizeAuditHistory(auditHistory).slice(0, 20),
       semanticCoreSelected: normalizeSemanticSelection(semanticCoreSelected),
+      semanticCoreReports: normalizeSemanticReports(semanticCoreReports),
       auditResult: sanitizeAuditResult(auditResult),
       evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
       card: {
@@ -2034,6 +2036,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
     semanticCoreSelected: normalizeSemanticSelection(meta.semanticCoreSelected),
+    semanticCoreReports: normalizeSemanticReports(meta.semanticCoreReports),
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: deriveOverallApproval(approvalSections),
     approvalSections,
@@ -2123,6 +2126,63 @@ function normalizeSemanticSelection(items) {
     });
   });
   return output.slice(0, 80);
+}
+
+function compactSemanticCore(core) {
+  if (!core || typeof core !== "object") return null;
+  const compactItems = (items, limit) => (Array.isArray(items) ? items : [])
+    .map((item) => ({
+      query: item.query || "",
+      cluster: item.cluster || "",
+      prioritySubject: item.prioritySubject || "",
+      prioritySubjectId: item.prioritySubjectId || "",
+      wbCount: Number(item.wbCount || 0),
+      ozonCount: Number(item.ozonCount || 0),
+      results: Number(item.results || 0),
+      frequency365: item.frequency365 || "",
+      uniqueDays: Number(item.uniqueDays || 0),
+      source: item.source || "mpstats-expanding",
+      priority: item.priority || "",
+      field: item.field || "",
+      status: item.status || "",
+      reason: item.reason || "",
+    }))
+    .filter((item) => item.query)
+    .slice(0, limit);
+  return {
+    source: core.source || "mpstats-expanding",
+    seedQuery: core.seedQuery || "",
+    period: core.period || {},
+    current: compactItems(core.current, 300),
+    recommended: compactItems(core.recommended, 5000),
+    missing: compactItems(core.missing, 5000),
+    allKeywords: compactItems(core.allKeywords, 5000),
+    subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, 200),
+    totalKeywords: Number(core.totalKeywords || 0),
+    coveragePercent: core.coveragePercent ?? null,
+    reason: core.reason || "",
+  };
+}
+
+function normalizeSemanticReports(reports) {
+  return (Array.isArray(reports) ? reports : [])
+    .map((report) => {
+      const semanticCore = compactSemanticCore(report?.semanticCore);
+      if (!semanticCore) return null;
+      const createdAt = report.createdAt || new Date().toISOString();
+      return {
+        id: report.id || `semantic-${Date.parse(createdAt) || Date.now()}`,
+        createdAt,
+        seedQuery: report.seedQuery || semanticCore.seedQuery || "",
+        subjectFilter: report.subjectFilter || "",
+        search: report.search || "",
+        excludeWords: report.excludeWords || "",
+        selected: normalizeSemanticSelection(report.selected),
+        semanticCore,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
 function semanticCoreWithSelection(core, selectedItems) {
@@ -4040,9 +4100,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCoreError, setSemanticCoreError] = useState("");
   const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
+  const [semanticCoreReports, setSemanticCoreReports] = useState([]);
+  const [semanticActiveReportId, setSemanticActiveReportId] = useState("");
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
   const [semanticSearch, setSemanticSearch] = useState("");
+  const [semanticExcludeWords, setSemanticExcludeWords] = useState("");
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -4130,6 +4193,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticSeedQuery(defaultSemanticSeedQuery(card));
     setSemanticSubjectFilter("");
     setSemanticSearch("");
+    setSemanticExcludeWords("");
     setSemanticSaveStatus("");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
@@ -4157,6 +4221,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticCore(null);
     setSemanticCoreStatus("idle");
     setSemanticCoreSelected([]);
+    setSemanticCoreReports([]);
+    setSemanticActiveReportId("");
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -4172,6 +4238,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftPrices(normalized.prices);
       setDraftStocks(normalized.stocks);
       setSemanticCoreSelected(normalized.semanticCoreSelected);
+      setSemanticCoreReports(normalized.semanticCoreReports);
+      if (normalized.semanticCoreReports.length) {
+        const latestReport = normalized.semanticCoreReports[0];
+        setSemanticActiveReportId(latestReport.id);
+        setSemanticCore(latestReport.semanticCore);
+        setSemanticSeedQuery(latestReport.seedQuery || defaultSemanticSeedQuery(card));
+        setSemanticSubjectFilter(latestReport.subjectFilter || "");
+        setSemanticSearch(latestReport.search || "");
+        setSemanticExcludeWords(latestReport.excludeWords || "");
+      }
       setApproval(normalized.approval);
       setApprovalSections(normalized.approvalSections);
       setApprovalComment("");
@@ -4339,6 +4415,43 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
+  function semanticReportFromCore(core, selected, overrides = {}) {
+    const createdAt = overrides.createdAt || new Date().toISOString();
+    const compactCore = compactSemanticCore(core);
+    if (!compactCore) return null;
+    return {
+      id: overrides.id || `semantic-${Date.now()}`,
+      createdAt,
+      seedQuery: overrides.seedQuery || compactCore.seedQuery || semanticSeedQuery.trim(),
+      subjectFilter: overrides.subjectFilter ?? semanticSubjectFilter,
+      search: overrides.search ?? semanticSearch,
+      excludeWords: overrides.excludeWords ?? semanticExcludeWords,
+      selected: normalizeSemanticSelection(selected),
+      semanticCore: compactCore,
+    };
+  }
+
+  function semanticReportsWithSelection(reports, selection) {
+    const normalizedSelection = normalizeSemanticSelection(selection);
+    const normalizedReports = normalizeSemanticReports(reports);
+    if (!normalizedReports.length) {
+      return normalizedReports;
+    }
+    const targetId = semanticActiveReportId || normalizedReports[0].id;
+    return normalizedReports.map((report, index) => (
+      report.id === targetId || (!semanticActiveReportId && index === 0)
+        ? {
+          ...report,
+          seedQuery: semanticSeedQuery.trim() || report.seedQuery,
+          subjectFilter: semanticSubjectFilter,
+          search: semanticSearch,
+          excludeWords: semanticExcludeWords,
+          selected: normalizedSelection,
+        }
+        : report
+    ));
+  }
+
   async function loadSemanticCore({ forceRefresh = false } = {}) {
     if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
       setSemanticCoreStatus("missing-card");
@@ -4360,12 +4473,42 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       const nextSemanticCore = payload.semanticCore || null;
       setSemanticCore(nextSemanticCore);
       const cardSubject = String(card?.subjectName || "").trim().toLowerCase();
+      let nextSubjectFilter = semanticSubjectFilter;
       if (nextSemanticCore?.subjectOptions?.length && cardSubject && !semanticSubjectFilter) {
         const matchedSubject = nextSemanticCore.subjectOptions.find((item) => String(item.name || "").trim().toLowerCase() === cardSubject)
           || nextSemanticCore.subjectOptions.find((item) => String(item.name || "").toLowerCase().includes(cardSubject.split("/").pop().trim()));
         if (matchedSubject?.name) {
-          setSemanticSubjectFilter(matchedSubject.name);
+          nextSubjectFilter = matchedSubject.name;
+          setSemanticSubjectFilter(nextSubjectFilter);
         }
+      }
+      const nextReport = semanticReportFromCore(nextSemanticCore, semanticCoreSelected, {
+        seedQuery: semanticSeedQuery.trim(),
+        subjectFilter: nextSubjectFilter,
+      });
+      if (nextReport) {
+        const nextReports = normalizeSemanticReports([nextReport, ...semanticCoreReports.filter((report) => report.id !== nextReport.id)]);
+        setSemanticCoreReports(nextReports);
+        setSemanticActiveReportId(nextReport.id);
+        const structuredDraft = buildStructuredCardDraft({
+          auditStatus,
+          auditHistory,
+          approval,
+          approvalSections,
+          title: draftTitle,
+          description: draftDescription,
+          titleSource: draftTitleSource,
+          descriptionSource: draftDescriptionSource,
+          titleReason: draftTitleReason,
+          descriptionReason: draftDescriptionReason,
+          characteristics: draftCharacteristics,
+          prices: draftPrices,
+          stocks: draftStocks,
+          semanticCoreSelected,
+          semanticCoreReports: nextReports,
+          card,
+        });
+        persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" }).catch(() => {});
       }
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
@@ -4386,7 +4529,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
   async function persistSemanticSelection(nextSelection) {
     const normalizedSelection = normalizeSemanticSelection(nextSelection);
+    const nextReports = semanticReportsWithSelection(semanticCoreReports, normalizedSelection);
     setSemanticCoreSelected(normalizedSelection);
+    setSemanticCoreReports(nextReports);
     setSemanticSaveStatus("saving");
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
@@ -4403,6 +4548,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected: normalizedSelection,
+      semanticCoreReports: nextReports,
       card,
     });
     try {
@@ -4498,6 +4644,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         prices: draftPrices,
         stocks: draftStocks,
         semanticCoreSelected,
+        semanticCoreReports,
         card,
         auditResult: payload.auditResult,
         evidenceSummary: payload.evidenceSummary,
@@ -4576,6 +4723,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+      semanticCoreReports,
       card,
     });
     setDraftTitle(nextTitle);
@@ -4832,6 +4980,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+      semanticCoreReports,
       card,
     });
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
@@ -4854,6 +5003,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+      semanticCoreReports,
       card,
     });
   }
@@ -4969,6 +5119,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftPrices(priceDraftFromCard(card));
       setDraftStocks(normalizeDraftStocks({}, card));
       setSemanticCoreSelected([]);
+      setSemanticCoreReports([]);
+      setSemanticActiveReportId("");
+      setSemanticCore(null);
       setApproval(defaultApprovalState());
       setApprovalSections(defaultApprovalSections());
       setApprovalComment("");
@@ -4998,9 +5151,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
-  function downloadSemanticCoreSelection() {
-    const rows = normalizeSemanticSelection(semanticCoreSelected);
-    downloadXlsx(`${exportFileBase}-semantic-core.xlsx`, [{
+  function downloadSemanticCoreSelection(rowsSource = semanticCoreSelected, suffix = "semantic-core") {
+    const rows = normalizeSemanticSelection(rowsSource);
+    downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
       name: "СЯ в работу",
       freezeRows: 1,
       widths: [34, 34, 28, 14, 14, 14, 14],
@@ -5017,6 +5170,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         ]),
       ],
     }]);
+  }
+
+  function openSemanticReport(report) {
+    if (!report?.semanticCore) return;
+    setSemanticCore(report.semanticCore);
+    setSemanticCoreSelected(normalizeSemanticSelection(report.selected));
+    setSemanticActiveReportId(report.id);
+    setSemanticSeedQuery(report.seedQuery || report.semanticCore.seedQuery || defaultSemanticSeedQuery(card));
+    setSemanticSubjectFilter(report.subjectFilter || "");
+    setSemanticSearch(report.search || "");
+    setSemanticExcludeWords(report.excludeWords || "");
+    setSemanticCoreStatus("loaded");
+    setSemanticCoreError("");
   }
 
   return (
@@ -5100,13 +5266,35 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <span>Поиск в запросах</span>
                     <input value={semanticSearch} onChange={(event) => setSemanticSearch(event.target.value)} placeholder="рибана, хлопок, розовая" disabled={!activeSemanticCore} />
                   </label>
+                  <label className="field-label">
+                    <span>Слова исключения</span>
+                    <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
+                  </label>
                 </div>
+                {semanticCoreReports.length ? (
+                  <div className="semantic-history">
+                    <span>Старые подборки</span>
+                    {semanticCoreReports.map((report) => (
+                      <div className={`semantic-history-row ${report.id === semanticActiveReportId ? "active" : ""}`} key={report.id}>
+                        <div>
+                          <strong>{report.seedQuery || "Без запроса"}</strong>
+                          <em>{report.createdAt ? new Date(report.createdAt).toLocaleString("ru-RU") : "без даты"} · {formatNumber(report.semanticCore?.totalKeywords || 0)} запросов · {formatNumber(report.selected?.length || 0)} выбрано</em>
+                        </div>
+                        <button className="btn mini" type="button" onClick={() => openSemanticReport(report)}>Открыть</button>
+                        <button className="btn mini" type="button" onClick={() => downloadSemanticCoreSelection(report.selected, `semantic-core-${String(report.createdAt || "").slice(0, 10)}`)} disabled={!report.selected?.length}>
+                          <Download size={14} />Скачать
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {activeSemanticCore ? (
                   <SemanticCorePanel
                     semanticCore={activeSemanticCore}
                     standalone
                     subjectFilter={semanticSubjectFilter}
                     search={semanticSearch}
+                    excludeWords={semanticExcludeWords}
                     onTakeKeyword={takeSemanticKeyword}
                     onRemoveKeyword={removeSemanticKeyword}
                   />
@@ -6038,7 +6226,29 @@ function semanticKeywordMeta(item) {
   return parts.join(" · ");
 }
 
-function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", onTakeKeyword = null, onRemoveKeyword = null }) {
+function semanticFilterWords(value) {
+  return String(value || "")
+    .split(/[\s,;\n]+/)
+    .map((item) => normalizedCharacteristicOption(item))
+    .filter(Boolean);
+}
+
+function semanticExclusionStem(value) {
+  const normalized = normalizedCharacteristicOption(value);
+  return normalized.length > 4
+    ? normalized.replace(/(ами|ями|ого|его|ыми|ими|ые|ие|ой|ая|яя|ое|ее|ом|ем|ам|ям|ах|ях|у|а|ы|и|е|о)$/u, "")
+    : normalized;
+}
+
+function semanticMatchesExclusion(query, excludedWords) {
+  const normalizedQuery = normalizedCharacteristicOption(query);
+  return excludedWords.some((word) => {
+    const stem = semanticExclusionStem(word);
+    return normalizedQuery.includes(word) || (stem.length >= 4 && normalizedQuery.includes(stem));
+  });
+}
+
+function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
   const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
@@ -6050,11 +6260,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const currentLimit = compact ? 4 : standalone ? 80 : 8;
   const workLimit = compact ? 4 : standalone ? 250 : 8;
   const searchText = String(search || "").trim().toLowerCase();
+  const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = allKeywords.length ? allKeywords : workItems;
   const filteredWorkItems = sourceItems
     .filter((item) => !selectedKeys.has(semanticQueryKey(item)))
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
+    .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
