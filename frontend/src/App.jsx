@@ -4037,6 +4037,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [mpstatsCharacteristicsMeta, setMpstatsCharacteristicsMeta] = useState({});
   const [semanticCore, setSemanticCore] = useState(null);
   const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
+  const [semanticCoreError, setSemanticCoreError] = useState("");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
@@ -4339,9 +4340,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   async function loadSemanticCore({ forceRefresh = false } = {}) {
     if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
       setSemanticCoreStatus("missing-card");
+      setSemanticCoreError("");
       return null;
     }
     setSemanticCoreStatus("loading");
+    setSemanticCoreError("");
     try {
       const payload = await apiRequest("/api/mpstats/semantic-expansion", {
         method: "POST",
@@ -4365,7 +4368,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
     } catch (error) {
-      setSemanticCoreStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
+      const message = error.payload?.message || error.message || "";
+      const readableMessage = message === "mpstats_expanding_report_not_ready"
+        ? "MPStats еще готовит SEO-отчет. Повторите подбор через минуту."
+        : message === "mpstats_key_missing"
+          ? "MPStats ключ не подключен."
+          : message && message !== "mpstats_api_error"
+            ? `MPStats: ${message}`
+            : "MPStats SEO expansion не загрузился. Повторите позже.";
+      setSemanticCoreStatus(error.payload?.status === 202 || message === "mpstats_expanding_report_not_ready" ? "pending" : error.message === "mpstats_api_error" ? "error" : "unavailable");
+      setSemanticCoreError(readableMessage);
       return null;
     }
   }
@@ -5059,7 +5071,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <p>Отдельный SEO-запрос MPStats: расширение запросов по стартовой фразе без запуска аудита.</p>
                   </div>
                   <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
-                    {semanticCoreStatus === "loading" ? "собираем" : activeSemanticCore ? `${activeSemanticCore.selectedCount || 0} выбрано` : "нет данных"}
+                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : activeSemanticCore ? `${activeSemanticCore.selectedCount || 0} выбрано` : "нет данных"}
                   </Tag>
                 </div>
                 <div className="semantic-query-bar">
@@ -5097,13 +5109,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 )}
                 <div className="tab-actions">
-                  {semanticCoreStatus === "error" || semanticCoreStatus === "unavailable" ? <span className="status-note">MPStats SEO expansion не загрузился. Проверьте ключ или повторите позже.</span> : null}
+                  {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
                   <button className="btn" type="button" onClick={downloadSemanticCoreSelection} disabled={!semanticCoreSelected.length}>
                     <Download size={17} />Скачать выбранное
                   </button>
                   <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
-                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : activeSemanticCore ? "Обновить подбор" : "Подобрать запросы"}
+                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : activeSemanticCore ? "Обновить подбор" : "Подобрать запросы"}
                   </button>
                 </div>
               </section>

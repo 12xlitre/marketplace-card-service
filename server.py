@@ -3742,12 +3742,12 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
     if not report_hash:
       raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_expanding_hash_missing", retryable=True)
     payload = None
-    for attempt in range(12):
+    for attempt in range(18):
       poll_payload = mpstats_get_json(token, f"/seo/keywords/expanding/{report_hash}", attempts=1)
       if isinstance(poll_payload, dict) and isinstance(poll_payload.get("words"), list):
         payload = poll_payload
         break
-      if attempt < 11:
+      if attempt < 17:
         time.sleep(1.5 if attempt < 3 else 3)
     if payload is None:
       raise MpstatsApiError(HTTPStatus.ACCEPTED, "mpstats_expanding_report_not_ready", retryable=True)
