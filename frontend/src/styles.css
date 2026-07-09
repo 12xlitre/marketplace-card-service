@@ -1654,10 +1654,38 @@ tr:last-child td {
   font-weight: 700;
   cursor: pointer;
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 4px;
   box-shadow: 0 1px 0 rgba(20, 35, 55, .04);
+}
+
+.changes-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.changes-tab-status {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.changes-tab-status.status-submitted {
+  color: #a16207;
+}
+
+.changes-tab-status.status-approved,
+.changes-tab-status.status-exported {
+  color: #15803d;
+}
+
+.changes-tab-status.status-changes_requested {
+  color: #b42318;
 }
 
 .changes-tabs button.active {

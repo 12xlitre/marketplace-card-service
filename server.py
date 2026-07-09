@@ -1631,34 +1631,103 @@ def user_can_review_portal_approval(user, portal_id):
   return portal_team_roles(portal_id).get("manager") == user.get("login")
 
 
+APPROVAL_SECTION_LABELS = {
+  "content": "Контент",
+  "prices": "Цены",
+  "stocks": "Остатки",
+}
+
+
+def approval_sections_from_payload(payload):
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+  return {
+    key: value
+    for key, value in sections.items()
+    if key in APPROVAL_SECTION_LABELS and isinstance(value, dict)
+  }
+
+
+def approval_status_from_approval(approval):
+  return str(approval.get("status") or "draft").strip() or "draft"
+
+
 def approval_status_from_payload(payload):
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
-  return str(approval.get("status") or "draft").strip()
+  return approval_status_from_approval(approval)
 
 
-def approval_event_from_payload(payload, user, nm_id="", vendor_code=""):
-  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+def approval_event_from_approval(approval, user, nm_id="", vendor_code="", section_label=""):
   history = approval.get("history") if isinstance(approval.get("history"), list) else []
   latest = history[0] if history and isinstance(history[0], dict) else {}
-  status = str(approval.get("status") or "draft").strip() or "draft"
+  status = approval_status_from_approval(approval)
   event_at = (
     latest.get("createdAt")
     or (approval.get("reviewedAt") if status in {"approved", "changes_requested"} else "")
     or approval.get("submittedAt")
     or dt.datetime.now(dt.timezone.utc).isoformat()
   )
+  reason = str(latest.get("reason") or approval.get("returnReason") or "")[:1000]
+  if section_label:
+    reason = f"{section_label}: {reason}"[:1000] if reason else section_label
   return {
     "status": status[:40],
     "action": str(latest.get("action") or status)[:40],
     "actorLogin": str(latest.get("userLogin") or user.get("login") or "")[:120],
     "assigneeLogin": str(approval.get("assigneeLogin") or "")[:120],
-    "reason": str(latest.get("reason") or approval.get("returnReason") or "")[:1000],
+    "reason": reason,
     "eventAt": str(event_at)[:80],
     "nmID": str(nm_id or "")[:80],
     "vendorCode": str(vendor_code or "")[:120],
   }
+
+
+def approval_event_from_payload(payload, user, nm_id="", vendor_code=""):
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  return approval_event_from_approval(approval, user, nm_id, vendor_code)
+
+
+def restricted_approval_changes(payload, previous_payload):
+  restricted_statuses = {"approved", "changes_requested"}
+  sections = approval_sections_from_payload(payload)
+  if sections:
+    previous_sections = approval_sections_from_payload(previous_payload or {})
+    changes = []
+    for key, approval in sections.items():
+      status = approval_status_from_approval(approval)
+      previous_status = approval_status_from_approval(previous_sections.get(key, {}))
+      if status in restricted_statuses and status != previous_status:
+        changes.append(key)
+    return changes
+  status = approval_status_from_payload(payload)
+  previous_status = approval_status_from_payload(previous_payload or {})
+  return ["approval"] if status in restricted_statuses and status != previous_status else []
+
+
+def approval_events_from_payload_change(payload, previous_payload, user, nm_id="", vendor_code=""):
+  sections = approval_sections_from_payload(payload)
+  if sections:
+    previous_sections = approval_sections_from_payload(previous_payload or {})
+    events = []
+    for key, approval in sections.items():
+      status = approval_status_from_approval(approval)
+      previous_status = approval_status_from_approval(previous_sections.get(key, {}))
+      if status != "draft" and status != previous_status:
+        events.append(approval_event_from_approval(
+          approval,
+          user,
+          nm_id,
+          vendor_code,
+          APPROVAL_SECTION_LABELS.get(key, ""),
+        ))
+    return events
+  approval_status = approval_status_from_payload(payload)
+  previous_status = approval_status_from_payload(previous_payload or {})
+  if approval_status != "draft" and approval_status != previous_status:
+    return [approval_event_from_payload(payload, user, nm_id, vendor_code)]
+  return []
 
 
 def insert_card_approval_event(db, portal_id, card_key, event):
@@ -1843,9 +1912,6 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
   normalized_payload = normalize_card_draft_payload(payload)
-  approval_status = approval_status_from_payload(normalized_payload)
-  if approval_status in {"approved", "changes_requested"} and not user_can_review_portal_approval(user, numeric_portal_id):
-    raise PermissionError("approval_forbidden")
   payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
   with connect_db() as db:
     previous = db.execute(
@@ -1856,13 +1922,15 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
       """,
       (numeric_portal_id, card_key),
     ).fetchone()
-    previous_status = "draft"
+    previous_payload = normalize_card_draft_payload({})
     if previous:
       try:
         previous_payload = json.loads(previous["payload_json"])
-        previous_status = approval_status_from_payload(previous_payload)
       except (TypeError, json.JSONDecodeError):
-        previous_status = "draft"
+        previous_payload = normalize_card_draft_payload({})
+    previous_payload = normalize_card_draft_payload(previous_payload)
+    if restricted_approval_changes(normalized_payload, previous_payload) and not user_can_review_portal_approval(user, numeric_portal_id):
+      raise PermissionError("approval_forbidden")
     db.execute(
       """
       INSERT INTO card_drafts (
@@ -1889,12 +1957,12 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
         user["login"],
       ),
     )
-    if approval_status != "draft" and approval_status != previous_status:
+    for event in approval_events_from_payload_change(normalized_payload, previous_payload, user, nm_id, vendor_code):
       insert_card_approval_event(
         db,
         numeric_portal_id,
         card_key,
-        approval_event_from_payload(normalized_payload, user, nm_id, vendor_code),
+        event,
       )
   return get_card_draft(numeric_portal_id, card_key, user)
 

@@ -650,6 +650,65 @@ function normalizeApprovalState(value) {
   };
 }
 
+const APPROVAL_SECTION_KEYS = ["content", "prices", "stocks"];
+
+const APPROVAL_SECTION_LABELS = {
+  content: "Контент",
+  prices: "Цены",
+  stocks: "Остатки",
+};
+
+function defaultApprovalSections() {
+  return APPROVAL_SECTION_KEYS.reduce((acc, key) => {
+    acc[key] = defaultApprovalState();
+    return acc;
+  }, {});
+}
+
+function approvalSectionLabel(section) {
+  return APPROVAL_SECTION_LABELS[section] || "Изменения";
+}
+
+function normalizeApprovalSections(value, fallbackApproval = null) {
+  const source = value && typeof value === "object" ? value : {};
+  const hasSectionState = APPROVAL_SECTION_KEYS.some((key) => source[key] && typeof source[key] === "object");
+  const fallback = normalizeApprovalState(fallbackApproval);
+  return APPROVAL_SECTION_KEYS.reduce((acc, key) => {
+    acc[key] = normalizeApprovalState(hasSectionState ? source[key] : fallback);
+    return acc;
+  }, {});
+}
+
+function approvalEventTime(approval) {
+  const historyTime = approval?.history?.[0]?.createdAt || "";
+  const candidates = [historyTime, approval?.reviewedAt, approval?.submittedAt].filter(Boolean);
+  const timestamps = candidates
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  return timestamps.length ? Math.max(...timestamps) : 0;
+}
+
+function latestApprovalByStatus(sections, statuses) {
+  const statusSet = new Set(statuses);
+  return APPROVAL_SECTION_KEYS
+    .map((key) => normalizeApprovalState(sections?.[key]))
+    .filter((item) => statusSet.has(item.status))
+    .sort((a, b) => approvalEventTime(b) - approvalEventTime(a))[0];
+}
+
+function deriveOverallApproval(approvalSections) {
+  const sections = normalizeApprovalSections(approvalSections);
+  const statuses = APPROVAL_SECTION_KEYS.map((key) => sections[key].status);
+  const submitted = latestApprovalByStatus(sections, ["submitted"]);
+  if (submitted) return submitted;
+  const returned = latestApprovalByStatus(sections, ["changes_requested"]);
+  if (returned) return returned;
+  if (statuses.every((status) => status === "approved" || status === "exported")) {
+    return latestApprovalByStatus(sections, ["approved", "exported"]) || normalizeApprovalState({ status: "approved" });
+  }
+  return defaultApprovalState();
+}
+
 function approvalStatusLabel(status) {
   return {
     draft: "в работе",
@@ -1885,6 +1944,7 @@ function buildStructuredCardDraft({
   auditStatus,
   auditHistory,
   approval,
+  approvalSections,
   title,
   titleSource,
   titleReason,
@@ -1898,6 +1958,7 @@ function buildStructuredCardDraft({
   auditResult,
   evidenceSummary,
 }) {
+  const normalizedApprovalSections = normalizeApprovalSections(approvalSections, approval);
   return {
     version: 2,
     auditStatus,
@@ -1917,7 +1978,8 @@ function buildStructuredCardDraft({
     prices: prices || {},
     stocks: stocks || {},
     meta: {
-      approval: normalizeApprovalState(approval),
+      approval: deriveOverallApproval(normalizedApprovalSections),
+      approvalSections: normalizedApprovalSections,
       auditContract: {
         version: "sergey-audit-v1",
         sections: ["title", "description", "characteristics"],
@@ -1943,6 +2005,8 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   const title = content.title || {};
   const description = content.description || {};
   const meta = payload.meta || {};
+  const approval = normalizeApprovalState(meta.approval);
+  const approvalSections = normalizeApprovalSections(meta.approvalSections, approval);
   return {
     auditStatus: payload.auditStatus || storedDraft?.auditStatus || "idle",
     title: typeof title === "object" ? title.value || "" : payload.title || "",
@@ -1955,7 +2019,8 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
-    approval: normalizeApprovalState(meta.approval),
+    approval: deriveOverallApproval(approvalSections),
+    approvalSections,
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
   };
 }
@@ -3752,6 +3817,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [draftPrices, setDraftPrices] = useState(() => priceDraftFromCard(card));
   const [draftStocks, setDraftStocks] = useState(() => normalizeDraftStocks({}, card));
   const [approval, setApproval] = useState(defaultApprovalState());
+  const [approvalSections, setApprovalSections] = useState(defaultApprovalSections());
   const [approvalComment, setApprovalComment] = useState("");
   const [auditHistory, setAuditHistory] = useState([]);
   const [subjectCharacteristics, setSubjectCharacteristics] = useState([]);
@@ -3820,9 +3886,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const userRoleType = getUserRoleType(currentUser);
   const isApprovalReviewer = Boolean(currentUser?.login && (currentUser.login === portalTeam.manager || userRoleType === "admin"));
   const isProjectLead = Boolean(currentUser?.login && currentUser.login === portalTeam.lead && !isApprovalReviewer);
-  const approvalReadOnly = isProjectLead || (approval.status === "submitted" && isApprovalReviewer);
-  const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(approval.status);
-  const canReviewApproval = approval.status === "submitted" && isApprovalReviewer;
+  const activeApprovalSection = APPROVAL_SECTION_KEYS.includes(changesTab) ? changesTab : "content";
+  const activeApproval = normalizeApprovalState(approvalSections[activeApprovalSection]);
+  const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
+  const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
+  const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
   const latestAuditSummary = auditHistory.find((item) => item?.summary)?.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
@@ -3842,6 +3910,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setDraftPrices(priceDraftFromCard(card));
     setDraftStocks(normalizeDraftStocks({}, card));
     setApproval(defaultApprovalState());
+    setApprovalSections(defaultApprovalSections());
     setApprovalComment("");
     setAuditHistory([]);
     setMpstatsCharacteristics([]);
@@ -3863,6 +3932,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftPrices(normalized.prices);
       setDraftStocks(normalized.stocks);
       setApproval(normalized.approval);
+      setApprovalSections(normalized.approvalSections);
       setApprovalComment("");
       setAuditHistory(normalized.auditHistory);
       setAuditStatus(normalized.auditStatus);
@@ -4059,6 +4129,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         auditStatus: "done",
         auditHistory: nextAuditHistory,
         approval,
+        approvalSections,
         title: nextTitle,
         description: nextDescription,
         titleSource: "audit",
@@ -4135,6 +4206,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       auditStatus: "done",
       auditHistory: nextAuditHistory,
       approval,
+      approvalSections,
       title: nextTitle,
       description: nextDescription,
       titleSource: "audit",
@@ -4277,6 +4349,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       auditStatus,
       auditHistory,
       approval,
+      approvalSections,
       title: draftTitle,
       description: draftDescription,
       titleSource: draftTitleSource,
@@ -4291,11 +4364,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
   }
 
-  function buildCurrentStructuredDraft(nextApproval = approval) {
+  function buildCurrentStructuredDraft(nextApprovalSections = approvalSections) {
+    const nextApproval = deriveOverallApproval(nextApprovalSections);
     return buildStructuredCardDraft({
       auditStatus,
       auditHistory,
       approval: nextApproval,
+      approvalSections: nextApprovalSections,
       title: draftTitle,
       description: draftDescription,
       titleSource: draftTitleSource,
@@ -4311,10 +4386,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
   async function applyApprovalChange(nextApproval, statusMessage) {
     const previousApproval = approval;
+    const previousSections = approvalSections;
     const normalized = normalizeApprovalState(nextApproval);
-    setApproval(normalized);
-    const persistStatus = await persistStructuredDraft(buildCurrentStructuredDraft(normalized), { auditDone: auditStatus === "done" });
+    const nextSections = normalizeApprovalSections({
+      ...approvalSections,
+      [activeApprovalSection]: normalized,
+    });
+    const nextOverallApproval = deriveOverallApproval(nextSections);
+    setApprovalSections(nextSections);
+    setApproval(nextOverallApproval);
+    const persistStatus = await persistStructuredDraft(buildCurrentStructuredDraft(nextSections), { auditDone: auditStatus === "done" });
     if (backendDraftEnabled && persistStatus !== "backend") {
+      setApprovalSections(previousSections);
       setApproval(previousApproval);
       setDraftSaveStatus("approval-save-error");
       return false;
@@ -4327,6 +4410,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     return {
       id: `approval-${Date.now()}`,
       action,
+      section: activeApprovalSection,
+      sectionLabel: approvalSectionLabel(activeApprovalSection),
       reason,
       userLogin: currentUser?.login || "",
       userName: currentUser?.full_name || currentUser?.login || "",
@@ -4337,7 +4422,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   async function submitForApproval() {
     const now = new Date().toISOString();
     const nextApproval = normalizeApprovalState({
-      ...approval,
+      ...activeApproval,
       status: "submitted",
       assigneeLogin: portalTeam.manager || "",
       submittedBy: currentUser?.login || "",
@@ -4345,7 +4430,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       reviewedBy: "",
       reviewedAt: "",
       returnReason: "",
-      history: [approvalHistoryItem("submitted"), ...(approval.history || [])],
+      history: [approvalHistoryItem("submitted"), ...(activeApproval.history || [])],
     });
     await applyApprovalChange(nextApproval, "approval-submitted");
   }
@@ -4353,12 +4438,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   async function approveChanges() {
     const now = new Date().toISOString();
     const nextApproval = normalizeApprovalState({
-      ...approval,
+      ...activeApproval,
       status: "approved",
       reviewedBy: currentUser?.login || "",
       reviewedAt: now,
       returnReason: "",
-      history: [approvalHistoryItem("approved"), ...(approval.history || [])],
+      history: [approvalHistoryItem("approved"), ...(activeApproval.history || [])],
     });
     setApprovalComment("");
     await applyApprovalChange(nextApproval, "approval-approved");
@@ -4372,12 +4457,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     const now = new Date().toISOString();
     const nextApproval = normalizeApprovalState({
-      ...approval,
+      ...activeApproval,
       status: "changes_requested",
       reviewedBy: currentUser?.login || "",
       reviewedAt: now,
       returnReason: reason,
-      history: [approvalHistoryItem("changes_requested", reason), ...(approval.history || [])],
+      history: [approvalHistoryItem("changes_requested", reason), ...(activeApproval.history || [])],
     });
     const saved = await applyApprovalChange(nextApproval, "approval-returned");
     if (saved) {
@@ -4410,6 +4495,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftPrices(priceDraftFromCard(card));
       setDraftStocks(normalizeDraftStocks({}, card));
       setApproval(defaultApprovalState());
+      setApprovalSections(defaultApprovalSections());
       setApprovalComment("");
       setDraftSavedAt("");
       setDraftSaveStatus("reset");
@@ -4690,9 +4776,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 </div>
                 <div className="changes-tabs" aria-label="Тип изменений">
-                  <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}><FileText size={17} />Контент</button>
-                  <button className={changesTab === "prices" ? "active" : ""} type="button" onClick={() => setChangesTab("prices")}><Tags size={17} />Цены</button>
-                  <button className={changesTab === "stocks" ? "active" : ""} type="button" onClick={() => setChangesTab("stocks")}><Warehouse size={17} />Остатки</button>
+                  <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}>
+                    <span className="changes-tab-title"><FileText size={17} />Контент</span>
+                    <span className={`changes-tab-status status-${approvalSections.content.status}`}>{approvalStatusLabel(approvalSections.content.status)}</span>
+                  </button>
+                  <button className={changesTab === "prices" ? "active" : ""} type="button" onClick={() => setChangesTab("prices")}>
+                    <span className="changes-tab-title"><Tags size={17} />Цены</span>
+                    <span className={`changes-tab-status status-${approvalSections.prices.status}`}>{approvalStatusLabel(approvalSections.prices.status)}</span>
+                  </button>
+                  <button className={changesTab === "stocks" ? "active" : ""} type="button" onClick={() => setChangesTab("stocks")}>
+                    <span className="changes-tab-title"><Warehouse size={17} />Остатки</span>
+                    <span className={`changes-tab-status status-${approvalSections.stocks.status}`}>{approvalStatusLabel(approvalSections.stocks.status)}</span>
+                  </button>
                 </div>
                 {changesTab === "content" ? (
                 <>
@@ -4851,7 +4946,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 ) : null}
                 <ApprovalPanel
-                  approval={approval}
+                  approval={activeApproval}
+                  sectionLabel={approvalSectionLabel(activeApprovalSection)}
                   currentUser={currentUser}
                   team={portalTeam}
                   canSubmit={canSubmitApproval}
@@ -4934,6 +5030,7 @@ function RawFieldValue({ value }) {
 
 function ApprovalPanel({
   approval,
+  sectionLabel,
   currentUser,
   team,
   canSubmit,
@@ -4953,14 +5050,14 @@ function ApprovalPanel({
     <section className={`approval-panel approval-${approval.status}`}>
       <div className="approval-panel-head">
         <div>
-          <strong>Согласование изменений</strong>
+          <strong>Согласование: {sectionLabel}</strong>
           <p>{approval.status === "submitted"
             ? `Задача у аккаунт-менеджера${assignee ? `: ${assignee}` : ""}.`
             : approval.status === "approved"
-              ? "Правки приняты и готовы к выгрузке."
+              ? "Этот блок принят и готов к выгрузке."
               : approval.status === "changes_requested"
-                ? "Правки возвращены специалисту на доработку."
-                : "Когда правки готовы, отправьте их аккаунт-менеджеру на проверку."}</p>
+                ? "Этот блок возвращен специалисту на доработку."
+                : "Когда блок готов, отправьте его аккаунт-менеджеру на проверку."}</p>
         </div>
         <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
       </div>
@@ -4996,9 +5093,9 @@ function ApprovalPanel({
       ) : null}
       {canSubmit ? (
         <div className="approval-buttons">
-          <button className="btn primary" type="button" onClick={onSubmit} disabled={busy}>
-            <Upload size={17} />Отправить на согласование
-          </button>
+            <button className="btn primary" type="button" onClick={onSubmit} disabled={busy}>
+              <Upload size={17} />Отправить блок
+            </button>
         </div>
       ) : null}
       {lastEvent ? (
