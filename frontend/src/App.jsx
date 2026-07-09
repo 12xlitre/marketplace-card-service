@@ -1956,6 +1956,7 @@ function buildStructuredCardDraft({
   characteristics,
   prices,
   stocks,
+  semanticCoreSelected,
   card,
   auditResult,
   evidenceSummary,
@@ -1988,6 +1989,7 @@ function buildStructuredCardDraft({
         expectedOutputs: ["value", "reason", "evidence", "confidence"],
       },
       auditHistory: sanitizeAuditHistory(auditHistory).slice(0, 20),
+      semanticCoreSelected: normalizeSemanticSelection(semanticCoreSelected),
       auditResult: sanitizeAuditResult(auditResult),
       evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
       card: {
@@ -2020,6 +2022,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
+    semanticCoreSelected: normalizeSemanticSelection(meta.semanticCoreSelected),
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: deriveOverallApproval(approvalSections),
     approvalSections,
@@ -2086,6 +2089,60 @@ function sizeCommercialRows(sizes) {
       wbStock: firstDefined(size?.wbStock),
     };
   });
+}
+
+function semanticQueryKey(value) {
+  const query = typeof value === "string" ? value : value?.query;
+  return normalizedCharacteristicOption(query);
+}
+
+function normalizeSemanticSelection(items) {
+  const output = [];
+  const seen = new Set();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const query = String(typeof item === "string" ? item : item?.query || "").trim();
+    const key = semanticQueryKey(query);
+    if (!query || seen.has(key)) return;
+    seen.add(key);
+    output.push({
+      ...(typeof item === "object" && item ? item : {}),
+      query,
+      status: "selected",
+      field: "work",
+    });
+  });
+  return output.slice(0, 80);
+}
+
+function semanticCoreWithSelection(core, selectedItems) {
+  const selected = normalizeSemanticSelection(selectedItems);
+  if (!core || typeof core !== "object") {
+    return selected.length ? {
+      coveragePercent: null,
+      current: selected,
+      missing: [],
+      recommended: [],
+      selectedCount: selected.length,
+      totalKeywords: selected.length,
+      workKeywords: 0,
+      reason: "Запросы взяты в работу вручную. Для обновления вариантов соберите СЯ через MPStats.",
+    } : null;
+  }
+  const selectedKeys = new Set(selected.map(semanticQueryKey));
+  const current = Array.isArray(core.current) ? core.current : [];
+  const currentKeys = new Set(current.map(semanticQueryKey));
+  const selectedCurrent = selected.filter((item) => !currentKeys.has(semanticQueryKey(item)));
+  const removeSelected = (items) => (Array.isArray(items) ? items : []).filter((item) => !selectedKeys.has(semanticQueryKey(item)));
+  const recommended = removeSelected(core.recommended);
+  const missing = removeSelected(core.missing);
+  return {
+    ...core,
+    current: [...current, ...selectedCurrent],
+    recommended,
+    missing,
+    selectedCount: selected.length,
+    workKeywords: recommended.length,
+  };
 }
 
 function numberFromInput(value) {
@@ -3903,6 +3960,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [mpstatsCharacteristicsStatus, setMpstatsCharacteristicsStatus] = useState("idle");
   const [mpstatsCharacteristicsMs, setMpstatsCharacteristicsMs] = useState(null);
   const [mpstatsCharacteristicsMeta, setMpstatsCharacteristicsMeta] = useState({});
+  const [semanticCore, setSemanticCore] = useState(null);
+  const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
+  const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -3984,7 +4044,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
-  const latestSemanticCore = latestAuditSummary.semanticCore && typeof latestAuditSummary.semanticCore === "object" ? latestAuditSummary.semanticCore : null;
+  const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
 
   useEffect(() => {
     let active = true;
@@ -4007,6 +4067,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setMpstatsCharacteristicsStatus("idle");
     setMpstatsCharacteristicsMs(null);
     setMpstatsCharacteristicsMeta({});
+    setSemanticCore(null);
+    setSemanticCoreStatus("idle");
+    setSemanticCoreSelected([]);
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -4021,13 +4084,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftCharacteristics(normalized.characteristics);
       setDraftPrices(normalized.prices);
       setDraftStocks(normalized.stocks);
+      setSemanticCoreSelected(normalized.semanticCoreSelected);
       setApproval(normalized.approval);
       setApprovalSections(normalized.approvalSections);
       setApprovalComment("");
       setAuditHistory(normalized.auditHistory);
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
-      setActiveTab("changes");
     };
     try {
       const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
@@ -4189,6 +4252,67 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
+  async function loadSemanticCore({ forceRefresh = false } = {}) {
+    if (!portal?.id || !card?.nmID) {
+      setSemanticCoreStatus("missing-card");
+      return null;
+    }
+    setSemanticCoreStatus("loading");
+    try {
+      const payload = await apiRequest("/api/mpstats/keywords", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          card,
+          refresh: forceRefresh,
+        }),
+      });
+      setSemanticCore(payload.semanticCore || null);
+      setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
+      return payload.semanticCore || null;
+    } catch (error) {
+      setSemanticCoreStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
+      return null;
+    }
+  }
+
+  async function persistSemanticSelection(nextSelection) {
+    const normalizedSelection = normalizeSemanticSelection(nextSelection);
+    setSemanticCoreSelected(normalizedSelection);
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      approval,
+      approvalSections,
+      title: draftTitle,
+      description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
+      characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
+      semanticCoreSelected: normalizedSelection,
+      card,
+    });
+    await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+  }
+
+  function takeSemanticKeyword(item) {
+    const key = semanticQueryKey(item);
+    if (!key || semanticCoreSelected.some((selected) => semanticQueryKey(selected) === key)) {
+      return;
+    }
+    persistSemanticSelection([...semanticCoreSelected, item]);
+  }
+
+  function removeSemanticKeyword(item) {
+    const key = semanticQueryKey(item);
+    if (!key) return;
+    persistSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
+  }
+
   async function runAudit(nextTab = "changes") {
     setAuditStatus("loading");
     try {
@@ -4259,6 +4383,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         characteristics: nextDraftCharacteristics,
         prices: draftPrices,
         stocks: draftStocks,
+        semanticCoreSelected,
         card,
         auditResult: payload.auditResult,
         evidenceSummary: payload.evidenceSummary,
@@ -4336,6 +4461,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       characteristics: nextDraftCharacteristics,
       prices: draftPrices,
       stocks: draftStocks,
+      semanticCoreSelected,
       card,
     });
     setDraftTitle(nextTitle);
@@ -4591,6 +4717,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       characteristics: draftCharacteristics,
       prices: draftPrices,
       stocks: draftStocks,
+      semanticCoreSelected,
       card,
     });
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
@@ -4612,6 +4739,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       characteristics: draftCharacteristics,
       prices: draftPrices,
       stocks: draftStocks,
+      semanticCoreSelected,
       card,
     });
   }
@@ -4726,12 +4854,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
       setDraftPrices(priceDraftFromCard(card));
       setDraftStocks(normalizeDraftStocks({}, card));
+      setSemanticCoreSelected([]);
       setApproval(defaultApprovalState());
       setApprovalSections(defaultApprovalSections());
       setApprovalComment("");
       setDraftSavedAt("");
       setDraftSaveStatus("reset");
-      setActiveTab("changes");
+      setActiveTab("semantic");
       if (onDraftReset) {
         onDraftReset();
       }
@@ -4814,21 +4943,27 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <h2>Семантическое ядро</h2>
                     <p>Действующие запросы из текущего контента и релевантные запросы MPStats для работы с карточкой.</p>
                   </div>
-                  <Tag tone={latestSemanticCore ? "blue" : (auditRunning ? "blue" : "amber")}>
-                    {auditRunning ? "собираем" : latestSemanticCore ? `${latestSemanticCore.workKeywords ?? (latestSemanticCore.recommended || []).length} в работу` : "нужен аудит"}
+                  <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
+                    {semanticCoreStatus === "loading" ? "собираем" : activeSemanticCore ? `${activeSemanticCore.selectedCount || 0} выбрано` : "нет данных"}
                   </Tag>
                 </div>
-                {latestSemanticCore ? (
-                  <SemanticCorePanel semanticCore={latestSemanticCore} standalone />
+                {activeSemanticCore ? (
+                  <SemanticCorePanel
+                    semanticCore={activeSemanticCore}
+                    standalone
+                    onTakeKeyword={takeSemanticKeyword}
+                    onRemoveKeyword={removeSemanticKeyword}
+                  />
                 ) : (
                   <div className="empty-state">
                     <strong>СЯ еще не собрано</strong>
-                    <span>Запустите аудит: MPStats подтянет поисковые запросы карточки, а система разделит их на действующие и новые для работы.</span>
+                    <span>Соберите СЯ: MPStats подтянет поисковые запросы карточки, а система разделит их на действующие и новые для работы.</span>
                   </div>
                 )}
                 <div className="tab-actions">
-                  <button className="btn primary" type="button" onClick={() => runAudit("semantic")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}>
-                    <ClipboardList size={17} />{auditRunning ? "Собираем СЯ" : latestSemanticCore ? "Обновить СЯ" : "Собрать СЯ"}
+                  {semanticCoreStatus === "error" || semanticCoreStatus === "unavailable" ? <span className="status-note">MPStats keywords не загрузились. Проверьте ключ или повторите позже.</span> : null}
+                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading"}>
+                    <Search size={17} />{semanticCoreStatus === "loading" ? "Собираем СЯ" : activeSemanticCore ? "Обновить СЯ" : "Собрать СЯ"}
                   </button>
                 </div>
               </section>
@@ -4912,9 +5047,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         </div>
                       ) : null}
 	                    </div>
-	                  ) : null}
-	                  {auditDone && latestSemanticCore ? (
-	                    <SemanticCorePanel semanticCore={latestSemanticCore} />
 	                  ) : null}
 	                  <div className="issue audit-history">
                     <div className="issue-head">
@@ -5138,14 +5270,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
 	                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
 	                  mpstatsStatus={mpstatsHintsLabel}
-	                  semanticCore={latestSemanticCore}
+	                  semanticCore={activeSemanticCore}
 	                />
-	                {latestSemanticCore ? (
-	                  <SemanticCorePanel
-	                    semanticCore={latestSemanticCore}
-	                    compact
-	                  />
-	                ) : null}
 	                <div className="before-after">
                   <div className="field-box">
                     <strong>Было: заголовок</strong>
@@ -5690,6 +5816,7 @@ function ContentAuditSummary({
   const titleState = contentSummaryState({ changed: titleChanged, source: titleSource, reason: titleReason, emptyText: "нет заголовка" });
   const descriptionState = contentSummaryState({ changed: descriptionChanged, source: descriptionSource, reason: descriptionReason, emptyText: "нет описания" });
   const semanticRecommendedCount = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended.length : 0;
+  const semanticSelectedCount = Number(semanticCore?.selectedCount || 0);
   return (
     <div className="content-audit-summary">
       <div className="content-audit-card">
@@ -5716,13 +5843,17 @@ function ContentAuditSummary({
       <div className="content-audit-card">
         <div>
           <strong>СЯ</strong>
-          <Tag tone={semanticRecommendedCount ? "amber" : "green"}>{semanticCore?.coveragePercent === null || semanticCore?.coveragePercent === undefined ? "нет данных" : `${semanticCore.coveragePercent}% покрытие`}</Tag>
+          <Tag tone={semanticSelectedCount ? "blue" : semanticRecommendedCount ? "amber" : "green"}>
+            {semanticSelectedCount ? `${semanticSelectedCount} в работе` : semanticCore ? `${semanticRecommendedCount} вариантов` : "нет данных"}
+          </Tag>
         </div>
-        <p>{semanticRecommendedCount
-          ? `MPStats нашел ${semanticRecommendedCount} ${pluralRu(semanticRecommendedCount, "запрос", "запроса", "запросов")} для добавления в заголовок или описание.`
+        <p>{semanticSelectedCount
+          ? `${semanticSelectedCount} ${pluralRu(semanticSelectedCount, "запрос взят", "запроса взяты", "запросов взяты")} в работу во вкладке СЯ.`
+          : semanticRecommendedCount
+            ? `Во вкладке СЯ есть ${semanticRecommendedCount} ${pluralRu(semanticRecommendedCount, "релевантный запрос", "релевантных запроса", "релевантных запросов")} для контента.`
           : semanticCore
-            ? "Топ-запросы MPStats уже учтены или не требуют срочной правки."
-            : "СЯ появится после запуска аудита с MPStats keywords."}</p>
+            ? "СЯ собрано, новые запросы в работу не выбраны."
+            : "Соберите СЯ отдельной вкладкой через MPStats keywords."}</p>
       </div>
       <div className="content-audit-card future">
         <div>
@@ -5743,10 +5874,19 @@ function semanticKeywordMeta(item) {
   if (item?.orgPos) {
     parts.push(`органика ${item.orgPos}`);
   }
+  if (item?.status === "selected") {
+    parts.push("в работе");
+  } else if (item?.field === "title") {
+    parts.push("найдено в заголовке");
+  } else if (item?.field === "description") {
+    parts.push("найдено в описании");
+  } else if (item?.field === "title_description") {
+    parts.push("заголовок и описание");
+  }
   return parts.join(" · ");
 }
 
-function SemanticCorePanel({ semanticCore, compact = false, standalone = false }) {
+function SemanticCorePanel({ semanticCore, compact = false, standalone = false, onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
   const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
@@ -5774,8 +5914,15 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false }
           <div className="semantic-keyword-list">
             {current.length ? current.slice(0, currentLimit).map((item) => (
               <div className="semantic-keyword" key={`current-${item.query}`}>
-                <strong>{item.query}</strong>
-                <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                </div>
+                {standalone && item.status === "selected" && onRemoveKeyword ? (
+                  <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)}>
+                    <X size={14} />Убрать
+                  </button>
+                ) : null}
               </div>
             )) : <p>В топ-запросах MPStats нет подтвержденных вхождений в текущем контенте.</p>}
           </div>
@@ -5789,7 +5936,14 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false }
                   <strong>{item.query}</strong>
                   <em>{semanticKeywordMeta(item) || item.reason || "нет в текущем контенте"}</em>
                 </div>
-                {item.priority ? <Tag tone={item.priority === "high" ? "amber" : "blue"}>{item.priority === "high" ? "высокий" : item.priority === "medium" ? "средний" : "низкий"}</Tag> : null}
+                <div className="semantic-keyword-actions">
+                  {item.priority ? <Tag tone={item.priority === "high" ? "amber" : "blue"}>{item.priority === "high" ? "высокий" : item.priority === "medium" ? "средний" : "низкий"}</Tag> : null}
+                  {standalone && onTakeKeyword ? (
+                    <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)}>
+                      <Plus size={14} />В работу
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ))}
             {!workItems.length ? <p>Недостающих запросов не найдено или MPStats не вернул keywords.</p> : null}

@@ -3630,6 +3630,42 @@ def audit_build_semantic_core(card, keywords):
   }
 
 
+def fetch_mpstats_keywords_core(card, force_refresh=False):
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or card.get("id") or "")
+  if not nm_id:
+    raise ValueError("missing_nm_id")
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+
+  period = audit_period_default()
+  path = f"/analytics/v1/wb/items/{nm_id}/keywords"
+  params = {"d1": period["d1"], "d2": period["d2"]}
+  body = {"startRow": 0, "endRow": 500, "filterModel": {}, "sortModel": []}
+  cache_key = f"POST:{path}:{json.dumps(params, sort_keys=True, ensure_ascii=False)}:{json.dumps(body, sort_keys=True, ensure_ascii=False)}"
+  cached = None if force_refresh else audit_cache_get(cache_key)
+  if cached is not None:
+    mpstats_usage_record("POST", path, source="cache", status="hit")
+    payload = cached
+    cached_flag = True
+  else:
+    payload = mpstats_post_body_json(token, path, body=body, params=params, attempts=2)
+    audit_cache_set(cache_key, payload, AUDIT_MARKET_CACHE_TTL_SECONDS)
+    cached_flag = False
+
+  keywords = audit_keywords_from_payload(payload)
+  semantic_core = audit_build_semantic_core(card, keywords)
+  return {
+    "source": "mpstats",
+    "status": "loaded" if keywords else "empty",
+    "nmID": nm_id,
+    "period": period,
+    "keywords": keywords,
+    "semanticCore": semantic_core,
+    "cached": cached_flag,
+  }
+
+
 def audit_normalize_subject_item(item):
   if not isinstance(item, dict):
     return None
@@ -5577,6 +5613,42 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except RuntimeError:
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/mpstats/keywords":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      portal_id = str(payload.get("portalId") or payload.get("portal_id") or "demo-wb")
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      force_refresh = bool(payload.get("refresh"))
+      try:
+        result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh)
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_keywords_request"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except MpstatsApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "mpstats_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
         return
       self.send_json(HTTPStatus.OK, result)
       return
