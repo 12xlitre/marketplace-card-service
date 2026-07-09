@@ -5341,9 +5341,9 @@ function competitorStatusText(status, enabled) {
   return {
     loading: "Загружаем конкурентов...",
     saving: "Сохраняем список...",
-    refreshing: "Обновляем снимки WB...",
+    refreshing: "Проверяем конкурентов...",
     saved: "Список сохранен.",
-    refreshed: "Снимки обновлены.",
+    refreshed: "Данные конкурентов обновлены.",
     invalid: "Вставьте ссылку WB или nmID конкурента.",
     duplicate: "Этот конкурент уже добавлен.",
     limit: "Можно добавить до 3 конкурентов.",
@@ -5400,7 +5400,7 @@ function TopCompetitorsPanel({
           <Plus size={17} />Добавить
         </button>
         <button className="btn" type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length}>
-          <RefreshCw size={17} />Обновить снимки
+          <RefreshCw size={17} />Проверить конкурентов
         </button>
       </div>
       {statusText ? <div className={`competitor-status status-${status}`}>{statusText}</div> : null}
@@ -5411,7 +5411,7 @@ function TopCompetitorsPanel({
           ))}
         </div>
       ) : (
-        <div className="empty-state"><span>Добавьте 1-3 ссылки на карточки конкурентов. После обновления появится первый снимок WB.</span></div>
+        <div className="empty-state"><span>Добавьте 1-3 ссылки на карточки конкурентов. После проверки появятся данные WB.</span></div>
       )}
     </section>
   );
@@ -5450,7 +5450,7 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       </div>
       {changes.length ? (
         <div className="competitor-changes">
-          <span>{criticalChanges.length ? "Критичные изменения" : "Изменения после прошлого снимка"}</span>
+          <span>{criticalChanges.length ? "Критичные изменения" : "Изменения после прошлой проверки"}</span>
           {changes.slice(0, 5).map((change, index) => (
             <p key={`${change.field}-${index}`}>
               <strong>{change.label}</strong>
