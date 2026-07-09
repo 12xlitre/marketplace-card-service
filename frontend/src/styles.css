@@ -2734,7 +2734,7 @@ tr:last-child td {
 
 .semantic-core-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
@@ -2823,6 +2823,17 @@ tr:last-child td {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.semantic-list-footer {
+  display: grid;
+  gap: 8px;
+}
+
+.semantic-list-footer div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .semantic-keyword strong,

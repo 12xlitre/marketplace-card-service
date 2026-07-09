@@ -6267,16 +6267,23 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const selectedLimit = compact ? 4 : standalone ? 500 : 8;
   const currentLimit = compact ? 4 : standalone ? 120 : 8;
   const workLimit = compact ? 4 : standalone ? 250 : 8;
+  const workPageSize = standalone ? 250 : workLimit;
+  const [visibleWorkLimit, setVisibleWorkLimit] = useState(workLimit);
   const searchText = String(search || "").trim().toLowerCase();
   const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = allKeywords.length ? allKeywords : workItems;
+  const reportTotal = semanticCore?.totalKeywords || sourceItems.length || current.length + missing.length;
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredWorkItems = filteredSourceItems
     .filter((item) => !selectedKeys.has(semanticQueryKey(item)));
+  useEffect(() => {
+    setVisibleWorkLimit(workLimit);
+  }, [workLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
+  const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
@@ -6288,7 +6295,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
         <div className="semantic-core-metrics">
           <div><span>Действующие</span><strong>{formatNumber(current.length)}</strong></div>
           <div><span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
-          <div><span>Всего MPStats</span><strong>{formatNumber(filteredSourceItems.length)}</strong></div>
+          <div><span>По фильтрам</span><strong>{formatNumber(filteredSourceItems.length)}</strong></div>
+          <div><span>Отчет MPStats</span><strong>{formatNumber(reportTotal)}</strong></div>
         </div>
       ) : null}
       <div className="semantic-core-grid">
@@ -6321,9 +6329,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
           </div>
         </div>
         <div>
-          <span>Найденные запросы MPStats</span>
+          <span>Найденные запросы MPStats · к добавлению {formatNumber(filteredWorkItems.length)}</span>
           <div className="semantic-keyword-list">
-            {filteredWorkItems.slice(0, workLimit).map((item) => (
+            {filteredWorkItems.slice(0, visibleWorkLimit).map((item) => (
               <div className="semantic-keyword recommended" key={`recommended-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -6339,7 +6347,21 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             ))}
-            {filteredWorkItems.length > workLimit ? <p>Показано {formatNumber(workLimit)} из {formatNumber(filteredWorkItems.length)}. Используйте фильтр предмета или поиск.</p> : null}
+            {filteredWorkItems.length > visibleWorkLimit ? (
+              <div className="semantic-list-footer">
+                <p>Показано {formatNumber(visibleWorkCount)} из {formatNumber(filteredWorkItems.length)}. Можно раскрыть список или сузить его поиском.</p>
+                {standalone ? (
+                  <div>
+                    <button className="btn mini" type="button" onClick={() => setVisibleWorkLimit((value) => Math.min(value + workPageSize, filteredWorkItems.length))}>
+                      Показать еще {formatNumber(Math.min(workPageSize, filteredWorkItems.length - visibleWorkCount))}
+                    </button>
+                    <button className="btn mini" type="button" onClick={() => setVisibleWorkLimit(filteredWorkItems.length)}>
+                      Показать все
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {!filteredWorkItems.length ? <p>По текущим фильтрам запросы не найдены.</p> : null}
           </div>
         </div>
