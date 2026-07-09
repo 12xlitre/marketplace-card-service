@@ -5448,7 +5448,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <div className="audit-history-list">
                         {auditHistory.slice(0, 5).map((item) => (
                           <div className="audit-history-row" key={item.id || item.createdAt}>
-                            <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"}</span>
+                            <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"} · {auditEngineLabel(item.engine)}</span>
                             <em>
                               {item.mpstatsGroups || 0} MPStats · {Number.isFinite(Number(item.mpstatsCredits)) ? `${item.mpstatsCredits} кредитов · ` : ""}
                               {Number.isFinite(Number(item.mpstatsCacheHits)) ? `${item.mpstatsCacheHits} кэш · ` : ""}
@@ -5945,6 +5945,15 @@ function competitorChangeValue(change, key = "current") {
 
 function auditCompetitorSourceText(source) {
   return source === "manual" ? "вручную" : "MPStats";
+}
+
+function auditEngineLabel(engine) {
+  const value = String(engine || "").toLowerCase();
+  if (value.includes("gigachat")) return "GigaChat";
+  if (value.includes("llm")) return "LLM";
+  if (value.includes("deterministic")) return "базовый аудит";
+  if (value.includes("basic")) return "локальный fallback";
+  return engine || "аудит";
 }
 
 function auditCompetitorMetricText(item) {

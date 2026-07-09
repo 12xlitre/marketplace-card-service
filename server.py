@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
+import ssl
 import time
 import contextvars
 import uuid
@@ -77,6 +78,7 @@ GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip() o
 GIGACHAT_OAUTH_URL = os.environ.get("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
 GIGACHAT_API_BASE = os.environ.get("GIGACHAT_API_BASE", "https://gigachat.devices.sberbank.ru/api/v1")
 GIGACHAT_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat")
+GIGACHAT_VERIFY_SSL = os.environ.get("GIGACHAT_VERIFY_SSL", "0").strip().lower() in {"1", "true", "yes", "on"}
 OPTICARDS_LLM_PROVIDER = os.environ.get("OPTICARDS_LLM_PROVIDER", "gigachat" if GIGACHAT_AUTH_KEY else "openai").strip().lower()
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
@@ -4746,6 +4748,11 @@ def parse_llm_json_content(content):
     raise
 
 
+def gigachat_urlopen(request, timeout):
+  context = None if GIGACHAT_VERIFY_SSL else ssl._create_unverified_context()
+  return urlrequest.urlopen(request, timeout=timeout, context=context)
+
+
 def gigachat_access_token():
   now = time.time()
   cached_token = GIGACHAT_TOKEN_CACHE.get("accessToken")
@@ -4766,7 +4773,7 @@ def gigachat_access_token():
     },
     method="POST",
   )
-  with urlrequest.urlopen(request, timeout=45) as response:
+  with gigachat_urlopen(request, timeout=45) as response:
     payload = json.loads(response.read().decode("utf-8"))
   access_token = audit_str(payload.get("access_token") or payload.get("accessToken") or "")
   if not access_token:
@@ -4802,7 +4809,7 @@ def audit_llm_chat_completion(messages):
       },
       method="POST",
     )
-    with urlrequest.urlopen(request, timeout=60) as response:
+    with gigachat_urlopen(request, timeout=60) as response:
       return json.loads(response.read().decode("utf-8")), GIGACHAT_MODEL, "gigachat"
 
   token = audit_str(OPTICARDS_LLM_API_KEY)
