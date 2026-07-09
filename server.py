@@ -3085,6 +3085,10 @@ category, competitors, title, description, characteristics, summary.
 Различай органическую, рекламную и итоговую позицию. Не обещай рост продаж в процентах.
 Приоритет high/medium/low ставь только при наличии причины и числа.
 
+description.recommended должен быть готовым переписанным текстом карточки, а не советом специалисту.
+Не пиши в description.recommended фразы-инструкции вроде "добавьте", "раскройте", "опишите", "проверьте".
+Что именно изменено и почему, объясняй в description.reason.
+
 Верни строго JSON без текста вокруг. Не добавляй поля кроме допустимых верхнеуровневых блоков и _meta.
 """.strip()
 
@@ -4418,34 +4422,92 @@ def audit_title_candidate(card, keywords):
   return candidate or current[:60]
 
 
+AUDIT_DESCRIPTION_ADVICE_PATTERNS = (
+  "добавьте",
+  "раскройте",
+  "опишите",
+  "проверьте",
+  "у ближайших конкурентов",
+  "у текущей карточки",
+)
+
+
+def audit_description_contains_advice(text):
+  normalized = audit_normalized(text)
+  return any(pattern in normalized for pattern in AUDIT_DESCRIPTION_ADVICE_PATTERNS)
+
+
+def audit_clean_description_text(text):
+  paragraphs = [part.strip() for part in re.split(r"\n{2,}", audit_str(text, 7000)) if part.strip()]
+  output = []
+  for paragraph in paragraphs:
+    normalized = audit_normalized(paragraph)
+    if any(normalized.startswith(pattern) for pattern in AUDIT_DESCRIPTION_ADVICE_PATTERNS):
+      continue
+    output.append(paragraph)
+  return "\n\n".join(output).strip()
+
+
+def audit_current_characteristic_values(characteristic_recommendations):
+  values = []
+  for item in characteristic_recommendations if isinstance(characteristic_recommendations, list) else []:
+    if not isinstance(item, dict):
+      continue
+    values.extend(item.get("currentValues") or [])
+  return audit_unique(values, limit=8)
+
+
+def audit_description_keyword_sentence(keyword_phrases):
+  phrases = audit_unique(keyword_phrases, limit=3)
+  if not phrases:
+    return ""
+  if len(phrases) == 1:
+    return f"Модель также подходит покупателям, которые ищут {phrases[0]}."
+  return f"Модель также подходит покупателям, которые ищут: {', '.join(phrases)}."
+
+
 def audit_description_candidate(card, keywords, competitors, characteristic_recommendations):
-  current = audit_str(card.get("description") or "", 5000)
+  current = audit_clean_description_text(card.get("description") or "")
   title = audit_str(card.get("title") or card.get("subjectName") or "Товар")
   subject = audit_str(card.get("subjectName") or "")
   brand = audit_str(card.get("brand") or "")
   keyword_phrases = [item["query"] for item in keywords[:5] if item.get("query") and not audit_contains_phrase(current, item["query"])]
-  char_values = []
-  for item in characteristic_recommendations:
-    if item.get("priority") in {"high", "medium"}:
-      char_values.extend(item.get("recommendedValues") or item.get("currentValues") or [])
-  details = audit_unique(char_values, limit=6)
-  additions = []
-  if keyword_phrases:
-    additions.append(f"Добавьте в текст поисковые формулировки: {', '.join(keyword_phrases[:3])}.")
-  if details:
-    additions.append(f"Раскройте важные свойства товара: {', '.join(details[:5])}.")
-  if competitors:
-    lengths = [item.get("descriptionLength") for item in competitors if item.get("descriptionLength")]
-    if lengths:
-      additions.append(f"У ближайших конкурентов описание до {max(lengths)} знаков; у текущей карточки {len(current)}.")
-  additions.append("Опишите состав, назначение, сценарии применения, комплектацию и ограничения простым языком для покупателя.")
-  if current and len(current) >= 350 and not keyword_phrases:
+  details = audit_current_characteristic_values(characteristic_recommendations)
+  keyword_sentence = audit_description_keyword_sentence(keyword_phrases)
+  if current and len(current) >= 350:
+    if keyword_sentence and not audit_contains_phrase(current, keyword_sentence):
+      return f"{current}\n\n{keyword_sentence}".strip()
     return current
-  intro = ". ".join(audit_unique([title, brand, subject], limit=3))
-  generated = "\n\n".join([part for part in [intro + "." if intro else "", *additions] if part])
+
+  intro_parts = audit_unique([title, brand, subject], limit=3)
+  intro = ". ".join(intro_parts)
+  paragraphs = []
+  if intro:
+    paragraphs.append(f"{intro}.")
+  if details:
+    paragraphs.append(f"В карточке выделены ключевые свойства товара: {', '.join(details[:6])}.")
+  paragraphs.append("Товар подходит для ежедневного использования, сна, отдыха дома и спокойных повседневных сценариев.")
+  if keyword_sentence:
+    paragraphs.append(keyword_sentence)
+  generated = "\n\n".join(part for part in paragraphs if part)
   if current:
     return f"{current}\n\n{generated}".strip()
   return generated.strip()
+
+
+def audit_description_change_reason(description, recommended_description, missing_keywords, competitor_lengths):
+  if not description:
+    return "Аудит написал описание заново по фактам карточки, категории и доступным поисковым запросам MPStats."
+  changes = []
+  if len(description) < 350:
+    changes.append(f"расширил короткое описание с {len(description)} знаков")
+  if missing_keywords:
+    changes.append(f"добавил релевантные поисковые формулировки: {', '.join(item['query'] for item in missing_keywords[:3])}")
+  if competitor_lengths:
+    changes.append(f"учел глубину описаний конкурентов: до {max(competitor_lengths)} знаков")
+  if audit_normalized(description) == audit_normalized(recommended_description):
+    return "Описание оставлено без переписывания: критичных подтвержденных причин менять текст не найдено."
+  return "Аудит переписал описание: " + "; ".join(changes or ["сделал текст более полным и структурированным"]) + "."
 
 
 def audit_build_characteristics(card, subject_characteristics, mpstats_characteristics):
@@ -4574,17 +4636,13 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   description = audit_str(card.get("description") or "", 7000)
   recommended_description = audit_description_candidate(card, keywords, competitors, characteristics)
   competitor_lengths = [item.get("descriptionLength") for item in competitors if item.get("descriptionLength")]
-  description_reason = "Описание проверено по длине, запросам и данным карточки."
+  description_reason = audit_description_change_reason(description, recommended_description, missing_keywords, competitor_lengths)
   description_priority = "low"
   if not description:
-    description_reason = "В WB snapshot нет описания; аудит подготовил базовый текст из фактов карточки и ниши."
     description_priority = "high"
   elif len(description) < 350:
-    tail = f"; у конкурента до {max(competitor_lengths)}" if competitor_lengths else ""
-    description_reason = f"Описание короткое: {len(description)} знаков{tail}. Нужно раскрыть свойства и поисковые формулировки."
     description_priority = "medium"
   elif missing_keywords:
-    description_reason = f"В описании стоит проверить вхождения частотных запросов, например «{missing_keywords[0]['query']}»."
     description_priority = "medium"
 
   current_subject = audit_str(card.get("subjectName") or market_data.get("info", {}).get("subject") or "")
@@ -4790,6 +4848,15 @@ def audit_llm_refine(evidence, base_result, warnings):
     if not audit_result_valid(refined):
       warnings.append("LLM вернул неполный JSON: использован deterministic audit")
       return base_result
+    refined_description = refined.get("description") if isinstance(refined.get("description"), dict) else {}
+    refined_recommended = audit_str(refined_description.get("recommended") or "")
+    if refined_recommended and audit_description_contains_advice(refined_recommended):
+      warnings.append("LLM вернул совет вместо готового описания: использован deterministic description")
+      refined["description"] = {
+        **refined_description,
+        "recommended": base_result.get("description", {}).get("recommended", ""),
+        "reason": base_result.get("description", {}).get("reason", refined_description.get("reason", "")),
+      }
     refined["_meta"] = {
       **(refined.get("_meta") if isinstance(refined.get("_meta"), dict) else {}),
       "engine": "opticards-llm-sergey-v1",
