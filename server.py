@@ -1876,6 +1876,14 @@ def reset_portal_work_cache(portal_id, user):
       "DELETE FROM card_drafts WHERE portal_id = ?",
       (numeric_portal_id,),
     )
+    workset_cursor = db.execute(
+      "DELETE FROM portal_workset_cards WHERE portal_id = ?",
+      (numeric_portal_id,),
+    )
+    approval_cursor = db.execute(
+      "DELETE FROM card_approval_events WHERE portal_id = ?",
+      (numeric_portal_id,),
+    )
     mpstats_deleted = 0
     if subject_ids:
       placeholders = ",".join("?" for _ in subject_ids)
@@ -1889,6 +1897,8 @@ def reset_portal_work_cache(portal_id, user):
       mpstats_deleted = mpstats_cursor.rowcount
   return {
     "draftsDeleted": draft_cursor.rowcount,
+    "worksetDeleted": workset_cursor.rowcount,
+    "approvalEventsDeleted": approval_cursor.rowcount,
     "mpstatsDeleted": mpstats_deleted,
     "subjectIDs": subject_ids,
   }
@@ -3990,7 +4000,6 @@ def audit_build_characteristics(card, subject_characteristics, mpstats_character
 
 def audit_build_result(card, market_data, competitors, characteristics, warnings, period):
   keywords = market_data.get("keywords", [])
-  semantic_core = audit_build_semantic_core(card, keywords)
   current_title = audit_str(card.get("title") or "")
   recommended_title = audit_title_candidate(card, keywords)
   missing_keywords = [item for item in keywords[:8] if not audit_contains_phrase(current_title, item.get("query"))]
@@ -4046,10 +4055,6 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   if title_priority in {"high", "medium"} and recommended_title != current_title:
     quick_wins.append(f"Переписать заголовок под частотный запрос: {recommended_title}.")
   quick_wins.extend(
-    f"Взять СЯ-запрос «{item['query']}» в работу с контентом."
-    for item in semantic_core.get("recommended", [])[:2]
-  )
-  quick_wins.extend(
     f"Заполнить «{item['name']}»: {', '.join(item.get('recommendedValues') or [])}."
     for item in high_characteristics[:3]
     if item.get("recommendedValues")
@@ -4088,12 +4093,10 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
       "reason": description_reason,
       "priority": description_priority,
     },
-    "semanticCore": semantic_core,
     "characteristics": characteristics,
     "summary": {
       "mainProblems": main_problems[:3] or ["Критичные проблемы не подтверждены данными; нужна ручная проверка специалиста."],
       "quickWins": quick_wins[:5] or ["Проверить черновик характеристик и сохранить подтвержденные значения."],
-      "semanticCore": semantic_core,
       "strategicRecommendations": [
         "Сравнить карточку с топом ниши по выручке и проверить цену, отзывы, фото и рекламные позиции отдельным этапом.",
         "Накопить историю аудитов по предмету, чтобы переиспользовать рабочие формулировки и значения характеристик.",
@@ -4344,10 +4347,6 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
     "warnings": warnings,
   }
   result = audit_llm_refine(evidence, base_result, warnings)
-  if not isinstance(result.get("semanticCore"), dict):
-    result["semanticCore"] = base_result.get("semanticCore", {})
-  if isinstance(result.get("summary"), dict) and not isinstance(result["summary"].get("semanticCore"), dict):
-    result["summary"]["semanticCore"] = result.get("semanticCore", {})
   if result is not base_result:
     result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *audit_public_warnings(warnings)], limit=8)
   draft_content = audit_draft_from_result(result, characteristic_draft)

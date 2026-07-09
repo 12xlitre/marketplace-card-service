@@ -620,6 +620,17 @@ function normalizePortal(portal) {
   };
 }
 
+function emptyDraftSummary() {
+  return {
+    draftCount: 0,
+    auditCount: 0,
+    approvalPendingCount: 0,
+    approvalReturnedCount: 0,
+    approvalApprovedCount: 0,
+    lastDraftAt: "",
+  };
+}
+
 function defaultApprovalState() {
   return {
     status: "draft",
@@ -2824,6 +2835,56 @@ export default function App() {
     }
   }
 
+  async function resetPortalWork(portal) {
+    if (!portal || portal.isDemo || !portal.apiConnected) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Обнулить работу по кабинету? Удалятся аудиты, черновики, задачи и история согласования. Карточки WB и API-ключ останутся.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    const portalKey = String(portal.id);
+    if (loadingPortalCards[portalKey]) {
+      return;
+    }
+    setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
+    try {
+      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-work-cache`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      clearLocalDraftsForPortal(portal.id);
+      resetPortalWorkSummary(portal.id);
+      const resetPortal = {
+        ...portal,
+        draftSummary: emptyDraftSummary(),
+        realCards: portal.realCards || [],
+      };
+      replaceUserPortal(resetPortal);
+      const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
+      const updatedPortal = applyWbSnapshotToPortal(resetPortal, payload);
+      replaceUserPortal({
+        ...updatedPortal,
+        draftSummary: emptyDraftSummary(),
+      });
+      setNotice("Работа по кабинету обнулена: аудиты, черновики и согласование удалены.");
+    } catch {
+      setNotice("Не удалось обнулить работу по кабинету. Попробуйте повторить позже.");
+      replaceUserPortal({
+        ...portal,
+        syncStatus: "error",
+      });
+    } finally {
+      setLoadingPortalCards((items) => {
+        const next = { ...items };
+        delete next[portalKey];
+        return next;
+      });
+    }
+  }
+
   async function loadPortalCards(portal, { force = false, resetWork = false } = {}) {
     if (!portal || portal.isDemo || !portal.apiConnected || (!force && portal.realCards?.length)) {
       return;
@@ -2843,7 +2904,7 @@ export default function App() {
         resetPortalWorkSummary(portal.id);
         replaceUserPortal({
           ...portal,
-          draftSummary: { draftCount: 0, auditCount: 0, lastDraftAt: "" },
+          draftSummary: emptyDraftSummary(),
           realCards: portal.realCards || [],
         });
       }
@@ -2851,13 +2912,13 @@ export default function App() {
       const updatedPortal = applyWbSnapshotToPortal(portal, payload);
       replaceUserPortal(resetWork ? {
         ...updatedPortal,
-        draftSummary: { draftCount: 0, auditCount: 0, lastDraftAt: "" },
+        draftSummary: emptyDraftSummary(),
       } : updatedPortal);
     } catch {
       replaceUserPortal({
         ...portal,
         syncStatus: "error",
-        draftSummary: resetWork ? { draftCount: 0, auditCount: 0, lastDraftAt: "" } : portal.draftSummary,
+        draftSummary: resetWork ? emptyDraftSummary() : portal.draftSummary,
       });
     } finally {
       setLoadingPortalCards((items) => {
@@ -3002,6 +3063,7 @@ export default function App() {
             onBack={() => setScreen("cabinets")}
             onOpenCard={openCard}
             onRefreshCards={() => refreshPortalCards(currentPortal)}
+            onResetWork={() => resetPortalWork(currentPortal)}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
               setPortalModalTarget(currentPortal?.isDemo ? null : currentPortal);
@@ -3290,7 +3352,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onUpdateTeam }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam }) {
   const owner = findUser(portal.ownerLogin);
   const isApi = portal.mode === "api";
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
@@ -3469,6 +3531,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <div className="panel-actions">
                 <button className="btn" type="button" onClick={onRefreshCards} disabled={!portal.apiConnected || cardsLoading}>
                   <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : "Загрузить свежие данные"}
+                </button>
+                <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
+                  <Trash2 size={16} />Обнулить работу
                 </button>
                 <button className="btn" type="button" onClick={() => onOpenModal("api")}>Подключить API</button>
               </div>
@@ -5270,7 +5335,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
 	                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
 	                  mpstatsStatus={mpstatsHintsLabel}
-	                  semanticCore={activeSemanticCore}
 	                />
 	                <div className="before-after">
                   <div className="field-box">
@@ -5811,12 +5875,9 @@ function ContentAuditSummary({
   changedCharacteristicsCount,
   auditCharacteristicsCount,
   mpstatsStatus,
-  semanticCore,
 }) {
   const titleState = contentSummaryState({ changed: titleChanged, source: titleSource, reason: titleReason, emptyText: "нет заголовка" });
   const descriptionState = contentSummaryState({ changed: descriptionChanged, source: descriptionSource, reason: descriptionReason, emptyText: "нет описания" });
-  const semanticRecommendedCount = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended.length : 0;
-  const semanticSelectedCount = Number(semanticCore?.selectedCount || 0);
   return (
     <div className="content-audit-summary">
       <div className="content-audit-card">
@@ -5841,21 +5902,6 @@ function ContentAuditSummary({
         <p>{auditCharacteristicsCount ? `Аудит подготовил ${auditCharacteristicsCount} ${pluralRu(auditCharacteristicsCount, "поле", "поля", "полей")}. ${mpstatsStatus}.` : "Можно править вручную или добавить поля из справочника WB."}</p>
       </div>
       <div className="content-audit-card">
-        <div>
-          <strong>СЯ</strong>
-          <Tag tone={semanticSelectedCount ? "blue" : semanticRecommendedCount ? "amber" : "green"}>
-            {semanticSelectedCount ? `${semanticSelectedCount} в работе` : semanticCore ? `${semanticRecommendedCount} вариантов` : "нет данных"}
-          </Tag>
-        </div>
-        <p>{semanticSelectedCount
-          ? `${semanticSelectedCount} ${pluralRu(semanticSelectedCount, "запрос взят", "запроса взяты", "запросов взяты")} в работу во вкладке СЯ.`
-          : semanticRecommendedCount
-            ? `Во вкладке СЯ есть ${semanticRecommendedCount} ${pluralRu(semanticRecommendedCount, "релевантный запрос", "релевантных запроса", "релевантных запросов")} для контента.`
-          : semanticCore
-            ? "СЯ собрано, новые запросы в работу не выбраны."
-            : "Соберите СЯ отдельной вкладкой через MPStats keywords."}</p>
-      </div>
-      <div className="content-audit-card future">
         <div>
           <strong>Методика</strong>
           <Tag tone="blue">MP Audit</Tag>
