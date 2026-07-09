@@ -4038,6 +4038,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCore, setSemanticCore] = useState(null);
   const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
   const [semanticCoreError, setSemanticCoreError] = useState("");
+  const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
@@ -4129,6 +4130,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticSeedQuery(defaultSemanticSeedQuery(card));
     setSemanticSubjectFilter("");
     setSemanticSearch("");
+    setSemanticSaveStatus("");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -4385,6 +4387,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   async function persistSemanticSelection(nextSelection) {
     const normalizedSelection = normalizeSemanticSelection(nextSelection);
     setSemanticCoreSelected(normalizedSelection);
+    setSemanticSaveStatus("saving");
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       auditHistory,
@@ -4402,7 +4405,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       semanticCoreSelected: normalizedSelection,
       card,
     });
-    await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+    try {
+      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      setSemanticSaveStatus("saved");
+    } catch {
+      setSemanticSaveStatus("error");
+    }
   }
 
   function takeSemanticKeyword(item) {
@@ -5110,6 +5118,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 )}
                 <div className="tab-actions">
                   {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
+                  {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
+                  {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
                   <button className="btn" type="button" onClick={downloadSemanticCoreSelection} disabled={!semanticCoreSelected.length}>
                     <Download size={17} />Скачать выбранное
@@ -6056,13 +6066,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       {standalone ? (
         <div className="semantic-core-metrics">
           <div><span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong></div>
-          <div><span>В работе</span><strong>{formatNumber(selectedItems.length)}</strong></div>
+          <div><span>Выбранные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
           <div><span>Всего MPStats</span><strong>{formatNumber(semanticCore?.totalKeywords || current.length + missing.length)}</strong></div>
         </div>
       ) : null}
       <div className="semantic-core-grid">
         <div>
-          <span>В работе и действующие</span>
+          <span>Выбранные запросы</span>
           <div className="semantic-keyword-list">
             {selectedItems.length ? selectedItems.slice(0, currentLimit).map((item) => (
               <div className="semantic-keyword selected" key={`selected-${item.query}`}>
@@ -6085,7 +6095,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {!selectedItems.length && !currentItems.length ? <p>Пока нет выбранных запросов и подтвержденных вхождений в текущем контенте.</p> : null}
+            {!selectedItems.length && !currentItems.length ? <p>Пока нет выбранных запросов.</p> : null}
           </div>
         </div>
         <div>
