@@ -2079,18 +2079,33 @@ function numberFromInput(value) {
 }
 
 function priceDraftFromCard(card) {
-  return {
+  const draft = {
     price: firstDefined(card?.price, card?.rawFields?.price),
     discount: firstDefined(card?.discount, card?.rawFields?.discount),
+  };
+  return {
+    ...draft,
+    recommendation: buildPriceRecommendation(card, draft),
+    recommendationSource: "system",
   };
 }
 
 function normalizeDraftPrices(value, card) {
   const base = priceDraftFromCard(card);
   const source = value && typeof value === "object" ? value : {};
-  return {
+  const normalized = {
     price: firstDefined(source.price, source.basePrice, base.price),
     discount: firstDefined(source.discount, base.discount),
+  };
+  const recommendation = firstDefined(
+    source.recommendation,
+    source.recommendationText,
+    buildPriceRecommendation(card, normalized),
+  );
+  return {
+    ...normalized,
+    recommendation,
+    recommendationSource: source.recommendationSource || (source.recommendation || source.recommendationText ? "manual" : "system"),
   };
 }
 
@@ -2104,6 +2119,46 @@ function discountedPriceFromValues(price, discount) {
     return priceNumber;
   }
   return Math.round(priceNumber * (100 - discountNumber)) / 100;
+}
+
+function signedPercent(value) {
+  if (!Number.isFinite(value)) return "";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${Math.round(value * 10) / 10}%`;
+}
+
+function buildPriceRecommendation(card, prices = {}) {
+  const currentPrice = firstDefined(card?.price, card?.rawFields?.price);
+  const currentDiscount = firstDefined(card?.discount, card?.rawFields?.discount);
+  const currentDiscounted = firstDefined(
+    card?.discountedPrice,
+    card?.rawFields?.discountedPrice,
+    discountedPriceFromValues(currentPrice, currentDiscount),
+  );
+  const draftPrice = firstDefined(prices.price, currentPrice);
+  const draftDiscount = firstDefined(prices.discount, currentDiscount);
+  const draftDiscounted = discountedPriceFromValues(draftPrice, draftDiscount);
+  if (draftPrice === "" || draftDiscounted === "") {
+    return "Не хватает цены до скидки, чтобы сформировать рекомендацию.";
+  }
+  const currentNumber = numberFromInput(currentDiscounted);
+  const draftNumber = numberFromInput(draftDiscounted);
+  const discountNumber = numberFromInput(draftDiscount);
+  if (currentNumber === "" || currentNumber <= 0) {
+    return `Рекомендация: поставить цену со скидкой ${valueSummary(draftDiscounted)} и после выгрузки проверить динамику продаж. Текущая цена WB не найдена для сравнения.`;
+  }
+  const deltaPercent = ((draftNumber - currentNumber) / currentNumber) * 100;
+  const deltaText = signedPercent(deltaPercent);
+  const discountWarning = discountNumber !== "" && discountNumber >= 70
+    ? " Скидка высокая, перед выгрузкой проверьте маржинальность и ограничения WB."
+    : "";
+  if (deltaPercent <= -10) {
+    return `Рекомендация: снизить цену со скидкой до ${valueSummary(draftDiscounted)} (${deltaText} к текущей). Подходит для ускорения продаж или распродажи остатка.${discountWarning}`;
+  }
+  if (deltaPercent >= 10) {
+    return `Рекомендация: повысить цену со скидкой до ${valueSummary(draftDiscounted)} (${deltaText} к текущей). Используйте, если маржа важнее объема продаж или товар хорошо продается.${discountWarning}`;
+  }
+  return `Рекомендация: оставить цену близко к текущей, ${valueSummary(draftDiscounted)} (${deltaText} к текущей). Изменение мягкое, можно согласовывать без сильного риска для конверсии.${discountWarning}`;
 }
 
 function stockDraftRowsFromCard(card) {
@@ -2151,13 +2206,14 @@ function buildPricesExportSheets(card, draftPrices = {}) {
   const price = firstDefined(draftPrices.price, card?.price, card?.rawFields?.price);
   const discount = firstDefined(draftPrices.discount, card?.discount, card?.rawFields?.discount);
   const discountedPrice = discountedPriceFromValues(price, discount) || firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice);
+  const recommendation = firstDefined(draftPrices.recommendation, buildPriceRecommendation(card, draftPrices));
   return [
     {
       name: "Цены и скидки",
       freezeRows: 1,
-      widths: [18, 24, 24, 22, 20, 22],
+      widths: [18, 24, 24, 22, 20, 22, 72],
       rows: [
-        ["Номенклатура WB", "Артикул продавца", "Баркод", "Цена продавца до скидки", "Скидка продавца", "Цена со скидкой"],
+        ["Номенклатура WB", "Артикул продавца", "Баркод", "Цена продавца до скидки", "Скидка продавца", "Цена со скидкой", "Рекомендация"],
         [
           card?.nmID || "",
           card?.vendorCode || "",
@@ -2165,6 +2221,7 @@ function buildPricesExportSheets(card, draftPrices = {}) {
           price,
           discount,
           discountedPrice,
+          recommendation,
         ],
       ],
     },
@@ -2175,6 +2232,7 @@ function buildPricesExportSheets(card, draftPrices = {}) {
         ["Раздел WB", "Что делать"],
         ["Цены и скидки", "В ЛК WB откройте Товары и цены -> Цены и скидки -> Обновить через Excel -> Цены или скидки."],
         ["Редактируемые поля", "В WB-шаблоне обычно редактируются цена продавца до скидки и скидка продавца. Итоговая цена пересчитывается WB."],
+        ["Рекомендация", "Поле с рекомендацией не загружается в WB автоматически, оно нужно для согласования решения внутри команды."],
         ["Ограничение", "Если WB выгрузил свой шаблон со всеми товарами, переносите значения из листа Цены и скидки в строки с тем же nmID/артикулом/баркодом."],
       ],
     },
@@ -4285,10 +4343,33 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   function updateDraftPrice(field, value) {
+    setDraftPrices((current) => {
+      const next = {
+        ...current,
+        [field]: value,
+        source: "manual",
+      };
+      if (current.recommendationSource !== "manual") {
+        next.recommendation = buildPriceRecommendation(card, next);
+        next.recommendationSource = "system";
+      }
+      return next;
+    });
+  }
+
+  function updatePriceRecommendation(value) {
     setDraftPrices((current) => ({
       ...current,
-      [field]: value,
-      source: "manual",
+      recommendation: value,
+      recommendationSource: "manual",
+    }));
+  }
+
+  function regeneratePriceRecommendation() {
+    setDraftPrices((current) => ({
+      ...current,
+      recommendation: buildPriceRecommendation(card, current),
+      recommendationSource: "system",
     }));
   }
 
@@ -4907,6 +4988,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                      </label>
 	                      <div className="panel-list compact-list">
 	                        <div className="list-row"><span>Расчетная цена со скидкой</span><strong>{valueSummary(draftDiscountedPriceValue)}</strong></div>
+	                      </div>
+	                      <label className="field-label price-recommendation-field">
+	                        Рекомендация по цене
+	                        <textarea
+	                          value={draftPrices.recommendation || ""}
+	                          disabled={approvalReadOnly}
+	                          onChange={(event) => updatePriceRecommendation(event.target.value)}
+	                          placeholder="Система сформирует рекомендацию после заполнения цены."
+	                        />
+	                      </label>
+	                      <div className="price-recommendation-actions">
+	                        <span>{draftPrices.recommendationSource === "manual" ? "Текст изменен вручную" : "Системная рекомендация"}</span>
+	                        <button className="btn" type="button" onClick={regeneratePriceRecommendation} disabled={approvalReadOnly}><RefreshCw size={16} />Обновить</button>
 	                      </div>
 	                      <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
 	                    </div>

@@ -944,6 +944,29 @@ tr.selected-row td {
   text-align: right;
 }
 
+.price-recommendation-field {
+  margin-top: 10px;
+}
+
+.price-recommendation-field textarea {
+  min-height: 118px;
+}
+
+.price-recommendation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.price-recommendation-actions span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .user-list-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
