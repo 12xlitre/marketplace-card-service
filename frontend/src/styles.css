@@ -2662,6 +2662,34 @@ tr:last-child td {
   margin-bottom: 14px;
 }
 
+.semantic-core-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--line);
+  gap: 1px;
+}
+
+.semantic-core-metrics div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  background: var(--surface-soft);
+}
+
+.semantic-core-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.semantic-core-metrics strong {
+  color: var(--ink);
+  font-size: 18px;
+}
+
 .semantic-core-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3110,6 +3138,7 @@ tr:last-child td {
     .approval-events-head,
     .approval-event-row,
     .semantic-core-grid,
+    .semantic-core-metrics,
     .settings-grid,
   .competitor-toolbar,
   .competitor-grid,

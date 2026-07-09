@@ -3562,7 +3562,7 @@ def audit_keywords_from_payload(payload):
       "avgPos": item.get("avg_position") or item.get("avgPos") or item.get("position"),
       "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
     })
-  return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:30]
+  return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:80]
 
 
 def audit_keyword_entry(item, status, field):
@@ -3584,7 +3584,7 @@ def audit_build_semantic_core(card, keywords):
   keywords = [item for item in keywords if isinstance(item, dict) and item.get("query")]
   current = []
   missing = []
-  for item in keywords[:30]:
+  for item in keywords[:80]:
     in_title = audit_contains_phrase(current_title, item.get("query"))
     in_description = audit_contains_phrase(description, item.get("query"))
     if in_title or in_description:
@@ -3598,17 +3598,15 @@ def audit_build_semantic_core(card, keywords):
   for item in missing:
     wb_count = audit_int(item.get("wbCount"), 0)
     priority = "high" if wb_count >= 1000 else "medium" if wb_count >= 300 else "low"
-    target = "title" if len(recommended) < 1 and len(item.get("query") or "") <= 45 else "description"
     recommended.append({
       **item,
       "priority": priority,
-      "target": target,
       "reason": (
-        f"Частотный запрос {audit_format_count(wb_count)} показов/мес не найден в текущем заголовке и описании."
-        if wb_count else "Запрос есть в MPStats, но не найден в текущем заголовке и описании."
+        f"Частотный запрос {audit_format_count(wb_count)} показов/мес не найден в текущем контенте."
+        if wb_count else "Запрос есть в MPStats, но не найден в текущем контенте."
       ),
     })
-    if len(recommended) >= 8:
+    if len(recommended) >= 40:
       break
   total_top = min(len(keywords), 12)
   present_top = sum(
@@ -3623,9 +3621,11 @@ def audit_build_semantic_core(card, keywords):
       reason += f" В работу стоит взять: {', '.join(item['query'] for item in recommended[:3])}."
   return {
     "coveragePercent": coverage,
-    "current": current[:12],
-    "missing": missing[:12],
+    "current": current[:40],
+    "missing": missing[:60],
     "recommended": recommended,
+    "totalKeywords": len(keywords),
+    "workKeywords": len(recommended),
     "reason": reason,
   }
 
@@ -4010,7 +4010,7 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   if title_priority in {"high", "medium"} and recommended_title != current_title:
     quick_wins.append(f"Переписать заголовок под частотный запрос: {recommended_title}.")
   quick_wins.extend(
-    f"Добавить СЯ-запрос «{item['query']}» в {('заголовок' if item.get('target') == 'title' else 'описание')}."
+    f"Взять СЯ-запрос «{item['query']}» в работу с контентом."
     for item in semantic_core.get("recommended", [])[:2]
   )
   quick_wins.extend(
