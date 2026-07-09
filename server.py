@@ -1071,6 +1071,49 @@ def update_portal_sync_stats(portal_id, snapshot):
     )
 
 
+def replace_wb_token_for_portal(portal_id, token, snapshot):
+  numeric_portal_id = int(portal_id)
+  token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
+  external_key = wb_snapshot_external_key(snapshot)
+  aad = integration_aad(numeric_portal_id, WB_PROVIDER)
+  nonce, ciphertext = encrypt_secret(token, aad)
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    db.execute(
+      """
+      INSERT INTO portal_integrations (
+        portal_id, provider, status, token_nonce, token_ciphertext, token_digest,
+        external_key, token_issued_at, token_expires_at, last_checked_at
+      )
+      VALUES (?, ?, 'connected', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(portal_id, provider) DO UPDATE SET
+        status = 'connected',
+        token_nonce = excluded.token_nonce,
+        token_ciphertext = excluded.token_ciphertext,
+        token_digest = excluded.token_digest,
+        external_key = excluded.external_key,
+        token_issued_at = excluded.token_issued_at,
+        token_expires_at = excluded.token_expires_at,
+        last_checked_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      """,
+      (
+        numeric_portal_id,
+        WB_PROVIDER,
+        nonce,
+        ciphertext,
+        secret_digest(token),
+        external_key,
+        token_meta.get("issuedAt", ""),
+        token_meta.get("expiresAt", ""),
+      ),
+    )
+  update_portal_sync_stats(numeric_portal_id, snapshot)
+  return get_portal_row(numeric_portal_id)
+
+
 def draft_card_key(value):
   return str(value or "").strip()[:120]
 
@@ -4594,6 +4637,63 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           max_age=SESSION_TTL_REMEMBER_SECONDS if remember else SESSION_TTL_SECONDS,
         )},
       )
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/wb-token"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/wb-token")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      api_key = str(payload.get("apiKey", "")).strip()
+      if len(api_key) < 20:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "wb_token_required"})
+        return
+      existing_portal = find_portal_by_integration_token(WB_PROVIDER, api_key)
+      if existing_portal and int(existing_portal["id"]) != portal_id:
+        self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
+        return
+      try:
+        snapshot = fetch_wb_cards(api_key, max_cards=100)
+        existing_portal = find_portal_by_integration_external_key(
+          WB_PROVIDER,
+          wb_snapshot_external_key(snapshot),
+        )
+        if existing_portal and int(existing_portal["id"]) != portal_id:
+          self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
+          return
+        row = replace_wb_token_for_portal(portal_id, api_key, snapshot)
+      except WbApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "wb_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
       return
 
     if path == "/api/portals":

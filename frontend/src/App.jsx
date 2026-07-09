@@ -2113,6 +2113,7 @@ export default function App() {
   const [loadingPortalCards, setLoadingPortalCards] = useState({});
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
+  const [portalModalTarget, setPortalModalTarget] = useState(null);
   const [notice, setNotice] = useState("");
   const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
@@ -2608,6 +2609,25 @@ export default function App() {
     setScreen("seller");
   }
 
+  async function replacePortalApiToken(targetPortal, payload) {
+    const response = await apiRequest(`/api/portals/${encodeURIComponent(targetPortal.id)}/wb-token`, {
+      method: "POST",
+      body: JSON.stringify({ apiKey: payload.apiKey }),
+    });
+    const portal = normalizePortal(response.portal);
+    replaceUserPortal(portal);
+    setPortalModalOpen(false);
+    setPortalModalTarget(null);
+    setSelectedPortalId(portal.id);
+    setScreen("seller");
+    const firstCard = (portal.realCards || [])[0] || null;
+    if (firstCard) {
+      setSelectedCard(firstCard);
+      setSelectedCardKey(cardDraftKey(firstCard));
+    }
+    setNotice("WB API ключ заменен, свежие данные кабинета загружены.");
+  }
+
   async function updatePortalTeam(portal, teamRoles) {
     if (portal.isDemo) {
       setDemoPortal((item) => ({
@@ -2683,6 +2703,7 @@ export default function App() {
             onRestore={(portal) => setPortalActive(portal, true)}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
+              setPortalModalTarget(null);
               setPortalModalOpen(true);
             }}
           />
@@ -2702,6 +2723,7 @@ export default function App() {
             onRefreshCards={() => refreshPortalCards(currentPortal)}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
+              setPortalModalTarget(currentPortal?.isDemo ? null : currentPortal);
               setPortalModalOpen(true);
             }}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
@@ -2740,13 +2762,21 @@ export default function App() {
       </main>
 
       {portalModalOpen ? (
-        <PortalModal
-          mode={portalModalMode}
-          users={displayUsers}
-          onMode={setPortalModalMode}
-          onClose={() => setPortalModalOpen(false)}
-          onSubmit={createPortal}
-        />
+          <PortalModal
+            mode={portalModalMode}
+            users={displayUsers}
+            targetPortal={portalModalTarget}
+            onMode={setPortalModalMode}
+            onClose={() => {
+              setPortalModalOpen(false);
+              setPortalModalTarget(null);
+            }}
+            onSubmit={(payload) => (
+              portalModalTarget
+                ? replacePortalApiToken(portalModalTarget, payload)
+                : createPortal(payload)
+            )}
+          />
       ) : null}
     </div>
   );
@@ -5186,7 +5216,8 @@ function CharacteristicsList({ items }) {
   );
 }
 
-function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
+function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubmit }) {
+  const isReplacement = Boolean(targetPortal);
   const [form, setForm] = useState({
     name: "",
     marketplace: "Wildberries",
@@ -5216,27 +5247,27 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
     if (errorObject.message === "wb_api_error") return `WB API не подключился: ${errorObject.payload?.message || "WB отклонил запрос."}`;
     if (errorObject.message === "secret_storage_unavailable") return "На backend не настроен ключ шифрования.";
     if (errorObject.status === 401) return "Сессия истекла. Войдите заново.";
-    return "Не удалось добавить кабинет. Проверьте данные и попробуйте еще раз.";
+    return isReplacement ? "Не удалось заменить WB API ключ. Проверьте ключ и попробуйте еще раз." : "Не удалось добавить кабинет. Проверьте данные и попробуйте еще раз.";
   }
 
   async function submit(event) {
     event.preventDefault();
     setError("");
-    if (mode === "api" && !form.apiKey.trim()) {
+    if ((isReplacement || mode === "api") && !form.apiKey.trim()) {
       setError("Введите WB API ключ.");
       return;
     }
     setLoading(true);
     try {
       await onSubmit({
-        name: mode === "api" ? "" : form.name.trim(),
+        name: mode === "api" || isReplacement ? "" : form.name.trim(),
         marketplace: form.marketplace,
-        mode,
+        mode: isReplacement ? "api" : mode,
         scope: form.scope,
         teamRoles: { lead: form.lead, tech: form.tech, manager: form.manager },
-        apiKey: mode === "api" ? form.apiKey.trim() : "",
-        storeUrl: mode === "manual" ? form.storeUrl.trim() : "",
-        manualSource: mode === "manual" ? form.manualSource.trim() : "",
+        apiKey: mode === "api" || isReplacement ? form.apiKey.trim() : "",
+        storeUrl: !isReplacement && mode === "manual" ? form.storeUrl.trim() : "",
+        manualSource: !isReplacement && mode === "manual" ? form.manualSource.trim() : "",
       });
       update("apiKey", "");
     } catch (submitError) {
@@ -5252,13 +5283,15 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
       <form className="modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
-            <h2>Добавить кабинет</h2>
-            <p>API-ключ отправляется только на backend, проверяется read-only запросом WB и не хранится в браузере.</p>
+            <h2>{isReplacement ? "Заменить WB API ключ" : "Добавить кабинет"}</h2>
+            <p>{isReplacement
+              ? `Ключ будет заменен только в кабинете ${targetPortal?.name || "Wildberries"}, после проверки read-only запросом WB.`
+              : "API-ключ отправляется только на backend, проверяется read-only запросом WB и не хранится в браузере."}</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
-          <div className="connect-mode">
+          {!isReplacement ? <div className="connect-mode">
             <button className={mode === "api" ? "active" : ""} type="button" onClick={() => onMode("api")}>
               <strong>WB API</strong>
               <span>Определить кабинет и загрузить карточки.</span>
@@ -5267,14 +5300,14 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
               <strong>Ручной портал</strong>
               <span>Подготовить пространство под таблицы.</span>
             </button>
-          </div>
-          {mode === "manual" ? (
+          </div> : null}
+          {!isReplacement && mode === "manual" ? (
             <label className="field-label">
               Название кабинета
               <input value={form.name} onChange={(event) => update("name", event.target.value)} required />
             </label>
           ) : null}
-          <div className="form-two">
+          {!isReplacement ? <div className="form-two">
             <label className="field-label">
               Маркетплейс
               <select className="select" value={form.marketplace} onChange={(event) => update("marketplace", event.target.value)}>
@@ -5288,13 +5321,13 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
                 <option value="selected">Выбранные карточки</option>
               </select>
             </label>
-          </div>
-          <div className="form-two">
+          </div> : null}
+          {!isReplacement ? <div className="form-two">
             <UserSelect label="Руководитель отдела" value={form.lead} users={users} onChange={(value) => update("lead", value)} />
             <UserSelect label="Технический специалист" value={form.tech} users={users} onChange={(value) => update("tech", value)} />
-          </div>
-          <UserSelect label="Аккаунт-менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} />
-          {mode === "api" ? (
+          </div> : null}
+          {!isReplacement ? <UserSelect label="Аккаунт-менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} /> : null}
+          {mode === "api" || isReplacement ? (
             <label className="field-label">
               WB API ключ
               <input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} autoComplete="off" />
@@ -5315,7 +5348,7 @@ function PortalModal({ mode, users, onMode, onClose, onSubmit }) {
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose}>Отмена</button>
-          <button className="btn primary" type="submit" disabled={loading}>{loading ? "Проверяем..." : "Добавить кабинет"}</button>
+          <button className="btn primary" type="submit" disabled={loading}>{loading ? "Проверяем..." : (isReplacement ? "Заменить ключ" : "Добавить кабинет")}</button>
         </div>
       </form>
     </div>
