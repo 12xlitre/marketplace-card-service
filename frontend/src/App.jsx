@@ -450,6 +450,12 @@ function knownRawFields(card) {
     dimensions: card?.dimensions,
     characteristics: card?.characteristics,
     sizes: card?.sizes,
+    price: card?.price,
+    discount: card?.discount,
+    discountedPrice: card?.discountedPrice,
+    stock: card?.stock,
+    sellerStock: card?.sellerStock,
+    wbStock: card?.wbStock,
     tags: card?.tags,
     createdAt: card?.createdAt,
     updatedAt: card?.updatedAt,
@@ -1975,6 +1981,25 @@ function firstSku(card) {
   return "";
 }
 
+function sizeStockValue(size) {
+  return firstDefined(size?.stock, size?.stocks?.total, size?.sellerStock, size?.wbStock);
+}
+
+function sizeStockText(size) {
+  const total = sizeStockValue(size);
+  if (total === "") {
+    return "остаток не загружен";
+  }
+  const parts = [`остаток ${total}`];
+  if (firstDefined(size?.sellerStock) !== "") {
+    parts.push(`FBS ${size.sellerStock}`);
+  }
+  if (firstDefined(size?.wbStock) !== "") {
+    parts.push(`WB ${size.wbStock}`);
+  }
+  return parts.join(" · ");
+}
+
 function buildPricesExportSheets(card) {
   return [
     {
@@ -2017,6 +2042,7 @@ function buildStocksExportSheets(card) {
   } else {
     sizes.forEach((size) => {
       const skus = Array.isArray(size?.skus) && size.skus.length ? size.skus : [""];
+      const stockValue = sizeStockValue(size);
       skus.forEach((sku) => {
         uploadRows.push([sku, ""]);
         referenceRows.push([
@@ -2025,7 +2051,7 @@ function buildStocksExportSheets(card) {
           card?.nmID || "",
           size?.techSize || size?.wbSize || "",
           size?.chrtID || "",
-          "",
+          stockValue,
         ]);
       });
     });
@@ -4627,7 +4653,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <div className="panel-list compact-list">
                         {(Array.isArray(sizes) && sizes.length ? sizes : [{}]).slice(0, 8).map((size, index) => (
                           <div className="list-row" key={`${size?.chrtID || index}-${size?.techSize || ""}`}>
-                            <span>{size?.techSize || size?.wbSize || `Размер ${index + 1}`}</span>
+                            <span>{size?.techSize || size?.wbSize || `Размер ${index + 1}`} · {sizeStockText(size)}</span>
                             <strong>{Array.isArray(size?.skus) && size.skus.length ? size.skus.join(", ") : "Баркод не указан"}</strong>
                           </div>
                         ))}

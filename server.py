@@ -58,6 +58,9 @@ MPSTATS_API_BASE = os.environ.get("MPSTATS_API_BASE", "https://mpstats.io/api")
 MPSTATS_CHECK_ITEM_ID = os.environ.get("MPSTATS_CHECK_ITEM_ID", "265906486")
 WB_ENV_TOKEN = "WB_API_TOKEN"
 WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api.wildberries.ru")
+WB_PRICES_API_BASE = os.environ.get("WB_PRICES_API_BASE", "https://discounts-prices-api.wildberries.ru")
+WB_MARKETPLACE_API_BASE = os.environ.get("WB_MARKETPLACE_API_BASE", "https://marketplace-api.wildberries.ru")
+WB_ANALYTICS_API_BASE = os.environ.get("WB_ANALYTICS_API_BASE", "https://seller-analytics-api.wildberries.ru")
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
@@ -2125,64 +2128,21 @@ def parse_retry_after(value):
     return None
 
 
-def wb_request_json(token, path, payload, locale="ru", attempts=3):
-  url = f"{WB_CONTENT_API_BASE.rstrip('/')}{path}?locale={locale}"
-  body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-  headers = {
-    "Authorization": token,
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "User-Agent": "OptiCards/0.1 read-only",
-  }
-
-  for attempt in range(attempts):
-    request = urlrequest.Request(url, data=body, headers=headers, method="POST")
-    try:
-      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
-        response_body = response.read().decode("utf-8")
-        return json.loads(response_body) if response_body else {}
-    except urlerror.HTTPError as exc:
-      response_body = exc.read().decode("utf-8", errors="replace")
-      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
-      retryable = exc.code == 429 or 500 <= exc.code < 600
-      if retryable and attempt < attempts - 1:
-        time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
-        continue
-      message = response_body
-      try:
-        error_payload = json.loads(response_body)
-        message = (
-          error_payload.get("errorText")
-          or error_payload.get("detail")
-          or error_payload.get("title")
-          or error_payload.get("message")
-          or response_body
-        )
-      except json.JSONDecodeError:
-        pass
-      raise WbApiError(exc.code, message or HTTPStatus(exc.code).phrase, retryable=retryable) from exc
-    except (TimeoutError, urlerror.URLError) as exc:
-      if attempt < attempts - 1:
-        time.sleep(0.5 * (2 ** attempt))
-        continue
-      raise WbApiError(HTTPStatus.GATEWAY_TIMEOUT, "wb_request_timeout", retryable=True) from exc
-    except json.JSONDecodeError as exc:
-      raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_invalid_json", retryable=False) from exc
-
-  raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
-
-
-def wb_get_json(token, path, locale="ru", attempts=3):
+def wb_json_request(token, base_url, path, method="GET", payload=None, locale=None, attempts=3):
   separator = "&" if "?" in path else "?"
-  url = f"{WB_CONTENT_API_BASE.rstrip('/')}{path}{separator}locale={locale}"
+  locale_query = f"{separator}locale={locale}" if locale else ""
+  url = f"{base_url.rstrip('/')}{path}{locale_query}"
+  body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
   headers = {
     "Authorization": token,
     "Accept": "application/json",
     "User-Agent": "OptiCards/0.1 read-only",
   }
+  if payload is not None:
+    headers["Content-Type"] = "application/json"
 
   for attempt in range(attempts):
-    request = urlrequest.Request(url, headers=headers, method="GET")
+    request = urlrequest.Request(url, data=body, headers=headers, method=method)
     try:
       with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
@@ -2216,6 +2176,14 @@ def wb_get_json(token, path, locale="ru", attempts=3):
       raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_invalid_json", retryable=False) from exc
 
   raise WbApiError(HTTPStatus.BAD_GATEWAY, "wb_request_failed", retryable=True)
+
+
+def wb_request_json(token, path, payload, locale="ru", attempts=3, base_url=None):
+  return wb_json_request(token, base_url or WB_CONTENT_API_BASE, path, method="POST", payload=payload, locale=locale, attempts=attempts)
+
+
+def wb_get_json(token, path, locale="ru", attempts=3, base_url=None):
+  return wb_json_request(token, base_url or WB_CONTENT_API_BASE, path, method="GET", locale=locale, attempts=attempts)
 
 
 class MpstatsApiError(Exception):
@@ -3940,6 +3908,212 @@ def derive_wb_portal_name(cards):
   return "Wildberries"
 
 
+def wb_int(value):
+  try:
+    if value is None or value == "":
+      return None
+    return int(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def wb_chunks(items, size):
+  for index in range(0, len(items), size):
+    yield items[index:index + size]
+
+
+def wb_unique_ints(values):
+  output = []
+  seen = set()
+  for value in values:
+    number = wb_int(value)
+    if number is None or number in seen:
+      continue
+    seen.add(number)
+    output.append(number)
+  return output
+
+
+def wb_cards_nm_ids(cards):
+  return wb_unique_ints(card.get("nmID") for card in cards)
+
+
+def wb_cards_chrt_ids(cards):
+  values = []
+  for card in cards:
+    for size in card.get("sizes") or []:
+      if isinstance(size, dict):
+        values.append(size.get("chrtID") or size.get("chrtId") or size.get("sizeID"))
+  return wb_unique_ints(values)
+
+
+def wb_warning(source, exc):
+  status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+  return {
+    "source": source,
+    "status": int(status),
+    "message": exc.message,
+    "retryable": bool(exc.retryable),
+  }
+
+
+def fetch_wb_prices(token, nm_ids):
+  prices = {}
+  for nm_chunk in wb_chunks(wb_unique_ints(nm_ids), 1000):
+    response = wb_request_json(
+      token,
+      "/api/v2/list/goods/filter",
+      {"nmList": nm_chunk},
+      locale=None,
+      base_url=WB_PRICES_API_BASE,
+    )
+    for item in ((response.get("data") or {}).get("listGoods") or []):
+      nm_id = wb_int(item.get("nmID") or item.get("nmId"))
+      if nm_id is not None:
+        prices[str(nm_id)] = public_wb_value(item)
+  return prices
+
+
+def fetch_wb_seller_warehouses(token):
+  response = wb_get_json(token, "/api/v3/warehouses", locale=None, base_url=WB_MARKETPLACE_API_BASE)
+  return response if isinstance(response, list) else []
+
+
+def fetch_wb_marketplace_stocks(token, chrt_ids):
+  stock_rows = []
+  warehouses = fetch_wb_seller_warehouses(token)
+  for warehouse in warehouses:
+    if not isinstance(warehouse, dict):
+      continue
+    warehouse_id = wb_int(warehouse.get("id"))
+    if warehouse_id is None:
+      continue
+    for chrt_chunk in wb_chunks(wb_unique_ints(chrt_ids), 1000):
+      response = wb_request_json(
+        token,
+        f"/api/v3/stocks/{warehouse_id}",
+        {"chrtIds": chrt_chunk},
+        locale=None,
+        base_url=WB_MARKETPLACE_API_BASE,
+      )
+      for row in response.get("stocks") or []:
+        if not isinstance(row, dict):
+          continue
+        stock_rows.append({
+          **public_wb_value(row),
+          "warehouseId": warehouse_id,
+          "warehouseName": warehouse.get("name") or "",
+          "source": "seller_warehouse",
+        })
+  return stock_rows
+
+
+def fetch_wb_analytics_wb_stocks(token, nm_ids, chrt_ids):
+  rows = []
+  nm_ids = wb_unique_ints(nm_ids)[:1000]
+  if not nm_ids:
+    return rows
+  response = wb_request_json(
+    token,
+    "/api/analytics/v1/stocks-report/wb-warehouses",
+    {
+      "nmIds": nm_ids,
+      "limit": 250000,
+      "offset": 0,
+    },
+    locale=None,
+    base_url=WB_ANALYTICS_API_BASE,
+    attempts=2,
+  )
+  data = response.get("data") if isinstance(response, dict) else {}
+  for row in (data or {}).get("items") or []:
+    if isinstance(row, dict):
+      rows.append({**public_wb_value(row), "source": "wb_warehouse"})
+  return rows
+
+
+def first_present(*values):
+  for value in values:
+    if value is not None and value != "":
+      return value
+  return ""
+
+
+def wb_price_size_index(price_item):
+  output = {}
+  for size in price_item.get("sizes") or []:
+    if not isinstance(size, dict):
+      continue
+    size_id = wb_int(size.get("sizeID") or size.get("chrtID") or size.get("chrtId"))
+    if size_id is not None:
+      output[str(size_id)] = size
+  return output
+
+
+def wb_stock_index(rows, amount_field):
+  output = {}
+  for row in rows:
+    if not isinstance(row, dict):
+      continue
+    chrt_id = wb_int(row.get("chrtId") or row.get("chrtID"))
+    if chrt_id is None:
+      continue
+    key = str(chrt_id)
+    amount = wb_int(row.get(amount_field)) or 0
+    current = output.setdefault(key, {"amount": 0, "warehouses": []})
+    current["amount"] += amount
+    current["warehouses"].append(row)
+  return output
+
+
+def enrich_wb_cards_with_commercial_data(cards, prices, seller_stock_rows, wb_stock_rows):
+  seller_stocks = wb_stock_index(seller_stock_rows, "amount")
+  wb_stocks = wb_stock_index(wb_stock_rows, "quantity")
+  for card in cards:
+    nm_key = str(card.get("nmID") or "")
+    price_item = prices.get(nm_key) or {}
+    price_sizes = wb_price_size_index(price_item)
+    first_price_size = next((size for size in price_item.get("sizes") or [] if isinstance(size, dict)), {})
+    card["price"] = first_present(card.get("price"), first_price_size.get("price"))
+    card["discountedPrice"] = first_present(card.get("discountedPrice"), first_price_size.get("discountedPrice"))
+    card["clubDiscountedPrice"] = first_present(card.get("clubDiscountedPrice"), first_price_size.get("clubDiscountedPrice"))
+    card["discount"] = first_present(card.get("discount"), price_item.get("discount"))
+    card["clubDiscount"] = first_present(card.get("clubDiscount"), price_item.get("clubDiscount"))
+    card["currencyIsoCode4217"] = first_present(card.get("currencyIsoCode4217"), price_item.get("currencyIsoCode4217"))
+    card["editableSizePrice"] = price_item.get("editableSizePrice")
+    card["priceSizes"] = public_wb_value(price_item.get("sizes") or [])
+
+    seller_total = 0
+    wb_total = 0
+    enriched_sizes = []
+    for size in card.get("sizes") or []:
+      if not isinstance(size, dict):
+        enriched_sizes.append(size)
+        continue
+      chrt_id = wb_int(size.get("chrtID") or size.get("chrtId") or size.get("sizeID"))
+      chrt_key = str(chrt_id) if chrt_id is not None else ""
+      price_size = price_sizes.get(chrt_key) or {}
+      seller_stock = seller_stocks.get(chrt_key, {"amount": 0, "warehouses": []})
+      wb_stock = wb_stocks.get(chrt_key, {"amount": 0, "warehouses": []})
+      seller_total += seller_stock["amount"]
+      wb_total += wb_stock["amount"]
+      enriched_sizes.append({
+        **size,
+        "price": first_present(size.get("price"), price_size.get("price")),
+        "discountedPrice": first_present(size.get("discountedPrice"), price_size.get("discountedPrice")),
+        "clubDiscountedPrice": first_present(size.get("clubDiscountedPrice"), price_size.get("clubDiscountedPrice")),
+        "stock": seller_stock["amount"] + wb_stock["amount"],
+        "sellerStock": seller_stock["amount"],
+        "wbStock": wb_stock["amount"],
+        "stockWarehouses": public_wb_value(seller_stock["warehouses"] + wb_stock["warehouses"]),
+      })
+    card["sizes"] = enriched_sizes
+    card["sellerStock"] = seller_total
+    card["wbStock"] = wb_total
+    card["stock"] = seller_total + wb_total
+  return cards
+
+
 def fetch_wb_cards(token, max_cards=100):
   max_cards = max(1, min(int(max_cards), WB_MAX_CARDS_PER_SYNC))
   cards = []
@@ -3971,6 +4145,25 @@ def fetch_wb_cards(token, max_cards=100):
     }
 
   normalized_cards = [normalize_wb_card(card) for card in cards[:max_cards]]
+  wb_warnings = []
+  nm_ids = wb_cards_nm_ids(normalized_cards)
+  chrt_ids = wb_cards_chrt_ids(normalized_cards)
+  price_items = {}
+  seller_stock_rows = []
+  wb_stock_rows = []
+  try:
+    price_items = fetch_wb_prices(token, nm_ids)
+  except WbApiError as exc:
+    wb_warnings.append(wb_warning("prices", exc))
+  try:
+    seller_stock_rows = fetch_wb_marketplace_stocks(token, chrt_ids)
+  except WbApiError as exc:
+    wb_warnings.append(wb_warning("seller_stocks", exc))
+  try:
+    wb_stock_rows = fetch_wb_analytics_wb_stocks(token, nm_ids, chrt_ids)
+  except WbApiError as exc:
+    wb_warnings.append(wb_warning("wb_stocks", exc))
+  normalized_cards = enrich_wb_cards_with_commercial_data(normalized_cards, price_items, seller_stock_rows, wb_stock_rows)
   problem_count = sum(1 for card in normalized_cards if card["issueCount"] > 0)
   work_count = problem_count
   portal_name = derive_wb_portal_name(normalized_cards)
@@ -3979,6 +4172,7 @@ def fetch_wb_cards(token, max_cards=100):
     "raw_count": len(cards),
     "cursor": cursor,
     "tokenMeta": wb_token_meta(token),
+    "commercialWarnings": wb_warnings,
     "stats": {
       "cardCount": len(normalized_cards),
       "workCount": work_count,
