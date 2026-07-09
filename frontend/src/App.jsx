@@ -4384,11 +4384,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }));
   }
 
-  function applySemanticKeyword(item) {
+  async function applySemanticKeyword(item, targetOverride = "") {
     const query = String(item?.query || "").trim();
     if (!query) return;
     const normalizedQuery = normalizedCharacteristicOption(query);
-    const target = item?.target === "title" ? "title" : "description";
+    const target = targetOverride || (item?.target === "title" ? "title" : "description");
     const titleHasQuery = normalizedCharacteristicOption(draftTitle).includes(normalizedQuery);
     const descriptionHasQuery = normalizedCharacteristicOption(draftDescription).includes(normalizedQuery);
     if (titleHasQuery || descriptionHasQuery) {
@@ -4396,17 +4396,46 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       return;
     }
     const nextTitle = `${draftTitle.trim()} ${query}`.trim();
-    if (target === "title" && nextTitle.length <= 60) {
-      setDraftTitle(nextTitle);
-      setDraftTitleSource("manual");
-      setDraftTitleReason(`Добавлен СЯ-запрос из MPStats: ${query}.`);
-      setDraftSaveStatus("semantic-keyword-added");
+    if (target === "title" && nextTitle.length > 60) {
+      setDraftSaveStatus("semantic-keyword-title-too-long");
       return;
     }
     const separator = draftDescription.trim() ? "\n\n" : "";
-    setDraftDescription(`${draftDescription.trim()}${separator}${query}.`.trim());
-    setDraftDescriptionSource("manual");
-    setDraftDescriptionReason(`Добавлен СЯ-запрос из MPStats: ${query}.`);
+    const nextDescription = target === "title"
+      ? draftDescription
+      : `${draftDescription.trim()}${separator}${query}.`.trim();
+    const nextTitleValue = target === "title" ? nextTitle : draftTitle;
+    const nextTitleSource = target === "title" ? "manual" : draftTitleSource;
+    const nextDescriptionSource = target === "title" ? draftDescriptionSource : "manual";
+    const nextTitleReason = target === "title" ? `Добавлен СЯ-запрос из MPStats: ${query}.` : draftTitleReason;
+    const nextDescriptionReason = target === "title" ? draftDescriptionReason : `Добавлен СЯ-запрос из MPStats: ${query}.`;
+    setDraftTitle(nextTitleValue);
+    setDraftTitleSource(nextTitleSource);
+    setDraftTitleReason(nextTitleReason);
+    setDraftDescription(nextDescription);
+    setDraftDescriptionSource(nextDescriptionSource);
+    setDraftDescriptionReason(nextDescriptionReason);
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      approval,
+      approvalSections,
+      title: nextTitleValue,
+      description: nextDescription,
+      titleSource: nextTitleSource,
+      descriptionSource: nextDescriptionSource,
+      titleReason: nextTitleReason,
+      descriptionReason: nextDescriptionReason,
+      characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
+      card,
+    });
+    const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+    if (backendDraftEnabled && persistStatus !== "backend") {
+      setDraftSaveStatus("semantic-keyword-save-error");
+      return;
+    }
     setDraftSaveStatus("semantic-keyword-added");
   }
 
@@ -5109,8 +5138,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                    {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
 	                    {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
 	                    {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
-	                    {draftSaveStatus === "semantic-keyword-added" ? <p>СЯ-запрос добавлен в черновик контента. Сохраните изменения перед выходом.</p> : null}
+	                    {draftSaveStatus === "semantic-keyword-added" ? <p>СЯ-запрос добавлен и черновик сохранен.</p> : null}
 	                    {draftSaveStatus === "semantic-keyword-exists" ? <p>Этот СЯ-запрос уже есть в заголовке или описании.</p> : null}
+	                    {draftSaveStatus === "semantic-keyword-title-too-long" ? <p>Запрос не помещается в заголовок WB 60 символов. Добавьте его в описание.</p> : null}
+	                    {draftSaveStatus === "semantic-keyword-save-error" ? <p>СЯ-запрос добавлен на экране, но не сохранился на backend. Нажмите Сохранить.</p> : null}
 	                    {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
@@ -5403,9 +5434,14 @@ function SemanticCorePanel({ semanticCore, compact = false, onApplyKeyword = nul
                   <em>{semanticKeywordMeta(item) || item.reason || "нет в заголовке и описании"}</em>
                 </div>
                 {onApplyKeyword ? (
-                  <button className="btn mini" type="button" onClick={() => onApplyKeyword(item)} disabled={readOnly}>
-                    <Plus size={14} />Добавить
-                  </button>
+                  <div className="semantic-keyword-actions">
+                    <button className="btn mini" type="button" onClick={() => onApplyKeyword(item, "title")} disabled={readOnly}>
+                      <Plus size={14} />В заголовок
+                    </button>
+                    <button className="btn mini" type="button" onClick={() => onApplyKeyword(item, "description")} disabled={readOnly}>
+                      <Plus size={14} />В описание
+                    </button>
+                  </div>
                 ) : null}
               </div>
             ))}

@@ -2441,6 +2441,14 @@ tr:last-child td {
   min-width: 0;
 }
 
+.semantic-keyword-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .semantic-keyword strong,
 .semantic-keyword em {
   display: block;
@@ -2811,8 +2819,8 @@ tr:last-child td {
     flex-direction: column;
   }
 
-  .semantic-keyword .btn {
-    align-self: flex-start;
+  .semantic-keyword-actions {
+    justify-content: flex-start;
   }
 
   .summary-grid,
