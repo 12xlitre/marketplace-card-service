@@ -4384,6 +4384,32 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }));
   }
 
+  function applySemanticKeyword(item) {
+    const query = String(item?.query || "").trim();
+    if (!query) return;
+    const normalizedQuery = normalizedCharacteristicOption(query);
+    const target = item?.target === "title" ? "title" : "description";
+    const titleHasQuery = normalizedCharacteristicOption(draftTitle).includes(normalizedQuery);
+    const descriptionHasQuery = normalizedCharacteristicOption(draftDescription).includes(normalizedQuery);
+    if (titleHasQuery || descriptionHasQuery) {
+      setDraftSaveStatus("semantic-keyword-exists");
+      return;
+    }
+    const nextTitle = `${draftTitle.trim()} ${query}`.trim();
+    if (target === "title" && nextTitle.length <= 60) {
+      setDraftTitle(nextTitle);
+      setDraftTitleSource("manual");
+      setDraftTitleReason(`Добавлен СЯ-запрос из MPStats: ${query}.`);
+      setDraftSaveStatus("semantic-keyword-added");
+      return;
+    }
+    const separator = draftDescription.trim() ? "\n\n" : "";
+    setDraftDescription(`${draftDescription.trim()}${separator}${query}.`.trim());
+    setDraftDescriptionSource("manual");
+    setDraftDescriptionReason(`Добавлен СЯ-запрос из MPStats: ${query}.`);
+    setDraftSaveStatus("semantic-keyword-added");
+  }
+
   async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
     let savedLocally = false;
@@ -4888,7 +4914,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 	                  mpstatsStatus={mpstatsHintsLabel}
 	                  semanticCore={latestSemanticCore}
 	                />
-	                {latestSemanticCore ? <SemanticCorePanel semanticCore={latestSemanticCore} compact /> : null}
+	                {latestSemanticCore ? (
+	                  <SemanticCorePanel
+	                    semanticCore={latestSemanticCore}
+	                    compact
+	                    onApplyKeyword={applySemanticKeyword}
+	                    readOnly={approvalReadOnly}
+	                  />
+	                ) : null}
 	                <div className="before-after">
                   <div className="field-box">
                     <strong>Было: заголовок</strong>
@@ -5073,10 +5106,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "approval-submitted" ? <p>Задача отправлена аккаунт-менеджеру на согласование.</p> : null}
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
-                    {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
-                    {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
-                    {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
-                    {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
+	                    {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
+	                    {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
+	                    {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
+	                    {draftSaveStatus === "semantic-keyword-added" ? <p>СЯ-запрос добавлен в черновик контента. Сохраните изменения перед выходом.</p> : null}
+	                    {draftSaveStatus === "semantic-keyword-exists" ? <p>Этот СЯ-запрос уже есть в заголовке или описании.</p> : null}
+	                    {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft} disabled={approvalReadOnly}><Save size={17} />Сохранить</button>
@@ -5334,7 +5369,7 @@ function semanticKeywordMeta(item) {
   return parts.join(" · ");
 }
 
-function SemanticCorePanel({ semanticCore, compact = false }) {
+function SemanticCorePanel({ semanticCore, compact = false, onApplyKeyword = null, readOnly = false }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
   const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
@@ -5363,8 +5398,15 @@ function SemanticCorePanel({ semanticCore, compact = false }) {
           <div className="semantic-keyword-list">
             {(recommended.length ? recommended : missing).slice(0, compact ? 4 : 8).map((item) => (
               <div className="semantic-keyword recommended" key={`recommended-${item.query}`}>
-                <strong>{item.query}</strong>
-                <em>{semanticKeywordMeta(item) || item.reason || "нет в заголовке и описании"}</em>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{semanticKeywordMeta(item) || item.reason || "нет в заголовке и описании"}</em>
+                </div>
+                {onApplyKeyword ? (
+                  <button className="btn mini" type="button" onClick={() => onApplyKeyword(item)} disabled={readOnly}>
+                    <Plus size={14} />Добавить
+                  </button>
+                ) : null}
               </div>
             ))}
             {!recommended.length && !missing.length ? <p>Недостающих запросов не найдено или MPStats не вернул keywords.</p> : null}

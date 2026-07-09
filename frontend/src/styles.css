@@ -2431,6 +2431,14 @@ tr:last-child td {
 .semantic-keyword.recommended {
   border-color: #ead08f;
   background: #fff9e8;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.semantic-keyword-main {
+  min-width: 0;
 }
 
 .semantic-keyword strong,
@@ -2450,6 +2458,10 @@ tr:last-child td {
   font-style: normal;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.semantic-keyword .btn {
+  flex: 0 0 auto;
 }
 
 .draft-source-line {
@@ -2793,6 +2805,14 @@ tr:last-child td {
 
   .approval-buttons {
     justify-content: flex-start;
+  }
+
+  .semantic-keyword.recommended {
+    flex-direction: column;
+  }
+
+  .semantic-keyword .btn {
+    align-self: flex-start;
   }
 
   .summary-grid,
