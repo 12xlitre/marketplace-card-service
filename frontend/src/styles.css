@@ -1634,6 +1634,82 @@ tr:last-child td {
   gap: 10px;
 }
 
+.audit-competitors-input textarea {
+  width: 100%;
+  min-height: 86px;
+  margin-top: 10px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 10px 12px;
+  line-height: 1.45;
+}
+
+.audit-competitors-input textarea:focus {
+  outline: 2px solid var(--blue-soft);
+  border-color: #98adef;
+}
+
+.audit-competitor-selection {
+  display: grid;
+  gap: 10px;
+}
+
+.audit-competitor-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.audit-competitor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.audit-competitor-row strong,
+.audit-competitor-row span {
+  display: block;
+}
+
+.audit-competitor-row span,
+.audit-competitor-side em,
+.audit-competitor-rejected span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.audit-competitor-row p {
+  margin-top: 6px;
+}
+
+.audit-competitor-side {
+  min-width: 132px;
+  display: grid;
+  justify-items: end;
+  align-content: start;
+  gap: 6px;
+  text-align: right;
+}
+
+.audit-competitor-rejected {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--amber-soft);
+}
+
+.audit-competitor-rejected p {
+  margin: 0;
+}
+
 .detail-tabs {
   position: sticky;
   top: 84px;
@@ -3248,8 +3324,15 @@ tr:last-child td {
   .raw-field-row,
   .characteristic-row,
   .characteristics-diff-head,
-  .characteristics-diff-row {
+  .characteristics-diff-row,
+  .audit-competitor-row {
     grid-template-columns: 1fr;
+  }
+
+  .audit-competitor-side {
+    min-width: 0;
+    justify-items: start;
+    text-align: left;
   }
 
   table {

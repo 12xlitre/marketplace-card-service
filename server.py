@@ -2192,6 +2192,7 @@ def competitor_snapshot_from_sources(nm_id):
     "photosCount": product.get("pics") or product.get("photosCount") or None,
     "descriptionLength": len(audit_str(merged.get("description") or "")),
     "characteristicsCount": len(characteristics),
+    "characteristics": characteristics[:40],
     "characteristicsSignature": competitor_characteristic_signature(merged.get("characteristics") or []),
     "checkedAt": utc_now().isoformat(),
     "warnings": audit_public_warnings(warnings),
@@ -3952,30 +3953,451 @@ def audit_market_data(nm_id, subject_id, period, warnings):
     "keywords": audit_keywords_from_payload(keywords_payload),
     "nicheItems": sorted(niche_items, key=lambda item: audit_number(item.get("revenue"), 0) or 0, reverse=True)[:80],
     "nichePathMissing": niche_path_missing,
+    "subjectPath": subject_path,
     "brands": audit_extract_list(brands_payload)[:30],
     "priceSegmentation": price_payload if isinstance(price_payload, dict) else audit_extract_list(price_payload),
     "season": season_payload if isinstance(season_payload, dict) else audit_extract_list(season_payload),
   }
 
 
-def audit_pick_competitors(nm_id, market_data, warnings):
+def audit_competitor_ids_from_payload(value, limit=3):
+  raw_items = value if isinstance(value, list) else re.split(r"[\s,;]+", str(value or ""))
+  output = []
+  seen = set()
+  for item in raw_items:
+    raw_value = (item.get("url") or item.get("competitorNmID") or item.get("nmID") or item.get("nmId")) if isinstance(item, dict) else item
+    competitor_nm_id = parse_competitor_nm_id(raw_value)
+    if not competitor_nm_id or competitor_nm_id in seen:
+      continue
+    seen.add(competitor_nm_id)
+    output.append(competitor_nm_id)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def audit_subject_name_from_payload(payload):
+  if not isinstance(payload, dict):
+    return ""
+  for key in ("subjectName", "subject_name", "entity", "categoryName", "category"):
+    value = payload.get(key)
+    if isinstance(value, str) and value.strip():
+      return audit_str(value)
+  for key in ("subject", "niche", "category"):
+    value = payload.get(key)
+    if isinstance(value, dict):
+      name = audit_str(value.get("name") or value.get("title") or "")
+      if name:
+        return name
+  return ""
+
+
+def audit_card_price(card, market_data):
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  for value in (
+    card.get("discountedPrice"),
+    card.get("price"),
+    raw_fields.get("discountedPrice"),
+    raw_fields.get("price"),
+    market_data.get("info", {}).get("final_price") if isinstance(market_data.get("info"), dict) else None,
+    market_data.get("info", {}).get("price") if isinstance(market_data.get("info"), dict) else None,
+    market_data.get("stats", {}).get("final_price") if isinstance(market_data.get("stats"), dict) else None,
+    market_data.get("stats", {}).get("price") if isinstance(market_data.get("stats"), dict) else None,
+  ):
+    price = audit_number(value, None)
+    if price and price > 0:
+      return price
+  return None
+
+
+def audit_token_overlap_score(left, right):
+  left_tokens = set(audit_tokens(left))
+  right_tokens = set(audit_tokens(right))
+  if not left_tokens or not right_tokens:
+    return 0
+  overlap = len(left_tokens & right_tokens)
+  return overlap / max(1, min(len(left_tokens), len(right_tokens)))
+
+
+def audit_tokens_with_stems(text, stems):
+  tokens = set(audit_tokens(text))
+  output = set()
+  for token in tokens:
+    for stem in stems:
+      if token.startswith(stem):
+        output.add(stem)
+  return output
+
+
+def audit_characteristics_text(characteristics):
+  parts = []
+  rows = characteristics if isinstance(characteristics, list) else []
+  for row in rows[:80]:
+    if not isinstance(row, dict):
+      parts.append(audit_str(row))
+      continue
+    parts.append(audit_str(row.get("name") or row.get("label") or ""))
+    values = row.get("values")
+    if values is None:
+      values = row.get("value")
+    if isinstance(values, list):
+      parts.extend(audit_str(value) for value in values)
+    else:
+      parts.append(audit_str(values))
+  return " ".join(part for part in parts if part)
+
+
+def audit_commercial_text(item):
+  if not isinstance(item, dict):
+    return ""
+  raw_fields = item.get("rawFields") if isinstance(item.get("rawFields"), dict) else {}
+  characteristics = item.get("characteristics") if isinstance(item.get("characteristics"), list) else raw_fields.get("characteristics")
+  return " ".join(
+    audit_str(part)
+    for part in (
+      item.get("title"),
+      item.get("name"),
+      item.get("brand"),
+      item.get("subjectName"),
+      item.get("subject"),
+      item.get("seller"),
+      raw_fields.get("title"),
+      raw_fields.get("subjectName"),
+      audit_characteristics_text(characteristics),
+    )
+    if audit_str(part)
+  )
+
+
+def audit_commercial_traits(item):
+  text = audit_commercial_text(item)
+  normalized = audit_normalized(text)
+  gender = set()
+  if re.search(r"\b(жен|женск|женщин|девуш)", normalized):
+    gender.add("женский")
+  if re.search(r"\b(муж|мужск)", normalized):
+    gender.add("мужской")
+  if re.search(r"\b(унисекс)", normalized):
+    gender.add("унисекс")
+  age = set()
+  if re.search(r"\b(дет|детск|ребен|малыш|девоч|мальч)", normalized):
+    age.add("детский")
+  elif gender:
+    age.add("взрослый")
+  product = audit_tokens_with_stems(
+    normalized,
+    {
+      "пижам",
+      "халат",
+      "сороч",
+      "комплект",
+      "костюм",
+      "брюк",
+      "шорт",
+      "футбол",
+      "лонгслив",
+      "рубаш",
+      "плать",
+      "топ",
+      "майк",
+      "боди",
+      "свитшот",
+      "толстов",
+    },
+  )
+  materials = audit_tokens_with_stems(
+    normalized,
+    {
+      "хлоп",
+      "трикот",
+      "рибана",
+      "кулир",
+      "футер",
+      "вискоз",
+      "полиэстер",
+      "сатин",
+      "шелк",
+      "шёлк",
+      "флис",
+      "велюр",
+      "муслин",
+      "лен",
+      "лён",
+    },
+  )
+  return {
+    "gender": gender,
+    "age": age,
+    "product": product,
+    "materials": materials,
+  }
+
+
+def audit_trait_overlap(left, right, key):
+  left_values = left.get(key) or set()
+  right_values = right.get(key) or set()
+  if not left_values or not right_values:
+    return set()
+  if "унисекс" in left_values or "унисекс" in right_values:
+    return {"унисекс"}
+  return left_values & right_values
+
+
+def audit_trait_conflict(left, right, key):
+  left_values = left.get(key) or set()
+  right_values = right.get(key) or set()
+  if not left_values or not right_values:
+    return False
+  if key == "gender" and ("унисекс" in left_values or "унисекс" in right_values):
+    return False
+  return not bool(left_values & right_values)
+
+
+def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
+  snapshot = competitor_snapshot_from_sources(competitor_nm_id)
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  info = {}
+  full_payload = {}
+  if token:
+    d1 = period.get("d1")
+    d2 = period.get("d2")
+    info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}", warnings, cache_ttl=86400)
+    full_payload = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}/full?{urlencode({'d1': d1, 'd2': d2})}", warnings, cache_ttl=86400)
+  stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
+  if not isinstance(stats, dict):
+    stats = {}
+  subject_name = audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or snapshot.get("subjectName") or ""
+  candidate = {
+    "nmId": competitor_nm_id,
+    "title": snapshot.get("title") or audit_str(info.get("name") if isinstance(info, dict) else ""),
+    "brand": snapshot.get("brand") or audit_str(info.get("brand") if isinstance(info, dict) else ""),
+    "seller": audit_str(info.get("seller") if isinstance(info, dict) else ""),
+    "price": snapshot.get("discountedPrice") or snapshot.get("price") or audit_number(info.get("final_price") if isinstance(info, dict) else None, 0),
+    "sales": audit_int(stats.get("sales"), 0),
+    "revenue": audit_number(stats.get("revenue"), 0),
+    "comments": snapshot.get("feedbacks") or audit_int(info.get("comments") if isinstance(info, dict) else None, 0),
+    "rating": snapshot.get("rating") or audit_number(info.get("rating") if isinstance(info, dict) else None, None),
+    "position": None,
+    "balance": audit_number(stats.get("balance"), 0),
+    "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
+    "descriptionLength": snapshot.get("descriptionLength") or 0,
+    "characteristics": audit_card_characteristics({"characteristics": snapshot.get("characteristics") or []}),
+    "subjectName": subject_name,
+    "subjectPath": audit_subject_path_from_info(info, full_payload),
+    "selectionSource": "manual",
+    "source": "manual",
+  }
+  return candidate
+
+
+def audit_competitor_selection_item(candidate, source, status="selected", reason="", reasons=None):
+  nm_id = audit_str(candidate.get("nmId") or candidate.get("nmID") or "")
+  return {
+    "nmId": nm_id,
+    "url": wb_public_card_url(nm_id),
+    "title": audit_str(candidate.get("title") or ""),
+    "brand": audit_str(candidate.get("brand") or ""),
+    "subjectName": audit_str(candidate.get("subjectName") or ""),
+    "price": audit_number(candidate.get("price"), None),
+    "sales": audit_int(candidate.get("sales"), 0),
+    "revenue": audit_number(candidate.get("revenue"), 0),
+    "rating": audit_number(candidate.get("rating"), None),
+    "source": source,
+    "status": status,
+    "similarityScore": audit_int(candidate.get("similarityScore"), 0),
+    "reason": audit_str(reason or candidate.get("whyRelevant") or ""),
+    "reasons": audit_unique(reasons or candidate.get("similarityReasons") or [], limit=5),
+  }
+
+
+def audit_competitor_similarity(card, market_data, candidate):
+  current_subject = audit_str(card.get("subjectName") or "")
+  candidate_subject = audit_str(candidate.get("subjectName") or "")
+  current_path = audit_str(market_data.get("subjectPath") or "")
+  candidate_path = audit_str(candidate.get("subjectPath") or "")
+  current_text = audit_commercial_text(card) or f"{card.get('title') or ''} {current_subject}"
+  candidate_text = audit_commercial_text(candidate) or f"{candidate.get('title') or ''} {candidate_subject}"
+  current_traits = audit_commercial_traits(card)
+  candidate_traits = audit_commercial_traits(candidate)
+  title_overlap = audit_token_overlap_score(current_text, candidate_text)
+  score = 0
+  reasons = []
+  conflicts = []
+  if current_path and candidate_path and current_path == candidate_path:
+    score += 40
+    reasons.append("тот же предмет MPStats")
+  elif current_subject and candidate_subject and audit_normalized(current_subject) == audit_normalized(candidate_subject):
+    score += 32
+    reasons.append("та же категория WB")
+  elif current_subject and candidate_subject and audit_token_overlap_score(current_subject, candidate_subject) >= 0.45:
+    score += 22
+    reasons.append("похожая категория")
+  if title_overlap >= 0.45:
+    score += 25
+    reasons.append("похожее название")
+  elif title_overlap >= 0.25:
+    score += 15
+    reasons.append("частично похожее название")
+
+  product_overlap = audit_trait_overlap(current_traits, candidate_traits, "product")
+  if product_overlap:
+    score += 22
+    reasons.append(f"тот же тип товара: {', '.join(sorted(product_overlap))}")
+  elif audit_trait_conflict(current_traits, candidate_traits, "product"):
+    score -= 18
+    conflicts.append("другой тип товара")
+
+  gender_overlap = audit_trait_overlap(current_traits, candidate_traits, "gender")
+  if gender_overlap:
+    score += 12
+    reasons.append(f"тот же пол/сегмент: {', '.join(sorted(gender_overlap))}")
+  elif audit_trait_conflict(current_traits, candidate_traits, "gender"):
+    score -= 35
+    conflicts.append("другой пол/сегмент")
+
+  age_overlap = audit_trait_overlap(current_traits, candidate_traits, "age")
+  if age_overlap:
+    score += 10
+    reasons.append(f"тот же возрастной сегмент: {', '.join(sorted(age_overlap))}")
+  elif audit_trait_conflict(current_traits, candidate_traits, "age"):
+    score -= 30
+    conflicts.append("другой возрастной сегмент")
+
+  material_overlap = audit_trait_overlap(current_traits, candidate_traits, "materials")
+  if material_overlap:
+    score += 8
+    reasons.append(f"похожий материал: {', '.join(sorted(material_overlap)[:2])}")
+
+  keyword_text = " ".join(item.get("query") or "" for item in market_data.get("keywords", [])[:6] if isinstance(item, dict))
+  if keyword_text:
+    keyword_overlap = audit_token_overlap_score(keyword_text, candidate_text)
+    if keyword_overlap >= 0.35:
+      score += 10
+      reasons.append("попадает в поисковый спрос карточки")
+
+  current_price = audit_card_price(card, market_data)
+  candidate_price = audit_number(candidate.get("price"), None)
+  if current_price and candidate_price:
+    ratio = min(current_price, candidate_price) / max(current_price, candidate_price)
+    if ratio >= 0.75:
+      score += 15
+      reasons.append("близкая цена")
+    elif ratio >= 0.45:
+      score += 8
+      reasons.append("смежный ценовой сегмент")
+    else:
+      score -= 12
+      conflicts.append("сильно другой ценовой сегмент")
+  if candidate.get("sales") or candidate.get("revenue") or candidate.get("comments"):
+    score += 10
+    reasons.append("есть рыночные метрики")
+  reasons.extend(conflicts)
+  return max(0, score), reasons
+
+
+def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitors=None, period=None):
   competitors = []
+  selection = {
+    "manualRequested": audit_competitor_ids_from_payload(manual_competitors),
+    "manualAccepted": [],
+    "manualRejected": [],
+    "autoSelected": [],
+    "finalCompetitors": [],
+    "method": "manual-priority-plus-mpstats-commercial-similarity-v1",
+  }
   seen = {str(nm_id)}
+  period = period if isinstance(period, dict) else audit_period_default()
+  for competitor_nm_id in selection["manualRequested"]:
+    if competitor_nm_id in seen:
+      reason = "Это текущая карточка или дубль в списке."
+      selection["manualRejected"].append({
+        "nmId": competitor_nm_id,
+        "url": wb_public_card_url(competitor_nm_id),
+        "source": "manual",
+        "status": "rejected",
+        "reason": reason,
+        "reasons": [reason],
+      })
+      warnings.append(f"Конкурент WB {competitor_nm_id} не включен: {reason}")
+      continue
+    candidate = audit_manual_competitor_candidate(competitor_nm_id, period, warnings)
+    score, reasons = audit_competitor_similarity(card, market_data, candidate)
+    candidate["similarityScore"] = score
+    candidate["similarityReasons"] = reasons
+    if score < 40:
+      conflicts = [item for item in reasons if item.startswith("друг") or item.startswith("сильно")]
+      reason = (
+        f"Низкая коммерческая схожесть: {', '.join(conflicts[:3])}."
+        if conflicts
+        else "Низкая коммерческая схожесть с анализируемой карточкой."
+      )
+      selection["manualRejected"].append(audit_competitor_selection_item(candidate, "manual", "rejected", reason, reasons))
+      warnings.append(f"Конкурент WB {competitor_nm_id} не включен в аудит: {reason}")
+      continue
+    candidate["whyRelevant"] = f"Добавлен вручную для аудита; проверка схожести: {', '.join(reasons[:3]) or 'достаточно похож на товар'}."
+    seen.add(competitor_nm_id)
+    selection["manualAccepted"].append(audit_competitor_selection_item(candidate, "manual", "accepted", candidate["whyRelevant"], reasons))
+    competitors.append(candidate)
+    if len(competitors) >= 5:
+      break
+
+  auto_candidates = []
   for item in market_data.get("nicheItems", []):
     if str(item.get("nmId")) in seen:
       continue
-    seen.add(str(item.get("nmId")))
-    competitors.append(item)
-    if len(competitors) >= 3:
+    candidate = {
+      **item,
+      "subjectName": item.get("subjectName") or card.get("subjectName") or "",
+      "subjectPath": market_data.get("subjectPath"),
+      "selectionSource": "mpstats",
+      "source": "mpstats",
+    }
+    score, reasons = audit_competitor_similarity(card, market_data, candidate)
+    candidate["similarityScore"] = score
+    candidate["similarityReasons"] = reasons
+    revenue = audit_number(candidate.get("revenue"), 0) or 0
+    auto_candidates.append((score, revenue, candidate))
+  auto_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+  for _, _, item in auto_candidates:
+    if len(competitors) >= 5:
       break
+    seen.add(str(item.get("nmId")))
+    item["whyRelevant"] = (
+      "Добран автоматически из MPStats по нише: "
+      f"{', '.join((item.get('similarityReasons') or [])[:3]) or 'коммерчески похожий товар'}."
+    )
+    competitors.append(item)
+    selection["autoSelected"].append(
+      audit_competitor_selection_item(item, "mpstats", "selected", item["whyRelevant"], item.get("similarityReasons"))
+    )
+
   for competitor in competitors:
-    cdn_warnings = []
-    cdn_card = audit_fetch_wb_cdn_card(competitor.get("nmId"), cdn_warnings)
-    competitor["descriptionLength"] = len(audit_str(cdn_card.get("description") if isinstance(cdn_card, dict) else ""))
-    competitor["characteristics"] = audit_card_characteristics(audit_merge_card_content({}, cdn_card))
+    if not competitor.get("descriptionLength") or not competitor.get("characteristics"):
+      cdn_warnings = []
+      cdn_card = audit_fetch_wb_cdn_card(competitor.get("nmId"), cdn_warnings)
+      competitor["descriptionLength"] = len(audit_str(cdn_card.get("description") if isinstance(cdn_card, dict) else ""))
+      competitor["characteristics"] = audit_card_characteristics(audit_merge_card_content({}, cdn_card))
   if not competitors and market_data.get("keywords") and not market_data.get("nichePathMissing"):
     warnings.append("Не удалось выбрать конкурентов из MPStats subject/items")
-  return competitors
+  selection["finalCompetitors"] = [
+    audit_competitor_selection_item(
+      item,
+      item.get("selectionSource") or item.get("source") or "mpstats",
+      "selected",
+      item.get("whyRelevant") or "",
+      item.get("similarityReasons"),
+    )
+    for item in competitors[:5]
+  ]
+  selection["summary"] = {
+    "requestedManual": len(selection["manualRequested"]),
+    "acceptedManual": len(selection["manualAccepted"]),
+    "rejectedManual": len(selection["manualRejected"]),
+    "autoSelected": len(selection["autoSelected"]),
+    "finalCount": len(selection["finalCompetitors"]),
+  }
+  return competitors, selection
 
 
 def audit_title_candidate(card, keywords):
@@ -4173,14 +4595,16 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
     confidence = 0.9
 
   competitors_result = []
-  for item in competitors[:3]:
-    why = f"Выбран из топа ниши по выручке: {audit_format_count(item.get('revenue'))} ₽ за период."
-    if item.get("sales"):
+  for item in competitors[:5]:
+    why = item.get("whyRelevant") or f"Выбран из топа ниши по выручке: {audit_format_count(item.get('revenue'))} ₽ за период."
+    if item.get("sales") and "Продажи" not in why:
       why += f" Продажи: {audit_format_count(item.get('sales'))}."
     competitors_result.append({
       "nmId": item.get("nmId"),
       "url": f"https://www.wildberries.ru/catalog/{item.get('nmId')}/detail.aspx",
       "position": item.get("position"),
+      "source": item.get("selectionSource") or item.get("source") or "mpstats",
+      "similarityScore": item.get("similarityScore"),
       "whyRelevant": why,
     })
 
@@ -4418,7 +4842,7 @@ def audit_draft_from_result(result, characteristic_draft):
   }
 
 
-def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None, mpstats_characteristics=None, period=None):
+def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None, mpstats_characteristics=None, period=None, audit_competitors=None):
   period = period if isinstance(period, dict) and period.get("d1") and period.get("d2") else audit_period_default()
   warnings = []
   _, mpstats_usage = mpstats_usage_start()
@@ -4455,11 +4879,23 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       warnings.append("MPStats characteristics-analysis не получен")
 
   market_data = audit_market_data(nm_id, subject_id, period, warnings)
-  competitors = audit_pick_competitors(nm_id, market_data, warnings)
+  competitors, competitor_selection = audit_pick_competitors(
+    nm_id,
+    card,
+    market_data,
+    warnings,
+    manual_competitors=audit_competitors,
+    period=period,
+  )
   characteristics, characteristic_draft = audit_build_characteristics(card, subject_characteristics, mpstats_characteristics)
   base_result = audit_build_result(card, market_data, competitors, characteristics, warnings, period)
   evidence = {
-    "input": {"nmId": nm_id, "subjectId": subject_id, "period": period},
+    "input": {
+      "nmId": nm_id,
+      "subjectId": subject_id,
+      "period": period,
+      "manualCompetitors": audit_competitor_ids_from_payload(audit_competitors),
+    },
     "card": {
       "nmId": nm_id,
       "title": card.get("title"),
@@ -4476,6 +4912,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "brandsTop": market_data.get("brands", [])[:10],
       "priceSegmentation": market_data.get("priceSegmentation"),
     },
+    "competitorSelection": competitor_selection,
     "competitors": competitors,
     "mpstatsCharacteristics": mpstats_characteristics[:80],
     "warnings": warnings,
@@ -4498,6 +4935,9 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "mpstatsMatches": sum(1 for item in characteristics if item.get("topCategoryValues")),
       "mpstatsCredits": mpstats_usage_summary["creditsEstimate"],
       "mpstatsCacheHits": mpstats_usage_summary["cacheHits"],
+      "competitors": len(competitors),
+      "manualCompetitors": sum(1 for item in competitors if item.get("selectionSource") == "manual"),
+      "competitorSelection": competitor_selection,
       "promotionRelevantCount": sum(1 for item in characteristics if item.get("isPromotionRelevant")),
       "changedCharacteristics": changed_characteristics,
       "content": {
@@ -4513,6 +4953,8 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "period": period,
       "keywords": len(market_data.get("keywords", [])),
       "competitors": len(competitors),
+      "manualCompetitors": sum(1 for item in competitors if item.get("selectionSource") == "manual"),
+      "competitorSelection": competitor_selection,
       "mpstatsCharacteristics": len(mpstats_characteristics),
       "mpstatsUsage": mpstats_usage_summary,
       "warnings": audit_public_warnings(warnings),
@@ -5737,6 +6179,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           subject_characteristics=None,
           mpstats_characteristics=None,
           period=payload.get("period"),
+          audit_competitors=payload.get("auditCompetitors") or payload.get("competitorsForAudit"),
         )
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_audit_request"})

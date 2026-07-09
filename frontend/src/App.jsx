@@ -4119,6 +4119,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [competitors, setCompetitors] = useState([]);
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
+  const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const titleLength = currentTitle.length;
@@ -4190,11 +4191,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
-  const latestAuditSummary = auditHistory.find((item) => item?.summary)?.summary || {};
+  const latestAuditEntry = auditHistory.find((item) => item?.summary || item?.competitorSelection) || {};
+  const latestAuditSummary = latestAuditEntry.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
+  const latestCompetitorSelection = latestAuditEntry.competitorSelection || null;
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+  const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
 
   useEffect(() => {
     setSemanticSeedQuery(defaultSemanticSeedQuery(card));
@@ -4233,6 +4237,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
+    setAuditCompetitorInput("");
     const applyDraft = (storedDraft) => {
       const normalized = contentFromStoredDraft(storedDraft, card);
       setDraftTitle(normalized.title);
@@ -4589,6 +4594,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           portalId: portal?.id,
           cardKey: draftCardKey,
           card,
+          auditCompetitors: auditCompetitorIds.map((id) => ({ nmID: id, url: wbCompetitorUrl(id) })),
         }),
       });
       const returnedMpstats = Array.isArray(payload.mpstatsCharacteristics) ? payload.mpstatsCharacteristics : [];
@@ -4619,6 +4625,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         sourceInputs: ["wb_snapshot", "mpstats_market", "sergey_methodology"],
         mpstatsGroups: returnedMpstats.length || mpstatsCharacteristics.length,
         mpstatsMatches: countMpstatsMatches(characteristicItems, subjectCharacteristics, returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics),
+        competitors: payload.evidenceSummary?.competitors || 0,
+        manualCompetitors: payload.evidenceSummary?.manualCompetitors || 0,
         promotionRelevantCount: countPromotionRelevantCharacteristics(characteristicItems, subjectCharacteristics, returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics),
         changedCharacteristics: Object.keys(nextDraftCharacteristics).length,
         content: {
@@ -5351,6 +5359,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     </div>
                     <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
                   </div>
+                  <div className="issue audit-competitors-input">
+                    <div className="issue-head">
+                      <strong>Конкуренты для этого аудита</strong>
+                      <Tag tone={auditCompetitorIds.length ? "blue" : "green"}>{auditCompetitorIds.length ? `${auditCompetitorIds.length}/3` : "необязательно"}</Tag>
+                    </div>
+                    <textarea
+                      value={auditCompetitorInput}
+                      onChange={(event) => setAuditCompetitorInput(event.target.value)}
+                      disabled={auditRunning}
+                      rows={3}
+                      placeholder="Ссылки WB или nmID, по одной строке"
+                    />
+                    <p>{auditCompetitorIds.length ? "Эти карточки будут проверены на коммерческую схожесть и получат приоритет в аудите." : "Если оставить поле пустым, аудит сам подберет конкурентов через MPStats."}</p>
+                  </div>
                   <div className="issue">
                     <div className="issue-head">
                       <strong>Аналитика MPStats</strong>
@@ -5376,6 +5398,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         <Tag tone="blue">черновик</Tag>
                       </div>
                       <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
+                    </div>
+                  ) : null}
+                  {auditDone && latestCompetitorSelection ? (
+                    <div className="issue audit-competitor-selection">
+                      <div className="issue-head">
+                        <strong>Конкурентный набор аудита</strong>
+                        <Tag tone={latestCompetitorSelection.summary?.rejectedManual ? "amber" : "blue"}>
+                          {latestCompetitorSelection.summary?.finalCount || 0}/5
+                        </Tag>
+                      </div>
+                      <AuditCompetitorSelection selection={latestCompetitorSelection} />
                     </div>
                   ) : null}
 	                  {auditDone && (latestMainProblems.length || latestQuickWins.length || latestRiskNotes.length) ? (
@@ -5417,6 +5450,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                             <em>
                               {item.mpstatsGroups || 0} MPStats · {Number.isFinite(Number(item.mpstatsCredits)) ? `${item.mpstatsCredits} кредитов · ` : ""}
                               {Number.isFinite(Number(item.mpstatsCacheHits)) ? `${item.mpstatsCacheHits} кэш · ` : ""}
+                              {item.competitors || 0} конкурентов{item.manualCompetitors ? `, ${item.manualCompetitors} вручную` : ""} ·
                               {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено
                             </em>
                           </div>
@@ -5852,6 +5886,18 @@ function competitorNmIdFromInput(value) {
   return matches?.length ? matches[matches.length - 1] : "";
 }
 
+function auditCompetitorIdsFromInput(value, limit = 3) {
+  const seen = new Set();
+  const ids = [];
+  const matches = String(value || "").match(/\d{6,12}/g) || [];
+  matches.forEach((id) => {
+    if (seen.has(id) || ids.length >= limit) return;
+    seen.add(id);
+    ids.push(id);
+  });
+  return ids;
+}
+
 function wbCompetitorUrl(nmID) {
   const id = competitorNmIdFromInput(nmID);
   return id ? `https://www.wildberries.ru/catalog/${id}/detail.aspx` : "";
@@ -5893,6 +5939,72 @@ function competitorChangeValue(change, key = "current") {
     return competitorPriceText(change?.[key]);
   }
   return textOrDash(change?.[key]);
+}
+
+function auditCompetitorSourceText(source) {
+  return source === "manual" ? "вручную" : "MPStats";
+}
+
+function auditCompetitorMetricText(item) {
+  const parts = [];
+  if (Number(item?.price) > 0) {
+    parts.push(competitorPriceText(item.price));
+  }
+  if (Number(item?.sales) > 0) {
+    parts.push(`${formatNumber(item.sales)} продаж`);
+  }
+  if (Number(item?.revenue) > 0) {
+    parts.push(`${formatNumber(Math.round(item.revenue))} ₽`);
+  }
+  if (Number(item?.similarityScore) > 0) {
+    parts.push(`схожесть ${item.similarityScore}`);
+  }
+  return parts.join(" · ");
+}
+
+function AuditCompetitorSelection({ selection }) {
+  const finalCompetitors = Array.isArray(selection?.finalCompetitors) ? selection.finalCompetitors : [];
+  const rejected = Array.isArray(selection?.manualRejected) ? selection.manualRejected : [];
+  const accepted = Array.isArray(selection?.manualAccepted) ? selection.manualAccepted : [];
+  const autoSelected = Array.isArray(selection?.autoSelected) ? selection.autoSelected : [];
+  return (
+    <>
+      <p>
+        {accepted.length ? `${accepted.length} ручн. принято. ` : ""}
+        {rejected.length ? `${rejected.length} ручн. отклонено. ` : ""}
+        {autoSelected.length ? `${autoSelected.length} добран(о) через MPStats.` : "Автодобор MPStats не потребовался."}
+      </p>
+      {finalCompetitors.length ? (
+        <div className="audit-competitor-rows">
+          {finalCompetitors.map((item) => (
+            <div className="audit-competitor-row" key={`final-${item.nmId}`}>
+              <div>
+                <strong>{item.title || `WB ${item.nmId}`}</strong>
+                <span>WB {item.nmId} · {auditCompetitorSourceText(item.source)}{item.subjectName ? ` · ${item.subjectName}` : ""}</span>
+                {item.reason ? <p>{item.reason}</p> : null}
+              </div>
+              <div className="audit-competitor-side">
+                <Tag tone={item.source === "manual" ? "blue" : "green"}>{auditCompetitorSourceText(item.source)}</Tag>
+                <em>{auditCompetitorMetricText(item)}</em>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>Итоговый список конкурентов не собран. Проверьте MPStats и категорию карточки.</p>
+      )}
+      {rejected.length ? (
+        <div className="audit-competitor-rejected">
+          <span>Отклонены из ручного ввода</span>
+          {rejected.map((item) => (
+            <p key={`rejected-${item.nmId}`}>
+              <strong>WB {item.nmId}</strong> · {item.reason || "не прошел проверку схожести"}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 function TopCompetitorsPanel({
