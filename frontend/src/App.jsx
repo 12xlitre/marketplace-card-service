@@ -2110,6 +2110,8 @@ function semanticQueryKey(value) {
   return normalizedCharacteristicOption(query);
 }
 
+const semanticSelectionLimit = 2000;
+
 function normalizeSemanticSelection(items) {
   const output = [];
   const seen = new Set();
@@ -2125,7 +2127,7 @@ function normalizeSemanticSelection(items) {
       field: "work",
     });
   });
-  return output.slice(0, 80);
+  return output.slice(0, semanticSelectionLimit);
 }
 
 function compactSemanticCore(core) {
@@ -2199,8 +2201,13 @@ function semanticCoreWithSelection(core, selectedItems) {
       reason: "Запросы взяты в работу вручную. Для обновления вариантов соберите СЯ через MPStats.",
     } : null;
   }
-  const selectedKeys = new Set(selected.map(semanticQueryKey));
-  const current = Array.isArray(core.current) ? core.current : [];
+  const selectedByKey = new Map(selected.map((item) => [semanticQueryKey(item), item]));
+  const selectedKeys = new Set(selectedByKey.keys());
+  const current = (Array.isArray(core.current) ? core.current : []).map((item) => {
+    const key = semanticQueryKey(item);
+    const selectedItem = selectedByKey.get(key);
+    return selectedItem ? { ...item, ...selectedItem, status: "selected", field: "work" } : item;
+  });
   const currentKeys = new Set(current.map(semanticQueryKey));
   const selectedCurrent = selected.filter((item) => !currentKeys.has(semanticQueryKey(item)));
   const removeSelected = (items) => (Array.isArray(items) ? items : []).filter((item) => !selectedKeys.has(semanticQueryKey(item)));
@@ -2208,7 +2215,7 @@ function semanticCoreWithSelection(core, selectedItems) {
   const missing = removeSelected(core.missing);
   return {
     ...core,
-    current: [...current, ...selectedCurrent],
+    current: [...selectedCurrent, ...current],
     recommended,
     missing,
     selectedCount: selected.length,
@@ -6257,7 +6264,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const currentItems = current.filter((item) => item.status !== "selected");
   const workItems = recommended.length ? recommended : missing;
   const coverage = semanticCore?.coveragePercent;
-  const currentLimit = compact ? 4 : standalone ? 80 : 8;
+  const selectedLimit = compact ? 4 : standalone ? 500 : 8;
+  const currentLimit = compact ? 4 : standalone ? 120 : 8;
   const workLimit = compact ? 4 : standalone ? 250 : 8;
   const searchText = String(search || "").trim().toLowerCase();
   const excludedWords = semanticFilterWords(excludeWords);
@@ -6286,7 +6294,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
         <div>
           <span>Выбранные запросы</span>
           <div className="semantic-keyword-list">
-            {selectedItems.length ? selectedItems.slice(0, currentLimit).map((item) => (
+            {selectedItems.length ? selectedItems.slice(0, selectedLimit).map((item) => (
               <div className="semantic-keyword selected" key={`selected-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -6299,6 +6307,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             )) : null}
+            {selectedItems.length > selectedLimit ? <p>Показано {formatNumber(selectedLimit)} из {formatNumber(selectedItems.length)} выбранных. Полный список попадет в Excel.</p> : null}
             {currentItems.length ? currentItems.slice(0, currentLimit).map((item) => (
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
