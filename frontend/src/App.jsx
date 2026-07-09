@@ -4923,7 +4923,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         {auditHistory.slice(0, 5).map((item) => (
                           <div className="audit-history-row" key={item.id || item.createdAt}>
                             <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"}</span>
-                            <em>{item.mpstatsGroups || 0} MPStats · {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено</em>
+                            <em>
+                              {item.mpstatsGroups || 0} MPStats · {Number.isFinite(Number(item.mpstatsCredits)) ? `${item.mpstatsCredits} кредитов · ` : ""}
+                              {Number.isFinite(Number(item.mpstatsCacheHits)) ? `${item.mpstatsCacheHits} кэш · ` : ""}
+                              {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено
+                            </em>
                           </div>
                         ))}
                       </div>

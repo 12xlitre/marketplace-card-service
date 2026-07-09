@@ -13,6 +13,8 @@ import re
 import secrets
 import sqlite3
 import time
+import contextvars
+import uuid
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -70,12 +72,20 @@ AUDIT_MARKET_CACHE_TTL_SECONDS = int(os.environ.get("AUDIT_MARKET_CACHE_TTL_SECO
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
+GIGACHAT_AUTH_KEY = os.environ.get("GIGACHAT_AUTH_KEY", "").strip()
+GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip() or "GIGACHAT_API_PERS"
+GIGACHAT_OAUTH_URL = os.environ.get("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
+GIGACHAT_API_BASE = os.environ.get("GIGACHAT_API_BASE", "https://gigachat.devices.sberbank.ru/api/v1")
+GIGACHAT_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat")
+OPTICARDS_LLM_PROVIDER = os.environ.get("OPTICARDS_LLM_PROVIDER", "gigachat" if GIGACHAT_AUTH_KEY else "openai").strip().lower()
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
 WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
 AUDIT_MARKET_CACHE = {}
+GIGACHAT_TOKEN_CACHE = {"accessToken": "", "expiresAt": 0}
+MPSTATS_USAGE_CONTEXT = contextvars.ContextVar("mpstats_usage", default=None)
 
 
 def utc_now():
@@ -84,6 +94,52 @@ def utc_now():
 
 def iso_now_plus(seconds):
   return (utc_now() + dt.timedelta(seconds=seconds)).isoformat()
+
+
+def mpstats_usage_start():
+  usage = {
+    "apiRequests": 0,
+    "cacheHits": 0,
+    "creditsEstimate": 0,
+    "requests": [],
+    "cache": [],
+  }
+  return MPSTATS_USAGE_CONTEXT.set(usage), usage
+
+
+def mpstats_usage_stop(token):
+  MPSTATS_USAGE_CONTEXT.reset(token)
+
+
+def mpstats_usage_record(method, path, source="api", status="sent"):
+  usage = MPSTATS_USAGE_CONTEXT.get()
+  if usage is None:
+    return
+  entry = {
+    "method": method,
+    "path": str(path or "")[:220],
+    "source": source,
+    "status": status,
+  }
+  if source == "cache":
+    usage["cacheHits"] += 1
+    usage["cache"].append(entry)
+    return
+  usage["apiRequests"] += 1
+  usage["creditsEstimate"] += 1
+  usage["requests"].append(entry)
+
+
+def mpstats_usage_public(usage):
+  usage = usage if isinstance(usage, dict) else {}
+  return {
+    "creditsEstimate": int(usage.get("creditsEstimate") or 0),
+    "apiRequests": int(usage.get("apiRequests") or 0),
+    "cacheHits": int(usage.get("cacheHits") or 0),
+    "rule": "MPStats: 1 API request = 1 external analytics limit",
+    "requests": (usage.get("requests") or [])[:20],
+    "cache": (usage.get("cache") or [])[:20],
+  }
 
 
 def connect_db():
@@ -2725,6 +2781,7 @@ def mpstats_get_json(token, path, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, headers=headers, method="GET")
+    mpstats_usage_record("GET", path, status=f"attempt-{attempt + 1}")
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
@@ -2767,6 +2824,7 @@ def mpstats_post_json(token, path, params=None, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, data=b"{}", headers=headers, method="POST")
+    mpstats_usage_record("POST", f"{path}{'?' + query if query else ''}", status=f"attempt-{attempt + 1}")
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
@@ -2948,6 +3006,7 @@ def fetch_mpstats_characteristics(report_type, value, num_top=100, min_cats=0, f
   if not force_refresh:
     cached = load_mpstats_characteristics_cache(cache_key)
     if cached:
+      mpstats_usage_record("POST", "/analytics/v1/wb/characteristics-analysis", source="cache", status="hit")
       return cached
   if cache_only:
     return {
@@ -3199,6 +3258,7 @@ def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, data=data, headers=headers, method="POST")
+    mpstats_usage_record("POST", f"{path}{'?' + query if query else ''}", status=f"attempt-{attempt + 1}")
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
@@ -3245,6 +3305,7 @@ def audit_mpstats_get(token, path, warnings, cache_ttl=AUDIT_MARKET_CACHE_TTL_SE
   cache_key = f"GET:{path}"
   cached = audit_cache_get(cache_key)
   if cached is not None:
+    mpstats_usage_record("GET", path, source="cache", status="hit")
     return cached
   try:
     return audit_cache_set(cache_key, mpstats_get_json(token, path, attempts=2), cache_ttl)
@@ -3257,6 +3318,7 @@ def audit_mpstats_post(token, path, params, body, warnings, cache_ttl=AUDIT_MARK
   cache_key = f"POST:{path}:{json.dumps(params or {}, sort_keys=True, ensure_ascii=False)}:{json.dumps(body or {}, sort_keys=True, ensure_ascii=False)}"
   cached = audit_cache_get(cache_key)
   if cached is not None:
+    mpstats_usage_record("POST", path, source="cache", status="hit")
     return cached
   try:
     return audit_cache_set(cache_key, mpstats_post_body_json(token, path, body=body, params=params, attempts=2), cache_ttl)
@@ -4014,19 +4076,89 @@ def audit_result_valid(payload):
   return isinstance(payload, dict) and all(key in payload for key in AUDIT_REQUIRED_KEYS)
 
 
-def audit_llm_refine(evidence, base_result, warnings):
+def parse_llm_json_content(content):
+  text = audit_str(content)
+  if text.startswith("```"):
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text).strip()
+  try:
+    return json.loads(text)
+  except json.JSONDecodeError:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+      return json.loads(text[start:end + 1])
+    raise
+
+
+def gigachat_access_token():
+  now = time.time()
+  cached_token = GIGACHAT_TOKEN_CACHE.get("accessToken")
+  if cached_token and now < float(GIGACHAT_TOKEN_CACHE.get("expiresAt") or 0) - 60:
+    return cached_token
+  if not GIGACHAT_AUTH_KEY:
+    raise RuntimeError("gigachat_auth_key_missing")
+  data = urlencode({"scope": GIGACHAT_SCOPE}).encode("utf-8")
+  request = urlrequest.Request(
+    GIGACHAT_OAUTH_URL,
+    data=data,
+    headers={
+      "Authorization": f"Basic {GIGACHAT_AUTH_KEY}",
+      "RqUID": str(uuid.uuid4()),
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+      "User-Agent": "OptiCards/0.1 gigachat-oauth",
+    },
+    method="POST",
+  )
+  with urlrequest.urlopen(request, timeout=45) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+  access_token = audit_str(payload.get("access_token") or payload.get("accessToken") or "")
+  if not access_token:
+    raise RuntimeError("gigachat_access_token_missing")
+  expires_at = audit_number(payload.get("expires_at") or payload.get("expiresAt"), None)
+  if expires_at and expires_at > 10_000_000_000:
+    expires_at = expires_at / 1000
+  if not expires_at:
+    expires_at = now + 29 * 60
+  GIGACHAT_TOKEN_CACHE["accessToken"] = access_token
+  GIGACHAT_TOKEN_CACHE["expiresAt"] = expires_at
+  return access_token
+
+
+def audit_llm_chat_completion(messages):
+  provider = OPTICARDS_LLM_PROVIDER
+  if provider == "gigachat":
+    access_token = gigachat_access_token()
+    url = f"{GIGACHAT_API_BASE.rstrip('/')}/chat/completions"
+    body = {
+      "model": GIGACHAT_MODEL,
+      "temperature": 0.2,
+      "messages": messages,
+    }
+    request = urlrequest.Request(
+      url,
+      data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+      headers={
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "OptiCards/0.1 audit-gigachat",
+      },
+      method="POST",
+    )
+    with urlrequest.urlopen(request, timeout=60) as response:
+      return json.loads(response.read().decode("utf-8")), GIGACHAT_MODEL, "gigachat"
+
   token = audit_str(OPTICARDS_LLM_API_KEY)
   if not token:
-    return base_result
+    return None, "", provider or "openai"
   url = f"{OPTICARDS_LLM_API_BASE.rstrip('/')}/chat/completions"
   body = {
     "model": OPTICARDS_LLM_MODEL,
     "temperature": 0.2,
     "response_format": {"type": "json_object"},
-    "messages": [
-      {"role": "system", "content": AUDIT_LLM_SYSTEM_PROMPT},
-      {"role": "user", "content": json.dumps({"evidenceBundle": evidence, "baseResult": base_result}, ensure_ascii=False)},
-    ],
+    "messages": messages,
   }
   request = urlrequest.Request(
     url,
@@ -4039,23 +4171,38 @@ def audit_llm_refine(evidence, base_result, warnings):
     },
     method="POST",
   )
+  with urlrequest.urlopen(request, timeout=45) as response:
+    return json.loads(response.read().decode("utf-8")), OPTICARDS_LLM_MODEL, provider or "openai"
+
+
+def audit_llm_refine(evidence, base_result, warnings):
+  if OPTICARDS_LLM_PROVIDER == "gigachat" and not GIGACHAT_AUTH_KEY:
+    return base_result
+  if OPTICARDS_LLM_PROVIDER != "gigachat" and not audit_str(OPTICARDS_LLM_API_KEY):
+    return base_result
+  messages = [
+    {"role": "system", "content": AUDIT_LLM_SYSTEM_PROMPT},
+    {"role": "user", "content": json.dumps({"evidenceBundle": evidence, "baseResult": base_result}, ensure_ascii=False)},
+  ]
   try:
-    with urlrequest.urlopen(request, timeout=45) as response:
-      payload = json.loads(response.read().decode("utf-8"))
+    payload, model, provider = audit_llm_chat_completion(messages)
+    if not payload:
+      return base_result
     content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
-    refined = json.loads(content)
+    refined = parse_llm_json_content(content)
     if not audit_result_valid(refined):
       warnings.append("LLM вернул неполный JSON: использован deterministic audit")
       return base_result
     refined["_meta"] = {
       **(refined.get("_meta") if isinstance(refined.get("_meta"), dict) else {}),
       "engine": "opticards-llm-sergey-v1",
-      "model": OPTICARDS_LLM_MODEL,
+      "provider": provider,
+      "model": model,
       "baseEngine": base_result.get("_meta", {}).get("engine"),
       "generatedAt": utc_now().isoformat(),
     }
     return refined
-  except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+  except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
     warnings.append(f"LLM refinement недоступен: {type(exc).__name__}")
     return base_result
 
@@ -4101,6 +4248,7 @@ def audit_draft_from_result(result, characteristic_draft):
 def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None, mpstats_characteristics=None, period=None):
   period = period if isinstance(period, dict) and period.get("d1") and period.get("d2") else audit_period_default()
   warnings = []
+  _, mpstats_usage = mpstats_usage_start()
   card = raw_card if isinstance(raw_card, dict) else {}
   if portal_id and str(portal_id) != "demo-wb":
     init_db()
@@ -4168,6 +4316,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
     result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *audit_public_warnings(warnings)], limit=8)
   draft_content = audit_draft_from_result(result, characteristic_draft)
   changed_characteristics = sum(1 for item in draft_content.get("characteristics", {}).values() if item.get("source") == "audit")
+  mpstats_usage_summary = mpstats_usage_public(mpstats_usage)
   return {
     "auditResult": result,
     "draftContent": draft_content,
@@ -4178,6 +4327,8 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "sourceInputs": ["wb_snapshot", "wb_cdn", "wb_subject_characteristics", "mpstats_market", "mpstats_characteristics", "llm_optional"],
       "mpstatsGroups": len(mpstats_characteristics),
       "mpstatsMatches": sum(1 for item in characteristics if item.get("topCategoryValues")),
+      "mpstatsCredits": mpstats_usage_summary["creditsEstimate"],
+      "mpstatsCacheHits": mpstats_usage_summary["cacheHits"],
       "promotionRelevantCount": sum(1 for item in characteristics if item.get("isPromotionRelevant")),
       "changedCharacteristics": changed_characteristics,
       "content": {
@@ -4194,6 +4345,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "keywords": len(market_data.get("keywords", [])),
       "competitors": len(competitors),
       "mpstatsCharacteristics": len(mpstats_characteristics),
+      "mpstatsUsage": mpstats_usage_summary,
       "warnings": audit_public_warnings(warnings),
     },
     "mpstatsCharacteristics": mpstats_characteristics,
