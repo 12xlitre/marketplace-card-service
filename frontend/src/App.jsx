@@ -5158,22 +5158,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
-  function downloadSemanticCoreSelection(rowsSource = semanticCoreSelected, suffix = "semantic-core") {
-    const rows = normalizeSemanticSelection(rowsSource);
+  function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore, suffix = "semantic-core" } = {}) {
+    const selectedRowsNormalized = normalizeSemanticSelection(selectedRows);
+    const currentRows = (Array.isArray(core?.current) ? core.current : [])
+      .filter((item) => item?.status !== "selected")
+      .filter((item) => semanticQueryKey(item));
+    const rowCount = Math.max(currentRows.length, selectedRowsNormalized.length);
     downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
       name: "СЯ в работу",
       freezeRows: 1,
-      widths: [34, 34, 28, 14, 14, 14, 14],
+      widths: [44, 44],
       rows: [
-        ["Запрос", "Кластер WB", "Приоритетный предмет", "Частота WB", "Частота Ozon", "Результатов WB", "Частота 365"],
-        ...rows.map((item) => [
-          item.query || "",
-          item.cluster || "",
-          item.prioritySubject || "",
-          Number(item.wbCount || 0),
-          Number(item.ozonCount || 0),
-          Number(item.results || 0),
-          Number(item.frequency365 || 0),
+        ["Действующие до подбора", "Добавленные в работу"],
+        ...Array.from({ length: rowCount }, (_, index) => [
+          currentRows[index]?.query || "",
+          selectedRowsNormalized[index]?.query || "",
         ]),
       ],
     }]);
@@ -5288,7 +5287,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                           <em>{report.createdAt ? new Date(report.createdAt).toLocaleString("ru-RU") : "без даты"} · {formatNumber(report.semanticCore?.totalKeywords || 0)} запросов · {formatNumber(report.selected?.length || 0)} выбрано</em>
                         </div>
                         <button className="btn mini" type="button" onClick={() => openSemanticReport(report)}>Открыть</button>
-                        <button className="btn mini" type="button" onClick={() => downloadSemanticCoreSelection(report.selected, `semantic-core-${String(report.createdAt || "").slice(0, 10)}`)} disabled={!report.selected?.length}>
+                        <button className="btn mini" type="button" onClick={() => downloadSemanticCoreSelection({ selectedRows: report.selected, core: report.semanticCore, suffix: `semantic-core-${String(report.createdAt || "").slice(0, 10)}` })} disabled={!report.selected?.length && !report.semanticCore?.current?.length}>
                           <Download size={14} />Скачать
                         </button>
                       </div>
@@ -5316,7 +5315,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
-                  <button className="btn" type="button" onClick={downloadSemanticCoreSelection} disabled={!semanticCoreSelected.length}>
+                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore}>
                     <Download size={17} />Скачать выбранное
                   </button>
                   <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
@@ -6301,7 +6300,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       ) : null}
       <div className="semantic-core-grid">
         <div>
-          <span>Выбранные запросы</span>
+          <span>Выбранные и добавленные</span>
           <div className="semantic-keyword-list">
             {selectedItems.length ? selectedItems.slice(0, selectedLimit).map((item) => (
               <div className="semantic-keyword selected" key={`selected-${item.query}`}>
