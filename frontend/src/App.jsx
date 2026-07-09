@@ -6271,11 +6271,12 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = allKeywords.length ? allKeywords : workItems;
-  const filteredWorkItems = sourceItems
-    .filter((item) => !selectedKeys.has(semanticQueryKey(item)))
+  const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredWorkItems = filteredSourceItems
+    .filter((item) => !selectedKeys.has(semanticQueryKey(item)));
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
@@ -6285,9 +6286,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
-          <div><span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong></div>
-          <div><span>Выбранные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
-          <div><span>Всего MPStats</span><strong>{formatNumber(semanticCore?.totalKeywords || current.length + missing.length)}</strong></div>
+          <div><span>Действующие</span><strong>{formatNumber(current.length)}</strong></div>
+          <div><span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
+          <div><span>Всего MPStats</span><strong>{formatNumber(filteredSourceItems.length)}</strong></div>
         </div>
       ) : null}
       <div className="semantic-core-grid">
