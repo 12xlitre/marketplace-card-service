@@ -4352,9 +4352,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           refresh: forceRefresh,
         }),
       });
-      setSemanticCore(payload.semanticCore || null);
+      const nextSemanticCore = payload.semanticCore || null;
+      setSemanticCore(nextSemanticCore);
+      const cardSubject = String(card?.subjectName || "").trim().toLowerCase();
+      if (nextSemanticCore?.subjectOptions?.length && cardSubject && !semanticSubjectFilter) {
+        const matchedSubject = nextSemanticCore.subjectOptions.find((item) => String(item.name || "").trim().toLowerCase() === cardSubject)
+          || nextSemanticCore.subjectOptions.find((item) => String(item.name || "").toLowerCase().includes(cardSubject.split("/").pop().trim()));
+        if (matchedSubject?.name) {
+          setSemanticSubjectFilter(matchedSubject.name);
+        }
+      }
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
-      return payload.semanticCore || null;
+      return nextSemanticCore;
     } catch (error) {
       setSemanticCoreStatus(error.message === "mpstats_api_error" ? "error" : "unavailable");
       return null;
