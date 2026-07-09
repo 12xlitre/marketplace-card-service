@@ -2387,6 +2387,71 @@ tr:last-child td {
   color: var(--muted);
 }
 
+.semantic-core-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.semantic-core-panel.compact {
+  margin-bottom: 14px;
+}
+
+.semantic-core-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.semantic-core-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.semantic-core-grid > div > span {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.semantic-keyword-list {
+  display: grid;
+  gap: 6px;
+}
+
+.semantic-keyword {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+.semantic-keyword.recommended {
+  border-color: #ead08f;
+  background: #fff9e8;
+}
+
+.semantic-keyword strong,
+.semantic-keyword em {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.semantic-keyword strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.semantic-keyword em {
+  margin-top: 3px;
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .draft-source-line {
   display: flex;
   flex-wrap: wrap;
@@ -2742,9 +2807,10 @@ tr:last-child td {
   .snapshot-facts,
   .pipeline,
   .approval-analytics-grid,
-  .approval-events-head,
-  .approval-event-row,
-  .settings-grid,
+    .approval-events-head,
+    .approval-event-row,
+    .semantic-core-grid,
+    .settings-grid,
   .form-two,
   .connect-mode,
   .before-after,

@@ -3953,6 +3953,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
+  const latestSemanticCore = latestAuditSummary.semanticCore && typeof latestAuditSummary.semanticCore === "object" ? latestAuditSummary.semanticCore : null;
 
   useEffect(() => {
     let active = true;
@@ -4702,7 +4703,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
                     </div>
                   ) : null}
-                  {auditDone && (latestMainProblems.length || latestQuickWins.length || latestRiskNotes.length) ? (
+	                  {auditDone && (latestMainProblems.length || latestQuickWins.length || latestRiskNotes.length) ? (
                     <div className="issue audit-findings">
                       <div className="issue-head">
                         <strong>Выводы аудита</strong>
@@ -4726,9 +4727,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                           {latestRiskNotes.slice(0, 3).map((item, index) => <p key={`risk-${index}`}>{item}</p>)}
                         </div>
                       ) : null}
-                    </div>
-                  ) : null}
-                  <div className="issue audit-history">
+	                    </div>
+	                  ) : null}
+	                  {auditDone && latestSemanticCore ? (
+	                    <SemanticCorePanel semanticCore={latestSemanticCore} />
+	                  ) : null}
+	                  <div className="issue audit-history">
                     <div className="issue-head">
                       <strong>История аудитов</strong>
                       <Tag tone={auditHistory.length ? "blue" : "green"}>{auditHistory.length || "пусто"}</Tag>
@@ -4879,11 +4883,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   descriptionChanged={normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description)}
                   descriptionSource={draftDescriptionSource}
                   descriptionReason={draftDescriptionReason}
-                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
-                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
-                  mpstatsStatus={mpstatsHintsLabel}
-                />
-                <div className="before-after">
+	                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
+	                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
+	                  mpstatsStatus={mpstatsHintsLabel}
+	                  semanticCore={latestSemanticCore}
+	                />
+	                {latestSemanticCore ? <SemanticCorePanel semanticCore={latestSemanticCore} compact /> : null}
+	                <div className="before-after">
                   <div className="field-box">
                     <strong>Было: заголовок</strong>
                     <p>{currentTitle}</p>
@@ -5264,9 +5270,11 @@ function ContentAuditSummary({
   changedCharacteristicsCount,
   auditCharacteristicsCount,
   mpstatsStatus,
+  semanticCore,
 }) {
   const titleState = contentSummaryState({ changed: titleChanged, source: titleSource, reason: titleReason, emptyText: "нет заголовка" });
   const descriptionState = contentSummaryState({ changed: descriptionChanged, source: descriptionSource, reason: descriptionReason, emptyText: "нет описания" });
+  const semanticRecommendedCount = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended.length : 0;
   return (
     <div className="content-audit-summary">
       <div className="content-audit-card">
@@ -5290,12 +5298,78 @@ function ContentAuditSummary({
         </div>
         <p>{auditCharacteristicsCount ? `Аудит подготовил ${auditCharacteristicsCount} ${pluralRu(auditCharacteristicsCount, "поле", "поля", "полей")}. ${mpstatsStatus}.` : "Можно править вручную или добавить поля из справочника WB."}</p>
       </div>
+      <div className="content-audit-card">
+        <div>
+          <strong>СЯ</strong>
+          <Tag tone={semanticRecommendedCount ? "amber" : "green"}>{semanticCore?.coveragePercent === null || semanticCore?.coveragePercent === undefined ? "нет данных" : `${semanticCore.coveragePercent}% покрытие`}</Tag>
+        </div>
+        <p>{semanticRecommendedCount
+          ? `MPStats нашел ${semanticRecommendedCount} ${pluralRu(semanticRecommendedCount, "запрос", "запроса", "запросов")} для добавления в заголовок или описание.`
+          : semanticCore
+            ? "Топ-запросы MPStats уже учтены или не требуют срочной правки."
+            : "СЯ появится после запуска аудита с MPStats keywords."}</p>
+      </div>
       <div className="content-audit-card future">
         <div>
           <strong>Методика</strong>
           <Tag tone="blue">MP Audit</Tag>
         </div>
         <p>Рекомендации строятся только на доступных данных WB, MPStats и карточек конкурентов. Если данных недостаточно, аудит помечает пункт для ручной проверки.</p>
+      </div>
+    </div>
+  );
+}
+
+function semanticKeywordMeta(item) {
+  const parts = [];
+  if (Number(item?.wbCount || 0) > 0) {
+    parts.push(`${formatNumber(item.wbCount)} показов`);
+  }
+  if (item?.orgPos) {
+    parts.push(`органика ${item.orgPos}`);
+  }
+  if (item?.target) {
+    parts.push(item.target === "title" ? "в заголовок" : "в описание");
+  }
+  return parts.join(" · ");
+}
+
+function SemanticCorePanel({ semanticCore, compact = false }) {
+  const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
+  const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
+  const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
+  const coverage = semanticCore?.coveragePercent;
+  return (
+    <div className={`issue semantic-core-panel ${compact ? "compact" : ""}`}>
+      <div className="issue-head">
+        <strong>Семантическое ядро</strong>
+        <Tag tone={recommended.length ? "amber" : "green"}>{coverage === null || coverage === undefined ? "MPStats" : `${coverage}%`}</Tag>
+      </div>
+      <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
+      <div className="semantic-core-grid">
+        <div>
+          <span>Уже найдено в контенте</span>
+          <div className="semantic-keyword-list">
+            {current.length ? current.slice(0, compact ? 4 : 8).map((item) => (
+              <div className="semantic-keyword" key={`current-${item.query}`}>
+                <strong>{item.query}</strong>
+                <em>{semanticKeywordMeta(item) || "есть в текущем СЯ"}</em>
+              </div>
+            )) : <p>В топ-запросах MPStats нет подтвержденных вхождений в текущем контенте.</p>}
+          </div>
+        </div>
+        <div>
+          <span>Добавить в работу</span>
+          <div className="semantic-keyword-list">
+            {(recommended.length ? recommended : missing).slice(0, compact ? 4 : 8).map((item) => (
+              <div className="semantic-keyword recommended" key={`recommended-${item.query}`}>
+                <strong>{item.query}</strong>
+                <em>{semanticKeywordMeta(item) || item.reason || "нет в заголовке и описании"}</em>
+              </div>
+            ))}
+            {!recommended.length && !missing.length ? <p>Недостающих запросов не найдено или MPStats не вернул keywords.</p> : null}
+          </div>
+        </div>
       </div>
     </div>
   );

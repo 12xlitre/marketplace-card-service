@@ -3108,6 +3108,71 @@ def audit_keywords_from_payload(payload):
   return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:30]
 
 
+def audit_keyword_entry(item, status, field):
+  return {
+    "query": item.get("query"),
+    "wbCount": audit_int(item.get("wbCount"), 0),
+    "orgPos": item.get("orgPos"),
+    "adPos": item.get("adPos"),
+    "avgPos": item.get("avgPos"),
+    "totalFound": audit_int(item.get("totalFound"), 0),
+    "status": status,
+    "field": field,
+  }
+
+
+def audit_build_semantic_core(card, keywords):
+  current_title = audit_str(card.get("title") or "")
+  description = audit_str(card.get("description") or "", 7000)
+  keywords = [item for item in keywords if isinstance(item, dict) and item.get("query")]
+  current = []
+  missing = []
+  for item in keywords[:30]:
+    in_title = audit_contains_phrase(current_title, item.get("query"))
+    in_description = audit_contains_phrase(description, item.get("query"))
+    if in_title or in_description:
+      field = "title" if in_title else "description"
+      if in_title and in_description:
+        field = "title_description"
+      current.append(audit_keyword_entry(item, "present", field))
+    else:
+      missing.append(audit_keyword_entry(item, "missing", ""))
+  recommended = []
+  for item in missing:
+    wb_count = audit_int(item.get("wbCount"), 0)
+    priority = "high" if wb_count >= 1000 else "medium" if wb_count >= 300 else "low"
+    target = "title" if len(recommended) < 1 and len(item.get("query") or "") <= 45 else "description"
+    recommended.append({
+      **item,
+      "priority": priority,
+      "target": target,
+      "reason": (
+        f"Частотный запрос {audit_format_count(wb_count)} показов/мес не найден в текущем заголовке и описании."
+        if wb_count else "Запрос есть в MPStats, но не найден в текущем заголовке и описании."
+      ),
+    })
+    if len(recommended) >= 8:
+      break
+  total_top = min(len(keywords), 12)
+  present_top = sum(
+    1 for item in keywords[:12]
+    if audit_contains_phrase(current_title, item.get("query")) or audit_contains_phrase(description, item.get("query"))
+  )
+  coverage = round((present_top / total_top) * 100) if total_top else None
+  reason = "MPStats SEO-запросы не получены; СЯ нужно собрать вручную."
+  if total_top:
+    reason = f"В текущем контенте найдено {present_top} из {total_top} топ-запросов MPStats."
+    if recommended:
+      reason += f" В работу стоит взять: {', '.join(item['query'] for item in recommended[:3])}."
+  return {
+    "coveragePercent": coverage,
+    "current": current[:12],
+    "missing": missing[:12],
+    "recommended": recommended,
+    "reason": reason,
+  }
+
+
 def audit_normalize_subject_item(item):
   if not isinstance(item, dict):
     return None
@@ -3432,6 +3497,7 @@ def audit_build_characteristics(card, subject_characteristics, mpstats_character
 
 def audit_build_result(card, market_data, competitors, characteristics, warnings, period):
   keywords = market_data.get("keywords", [])
+  semantic_core = audit_build_semantic_core(card, keywords)
   current_title = audit_str(card.get("title") or "")
   recommended_title = audit_title_candidate(card, keywords)
   missing_keywords = [item for item in keywords[:8] if not audit_contains_phrase(current_title, item.get("query"))]
@@ -3487,6 +3553,10 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
   if title_priority in {"high", "medium"} and recommended_title != current_title:
     quick_wins.append(f"Переписать заголовок под частотный запрос: {recommended_title}.")
   quick_wins.extend(
+    f"Добавить СЯ-запрос «{item['query']}» в {('заголовок' if item.get('target') == 'title' else 'описание')}."
+    for item in semantic_core.get("recommended", [])[:2]
+  )
+  quick_wins.extend(
     f"Заполнить «{item['name']}»: {', '.join(item.get('recommendedValues') or [])}."
     for item in high_characteristics[:3]
     if item.get("recommendedValues")
@@ -3525,10 +3595,12 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
       "reason": description_reason,
       "priority": description_priority,
     },
+    "semanticCore": semantic_core,
     "characteristics": characteristics,
     "summary": {
       "mainProblems": main_problems[:3] or ["Критичные проблемы не подтверждены данными; нужна ручная проверка специалиста."],
       "quickWins": quick_wins[:5] or ["Проверить черновик характеристик и сохранить подтвержденные значения."],
+      "semanticCore": semantic_core,
       "strategicRecommendations": [
         "Сравнить карточку с топом ниши по выручке и проверить цену, отзывы, фото и рекламные позиции отдельным этапом.",
         "Накопить историю аудитов по предмету, чтобы переиспользовать рабочие формулировки и значения характеристик.",
@@ -3693,6 +3765,10 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
     "warnings": warnings,
   }
   result = audit_llm_refine(evidence, base_result, warnings)
+  if not isinstance(result.get("semanticCore"), dict):
+    result["semanticCore"] = base_result.get("semanticCore", {})
+  if isinstance(result.get("summary"), dict) and not isinstance(result["summary"].get("semanticCore"), dict):
+    result["summary"]["semanticCore"] = result.get("semanticCore", {})
   if result is not base_result:
     result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *audit_public_warnings(warnings)], limit=8)
   draft_content = audit_draft_from_result(result, characteristic_draft)
