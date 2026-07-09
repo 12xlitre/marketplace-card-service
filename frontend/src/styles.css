@@ -2676,6 +2676,13 @@ tr:last-child td {
   gap: 10px;
 }
 
+.semantic-query-bar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
 .semantic-core-panel.compact {
   margin-bottom: 14px;
 }
@@ -2734,6 +2741,9 @@ tr:last-child td {
 .semantic-keyword-list {
   display: grid;
   gap: 6px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .semantic-keyword {
@@ -2751,6 +2761,11 @@ tr:last-child td {
 .semantic-keyword.recommended {
   border-color: #ead08f;
   background: #fff9e8;
+}
+
+.semantic-keyword.selected {
+  border-color: #9fc5b4;
+  background: #eef8f2;
 }
 
 .semantic-keyword-main {
@@ -3165,6 +3180,7 @@ tr:last-child td {
     .approval-event-row,
     .semantic-core-grid,
     .semantic-core-metrics,
+    .semantic-query-bar,
     .settings-grid,
   .competitor-toolbar,
   .competitor-grid,

@@ -2156,6 +2156,16 @@ function semanticCoreWithSelection(core, selectedItems) {
   };
 }
 
+function defaultSemanticSeedQuery(card) {
+  const title = String(card?.title || "").trim();
+  const titleWords = title.split(/\s+/).filter(Boolean);
+  if (titleWords.length) {
+    return titleWords.slice(0, 3).join(" ").toLowerCase();
+  }
+  const subject = String(card?.subjectName || "").split("/").pop().trim();
+  return subject.toLowerCase();
+}
+
 function numberFromInput(value) {
   if (value === "" || value === null || value === undefined) {
     return "";
@@ -4028,6 +4038,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCore, setSemanticCore] = useState(null);
   const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
+  const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
+  const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
+  const [semanticSearch, setSemanticSearch] = useState("");
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -4110,6 +4123,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+
+  useEffect(() => {
+    setSemanticSeedQuery(defaultSemanticSeedQuery(card));
+    setSemanticSubjectFilter("");
+    setSemanticSearch("");
+  }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
     let active = true;
@@ -4318,17 +4337,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   async function loadSemanticCore({ forceRefresh = false } = {}) {
-    if (!portal?.id || !card?.nmID) {
+    if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
       setSemanticCoreStatus("missing-card");
       return null;
     }
     setSemanticCoreStatus("loading");
     try {
-      const payload = await apiRequest("/api/mpstats/keywords", {
+      const payload = await apiRequest("/api/mpstats/semantic-expansion", {
         method: "POST",
         body: JSON.stringify({
           portalId: portal.id,
           card,
+          query: semanticSeedQuery.trim(),
           refresh: forceRefresh,
         }),
       });
@@ -4949,6 +4969,27 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
+  function downloadSemanticCoreSelection() {
+    const rows = normalizeSemanticSelection(semanticCoreSelected);
+    downloadXlsx(`${exportFileBase}-semantic-core.xlsx`, [{
+      name: "СЯ в работу",
+      freezeRows: 1,
+      widths: [34, 34, 28, 14, 14, 14, 14],
+      rows: [
+        ["Запрос", "Кластер WB", "Приоритетный предмет", "Частота WB", "Частота Ozon", "Результатов WB", "Частота 365"],
+        ...rows.map((item) => [
+          item.query || "",
+          item.cluster || "",
+          item.prioritySubject || "",
+          Number(item.wbCount || 0),
+          Number(item.ozonCount || 0),
+          Number(item.results || 0),
+          Number(item.frequency365 || 0),
+        ]),
+      ],
+    }]);
+  }
+
   return (
     <section className="screen active">
       <header className="topbar">
@@ -5006,29 +5047,54 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="strip-head">
                   <div>
                     <h2>Семантическое ядро</h2>
-                    <p>Действующие запросы из текущего контента и релевантные запросы MPStats для работы с карточкой.</p>
+                    <p>Отдельный SEO-запрос MPStats: расширение запросов по стартовой фразе без запуска аудита.</p>
                   </div>
                   <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
                     {semanticCoreStatus === "loading" ? "собираем" : activeSemanticCore ? `${activeSemanticCore.selectedCount || 0} выбрано` : "нет данных"}
                   </Tag>
                 </div>
+                <div className="semantic-query-bar">
+                  <label className="field-label">
+                    <span>Стартовый запрос</span>
+                    <input value={semanticSeedQuery} onChange={(event) => setSemanticSeedQuery(event.target.value)} placeholder="пижама женская" />
+                  </label>
+                  <label className="field-label">
+                    <span>Приоритетный предмет</span>
+                    <select className="select" value={semanticSubjectFilter} onChange={(event) => setSemanticSubjectFilter(event.target.value)} disabled={!activeSemanticCore}>
+                      <option value="">Все предметы</option>
+                      {(activeSemanticCore?.subjectOptions || []).map((item) => (
+                        <option value={item.name} key={item.name}>{item.name} · {formatNumber(item.count)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field-label">
+                    <span>Поиск в запросах</span>
+                    <input value={semanticSearch} onChange={(event) => setSemanticSearch(event.target.value)} placeholder="рибана, хлопок, розовая" disabled={!activeSemanticCore} />
+                  </label>
+                </div>
                 {activeSemanticCore ? (
                   <SemanticCorePanel
                     semanticCore={activeSemanticCore}
                     standalone
+                    subjectFilter={semanticSubjectFilter}
+                    search={semanticSearch}
                     onTakeKeyword={takeSemanticKeyword}
                     onRemoveKeyword={removeSemanticKeyword}
                   />
                 ) : (
                   <div className="empty-state">
                     <strong>СЯ еще не собрано</strong>
-                    <span>Соберите СЯ: MPStats подтянет поисковые запросы карточки, а система разделит их на действующие и новые для работы.</span>
+                    <span>Введите релевантный запрос и запустите подбор. MPStats вернет расширение запросов, кластеры, предметы и частотность.</span>
                   </div>
                 )}
                 <div className="tab-actions">
-                  {semanticCoreStatus === "error" || semanticCoreStatus === "unavailable" ? <span className="status-note">MPStats keywords не загрузились. Проверьте ключ или повторите позже.</span> : null}
-                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading"}>
-                    <Search size={17} />{semanticCoreStatus === "loading" ? "Собираем СЯ" : activeSemanticCore ? "Обновить СЯ" : "Собрать СЯ"}
+                  {semanticCoreStatus === "error" || semanticCoreStatus === "unavailable" ? <span className="status-note">MPStats SEO expansion не загрузился. Проверьте ключ или повторите позже.</span> : null}
+                  {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
+                  <button className="btn" type="button" onClick={downloadSemanticCoreSelection} disabled={!semanticCoreSelected.length}>
+                    <Download size={17} />Скачать выбранное
+                  </button>
+                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
+                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : activeSemanticCore ? "Обновить подбор" : "Подобрать запросы"}
                   </button>
                 </div>
               </section>
@@ -5915,7 +5981,16 @@ function ContentAuditSummary({
 function semanticKeywordMeta(item) {
   const parts = [];
   if (Number(item?.wbCount || 0) > 0) {
-    parts.push(`${formatNumber(item.wbCount)} показов`);
+    parts.push(`${formatNumber(item.wbCount)} частота WB`);
+  }
+  if (Number(item?.ozonCount || 0) > 0) {
+    parts.push(`${formatNumber(item.ozonCount)} Ozon`);
+  }
+  if (item?.cluster) {
+    parts.push(`кластер: ${item.cluster}`);
+  }
+  if (item?.prioritySubject) {
+    parts.push(item.prioritySubject);
   }
   if (item?.orgPos) {
     parts.push(`органика ${item.orgPos}`);
@@ -5932,51 +6007,70 @@ function semanticKeywordMeta(item) {
   return parts.join(" · ");
 }
 
-function SemanticCorePanel({ semanticCore, compact = false, standalone = false, onTakeKeyword = null, onRemoveKeyword = null }) {
+function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
   const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
+  const allKeywords = Array.isArray(semanticCore?.allKeywords) ? semanticCore.allKeywords : [];
+  const selectedItems = current.filter((item) => item.status === "selected");
+  const currentItems = current.filter((item) => item.status !== "selected");
   const workItems = recommended.length ? recommended : missing;
   const coverage = semanticCore?.coveragePercent;
-  const currentLimit = compact ? 4 : standalone ? 40 : 8;
-  const workLimit = compact ? 4 : standalone ? 40 : 8;
+  const currentLimit = compact ? 4 : standalone ? 80 : 8;
+  const workLimit = compact ? 4 : standalone ? 250 : 8;
+  const searchText = String(search || "").trim().toLowerCase();
+  const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
+  const sourceItems = allKeywords.length ? allKeywords : workItems;
+  const filteredWorkItems = sourceItems
+    .filter((item) => !selectedKeys.has(semanticQueryKey(item)))
+    .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
         <strong>Семантическое ядро</strong>
-        <Tag tone={workItems.length ? "amber" : "green"}>{coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
+        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
       </div>
       <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
-          <div><span>Действующие</span><strong>{formatNumber(current.length)}</strong></div>
-          <div><span>В работу</span><strong>{formatNumber(workItems.length)}</strong></div>
+          <div><span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong></div>
+          <div><span>В работе</span><strong>{formatNumber(selectedItems.length)}</strong></div>
           <div><span>Всего MPStats</span><strong>{formatNumber(semanticCore?.totalKeywords || current.length + missing.length)}</strong></div>
         </div>
       ) : null}
       <div className="semantic-core-grid">
         <div>
-          <span>Действующие запросы</span>
+          <span>В работе и действующие</span>
           <div className="semantic-keyword-list">
-            {current.length ? current.slice(0, currentLimit).map((item) => (
-              <div className="semantic-keyword" key={`current-${item.query}`}>
+            {selectedItems.length ? selectedItems.slice(0, currentLimit).map((item) => (
+              <div className="semantic-keyword selected" key={`selected-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                  <em>{semanticKeywordMeta(item) || "взято в работу"}</em>
                 </div>
-                {standalone && item.status === "selected" && onRemoveKeyword ? (
+                {standalone && onRemoveKeyword ? (
                   <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)}>
                     <X size={14} />Убрать
                   </button>
                 ) : null}
               </div>
-            )) : <p>В топ-запросах MPStats нет подтвержденных вхождений в текущем контенте.</p>}
+            )) : null}
+            {currentItems.length ? currentItems.slice(0, currentLimit).map((item) => (
+              <div className="semantic-keyword" key={`current-${item.query}`}>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                </div>
+              </div>
+            )) : null}
+            {!selectedItems.length && !currentItems.length ? <p>Пока нет выбранных запросов и подтвержденных вхождений в текущем контенте.</p> : null}
           </div>
         </div>
         <div>
-          <span>Релевантные запросы в работу</span>
+          <span>Найденные запросы MPStats</span>
           <div className="semantic-keyword-list">
-            {workItems.slice(0, workLimit).map((item) => (
+            {filteredWorkItems.slice(0, workLimit).map((item) => (
               <div className="semantic-keyword recommended" key={`recommended-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -5992,7 +6086,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             ))}
-            {!workItems.length ? <p>Недостающих запросов не найдено или MPStats не вернул keywords.</p> : null}
+            {filteredWorkItems.length > workLimit ? <p>Показано {formatNumber(workLimit)} из {formatNumber(filteredWorkItems.length)}. Используйте фильтр предмета или поиск.</p> : null}
+            {!filteredWorkItems.length ? <p>По текущим фильтрам запросы не найдены.</p> : null}
           </div>
         </div>
       </div>

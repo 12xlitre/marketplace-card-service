@@ -3676,6 +3676,140 @@ def fetch_mpstats_keywords_core(card, force_refresh=False):
   }
 
 
+def mpstats_expanding_seed_query(card, query):
+  query = audit_str(query or "")
+  if query:
+    return query[:250]
+  title = audit_str(card.get("title") or "")
+  title_words = [word for word in re.split(r"\s+", title) if word]
+  if title_words:
+    return " ".join(title_words[:3])[:250]
+  subject = audit_str(card.get("subjectName") or card.get("subject") or "")
+  if "/" in subject:
+    subject = subject.split("/")[-1].strip()
+  return subject[:250]
+
+
+def normalize_mpstats_expanding_query(item):
+  if not isinstance(item, dict):
+    return None
+  query = audit_str(item.get("word") or item.get("query") or "")
+  if not query:
+    return None
+  priority_subject = item.get("prioritySubject") if isinstance(item.get("prioritySubject"), dict) else {}
+  return {
+    "query": query,
+    "cluster": audit_str(item.get("norm_query") or item.get("query_cluster") or ""),
+    "prioritySubject": audit_str(priority_subject.get("name") or item.get("prioritySubject") or ""),
+    "prioritySubjectId": priority_subject.get("id") or item.get("prioritySubjectId") or "",
+    "wbCount": audit_int(item.get("wbcount") or item.get("wb_count"), 0),
+    "ozonCount": audit_int(item.get("count"), 0),
+    "results": audit_int(item.get("total") or item.get("items_count"), 0),
+    "frequency365": item.get("freq_365") or item.get("freq365") or "",
+    "uniqueDays": audit_int(item.get("unique_days"), 0),
+    "source": "mpstats-expanding",
+  }
+
+
+def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+  seed_query = mpstats_expanding_seed_query(card, query)
+  if not seed_query:
+    raise ValueError("missing_semantic_query")
+
+  period = audit_period_default()
+  body = {
+    "type": "keyword",
+    "mp": 0,
+    "queryData": [seed_query],
+    "d1": period["d1"],
+    "d2": period["d2"],
+    "stopWords": [],
+    "searchFullWord": False,
+    "similar": False,
+  }
+  cache_key = f"POST:/seo/keywords/expanding/create-report:{json.dumps(body, sort_keys=True, ensure_ascii=False)}"
+  cached = None if force_refresh else audit_cache_get(cache_key)
+  if cached is not None:
+    mpstats_usage_record("POST", "/seo/keywords/expanding/create-report", source="cache", status="hit")
+    payload = cached
+    cached_flag = True
+  else:
+    create_payload = mpstats_post_body_json(token, "/seo/keywords/expanding/create-report", body=body, attempts=2)
+    report_hash = audit_str(create_payload.get("reportHash") or create_payload.get("result") or create_payload.get("hash") or "")
+    if not report_hash:
+      raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_expanding_hash_missing", retryable=True)
+    payload = None
+    for attempt in range(12):
+      poll_payload = mpstats_get_json(token, f"/seo/keywords/expanding/{report_hash}", attempts=1)
+      if isinstance(poll_payload, dict) and isinstance(poll_payload.get("words"), list):
+        payload = poll_payload
+        break
+      if attempt < 11:
+        time.sleep(1.5 if attempt < 3 else 3)
+    if payload is None:
+      raise MpstatsApiError(HTTPStatus.ACCEPTED, "mpstats_expanding_report_not_ready", retryable=True)
+    audit_cache_set(cache_key, payload, AUDIT_MARKET_CACHE_TTL_SECONDS)
+    cached_flag = False
+
+  rows = []
+  seen = set()
+  for item in payload.get("words") if isinstance(payload.get("words"), list) else []:
+    normalized = normalize_mpstats_expanding_query(item)
+    if not normalized:
+      continue
+    key = normalized["query"].lower()
+    if key in seen:
+      continue
+    seen.add(key)
+    rows.append(normalized)
+  rows.sort(key=lambda item: (audit_int(item.get("wbCount"), 0), audit_int(item.get("ozonCount"), 0)), reverse=True)
+
+  content = f"{audit_str(card.get('title') or '')} {audit_str(card.get('description') or '')}".strip()
+  current = []
+  recommended = []
+  for row in rows:
+    target = {
+      **row,
+      "priority": "high" if audit_int(row.get("wbCount"), 0) >= 1000 else "medium" if audit_int(row.get("wbCount"), 0) >= 100 else "low",
+    }
+    if content and audit_contains_phrase(content, row.get("query")):
+      current.append({**target, "field": "title_description", "status": "current"})
+    else:
+      recommended.append({**target, "reason": "найдено MPStats в расширении запросов"})
+
+  subject_counts = {}
+  for row in rows:
+    subject = row.get("prioritySubject") or "Без предмета"
+    item = subject_counts.setdefault(subject, {"name": subject, "count": 0, "wbCount": 0})
+    item["count"] += 1
+    item["wbCount"] += audit_int(row.get("wbCount"), 0)
+  subject_options = sorted(subject_counts.values(), key=lambda item: (item["count"], item["wbCount"]), reverse=True)
+
+  return {
+    "source": "mpstats-expanding",
+    "status": "loaded" if rows else "empty",
+    "seedQuery": seed_query,
+    "period": period,
+    "cached": cached_flag,
+    "semanticCore": {
+      "source": "mpstats-expanding",
+      "seedQuery": seed_query,
+      "period": period,
+      "current": current[:300],
+      "recommended": recommended[:5000],
+      "missing": recommended[:5000],
+      "allKeywords": rows[:5000],
+      "subjectOptions": subject_options[:200],
+      "totalKeywords": len(rows),
+      "coveragePercent": round((len(current) / len(rows)) * 100) if rows else None,
+      "reason": "MPStats SEO расширение запросов собрано отдельным отчетом по стартовой фразе.",
+    },
+  }
+
+
 def audit_normalize_subject_item(item):
   if not isinstance(item, dict):
     return None
@@ -5631,6 +5765,42 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_keywords_request"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except MpstatsApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "mpstats_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/mpstats/semantic-expansion":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      portal_id = str(payload.get("portalId") or payload.get("portal_id") or "demo-wb")
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      force_refresh = bool(payload.get("refresh"))
+      try:
+        result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh)
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_semantic_request"})
         return
       except RuntimeError:
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
