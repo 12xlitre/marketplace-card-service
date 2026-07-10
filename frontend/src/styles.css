@@ -491,6 +491,35 @@ a {
   padding: 12px;
 }
 
+.report-availability {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  display: grid;
+  background: var(--line);
+}
+
+.report-availability-row {
+  background: var(--surface);
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(260px, 1.4fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 9px 12px;
+}
+
+.report-availability-row span {
+  font-weight: 700;
+}
+
+.report-availability-row em {
+  color: var(--muted);
+  font-size: 13px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
 .filters {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 180px 180px;
@@ -3613,6 +3642,7 @@ tr:last-child td {
   .before-after,
   .content-audit-summary,
   .audit-fact-grid,
+  .report-availability-row,
   .raw-field-row,
   .characteristic-row,
   .characteristics-diff-head,

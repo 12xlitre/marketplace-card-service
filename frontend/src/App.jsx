@@ -2514,6 +2514,163 @@ function buildStocksExportSheets(card, draftStocks = {}) {
   ];
 }
 
+function clientReportDateLabel(date = new Date()) {
+  return date.toLocaleDateString("ru-RU");
+}
+
+function clientReportPeriodLabel(date = new Date()) {
+  const end = new Date(date);
+  const start = new Date(date);
+  start.setDate(start.getDate() - 6);
+  return `${start.toLocaleDateString("ru-RU")} - ${end.toLocaleDateString("ru-RU")}`;
+}
+
+function cardReportPrice(card) {
+  return firstDefined(card?.discountedPrice, card?.price, card?.rawFields?.discountedPrice, card?.rawFields?.price);
+}
+
+function cardReportStock(card) {
+  return firstDefined(card?.stock, card?.wbStock, card?.sellerStock, card?.rawFields?.stock);
+}
+
+function cardReportPhotoCount(card) {
+  const photos = Array.isArray(card?.photos) ? card.photos : [];
+  return photos.length || Number(card?.rawFields?.photosCount || 0) || "";
+}
+
+function cardReportCharacteristicsCount(card) {
+  return rawCharacteristicItems(card).length;
+}
+
+function cardReportColor(card) {
+  return characteristicValuesByAliases(card, ["цвет"])[0] || "";
+}
+
+function cardReportIssueText(card) {
+  const reasons = cardProblemReasons(card);
+  const signals = cardDataSignals(card);
+  if (reasons.length) {
+    return reasons.join("; ");
+  }
+  if (signals.length) {
+    return signals.join("; ");
+  }
+  return "без замечаний";
+}
+
+function clientReportAvailability(cards, portal) {
+  const hasCards = cards.length > 0;
+  const hasPrices = cards.some((card) => cardReportPrice(card) !== "");
+  const hasStocks = cards.some((card) => cardReportStock(card) !== "");
+  const hasContent = cards.some((card) => String(card?.description || "").trim() || rawCharacteristicItems(card).length);
+  return [
+    ["Карточки WB", hasCards ? "есть" : "нет данных", portal.apiConnected ? "WB API" : "ручная витрина"],
+    ["Контент карточек", hasContent ? "есть" : "частично", "название, описание, характеристики, фото"],
+    ["Цены и скидки", hasPrices ? "есть" : "нет данных", portal.apiConnected ? "WB Prices API" : "данные витрины"],
+    ["Остатки", hasStocks ? "есть" : "нет данных", portal.apiConnected ? "WB Marketplace/Analytics API" : "данные витрины"],
+    ["Воронка продаж", "не подключено", "показы, переходы, CTR, корзина, заказы по периодам"],
+    ["Локальность и доставка", "не подключено", "среднее время доставки, локальные заказы"],
+    ["Акции", "не подключено", "цены входа в акции и статус участия"],
+    ["Реклама", "не подключено", "заказы/расход/ДРР по рекламным кампаниям"],
+  ];
+}
+
+function buildClientWbReportSheets(portal, cards) {
+  const generatedAt = new Date();
+  const portalName = portalDisplayName(portal);
+  const sourceLabel = portal.apiConnected ? "WB API" : (portal.syncStatus === "mpstats-loaded" ? "MPStats / публичная витрина WB" : "ручной кабинет");
+  const reportRows = [
+    ["Проверка на (дата):", clientReportDateLabel(generatedAt)],
+    ["За период:", clientReportPeriodLabel(generatedAt)],
+    [],
+    [
+      "Товар",
+      "Цвет",
+      "Артикул",
+      "Артикул WB",
+      "Текущая цена",
+      "Показы",
+      "Перешли в карточку",
+      "CTR",
+      "Положили в корзину",
+      "Cреднее время доставки",
+      "Остаток на складах, шт",
+      "Дней до конца остатка",
+      "Локальные заказы %",
+      "Кол-во заказов",
+      "Сумма заказов",
+      "Комментарий",
+    ],
+    ...cards.map((card) => [
+      card?.subjectName || card?.title || "",
+      cardReportColor(card),
+      card?.vendorCode || "",
+      card?.nmID || "",
+      cardReportPrice(card),
+      "",
+      "",
+      "",
+      "",
+      "",
+      cardReportStock(card),
+      "",
+      "",
+      "",
+      "",
+      "Контент, цена и остатки из текущего снимка. Воронка продаж подключается отдельным отчетом WB.",
+    ]),
+  ];
+  const contentRows = [
+    ["Артикул", "Артикул WB", "Название", "Предмет", "Бренд", "Описание, знаков", "Характеристик", "Фото", "Замечания"],
+    ...cards.map((card) => [
+      card?.vendorCode || "",
+      card?.nmID || "",
+      card?.title || "",
+      card?.subjectName || "",
+      card?.brand || "",
+      String(card?.description || "").length,
+      cardReportCharacteristicsCount(card),
+      cardReportPhotoCount(card),
+      cardReportIssueText(card),
+    ]),
+  ];
+  const commerceRows = [
+    ["Артикул", "Артикул WB", "Цена до скидки", "Цена со скидкой", "Скидка", "Остаток всего", "Остаток WB", "Остаток продавца", "Баркод"],
+    ...cards.map((card) => [
+      card?.vendorCode || "",
+      card?.nmID || "",
+      firstDefined(card?.price, card?.rawFields?.price),
+      firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
+      firstDefined(card?.discount, card?.rawFields?.discount),
+      cardReportStock(card),
+      firstDefined(card?.wbStock, card?.rawFields?.wbStock),
+      firstDefined(card?.sellerStock, card?.rawFields?.sellerStock),
+      firstSku(card),
+    ]),
+  ];
+  const availabilityRows = [
+    ["Блок отчета", "Статус", "Источник / комментарий"],
+    ...clientReportAvailability(cards, portal),
+  ];
+  const summaryRows = [
+    ["Параметр", "Значение"],
+    ["Кабинет", portalName],
+    ["Маркетплейс", portal.marketplace || "Wildberries"],
+    ["Источник", sourceLabel],
+    ["Дата формирования", generatedAt.toLocaleString("ru-RU")],
+    ["Период", clientReportPeriodLabel(generatedAt)],
+    ["Карточек в отчете", cards.length],
+    ["С замечаниями", cards.filter((card) => cardProblemReasons(card).length).length],
+  ];
+  return [
+    { name: "Свод", freezeRows: 1, widths: [28, 72], rows: summaryRows },
+    { name: "Клиентский срез", freezeRows: 4, widths: [22, 16, 20, 18, 16, 14, 18, 10, 18, 20, 18, 18, 18, 16, 16, 64], rows: reportRows },
+    { name: "Контент", freezeRows: 1, widths: [20, 18, 52, 28, 18, 18, 16, 12, 42], rows: contentRows },
+    { name: "Цены и остатки", freezeRows: 1, widths: [20, 18, 16, 16, 12, 16, 16, 18, 24], rows: commerceRows },
+    { name: "Доступность данных", freezeRows: 1, widths: [28, 18, 72], rows: availabilityRows },
+  ];
+}
+
 function Tag({ children, tone = "amber", title = "" }) {
   return <span className={`tag ${tone}`} title={title}>{children}</span>;
 }
@@ -3639,6 +3796,14 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setApprovalWorkflowStatus("loaded");
   }
 
+  function downloadClientReport() {
+    const datePart = new Date().toISOString().slice(0, 10);
+    downloadXlsx(
+      `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
+      buildClientWbReportSheets(portal, cards),
+    );
+  }
+
   return (
     <section className="screen active">
       <header className="topbar">
@@ -3787,6 +3952,12 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               onOpenTask={openApprovalTask}
             />
 
+            <ReportsPanel
+              portal={portal}
+              cards={cards}
+              onDownloadClientReport={downloadClientReport}
+            />
+
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
@@ -3805,6 +3976,41 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             </section>
           </div>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function ReportsPanel({ portal, cards, onDownloadClientReport }) {
+  const availability = clientReportAvailability(cards, portal);
+  const availableCount = availability.filter((row) => row[1] === "есть").length;
+  const partialCount = availability.filter((row) => row[1] === "частично").length;
+  const unavailableCount = availability.filter((row) => row[1] === "не подключено" || row[1] === "нет данных").length;
+  return (
+    <section className="workspace-strip reports-strip">
+      <div className="strip-head">
+        <div>
+          <h2>Отчеты</h2>
+          <p>Клиентский XLSX по текущему снимку кабинета WB.</p>
+        </div>
+        <button className="btn primary" type="button" onClick={onDownloadClientReport} disabled={!cards.length}>
+          <Download size={17} />Скачать отчет
+        </button>
+      </div>
+      <div className="summary-grid">
+        <Metric label="Карточек в отчете" value={formatNumber(cards.length)} hint={portal.apiConnected ? "источник: WB API" : "ручной источник"} />
+        <Metric label="Данные есть" value={formatNumber(availableCount)} hint="блоки заполняются автоматически" />
+        <Metric label="Частично" value={formatNumber(partialCount)} hint="нужна ручная проверка" />
+        <Metric label="Не подключено" value={formatNumber(unavailableCount)} hint="добавим отдельными отчетами" />
+      </div>
+      <div className="report-availability">
+        {availability.map(([label, status, source]) => (
+          <div className="report-availability-row" key={label}>
+            <span>{label}</span>
+            <Tag tone={status === "есть" ? "green" : status === "частично" ? "amber" : "blue"}>{status}</Tag>
+            <em>{source}</em>
+          </div>
+        ))}
       </div>
     </section>
   );
