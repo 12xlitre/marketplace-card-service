@@ -6093,6 +6093,17 @@ function competitorCharacteristicLine(item) {
   return `${item?.name || "Характеристика"}: ${item?.value || item?.current || item?.competitor || "нет данных"}`;
 }
 
+function competitorNormalizedText(value) {
+  return String(value || "").trim().toLowerCase().replaceAll("ё", "е");
+}
+
+function competitorIsServiceCharacteristic(item) {
+  const name = competitorNormalizedText(item?.name);
+  if (!["основная информация", "дополнительная информация"].includes(name)) return false;
+  return [item?.value, item?.previous, item?.current, item?.competitor]
+    .some((value) => competitorNormalizedText(value) === name);
+}
+
 function competitorCharacteristicsComparisonText(comparison) {
   const data = comparison?.characteristics || {};
   const same = Number(data.sameCount || 0);
@@ -6130,16 +6141,21 @@ function competitorChangeText(change) {
 function competitorCharacteristicChangeLines(change) {
   const details = change?.details || {};
   const lines = [];
-  (details.changed || []).slice(0, 3).forEach((item) => {
+  (details.changed || []).filter((item) => !competitorIsServiceCharacteristic(item)).slice(0, 3).forEach((item) => {
     lines.push(`${item.name}: было ${item.previous || "пусто"}, стало ${item.current || "пусто"}`);
   });
-  (details.added || []).slice(0, 2).forEach((item) => {
+  (details.added || []).filter((item) => !competitorIsServiceCharacteristic(item)).slice(0, 3).forEach((item) => {
     lines.push(`добавили ${competitorCharacteristicLine(item)}`);
   });
-  (details.removed || []).slice(0, 2).forEach((item) => {
+  (details.removed || []).filter((item) => !competitorIsServiceCharacteristic(item)).slice(0, 3).forEach((item) => {
     lines.push(`убрали ${competitorCharacteristicLine(item)}`);
   });
   return lines;
+}
+
+function competitorVisibleChanges(changes) {
+  return (Array.isArray(changes) ? changes : [])
+    .filter((change) => change?.field !== "characteristics" || competitorCharacteristicChangeLines(change).length);
 }
 
 function competitorStatusText(status, enabled) {
@@ -6344,6 +6360,7 @@ function TopCompetitorsPanel({
 function CompetitorCard({ competitor, busy, onRemove }) {
   const snapshot = competitor.snapshot || {};
   const changes = Array.isArray(competitor.changes) ? competitor.changes : [];
+  const visibleChanges = competitorVisibleChanges(changes);
   const title = snapshot.title || `WB ${competitor.competitorNmID}`;
   const price = snapshot.discountedPrice || snapshot.price;
   const comparison = snapshot.comparison || {};
@@ -6425,20 +6442,20 @@ function CompetitorCard({ competitor, busy, onRemove }) {
           ) : null}
         </div>
       ) : null}
-      {changes.length ? (
+      {visibleChanges.length ? (
         <div className="competitor-changes">
           <span>Что изменилось за период</span>
           <p className="competitor-change-period">{competitorPeriodText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</p>
-          {changes.slice(0, 5).map((change, index) => (
-            <p key={`${change.field}-${index}`}>
-              <strong>{change.label}</strong>
-              {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
-              <small>{competitorChangeText(change)}</small>
-              {change.field === "characteristics" ? (
-                <small>{competitorCharacteristicChangeLines(change).slice(0, 4).join(" · ")}</small>
-              ) : null}
-            </p>
-          ))}
+          {visibleChanges.slice(0, 5).map((change, index) => {
+            const characteristicLines = change.field === "characteristics" ? competitorCharacteristicChangeLines(change) : [];
+            return (
+              <p key={`${change.field}-${index}`}>
+                <strong>{change.label}</strong>
+                {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
+                <small>{change.field === "characteristics" ? characteristicLines.slice(0, 5).join(" · ") : competitorChangeText(change)}</small>
+              </p>
+            );
+          })}
         </div>
       ) : (
         <div className="competitor-changes empty">
