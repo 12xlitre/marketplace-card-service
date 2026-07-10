@@ -6063,6 +6063,12 @@ function competitorSignedNumber(value, suffix = "") {
   return `${number > 0 ? "+" : ""}${formatNumber(number)}${suffix}`;
 }
 
+function competitorPlainNumber(value, suffix = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "нет данных";
+  return `${formatNumber(Math.round(number * 10) / 10)}${suffix}`;
+}
+
 function competitorDateText(value) {
   return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
 }
@@ -6302,6 +6308,7 @@ function CompetitorCard({ competitor, busy, onRemove }) {
   const priceDelta = competitorSignedPercent(comparison.priceDeltaPercent);
   const descriptionDelta = competitorSignedNumber(comparison.descriptionDelta, " зн.");
   const characteristicsDelta = competitorSignedNumber(comparison.characteristicsDelta, "");
+  const titleOverlap = Number(comparison.titleOverlap);
   const verdict = competitorVerdict(snapshot, competitor);
   return (
     <article className={`competitor-card ${competitor.hasCriticalChanges ? "critical" : ""}`}>
@@ -6321,15 +6328,28 @@ function CompetitorCard({ competitor, busy, onRemove }) {
           </button>
         </div>
       </div>
-      <div className="competitor-metrics">
-        <div><span>Цена</span><strong>{competitorPriceText(price)}</strong></div>
-        <div><span>К нашей цене</span><strong>{priceDelta || "нет данных"}</strong></div>
-        <div><span>Продажи MPStats</span><strong>{snapshot.sales ? formatNumber(snapshot.sales) : "нет данных"}</strong></div>
-        <div><span>Выручка MPStats</span><strong>{snapshot.revenue ? `${formatNumber(Math.round(snapshot.revenue))} ₽` : "нет данных"}</strong></div>
-        <div><span>Рейтинг</span><strong>{valueSummary(snapshot.rating)}</strong></div>
-        <div><span>Отзывы</span><strong>{valueSummary(snapshot.feedbacks)}</strong></div>
-        <div><span>Описание</span><strong>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · ${descriptionDelta}` : ""}` : "нет данных"}</strong></div>
-        <div><span>Характеристики</span><strong>{valueSummary(snapshot.characteristicsCount)}{characteristicsDelta ? ` · ${characteristicsDelta}` : ""}</strong></div>
+      <div className="competitor-data-grid">
+        <div className="competitor-data-section">
+          <span>Рынок MPStats</span>
+          <p><strong>Продажи</strong><em>{snapshot.sales ? formatNumber(snapshot.sales) : "нет данных"}</em></p>
+          <p><strong>Выручка</strong><em>{snapshot.revenue ? `${formatNumber(Math.round(snapshot.revenue))} ₽` : "нет данных"}</em></p>
+          <p><strong>В день</strong><em>{competitorPlainNumber(snapshot.salesPerDay, " шт.")}</em></p>
+          <p><strong>Остаток</strong><em>{competitorPlainNumber(snapshot.balance, " шт.")}</em></p>
+        </div>
+        <div className="competitor-data-section">
+          <span>Цена</span>
+          <p><strong>Финальная</strong><em>{competitorPriceText(price)}</em></p>
+          <p><strong>До скидки</strong><em>{competitorPriceText(snapshot.price)}</em></p>
+          <p><strong>К нашей</strong><em>{priceDelta || "нет данных"}</em></p>
+          <p><strong>Средняя продажа</strong><em>{snapshot.avgSalePrice ? competitorPriceText(snapshot.avgSalePrice) : "нет данных"}</em></p>
+        </div>
+        <div className="competitor-data-section">
+          <span>Контент</span>
+          <p><strong>Описание</strong><em>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · ${descriptionDelta}` : ""}` : "нет данных"}</em></p>
+          <p><strong>Характеристики</strong><em>{valueSummary(snapshot.characteristicsCount)}{characteristicsDelta ? ` · ${characteristicsDelta}` : ""}</em></p>
+          <p><strong>Схожесть названия</strong><em>{Number.isFinite(titleOverlap) ? `${Math.round(titleOverlap * 100)}%` : "нет данных"}</em></p>
+          <p><strong>Отзывы</strong><em>{valueSummary(snapshot.feedbacks)}</em></p>
+        </div>
       </div>
       <div className="competitor-verdict">
         <span>Вывод</span>

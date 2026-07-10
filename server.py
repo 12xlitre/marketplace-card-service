@@ -2183,6 +2183,7 @@ def competitor_snapshot_from_sources(nm_id):
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
+  mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
   merged = audit_merge_card_content({}, cdn_card)
   title = audit_str(product.get("name") or merged.get("title") or info.get("name") or full_payload.get("name") or "")
   brand = audit_str(product.get("brand") or merged.get("brand") or info.get("brand") or full_payload.get("brand") or "")
@@ -2190,13 +2191,13 @@ def competitor_snapshot_from_sources(nm_id):
   characteristics = audit_card_characteristics(merged)
   price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
   if price is None:
-    price = audit_number(info.get("final_price") or info.get("price") or stats.get("final_price") or stats.get("price"), None)
+    price = audit_positive_number(mpstats_prices.get("price"), mpstats_prices.get("discountedPrice"), mpstats_prices.get("avgSalePrice"))
   extended = product.get("extended") if isinstance(product.get("extended"), dict) else {}
   discounted_price = wb_public_product_price(product, ("salePriceU", "salePrice", "clientSalePriceU", "product", "total"))
   if discounted_price is None:
     discounted_price = wb_public_price(extended.get("clientPriceU"))
   if discounted_price is None:
-    discounted_price = audit_number(info.get("final_price") or stats.get("final_price"), None)
+    discounted_price = audit_positive_number(mpstats_prices.get("discountedPrice"), mpstats_prices.get("walletPrice"), mpstats_prices.get("avgSalePrice"))
   if discounted_price is None:
     discounted_price = price
   mpstats_filled = bool(info or full_payload)
@@ -2220,6 +2221,8 @@ def competitor_snapshot_from_sources(nm_id):
     "subjectName": subject,
     "price": price,
     "discountedPrice": discounted_price,
+    "walletPrice": mpstats_prices.get("walletPrice"),
+    "avgSalePrice": mpstats_prices.get("avgSalePrice"),
     "discount": product.get("sale") or product.get("clientSale") or None,
     "rating": product.get("reviewRating") or product.get("rating") or info.get("rating") or None,
     "feedbacks": product.get("feedbacks") or product.get("comments") or info.get("comments") or None,
@@ -2242,9 +2245,24 @@ def competitor_snapshot_from_sources(nm_id):
 
 def competitor_snapshot_value(snapshot, key):
   value = snapshot.get(key) if isinstance(snapshot, dict) else None
+  if key in {"discountedPrice", "price"}:
+    number = audit_number(value, None)
+    return str(number) if number and number > 0 else ""
   if value is None:
     return ""
   return str(value)
+
+
+def competitor_subject_leaf(value):
+  return audit_normalized(str(value or "").split("/")[-1].strip())
+
+
+def competitor_snapshot_values_equal(previous, current, key):
+  if key == "subjectName":
+    return competitor_subject_leaf(previous.get(key)) == competitor_subject_leaf(current.get(key))
+  if key in {"discountedPrice", "price"}:
+    return competitor_snapshot_value(previous, key) == competitor_snapshot_value(current, key)
+  return competitor_snapshot_value(previous, key) == competitor_snapshot_value(current, key)
 
 
 def competitor_snapshot_changes(previous, current):
@@ -2265,16 +2283,16 @@ def competitor_snapshot_changes(previous, current):
   ]
   changes = []
   for key, label in fields:
+    if competitor_snapshot_values_equal(previous, current, key):
+      continue
     before = competitor_snapshot_value(previous, key)
     after = competitor_snapshot_value(current, key)
-    if before == after:
-      continue
     change = {
       "field": key,
       "label": label,
       "previous": previous.get(key),
       "current": current.get(key),
-      "critical": key in {"title", "discountedPrice", "photosCount", "descriptionLength", "characteristicsSignature"},
+      "critical": key in {"title", "discountedPrice", "photosCount", "descriptionLength"},
     }
     if key == "discountedPrice":
       old_price = audit_number(previous.get(key), None)
@@ -3384,6 +3402,68 @@ def audit_number(value, default=None):
     return default
 
 
+def audit_positive_number(*values, default=None):
+  for value in values:
+    number = audit_number(value, None)
+    if number is not None and number > 0:
+      return number
+  return default
+
+
+def audit_average_price_from_stats(stats):
+  if not isinstance(stats, dict):
+    return None
+  revenue = audit_positive_number(stats.get("revenue"), stats.get("revenue_estimated"))
+  sales = audit_positive_number(stats.get("sales"), stats.get("sales_estimated"))
+  if revenue and sales:
+    return round(revenue / sales, 2)
+  return None
+
+
+def mpstats_price_metrics(*payloads):
+  price_sources = []
+  stats_sources = []
+  for payload in payloads:
+    if not isinstance(payload, dict):
+      continue
+    price_block = payload.get("price") if isinstance(payload.get("price"), dict) else {}
+    price_sources.append({
+      "price": audit_positive_number(
+        price_block.get("price"),
+        payload.get("price"),
+        payload.get("basic_price"),
+        payload.get("basicPrice"),
+      ),
+      "finalPrice": audit_positive_number(
+        price_block.get("final_price"),
+        price_block.get("finalPrice"),
+        payload.get("final_price"),
+        payload.get("finalPrice"),
+        payload.get("sale_price"),
+        payload.get("salePrice"),
+      ),
+      "walletPrice": audit_positive_number(
+        price_block.get("wallet_price"),
+        price_block.get("walletPrice"),
+        payload.get("wallet_price"),
+        payload.get("walletPrice"),
+      ),
+    })
+    stats = payload.get("period_stats") if isinstance(payload.get("period_stats"), dict) else payload
+    if isinstance(stats, dict):
+      stats_sources.append(stats)
+  base_price = audit_positive_number(*(item.get("price") for item in price_sources))
+  final_price = audit_positive_number(*(item.get("finalPrice") for item in price_sources))
+  wallet_price = audit_positive_number(*(item.get("walletPrice") for item in price_sources))
+  average_price = audit_positive_number(*(audit_average_price_from_stats(stats) for stats in stats_sources))
+  return {
+    "price": base_price or final_price or wallet_price or average_price,
+    "discountedPrice": final_price or wallet_price or average_price or base_price,
+    "walletPrice": wallet_price,
+    "avgSalePrice": average_price,
+  }
+
+
 def audit_int(value, default=0):
   number = audit_number(value)
   if number is None:
@@ -4090,13 +4170,14 @@ def audit_normalize_subject_item(item):
   nm_id = item.get("id") or item.get("itemid") or item.get("nmId") or item.get("nmID")
   if not nm_id:
     return None
+  price_metrics = mpstats_price_metrics(item)
   return {
     "nmId": nm_id,
     "title": audit_str(item.get("name") or item.get("title") or ""),
     "brand": audit_str(item.get("brand") or ""),
     "seller": audit_str(item.get("seller") or ""),
     "supplierId": item.get("supplier_id") or item.get("supplierId"),
-    "price": audit_number(item.get("final_price") or item.get("price"), 0),
+    "price": audit_positive_number(price_metrics.get("discountedPrice"), price_metrics.get("price"), default=0),
     "sales": audit_int(item.get("sales"), 0),
     "revenue": audit_number(item.get("revenue"), 0),
     "comments": audit_int(item.get("comments") or item.get("feedbacks"), 0),
@@ -4439,13 +4520,20 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
+  mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
   subject_name = audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or snapshot.get("subjectName") or ""
   candidate = {
     "nmId": competitor_nm_id,
     "title": snapshot.get("title") or audit_str(info.get("name") if isinstance(info, dict) else ""),
     "brand": snapshot.get("brand") or audit_str(info.get("brand") if isinstance(info, dict) else ""),
     "seller": audit_str(info.get("seller") if isinstance(info, dict) else ""),
-    "price": snapshot.get("discountedPrice") or snapshot.get("price") or audit_number(info.get("final_price") if isinstance(info, dict) else None, 0),
+    "price": audit_positive_number(
+      snapshot.get("discountedPrice"),
+      snapshot.get("price"),
+      mpstats_prices.get("discountedPrice"),
+      mpstats_prices.get("price"),
+      default=0,
+    ),
     "sales": audit_int(stats.get("sales"), 0),
     "revenue": audit_number(stats.get("revenue"), 0),
     "comments": snapshot.get("feedbacks") or audit_int(info.get("comments") if isinstance(info, dict) else None, 0),
