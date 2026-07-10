@@ -4807,11 +4807,16 @@ def mpstats_storefront_candidates(name, store_url, manual_source, seed_cards=Non
   return candidates
 
 
-def mpstats_storefront_body(path_value, period, limit):
+def mpstats_storefront_params(path_value, period):
   return {
     "path": path_value,
     "d1": period["d1"],
     "d2": period["d2"],
+  }
+
+
+def mpstats_storefront_body(limit):
+  return {
     "startRow": 0,
     "endRow": limit,
     "filterModel": {},
@@ -4984,7 +4989,8 @@ def fetch_mpstats_storefront_listing(token, candidate, period, limit):
   payload = mpstats_post_body_json(
     token,
     f"/wb/get/{candidate['kind']}",
-    body=mpstats_storefront_body(candidate["path"], period, limit),
+    body=mpstats_storefront_body(limit),
+    params=mpstats_storefront_params(candidate["path"], period),
     attempts=2,
   )
   rows = audit_extract_list(payload)
