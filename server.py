@@ -2180,11 +2180,17 @@ def competitor_characteristic_public(row):
 
 
 def competitor_characteristic_rows(characteristics):
-  return [
-    competitor_characteristic_public(row)
-    for row in audit_card_characteristics({"characteristics": characteristics})
-    if audit_str(row.get("name")) and competitor_characteristic_value_text(row)
-  ]
+  rows = []
+  for row in audit_card_characteristics({"characteristics": characteristics}):
+    public_row = competitor_characteristic_public(row)
+    normalized_name = audit_normalized(public_row.get("name"))
+    normalized_value = audit_normalized(public_row.get("value"))
+    if not normalized_name or not normalized_value:
+      continue
+    if normalized_name in {"основная информация", "дополнительная информация"} and normalized_name == normalized_value:
+      continue
+    rows.append(public_row)
+  return rows
 
 
 def competitor_characteristic_signature(characteristics):
