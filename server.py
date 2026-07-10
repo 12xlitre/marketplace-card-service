@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import ssl
 import time
+import threading
 import contextvars
 import uuid
 from email.utils import parsedate_to_datetime
@@ -71,6 +72,10 @@ MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
 MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "86400"))
 AUDIT_MARKET_CACHE_TTL_SECONDS = int(os.environ.get("AUDIT_MARKET_CACHE_TTL_SECONDS", "21600"))
 CARD_COMPETITOR_LIMIT = 3
+CARD_COMPETITOR_AUTO_CHECK_DAYS = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_DAYS", "7"))
+CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS", "3600"))
+CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH", "12"))
+CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_ENABLED", "1") != "0"
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
@@ -89,6 +94,8 @@ WB_DIRECTORY_CACHE = {}
 AUDIT_MARKET_CACHE = {}
 GIGACHAT_TOKEN_CACHE = {"accessToken": "", "expiresAt": 0}
 MPSTATS_USAGE_CONTEXT = contextvars.ContextVar("mpstats_usage", default=None)
+CARD_COMPETITOR_AUTO_CHECK_LOCK = threading.Lock()
+CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED = False
 
 
 def utc_now():
@@ -263,7 +270,9 @@ def init_db():
         snapshot_json TEXT NOT NULL DEFAULT '{}',
         previous_snapshot_json TEXT NOT NULL DEFAULT '{}',
         changed_fields_json TEXT NOT NULL DEFAULT '[]',
+        review_json TEXT NOT NULL DEFAULT '{}',
         last_checked_at TEXT,
+        next_auto_check_at TEXT,
         created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
         updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -327,6 +336,11 @@ def init_db():
       db.execute("ALTER TABLE portal_integrations ADD COLUMN token_issued_at TEXT")
     if "token_expires_at" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN token_expires_at TEXT")
+    competitor_columns = {row["name"] for row in db.execute("PRAGMA table_info(card_competitors)").fetchall()}
+    if "review_json" not in competitor_columns:
+      db.execute("ALTER TABLE card_competitors ADD COLUMN review_json TEXT NOT NULL DEFAULT '{}'")
+    if "next_auto_check_at" not in competitor_columns:
+      db.execute("ALTER TABLE card_competitors ADD COLUMN next_auto_check_at TEXT")
     db.execute(
       """
       CREATE INDEX IF NOT EXISTS idx_portal_integrations_provider_token_digest
@@ -361,6 +375,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_competitors_portal_card
       ON card_competitors(portal_id, card_key, position)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_card_competitors_next_auto_check
+      ON card_competitors(next_auto_check_at)
       """
     )
     db.execute(
@@ -2096,6 +2116,19 @@ def safe_json_list(value):
   return parsed if isinstance(parsed, list) else []
 
 
+def parse_iso_datetime(value):
+  text = audit_str(value)
+  if not text:
+    return None
+  try:
+    parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+  except ValueError:
+    return None
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+  return parsed.astimezone(dt.timezone.utc)
+
+
 def wb_public_price(value):
   try:
     number = float(value)
@@ -2497,6 +2530,315 @@ def competitor_snapshot_changes(previous, current):
   return changes[:12]
 
 
+def competitor_next_auto_check_at(base_value=None):
+  base_dt = parse_iso_datetime(base_value) or utc_now()
+  return (base_dt + dt.timedelta(days=CARD_COMPETITOR_AUTO_CHECK_DAYS)).isoformat()
+
+
+def competitor_row_due_at(row):
+  next_at = parse_iso_datetime(row["next_auto_check_at"] if row and "next_auto_check_at" in row.keys() else "")
+  if next_at:
+    return next_at
+  base_at = parse_iso_datetime(row["last_checked_at"] if row and "last_checked_at" in row.keys() else "")
+  if not base_at:
+    base_at = parse_iso_datetime(row["created_at"] if row and "created_at" in row.keys() else "")
+  if not base_at:
+    return utc_now() + dt.timedelta(days=CARD_COMPETITOR_AUTO_CHECK_DAYS)
+  return base_at + dt.timedelta(days=CARD_COMPETITOR_AUTO_CHECK_DAYS)
+
+
+def competitor_row_due_for_auto_check(row, now=None):
+  now = now or utc_now()
+  return competitor_row_due_at(row) <= now
+
+
+def competitor_is_service_characteristic(item):
+  if not isinstance(item, dict):
+    return False
+  name = audit_normalized(item.get("name") or "")
+  if name in {"документы проверены", "тнвэд", "декларация соответствия", "сертификат соответствия"}:
+    return True
+  if name not in {"основная информация", "дополнительная информация"}:
+    return False
+  values = [
+    item.get("value"),
+    item.get("previous"),
+    item.get("current"),
+    item.get("competitor"),
+  ]
+  return any(audit_normalized(value) == name for value in values)
+
+
+def competitor_actionable_characteristics_details(details):
+  details = details if isinstance(details, dict) else {}
+  cleaned = {
+    **details,
+    "changed": [item for item in details.get("changed", []) if not competitor_is_service_characteristic(item)],
+    "added": [item for item in details.get("added", []) if not competitor_is_service_characteristic(item)],
+    "removed": [item for item in details.get("removed", []) if not competitor_is_service_characteristic(item)],
+  }
+  cleaned["changedCount"] = len(cleaned["changed"])
+  cleaned["addedCount"] = len(cleaned["added"])
+  cleaned["removedCount"] = len(cleaned["removed"])
+  return cleaned
+
+
+def competitor_actionable_changes(changes):
+  output = []
+  for change in changes if isinstance(changes, list) else []:
+    if not isinstance(change, dict):
+      continue
+    if change.get("field") != "characteristics":
+      output.append(change)
+      continue
+    cleaned_details = competitor_actionable_characteristics_details(change.get("details"))
+    if cleaned_details["changedCount"] or cleaned_details["addedCount"] or cleaned_details["removedCount"]:
+      output.append({
+        **change,
+        "details": cleaned_details,
+      })
+  return output[:12]
+
+
+def competitor_change_hash(changes):
+  actionable = competitor_actionable_changes(changes)
+  if not actionable:
+    return ""
+  normalized = json.dumps(actionable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+  return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def competitor_characteristic_change_summary(details):
+  details = details if isinstance(details, dict) else {}
+  lines = []
+  for item in details.get("changed", [])[:3]:
+    lines.append(f"{item.get('name') or 'Характеристика'}: было {item.get('previous') or 'пусто'}, стало {item.get('current') or 'пусто'}")
+  for item in details.get("added", [])[:3]:
+    value = item.get("value") or item.get("current") or item.get("competitor") or ""
+    lines.append(f"добавили {item.get('name') or 'Характеристика'}: {value or 'пусто'}")
+  for item in details.get("removed", [])[:3]:
+    value = item.get("value") or item.get("previous") or item.get("competitor") or ""
+    lines.append(f"убрали {item.get('name') or 'Характеристика'}: {value or 'пусто'}")
+  return lines
+
+
+def competitor_change_summary(changes, limit=6):
+  parts = []
+  for change in competitor_actionable_changes(changes):
+    field = change.get("field")
+    if field == "discountedPrice":
+      parts.append(f"финальная цена: {competitor_snapshot_value({'value': change.get('previous')}, 'value') or change.get('previous') or 'нет'} -> {change.get('current') or 'нет'}")
+    elif field == "price":
+      parts.append(f"цена до скидки: {change.get('previous') or 'нет'} -> {change.get('current') or 'нет'}")
+    elif field == "title":
+      parts.append("изменили заголовок")
+    elif field == "descriptionHash":
+      parts.append(change.get("summary") or "изменили описание")
+    elif field == "characteristics":
+      parts.extend(competitor_characteristic_change_summary(change.get("details")) or ["изменили характеристики"])
+    else:
+      parts.append(f"{change.get('label') or 'Поле'}: {audit_str(change.get('previous'), 80) or 'пусто'} -> {audit_str(change.get('current'), 80) or 'пусто'}")
+    if len(parts) >= limit:
+      break
+  return "; ".join(parts[:limit])
+
+
+def competitor_change_detected_at(changes, snapshot, checked_at):
+  for change in competitor_actionable_changes(changes):
+    if change.get("detectedAt"):
+      return audit_str(change.get("detectedAt"))
+  snapshot = snapshot if isinstance(snapshot, dict) else {}
+  return audit_str(snapshot.get("mpstatsVersionAt") or snapshot.get("mpstatsUpdatedAt") or checked_at or utc_now().isoformat())
+
+
+def competitor_review_payload(existing_review, changes, snapshot, checked_at, assignee_login):
+  existing_review = existing_review if isinstance(existing_review, dict) else {}
+  actionable = competitor_actionable_changes(changes)
+  change_hash = competitor_change_hash(actionable)
+  if not change_hash:
+    return existing_review if existing_review.get("changeHash") else {}, False
+  if existing_review.get("changeHash") == change_hash:
+    status = existing_review.get("status") or "open"
+    return {
+      **existing_review,
+      "status": status,
+      "assigneeLogin": existing_review.get("assigneeLogin") or assignee_login or "",
+    }, False
+  detected_at = competitor_change_detected_at(actionable, snapshot, checked_at)
+  now_text = utc_now().isoformat()
+  history = existing_review.get("history") if isinstance(existing_review.get("history"), list) else []
+  summary = competitor_change_summary(actionable)
+  review = {
+    "status": "open",
+    "changeHash": change_hash,
+    "detectedAt": detected_at,
+    "createdAt": now_text,
+    "assigneeLogin": assignee_login or "",
+    "summary": summary,
+    "changes": actionable[:8],
+    "history": [
+      {
+        "action": "detected",
+        "at": now_text,
+        "detectedAt": detected_at,
+        "changeHash": change_hash,
+        "summary": summary,
+      },
+      *history[:9],
+    ],
+  }
+  return review, True
+
+
+def db_valid_user_login(db, login):
+  login = audit_str(login, 120)
+  if not login:
+    return ""
+  row = db.execute("SELECT login FROM users WHERE login = ? AND is_active = 1", (login,)).fetchone()
+  return row["login"] if row else ""
+
+
+def portal_team_roles_from_db(db, portal_id):
+  rows = db.execute(
+    """
+    SELECT project_role, user_login
+    FROM portal_members
+    WHERE portal_id = ?
+    """,
+    (portal_id,),
+  ).fetchall()
+  return {row["project_role"]: row["user_login"] for row in rows if row["project_role"] and row["user_login"]}
+
+
+def competitor_review_assignee(db, portal_id, row, user=None):
+  roles = portal_team_roles_from_db(db, portal_id)
+  candidates = [
+    roles.get("tech"),
+    (user or {}).get("login") if isinstance(user, dict) else "",
+    row["updated_by"] if row and "updated_by" in row.keys() else "",
+    row["created_by"] if row and "created_by" in row.keys() else "",
+  ]
+  for candidate in candidates:
+    login = db_valid_user_login(db, candidate)
+    if login:
+      return login
+  return ""
+
+
+def ensure_competitor_change_task(db, portal_id, card_key, row, card, snapshot, changes, review, actor_login=""):
+  if not review or review.get("status") != "open" or not review.get("changeHash"):
+    return False
+  existing = db.execute(
+    """
+    SELECT *
+    FROM card_drafts
+    WHERE portal_id = ? AND card_key = ?
+    """,
+    (portal_id, card_key),
+  ).fetchone()
+  previous_payload = {}
+  if existing:
+    try:
+      previous_payload = json.loads(existing["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+      previous_payload = {}
+  payload = normalize_card_draft_payload(previous_payload)
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  current_monitoring = meta.get("competitorMonitoring") if isinstance(meta.get("competitorMonitoring"), dict) else {}
+  if current_monitoring.get("changeHash") == review.get("changeHash") and current_monitoring.get("status") == "open":
+    return False
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = audit_str(row["nm_id"] or card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
+  vendor_code = audit_str(row["vendor_code"] or card.get("vendorCode") or raw_fields.get("vendorCode") or "")
+  card_title = audit_str(card.get("title") or raw_fields.get("title") or snapshot.get("title") or "")
+  subject_name = audit_str(card.get("subjectName") or raw_fields.get("subjectName") or "")
+  now_text = utc_now().isoformat()
+  assignee_login = db_valid_user_login(db, review.get("assigneeLogin")) or db_valid_user_login(db, actor_login)
+  draft_user = assignee_login or db_valid_user_login(db, row["updated_by"] if row and "updated_by" in row.keys() else "") or db_valid_user_login(db, row["created_by"] if row and "created_by" in row.keys() else "")
+  monitoring_history = current_monitoring.get("history") if isinstance(current_monitoring.get("history"), list) else []
+  meta = {
+    **meta,
+    "competitorMonitoring": {
+      "status": "open",
+      "changeHash": review.get("changeHash"),
+      "competitorNmID": row["competitor_nm_id"],
+      "assigneeLogin": assignee_login,
+      "detectedAt": review.get("detectedAt") or now_text,
+      "createdAt": review.get("createdAt") or now_text,
+      "summary": review.get("summary") or competitor_change_summary(changes),
+      "changes": competitor_actionable_changes(changes)[:8],
+      "history": [
+        {
+          "action": "detected",
+          "at": now_text,
+          "userLogin": actor_login or "system",
+          "changeHash": review.get("changeHash"),
+          "summary": review.get("summary") or competitor_change_summary(changes),
+        },
+        *monitoring_history[:9],
+      ],
+    },
+    "card": {
+      "nmID": nm_id,
+      "vendorCode": vendor_code,
+      "title": card_title,
+      "subjectName": subject_name,
+    },
+  }
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  approval_status = approval.get("status") or "draft"
+  if approval_status in {"draft", "approved", "changes_requested", ""}:
+    meta["approval"] = {
+      **approval,
+      "status": "draft",
+      "assigneeLogin": assignee_login or approval.get("assigneeLogin") or "",
+    }
+  payload["meta"] = meta
+  payload_json = json.dumps(normalize_card_draft_payload(payload), ensure_ascii=False, separators=(",", ":"))
+  db.execute(
+    """
+    INSERT INTO card_drafts (
+      portal_id, card_key, nm_id, vendor_code, payload_json,
+      audit_status, created_by, updated_by
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(portal_id, card_key) DO UPDATE SET
+      nm_id = COALESCE(NULLIF(excluded.nm_id, ''), nm_id),
+      vendor_code = COALESCE(NULLIF(excluded.vendor_code, ''), vendor_code),
+      payload_json = excluded.payload_json,
+      audit_status = excluded.audit_status,
+      updated_by = excluded.updated_by,
+      updated_at = CURRENT_TIMESTAMP
+    """,
+    (
+      portal_id,
+      card_key,
+      nm_id[:80],
+      vendor_code[:120],
+      payload_json,
+      payload.get("auditStatus") or "idle",
+      draft_user or None,
+      draft_user or None,
+    ),
+  )
+  insert_card_approval_event(
+    db,
+    portal_id,
+    card_key,
+    {
+      "nmID": nm_id,
+      "vendorCode": vendor_code,
+      "status": "draft",
+      "action": "competitor_change_detected",
+      "actorLogin": actor_login or "system",
+      "assigneeLogin": assignee_login,
+      "reason": review.get("summary") or competitor_change_summary(changes),
+      "eventAt": now_text,
+    },
+  )
+  return True
+
+
 def competitor_metric_delta(current_value, competitor_value):
   current_number = audit_number(current_value, None)
   competitor_number = audit_number(competitor_value, None)
@@ -2618,6 +2960,11 @@ def public_card_competitor(row):
   snapshot = safe_json_object(row["snapshot_json"])
   previous_snapshot = safe_json_object(row["previous_snapshot_json"])
   changes = safe_json_list(row["changed_fields_json"])
+  review = safe_json_object(row["review_json"] if "review_json" in row.keys() else "{}")
+  if not changes and review.get("status") == "open" and isinstance(review.get("changes"), list):
+    changes = review.get("changes")[:12]
+  if not review and competitor_actionable_changes(changes):
+    review, _created = competitor_review_payload({}, changes, snapshot, row["last_checked_at"] or snapshot.get("checkedAt") or "", "")
   return {
     "id": row["id"],
     "portalId": str(row["portal_id"]),
@@ -2631,8 +2978,10 @@ def public_card_competitor(row):
     "snapshot": snapshot,
     "previousSnapshot": previous_snapshot,
     "changes": changes,
+    "changeReview": review,
     "hasCriticalChanges": any(bool(item.get("critical")) for item in changes if isinstance(item, dict)),
     "lastCheckedAt": row["last_checked_at"] or "",
+    "nextAutoCheckAt": row["next_auto_check_at"] if "next_auto_check_at" in row.keys() else "",
     "createdBy": row["created_by"] or "",
     "updatedBy": row["updated_by"] or "",
     "createdAt": row["created_at"] or "",
@@ -2677,6 +3026,151 @@ def competitor_snapshot_needs_backfill(snapshot):
   if not isinstance(snapshot.get("comparison"), dict):
     return True
   return False
+
+
+def competitor_refresh_context(numeric_portal_id, card_key):
+  card = content_card_for_portal(numeric_portal_id, card_key, {})
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
+  subject_id = card.get("subjectID") or card.get("subjectId") or raw_fields.get("subjectID") or raw_fields.get("subjectId")
+  period = audit_period_default()
+  warnings = []
+  market_data = {}
+  if nm_id:
+    cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+    card = audit_merge_card_content(card, cdn_card)
+    market_data = audit_market_data(nm_id, subject_id, period, warnings)
+  return {
+    "card": card,
+    "rawFields": card.get("rawFields") if isinstance(card.get("rawFields"), dict) else raw_fields,
+    "nmID": nm_id,
+    "subjectID": subject_id,
+    "period": period,
+    "warnings": warnings,
+    "marketData": market_data,
+  }
+
+
+def build_competitor_snapshot_for_row(row, context, checked_at):
+  nm_id = context.get("nmID") or ""
+  card = context.get("card") or {}
+  market_data = context.get("marketData") or {}
+  period = context.get("period") or audit_period_default()
+  if nm_id:
+    row_warnings = list(context.get("warnings") or [])
+    candidate = audit_manual_competitor_candidate(row["competitor_nm_id"], period, row_warnings)
+    score, reasons = audit_competitor_similarity(card, market_data, candidate)
+    candidate["similarityScore"] = score
+    candidate["similarityReasons"] = reasons
+    candidate["whyRelevant"] = row["note"] or f"Добавлен специалистом; проверка схожести: {', '.join(reasons[:3]) or 'данные сверены через MPStats'}."
+    current_snapshot = competitor_snapshot_from_candidate(candidate, card, market_data)
+    current_snapshot["warnings"] = audit_public_warnings([*current_snapshot.get("warnings", []), *row_warnings])[:4]
+    return current_snapshot
+  current_snapshot = competitor_snapshot_from_sources(row["competitor_nm_id"])
+  current_snapshot["source"] = "manual"
+  current_snapshot["checkedAt"] = current_snapshot.get("checkedAt") or checked_at
+  return current_snapshot
+
+
+def refresh_card_competitor_rows(numeric_portal_id, card_key, rows, user=None, auto=False):
+  rows = list(rows or [])
+  if not rows:
+    return False
+  checked_at = utc_now().isoformat()
+  context = competitor_refresh_context(numeric_portal_id, card_key)
+  snapshot_updates = []
+  for row in rows:
+    previous_snapshot = safe_json_object(row["snapshot_json"])
+    try:
+      current_snapshot = build_competitor_snapshot_for_row(row, context, checked_at)
+    except (MpstatsApiError, urlerror.HTTPError, urlerror.URLError, TimeoutError, RuntimeError, json.JSONDecodeError, KeyError, IndexError) as exc:
+      current_snapshot = {
+        **previous_snapshot,
+        "checkedAt": checked_at,
+        "warnings": audit_public_warnings([
+          *safe_json_list(previous_snapshot.get("warnings") or []),
+          f"Автопроверка конкурента не обновилась: {type(exc).__name__}",
+        ])[:4],
+      } if previous_snapshot else {
+        "nmID": row["competitor_nm_id"],
+        "url": row["competitor_url"] or wb_public_card_url(row["competitor_nm_id"]),
+        "source": "manual",
+        "checkedAt": checked_at,
+        "warnings": [f"Автопроверка конкурента не обновилась: {type(exc).__name__}"],
+      }
+    has_current_data = bool(current_snapshot.get("title") or current_snapshot.get("price") or current_snapshot.get("discountedPrice"))
+    if previous_snapshot and not has_current_data:
+      current_snapshot = {
+        **previous_snapshot,
+        "checkedAt": current_snapshot.get("checkedAt") or checked_at,
+        "warnings": current_snapshot.get("warnings") or ["Публичный снимок WB временно не обновился"],
+      }
+      changes = []
+    else:
+      changes = competitor_snapshot_changes(previous_snapshot, current_snapshot)
+    snapshot_updates.append((row, previous_snapshot, current_snapshot, changes))
+  task_updates = []
+  with connect_db() as db:
+    for row, previous_snapshot, current_snapshot, changes in snapshot_updates:
+      assignee = competitor_review_assignee(db, numeric_portal_id, row, user)
+      review, is_new_review = competitor_review_payload(
+        safe_json_object(row["review_json"] if "review_json" in row.keys() else "{}"),
+        changes,
+        current_snapshot,
+        checked_at,
+        assignee,
+      )
+      actor_login = (user or {}).get("login") if isinstance(user, dict) else ""
+      actor_db_login = db_valid_user_login(db, actor_login) or db_valid_user_login(db, row["updated_by"] if "updated_by" in row.keys() else "") or db_valid_user_login(db, row["created_by"] if "created_by" in row.keys() else "") or assignee
+      db.execute(
+        """
+        UPDATE card_competitors
+        SET snapshot_json = ?,
+            previous_snapshot_json = ?,
+            changed_fields_json = ?,
+            review_json = ?,
+            last_checked_at = ?,
+            next_auto_check_at = ?,
+            updated_by = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+          json.dumps(current_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(review, ensure_ascii=False, separators=(",", ":")),
+          checked_at,
+          competitor_next_auto_check_at(checked_at),
+          actor_db_login or None,
+          row["id"],
+        ),
+      )
+      task_updates.append((row, current_snapshot, changes, review, is_new_review, actor_login))
+    for row, current_snapshot, changes, review, is_new_review, actor_login in task_updates:
+      if is_new_review and review.get("status") == "open":
+        ensure_competitor_change_task(
+          db,
+          numeric_portal_id,
+          card_key,
+          row,
+          context.get("card") or {},
+          current_snapshot,
+          changes,
+          review,
+          actor_login=actor_login or ("system-auto" if auto else ""),
+        )
+  return True
+
+
+def auto_refresh_due_card_competitors(numeric_portal_id, card_key, rows, user=None):
+  if not CARD_COMPETITOR_AUTO_CHECK_ENABLED:
+    return False
+  now = utc_now()
+  due_rows = [row for row in rows if competitor_row_due_for_auto_check(row, now)]
+  if not due_rows:
+    return False
+  return refresh_card_competitor_rows(numeric_portal_id, card_key, due_rows, user=user, auto=True)
 
 
 def backfill_stale_card_competitors(numeric_portal_id, card_key, rows, user):
@@ -2763,6 +3257,18 @@ def list_card_competitors(portal_id, card_key, user):
         (numeric_portal_id, card_key),
       ).fetchall()
     rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
+  if auto_refresh_due_card_competitors(numeric_portal_id, card_key, rows, user):
+    with connect_db() as db:
+      rows = db.execute(
+        """
+        SELECT *
+        FROM card_competitors
+        WHERE portal_id = ? AND card_key = ?
+        ORDER BY position, updated_at DESC, id
+        """,
+        (numeric_portal_id, card_key),
+      ).fetchall()
+    rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
   return [public_card_competitor(row) for row in rows]
 
 
@@ -2810,13 +3316,15 @@ def save_card_competitors(portal_id, card_key, nm_id, vendor_code, competitors, 
         (numeric_portal_id, card_key, competitor_nm_id),
       )
     for item in cleaned:
+      next_auto_check_at = competitor_next_auto_check_at()
       db.execute(
         """
         INSERT INTO card_competitors (
           portal_id, card_key, nm_id, vendor_code, competitor_nm_id,
-          competitor_url, note, position, created_by, updated_by
+          competitor_url, note, position, review_json, next_auto_check_at,
+          created_by, updated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
         ON CONFLICT(portal_id, card_key, competitor_nm_id) DO UPDATE SET
           nm_id = excluded.nm_id,
           vendor_code = excluded.vendor_code,
@@ -2835,6 +3343,7 @@ def save_card_competitors(portal_id, card_key, nm_id, vendor_code, competitors, 
           item["url"],
           item["note"],
           item["position"],
+          next_auto_check_at,
           user["login"],
           user["login"],
         ),
@@ -2852,18 +3361,6 @@ def refresh_card_competitors(portal_id, card_key, user):
     raise ValueError("invalid_card_key")
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
-  checked_at = utc_now().isoformat()
-  card = content_card_for_portal(numeric_portal_id, card_key, {})
-  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
-  nm_id = audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
-  subject_id = card.get("subjectID") or card.get("subjectId") or raw_fields.get("subjectID") or raw_fields.get("subjectId")
-  period = audit_period_default()
-  base_warnings = []
-  market_data = {}
-  if nm_id:
-    cdn_card = audit_fetch_wb_cdn_card(nm_id, base_warnings)
-    card = audit_merge_card_content(card, cdn_card)
-    market_data = audit_market_data(nm_id, subject_id, period, base_warnings)
   with connect_db() as db:
     rows = db.execute(
       """
@@ -2875,51 +3372,7 @@ def refresh_card_competitors(portal_id, card_key, user):
       (numeric_portal_id, card_key),
     ).fetchall()
   rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
-  with connect_db() as db:
-    for row in rows:
-      previous_snapshot = safe_json_object(row["snapshot_json"])
-      if nm_id:
-        row_warnings = list(base_warnings)
-        candidate = audit_manual_competitor_candidate(row["competitor_nm_id"], period, row_warnings)
-        score, reasons = audit_competitor_similarity(card, market_data, candidate)
-        candidate["similarityScore"] = score
-        candidate["similarityReasons"] = reasons
-        candidate["whyRelevant"] = row["note"] or f"Добавлен специалистом; проверка схожести: {', '.join(reasons[:3]) or 'данные сверены через MPStats'}."
-        current_snapshot = competitor_snapshot_from_candidate(candidate, card, market_data)
-        current_snapshot["warnings"] = audit_public_warnings([*current_snapshot.get("warnings", []), *row_warnings])[:4]
-      else:
-        current_snapshot = competitor_snapshot_from_sources(row["competitor_nm_id"])
-        current_snapshot["source"] = "manual"
-      has_current_data = bool(current_snapshot.get("title") or current_snapshot.get("price") or current_snapshot.get("discountedPrice"))
-      if previous_snapshot and not has_current_data:
-        current_snapshot = {
-          **previous_snapshot,
-          "checkedAt": current_snapshot.get("checkedAt") or checked_at,
-          "warnings": current_snapshot.get("warnings") or ["Публичный снимок WB временно не обновился"],
-        }
-        changes = []
-      else:
-        changes = competitor_snapshot_changes(previous_snapshot, current_snapshot)
-      db.execute(
-        """
-        UPDATE card_competitors
-        SET snapshot_json = ?,
-            previous_snapshot_json = ?,
-            changed_fields_json = ?,
-            last_checked_at = ?,
-            updated_by = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (
-          json.dumps(current_snapshot, ensure_ascii=False, separators=(",", ":")),
-          json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
-          json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
-          checked_at,
-          user["login"],
-          row["id"],
-        ),
-      )
+  refresh_card_competitor_rows(numeric_portal_id, card_key, rows, user=user, auto=False)
   return list_card_competitors(numeric_portal_id, card_key, user)
 
 
@@ -2973,6 +3426,7 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
   existing_rows = prune_card_competitor_rows(numeric_portal_id, card_key, existing_rows)
   with connect_db() as db:
     previous_by_id = {row["competitor_nm_id"]: safe_json_object(row["snapshot_json"]) for row in existing_rows}
+    review_by_id = {row["competitor_nm_id"]: safe_json_object(row["review_json"] if "review_json" in row.keys() else "{}") for row in existing_rows}
     selected_ids = {parse_competitor_nm_id(item.get("nmId") or item.get("nmID")) for item in competitors[:CARD_COMPETITOR_LIMIT]}
     for row in existing_rows:
       if row["competitor_nm_id"] not in selected_ids:
@@ -2989,14 +3443,33 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
       previous_snapshot = previous_by_id.get(competitor_nm_id, {})
       changes = competitor_snapshot_changes(previous_snapshot, snapshot)
       note = audit_str(item.get("whyRelevant") or "; ".join(item.get("similarityReasons") or []) or "Добавлен специалистом.", 500)
+      next_auto_check_at = competitor_next_auto_check_at(checked_at)
+      row_like = {
+        "competitor_nm_id": competitor_nm_id,
+        "competitor_url": wb_public_card_url(competitor_nm_id),
+        "nm_id": nm_id[:80],
+        "vendor_code": audit_str(card.get("vendorCode") or raw_fields.get("vendorCode") or "", 120),
+        "note": note,
+        "created_by": user["login"],
+        "updated_by": user["login"],
+      }
+      assignee = competitor_review_assignee(db, numeric_portal_id, row_like, user)
+      review, is_new_review = competitor_review_payload(
+        review_by_id.get(competitor_nm_id, {}),
+        changes,
+        snapshot,
+        checked_at,
+        assignee,
+      )
       db.execute(
         """
         INSERT INTO card_competitors (
           portal_id, card_key, nm_id, vendor_code, competitor_nm_id,
           competitor_url, note, position, snapshot_json, previous_snapshot_json,
-          changed_fields_json, last_checked_at, created_by, updated_by
+          changed_fields_json, review_json, last_checked_at, next_auto_check_at,
+          created_by, updated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(portal_id, card_key, competitor_nm_id) DO UPDATE SET
           nm_id = excluded.nm_id,
           vendor_code = excluded.vendor_code,
@@ -3006,7 +3479,9 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
           snapshot_json = excluded.snapshot_json,
           previous_snapshot_json = excluded.previous_snapshot_json,
           changed_fields_json = excluded.changed_fields_json,
+          review_json = excluded.review_json,
           last_checked_at = excluded.last_checked_at,
+          next_auto_check_at = excluded.next_auto_check_at,
           updated_by = excluded.updated_by,
           updated_at = CURRENT_TIMESTAMP
         """,
@@ -3022,11 +3497,25 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
           json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
           json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
           json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(review, ensure_ascii=False, separators=(",", ":")),
           checked_at,
+          next_auto_check_at,
           user["login"],
           user["login"],
         ),
       )
+      if is_new_review and review.get("status") == "open":
+        ensure_competitor_change_task(
+          db,
+          numeric_portal_id,
+          card_key,
+          row_like,
+          card,
+          snapshot,
+          changes,
+          review,
+          actor_login=user["login"],
+        )
   return {
     "competitors": list_card_competitors(numeric_portal_id, card_key, user),
     "selection": selection,
@@ -3712,6 +4201,27 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 {
   "title": {"value": "...", "reason": "...", "keywords": ["..."]},
   "description": {"value": "...", "reason": "...", "keywords": ["..."]},
+  "_meta": {"warnings": ["..."]}
+}
+""".strip()
+
+COMPETITOR_CHANGE_REOPTIMIZE_SYSTEM_PROMPT = """
+Ты — SEO-редактор карточек Wildberries. Подготовь черновик заголовка и описания нашей карточки с учетом изменений у конкурента.
+
+Правила:
+- используй только факты из evidenceBundle о нашей карточке и изменениях конкурента;
+- не копируй текст конкурента дословно;
+- не выдумывай состав, материал, размер, комплектацию, бренд и свойства;
+- если у конкурента изменились характеристики, можно усилить только те свойства, которые уже подтверждены в нашей карточке;
+- если изменение только по цене, текст можно оставить близким к текущему, а причину сделать про проверку позиционирования;
+- заголовок должен быть готовым названием WB длиной до 60 символов;
+- описание должно быть готовым текстом карточки, а не советом специалисту;
+- не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
+
+Верни строго JSON:
+{
+  "title": {"value": "...", "reason": "..."},
+  "description": {"value": "...", "reason": "..."},
   "_meta": {"warnings": ["..."]}
 }
 """.strip()
@@ -6028,6 +6538,272 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   }
 
 
+def competitor_for_reoptimization(portal_id, card_key, competitor_nm_id, user=None):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  competitor_nm_id = parse_competitor_nm_id(competitor_nm_id)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not competitor_nm_id:
+    raise ValueError("invalid_competitor")
+  if user is not None and not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT *
+      FROM card_competitors
+      WHERE portal_id = ? AND card_key = ? AND competitor_nm_id = ?
+      """,
+      (numeric_portal_id, card_key, competitor_nm_id),
+    ).fetchone()
+  if not row:
+    raise ValueError("competitor_not_found")
+  return numeric_portal_id, card_key, row
+
+
+def build_card_competitor_reoptimization(portal_id, card_key, raw_card, competitor_nm_id, draft=None, user=None):
+  numeric_portal_id, card_key, row = competitor_for_reoptimization(portal_id, card_key, competitor_nm_id, user=user)
+  if not content_reoptimization_configured():
+    raise ValueError("llm_key_missing")
+  snapshot = safe_json_object(row["snapshot_json"])
+  previous_snapshot = safe_json_object(row["previous_snapshot_json"])
+  changes = safe_json_list(row["changed_fields_json"])
+  review = safe_json_object(row["review_json"] if "review_json" in row.keys() else "{}")
+  if not changes and isinstance(review.get("changes"), list):
+    changes = review.get("changes")
+  actionable = competitor_actionable_changes(changes)
+  if not actionable:
+    raise ValueError("missing_competitor_changes")
+
+  card = content_card_for_portal(numeric_portal_id, card_key, raw_card)
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  draft = draft if isinstance(draft, dict) else {}
+  draft_title = audit_str(draft.get("title") or draft.get("titleValue") or "", 200)
+  draft_description = audit_str(draft.get("description") or draft.get("descriptionValue") or "", 7000)
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
+  characteristics = audit_card_characteristics(card)[:80]
+  evidence = {
+    "card": {
+      "nmId": audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or ""),
+      "vendorCode": audit_str(card.get("vendorCode") or raw_fields.get("vendorCode") or ""),
+      "brand": audit_str(card.get("brand") or raw_fields.get("brand") or ""),
+      "subject": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or ""),
+      "title": title,
+      "description": description,
+      "characteristics": characteristics,
+    },
+    "draft": {
+      "title": draft_title,
+      "description": draft_description,
+    },
+    "competitor": {
+      "nmId": row["competitor_nm_id"],
+      "title": snapshot.get("title") or "",
+      "subject": snapshot.get("subjectName") or "",
+      "price": snapshot.get("discountedPrice") or snapshot.get("price") or "",
+      "previousSnapshot": {
+        "title": previous_snapshot.get("title") or "",
+        "price": previous_snapshot.get("discountedPrice") or previous_snapshot.get("price") or "",
+        "descriptionLength": previous_snapshot.get("descriptionLength") or 0,
+      },
+      "changes": actionable,
+      "summary": review.get("summary") or competitor_change_summary(actionable),
+      "detectedAt": review.get("detectedAt") or competitor_change_detected_at(actionable, snapshot, row["last_checked_at"] or ""),
+    },
+    "constraints": {
+      "titleMaxChars": 60,
+      "descriptionMaxChars": 5000,
+      "language": "ru",
+    },
+  }
+  messages = [
+    {"role": "system", "content": COMPETITOR_CHANGE_REOPTIMIZE_SYSTEM_PROMPT},
+    {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
+  ]
+  try:
+    payload, model, provider = audit_llm_chat_completion(messages)
+    if not payload:
+      raise ValueError("llm_key_missing")
+    content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+    parsed = parse_llm_json_content(content)
+    if not isinstance(parsed, dict):
+      raise RuntimeError("llm_competitor_reoptimization_invalid_json")
+  except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+    raise RuntimeError(f"llm_competitor_reoptimization_failed:{type(exc).__name__}") from exc
+
+  title_block = parsed.get("title") if isinstance(parsed.get("title"), dict) else {}
+  description_block = parsed.get("description") if isinstance(parsed.get("description"), dict) else {}
+  next_title = content_title_limit(title_block.get("value") or title_block.get("recommended") or draft_title or title)
+  next_description = audit_str(description_block.get("value") or description_block.get("recommended") or draft_description or description, 5000)
+  if not next_title or not next_description:
+    raise RuntimeError("llm_competitor_reoptimization_empty")
+  return {
+    "draftContent": {
+      "title": {
+        "value": next_title,
+        "source": "competitor",
+        "reason": audit_str(title_block.get("reason") or "Заголовок подготовлен с учетом изменений у конкурента.", 500),
+      },
+      "description": {
+        "value": next_description,
+        "source": "competitor",
+        "reason": audit_str(description_block.get("reason") or "Описание подготовлено с учетом изменений у конкурента.", 700),
+      },
+    },
+    "competitorChange": {
+      "competitorNmID": row["competitor_nm_id"],
+      "changeHash": review.get("changeHash") or competitor_change_hash(actionable),
+      "detectedAt": review.get("detectedAt") or competitor_change_detected_at(actionable, snapshot, row["last_checked_at"] or ""),
+      "summary": review.get("summary") or competitor_change_summary(actionable),
+      "changes": actionable[:8],
+    },
+    "contentOptimization": {
+      "id": f"competitor-content-{int(time.time() * 1000)}",
+      "createdAt": utc_now().isoformat(),
+      "engine": "opticards-competitor-content-v1",
+      "provider": provider,
+      "model": model,
+      "changeFields": [item.get("field") for item in actionable if isinstance(item, dict)],
+      "warnings": parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else [],
+    },
+  }
+
+
+def update_competitor_change_action(portal_id, card_key, competitor_nm_id, action, user):
+  numeric_portal_id, card_key, row = competitor_for_reoptimization(portal_id, card_key, competitor_nm_id, user=user)
+  action = audit_str(action)
+  if action not in {"skip", "apply"}:
+    raise ValueError("invalid_competitor_change_action")
+  now_text = utc_now().isoformat()
+  with connect_db() as db:
+    current_row = db.execute(
+      """
+      SELECT *
+      FROM card_competitors
+      WHERE id = ?
+      """,
+      (row["id"],),
+    ).fetchone()
+    if not current_row:
+      raise ValueError("competitor_not_found")
+    snapshot = safe_json_object(current_row["snapshot_json"])
+    changes = safe_json_list(current_row["changed_fields_json"])
+    review = safe_json_object(current_row["review_json"] if "review_json" in current_row.keys() else "{}")
+    if not changes and isinstance(review.get("changes"), list):
+      changes = review.get("changes")
+    if not review.get("changeHash"):
+      assignee = competitor_review_assignee(db, numeric_portal_id, current_row, user)
+      review, _created = competitor_review_payload(review, changes, snapshot, current_row["last_checked_at"] or "", assignee)
+    if not review.get("changeHash"):
+      raise ValueError("missing_competitor_changes")
+    status = "skipped" if action == "skip" else "applied"
+    action_name = "competitor_change_skipped" if action == "skip" else "competitor_change_applied"
+    summary = review.get("summary") or competitor_change_summary(changes)
+    history = review.get("history") if isinstance(review.get("history"), list) else []
+    review = {
+      **review,
+      "status": status,
+      f"{status}At": now_text,
+      f"{status}By": user["login"],
+      "history": [
+        {
+          "action": status,
+          "at": now_text,
+          "userLogin": user["login"],
+          "changeHash": review.get("changeHash"),
+          "summary": summary,
+        },
+        *history[:19],
+      ],
+    }
+    db.execute(
+      """
+      UPDATE card_competitors
+      SET review_json = ?,
+          updated_by = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (
+        json.dumps(review, ensure_ascii=False, separators=(",", ":")),
+        user["login"],
+        current_row["id"],
+      ),
+    )
+    draft_row = db.execute(
+      """
+      SELECT payload_json
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if draft_row:
+      try:
+        payload = json.loads(draft_row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        payload = normalize_card_draft_payload({})
+      payload = normalize_card_draft_payload(payload)
+      meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+      monitoring = meta.get("competitorMonitoring") if isinstance(meta.get("competitorMonitoring"), dict) else {}
+      if monitoring.get("changeHash") == review.get("changeHash"):
+        monitoring_history = monitoring.get("history") if isinstance(monitoring.get("history"), list) else []
+        meta["competitorMonitoring"] = {
+          **monitoring,
+          "status": status,
+          f"{status}At": now_text,
+          f"{status}By": user["login"],
+          "history": [
+            {
+              "action": status,
+              "at": now_text,
+              "userLogin": user["login"],
+              "changeHash": review.get("changeHash"),
+              "summary": summary,
+            },
+            *monitoring_history[:19],
+          ],
+        }
+        payload["meta"] = meta
+        db.execute(
+          """
+          UPDATE card_drafts
+          SET payload_json = ?,
+              updated_by = ?,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE portal_id = ? AND card_key = ?
+          """,
+          (
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            user["login"],
+            numeric_portal_id,
+            card_key,
+          ),
+        )
+    insert_card_approval_event(
+      db,
+      numeric_portal_id,
+      card_key,
+      {
+        "nmID": current_row["nm_id"],
+        "vendorCode": current_row["vendor_code"],
+        "status": "draft",
+        "action": action_name,
+        "actorLogin": user["login"],
+        "assigneeLogin": review.get("assigneeLogin") or "",
+        "reason": summary,
+        "eventAt": now_text,
+      },
+    )
+  return list_card_competitors(numeric_portal_id, card_key, user)
+
+
 def audit_draft_from_result(result, characteristic_draft):
   characteristics = {key: {**value} for key, value in (characteristic_draft or {}).items()}
   for item in result.get("characteristics", []) if isinstance(result.get("characteristics"), list) else []:
@@ -7591,6 +8367,60 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, {"competitors": competitors})
       return
 
+    if path == "/api/card-competitors/reoptimize":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key") or "")
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      if not card_key:
+        card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
+      try:
+        result = build_card_competitor_reoptimization(
+          payload.get("portalId"),
+          card_key,
+          raw_card,
+          payload.get("competitorNmID") or payload.get("competitor_nm_id"),
+          draft=payload.get("draft"),
+          user=user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        message = str(exc) or "invalid_competitor_reoptimization_request"
+        status = HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": message})
+        return
+      except RuntimeError as exc:
+        self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc) or "llm_competitor_reoptimization_failed"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-competitors/change-action":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        competitors = update_competitor_change_action(
+          payload.get("portalId"),
+          payload.get("cardKey"),
+          payload.get("competitorNmID") or payload.get("competitor_nm_id"),
+          payload.get("action"),
+          user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitor_change_action"})
+        return
+      self.send_json(HTTPStatus.OK, {"competitors": competitors})
+      return
+
     if path == "/api/card-competitors/suggest":
       user = self.require_user()
       if not user:
@@ -7776,8 +8606,77 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     self.wfile.write(body)
 
 
+def due_card_competitor_rows(limit):
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM card_competitors
+      WHERE competitor_nm_id != ''
+      ORDER BY COALESCE(NULLIF(next_auto_check_at, ''), last_checked_at, created_at), id
+      LIMIT 200
+      """
+    ).fetchall()
+  now = utc_now()
+  due_rows = [
+    row for row in rows
+    if not card_competitor_row_is_auto(row) and competitor_row_due_for_auto_check(row, now)
+  ]
+  return due_rows[:limit]
+
+
+def run_competitor_auto_check_once():
+  if not CARD_COMPETITOR_AUTO_CHECK_ENABLED:
+    return 0
+  if not CARD_COMPETITOR_AUTO_CHECK_LOCK.acquire(blocking=False):
+    return 0
+  try:
+    rows = due_card_competitor_rows(CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH)
+    if not rows:
+      return 0
+    grouped = {}
+    for row in rows:
+      grouped.setdefault((row["portal_id"], row["card_key"]), []).append(row)
+    checked = 0
+    for (portal_id, card_key), group_rows in grouped.items():
+      try:
+        if refresh_card_competitor_rows(portal_id, card_key, group_rows, user=None, auto=True):
+          checked += len(group_rows)
+      except Exception as exc:  # noqa: BLE001 - background worker must keep running.
+        print(f"Competitor auto-check failed for portal={portal_id} card={card_key}: {type(exc).__name__}: {exc}")
+    return checked
+  finally:
+    CARD_COMPETITOR_AUTO_CHECK_LOCK.release()
+
+
+def competitor_auto_check_worker_loop():
+  time.sleep(10)
+  interval = max(60, CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS)
+  while True:
+    try:
+      run_competitor_auto_check_once()
+    except Exception as exc:  # noqa: BLE001 - background worker must keep running.
+      print(f"Competitor auto-check loop failed: {type(exc).__name__}: {exc}")
+    time.sleep(interval)
+
+
+def start_competitor_auto_check_worker():
+  global CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED
+  if not CARD_COMPETITOR_AUTO_CHECK_ENABLED or CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED:
+    return
+  CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED = True
+  worker = threading.Thread(
+    target=competitor_auto_check_worker_loop,
+    name="opticards-competitor-auto-check",
+    daemon=True,
+  )
+  worker.start()
+
+
 def run_server(host, port):
   init_db()
+  start_competitor_auto_check_worker()
   server = ThreadingHTTPServer((host, port), OpticardsHandler)
   print(f"Serving OptiCards on http://{host}:{port}/")
   server.serve_forever()

@@ -1862,7 +1862,8 @@ tr:last-child td {
 .competitor-status.status-invalid,
 .competitor-status.status-duplicate,
 .competitor-status.status-limit,
-.competitor-status.status-error {
+.competitor-status.status-error,
+.competitor-status.status-change-error {
   border-color: #ead08f;
   background: #fff9e8;
   color: #7b5a00;
@@ -2103,6 +2104,31 @@ tr:last-child td {
 .competitor-changes small {
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+.competitor-changes p.competitor-review-status {
+  border-color: #e7c46c;
+  background: #fff9e8;
+}
+
+.competitor-changes p.competitor-review-status.status-applied {
+  border-color: #b8d9c2;
+  background: #f0fbf3;
+}
+
+.competitor-changes p.competitor-review-status.status-skipped {
+  border-color: var(--line);
+  background: var(--surface-soft);
+}
+
+.competitor-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.competitor-change-actions .btn {
+  min-height: 34px;
 }
 
 .competitor-changes.empty p {

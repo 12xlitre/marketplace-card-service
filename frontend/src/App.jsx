@@ -5068,6 +5068,113 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
+  function competitorChangeActionBody(competitor, action) {
+    return {
+      portalId: portal?.id,
+      cardKey: draftCardKey,
+      competitorNmID: competitor?.competitorNmID || "",
+      action,
+    };
+  }
+
+  async function skipCompetitorChange(competitor) {
+    if (!competitorsEnabled || !competitor?.competitorNmID) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Пропустить изменение конкурента WB ${competitor.competitorNmID}? Нажмите OK = Да, Отмена = Нет. Решение сохранится в журнале.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setCompetitorStatus("change-skipping");
+    try {
+      const payload = await apiRequest("/api/card-competitors/change-action", {
+        method: "POST",
+        body: JSON.stringify(competitorChangeActionBody(competitor, "skip")),
+      });
+      setCompetitors(Array.isArray(payload.competitors) ? payload.competitors : competitors);
+      setCompetitorStatus("change-skipped");
+    } catch {
+      setCompetitorStatus("change-error");
+    }
+  }
+
+  async function reoptimizeContentFromCompetitorChange(competitor) {
+    if (!competitorsEnabled || !competitor?.competitorNmID || approvalReadOnly) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Переоптимизировать черновик с учетом изменения конкурента WB ${competitor.competitorNmID}? Нажмите OK = Да, Отмена = Нет.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setCompetitorStatus("change-reoptimizing");
+    try {
+      const payload = await apiRequest("/api/card-competitors/reoptimize", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal?.id,
+          cardKey: draftCardKey,
+          card,
+          competitorNmID: competitor.competitorNmID,
+          draft: {
+            title: draftTitle,
+            description: draftDescription,
+          },
+        }),
+      });
+      const titleDraft = payload.draftContent?.title || {};
+      const descriptionDraft = payload.draftContent?.description || {};
+      const nextTitle = titleDraft.value || draftTitle || currentTitle;
+      const nextDescription = descriptionDraft.value || draftDescription || description;
+      const nextTitleReason = titleDraft.reason || "Заголовок подготовлен с учетом изменений у конкурента.";
+      const nextDescriptionReason = descriptionDraft.reason || "Описание подготовлено с учетом изменений у конкурента.";
+      const structuredDraft = buildStructuredCardDraft({
+        auditStatus,
+        auditHistory,
+        approval,
+        approvalSections,
+        title: nextTitle,
+        description: nextDescription,
+        titleSource: "competitor",
+        descriptionSource: "competitor",
+        titleReason: nextTitleReason,
+        descriptionReason: nextDescriptionReason,
+        characteristics: draftCharacteristics,
+        prices: draftPrices,
+        stocks: draftStocks,
+        semanticCoreSelected,
+        semanticCoreReports,
+        card,
+      });
+      setDraftTitle(nextTitle);
+      setDraftDescription(nextDescription);
+      setDraftTitleSource("competitor");
+      setDraftDescriptionSource("competitor");
+      setDraftTitleReason(nextTitleReason);
+      setDraftDescriptionReason(nextDescriptionReason);
+      setChangesTab("content");
+      setActiveTab("changes");
+      if (onDraftActivity) {
+        onDraftActivity({ draft: true });
+      }
+      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      const actionPayload = await apiRequest("/api/card-competitors/change-action", {
+        method: "POST",
+        body: JSON.stringify(competitorChangeActionBody(competitor, "apply")),
+      });
+      setCompetitors(Array.isArray(actionPayload.competitors) ? actionPayload.competitors : competitors);
+      setCompetitorStatus("change-applied");
+    } catch (error) {
+      if (error.message === "llm_key_missing") {
+        setSemanticContentError("GigaChat не подключен: добавьте ключ на backend.");
+      }
+      setCompetitorStatus("change-error");
+    }
+  }
+
   async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
     let savedLocally = false;
@@ -5743,6 +5850,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 onSuggest={suggestCompetitors}
                 onRefresh={() => refreshCompetitors()}
                 onRemove={removeCompetitor}
+                onReoptimizeChange={reoptimizeContentFromCompetitorChange}
+                onSkipChange={skipCompetitorChange}
               />
             ) : null}
 
@@ -6260,12 +6369,34 @@ function competitorStatusText(status, enabled) {
     saved: "Список сохранен.",
     refreshed: "Данные конкурентов обновлены.",
     suggested: "Карточки конкурентов обновлены.",
+    "change-reoptimizing": "Готовим черновик по изменению конкурента...",
+    "change-skipping": "Фиксируем пропуск изменения...",
+    "change-applied": "Черновик подготовлен, изменение отмечено как примененное.",
+    "change-skipped": "Изменение пропущено и сохранено в журнале.",
+    "change-error": "Не удалось обработать изменение конкурента. Попробуйте еще раз.",
     invalid: "Вставьте ссылку WB или nmID конкурента.",
     duplicate: "Этот конкурент уже добавлен.",
     limit: `Можно добавить до ${topCompetitorLimit} конкурентов.`,
     empty: "Добавьте конкурентов вручную перед проверкой.",
     error: "Не удалось обновить конкурентов. Попробуйте еще раз.",
   }[status] || "";
+}
+
+function competitorReviewStatusText(review) {
+  if (!review?.status) return "";
+  if (review.status === "skipped") {
+    const date = review.skippedAt ? competitorDateText(review.skippedAt) : "";
+    return `Изменение пропущено${date ? ` ${date}` : ""}${review.skippedBy ? ` · ${review.skippedBy}` : ""}.`;
+  }
+  if (review.status === "applied") {
+    const date = review.appliedAt ? competitorDateText(review.appliedAt) : "";
+    return `Черновик подготовлен${date ? ` ${date}` : ""}${review.appliedBy ? ` · ${review.appliedBy}` : ""}.`;
+  }
+  if (review.status === "open") {
+    const date = review.detectedAt ? competitorDateText(review.detectedAt) : "";
+    return `Задача техспецу${review.assigneeLogin ? `: ${review.assigneeLogin}` : ""}${date ? ` · MPStats: ${date}` : ""}.`;
+  }
+  return "";
 }
 
 function auditCompetitorSourceText(source) {
@@ -6385,8 +6516,10 @@ function TopCompetitorsPanel({
   onSuggest,
   onRefresh,
   onRemove,
+  onReoptimizeChange,
+  onSkipChange,
 }) {
-  const busy = ["loading", "saving", "refreshing", "suggesting"].includes(status);
+  const busy = ["loading", "saving", "refreshing", "suggesting", "change-reoptimizing", "change-skipping"].includes(status);
   const criticalCount = competitors.filter((item) => item.hasCriticalChanges).length;
   const lastCheckedAt = competitors
     .map((item) => item.lastCheckedAt || item.snapshot?.checkedAt || "")
@@ -6437,7 +6570,14 @@ function TopCompetitorsPanel({
       {competitors.length ? (
         <div className="competitor-grid">
           {competitors.map((item) => (
-            <CompetitorCard key={item.competitorNmID} competitor={item} busy={busy} onRemove={onRemove} />
+            <CompetitorCard
+              key={item.competitorNmID}
+              competitor={item}
+              busy={busy}
+              onRemove={onRemove}
+              onReoptimizeChange={onReoptimizeChange}
+              onSkipChange={onSkipChange}
+            />
           ))}
         </div>
       ) : (
@@ -6450,10 +6590,14 @@ function TopCompetitorsPanel({
   );
 }
 
-function CompetitorCard({ competitor, busy, onRemove }) {
+function CompetitorCard({ competitor, busy, onRemove, onReoptimizeChange, onSkipChange }) {
   const snapshot = competitor.snapshot || {};
   const changes = Array.isArray(competitor.changes) ? competitor.changes : [];
   const visibleChanges = competitorVisibleChanges(changes);
+  const changeReview = competitor.changeReview || {};
+  const reviewStatus = changeReview.status || "";
+  const reviewStatusText = competitorReviewStatusText(changeReview);
+  const canResolveChange = visibleChanges.length && !["skipped", "applied"].includes(reviewStatus);
   const title = snapshot.title || `WB ${competitor.competitorNmID}`;
   const price = snapshot.discountedPrice || snapshot.price;
   const comparison = snapshot.comparison || {};
@@ -6531,6 +6675,12 @@ function CompetitorCard({ competitor, busy, onRemove }) {
         <div className="competitor-changes">
           <span>Что изменилось за период</span>
           <p className="competitor-change-period">{competitorPeriodText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</p>
+          {reviewStatusText ? (
+            <p className={`competitor-review-status status-${reviewStatus || "open"}`}>
+              <strong>Статус изменения</strong>
+              <small>{reviewStatusText}</small>
+            </p>
+          ) : null}
           <p>
             <strong>Вывод за период</strong>
             <small>{competitorMonitoringConclusion(visibleChanges, hasPreviousSnapshot, competitor.previousSnapshot, snapshot)}</small>
@@ -6548,11 +6698,27 @@ function CompetitorCard({ competitor, busy, onRemove }) {
               </p>
             );
           })}
+          {canResolveChange ? (
+            <div className="competitor-change-actions">
+              <button className="btn primary" type="button" onClick={() => onReoptimizeChange(competitor)} disabled={busy}>
+                <WandSparkles size={17} />Переоптимизировать
+              </button>
+              <button className="btn" type="button" onClick={() => onSkipChange(competitor)} disabled={busy}>
+                <X size={17} />Пропустить изменение
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="competitor-changes empty">
           <span>Мониторинг изменений</span>
           <p className="competitor-change-period">{hasPreviousSnapshot ? "За этот период изменений в цене, тексте или характеристиках не найдено." : "Первый снимок сохранен."}</p>
+          {reviewStatusText ? (
+            <p className={`competitor-review-status status-${reviewStatus || "open"}`}>
+              <strong>Последнее решение</strong>
+              <small>{reviewStatusText}</small>
+            </p>
+          ) : null}
           <p>
             <strong>Вывод за период</strong>
             <small>{competitorMonitoringConclusion([], hasPreviousSnapshot, competitor.previousSnapshot, snapshot)}</small>
@@ -6669,6 +6835,9 @@ function approvalEventLabel(action) {
     submitted: "отправлено на согласование",
     approved: "принято",
     changes_requested: "возвращено на доработку",
+    competitor_change_detected: "найдено изменение конкурента",
+    competitor_change_skipped: "изменение конкурента пропущено",
+    competitor_change_applied: "черновик обновлен по конкуренту",
   }[action] || "обновлено";
 }
 
@@ -7178,6 +7347,9 @@ function DraftSourceMark({ source }) {
   }
   if (source === "semantic") {
     return <Tag tone="blue">переоптимизация СЯ</Tag>;
+  }
+  if (source === "competitor") {
+    return <Tag tone="blue">по изменению конкурента</Tag>;
   }
   if (source === "manual") {
     return <span className="draft-source-manual">ручная правка</span>;
