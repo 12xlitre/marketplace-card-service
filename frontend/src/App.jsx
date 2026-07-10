@@ -6069,7 +6069,29 @@ function competitorSignedNumber(value, suffix = "") {
 }
 
 function competitorDateText(value) {
-  return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
+  if (!value) return "еще не обновляли";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("ru-RU");
+}
+
+function competitorContentVersionText(snapshot) {
+  const versions = Array.isArray(snapshot?.mpstatsVersions) ? snapshot.mpstatsVersions : [];
+  const parts = [];
+  if (snapshot?.mpstatsVersionAt) {
+    parts.push(`MPStats увидел ${competitorDateText(snapshot.mpstatsVersionAt)}`);
+  }
+  if (versions.length) {
+    parts.push(`последние ${formatNumber(versions.length)} верс.`);
+  }
+  return parts.join(" · ") || "версия не найдена";
+}
+
+function competitorPriceUpdatedText(snapshot) {
+  if (snapshot?.mpstatsUpdatedAt) {
+    return `MPStats обновил ${competitorDateText(snapshot.mpstatsUpdatedAt)}`;
+  }
+  return "дата цены не найдена";
 }
 
 function competitorPhotoHistoryText(snapshot) {
@@ -6089,22 +6111,30 @@ function competitorPhotoHistoryText(snapshot) {
 }
 
 function competitorPeriodText(previousSnapshot, snapshot, fallbackDate) {
+  const fromVersion = previousSnapshot?.mpstatsVersionAt || "";
+  const toVersion = snapshot?.mpstatsVersionAt || "";
+  if (fromVersion && toVersion && fromVersion !== toVersion) {
+    return `По версиям MPStats с ${competitorDateText(fromVersion)} по ${competitorDateText(toVersion)} поменялось следующее:`;
+  }
   const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
   const to = snapshot?.checkedAt || fallbackDate || "";
-  if (from && to) return `За период с ${competitorDateText(from)} по ${competitorDateText(to)} поменялось следующее:`;
+  if (from && to) return `За период проверок с ${competitorDateText(from)} по ${competitorDateText(to)} поменялось следующее:`;
   return "С прошлого сохраненного снимка поменялось следующее:";
 }
 
-function competitorChangeTimingText(previousSnapshot, snapshot, fallbackDate) {
+function competitorChangeTimingText(change, previousSnapshot, snapshot, fallbackDate) {
+  if (change?.detectedAt) {
+    return `${change.detectedBy === "mpstats" ? "MPStats увидел" : "Обнаружено"} ${competitorDateText(change.detectedAt)}.`;
+  }
   const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
   const to = snapshot?.checkedAt || fallbackDate || "";
   if (from && to) {
-    return `Появилось между ${competitorDateText(from)} и ${competitorDateText(to)}; точную дату по характеристике текущий MPStats API для WB не отдает.`;
+    return `Появилось между ${competitorDateText(from)} и ${competitorDateText(to)}.`;
   }
   if (to) {
     return `Обнаружено при обновлении ${competitorDateText(to)}; нужен следующий снимок для точного периода.`;
   }
-  return "Обнаружено на текущем снимке; точную дату по характеристике текущий MPStats API для WB не отдает.";
+  return "Обнаружено на текущем снимке.";
 }
 
 function competitorCharacteristicRows(characteristics, limit = 6) {
@@ -6192,10 +6222,10 @@ function competitorStatusText(status, enabled) {
     loading: "Загружаем конкурентов...",
     saving: "Сохраняем список...",
     refreshing: "Проверяем конкурентов...",
-    suggesting: "Проверяем ручной ТОП через MPStats...",
+    suggesting: "Обновляем цены, текст, характеристики и версии MPStats...",
     saved: "Список сохранен.",
     refreshed: "Данные конкурентов обновлены.",
-    suggested: "Ручной ТОП конкурентов обновлен.",
+    suggested: "Карточки конкурентов обновлены.",
     invalid: "Вставьте ссылку WB или nmID конкурента.",
     duplicate: "Этот конкурент уже добавлен.",
     limit: `Можно добавить до ${topCompetitorLimit} конкурентов.`,
@@ -6328,13 +6358,18 @@ function TopCompetitorsPanel({
 }) {
   const busy = ["loading", "saving", "refreshing", "suggesting"].includes(status);
   const criticalCount = competitors.filter((item) => item.hasCriticalChanges).length;
+  const lastCheckedAt = competitors
+    .map((item) => item.lastCheckedAt || item.snapshot?.checkedAt || "")
+    .filter(Boolean)
+    .sort();
+  const latestCheckedAt = lastCheckedAt.length ? lastCheckedAt[lastCheckedAt.length - 1] : "";
   const statusText = competitorStatusText(status, enabled);
   return (
     <section className="workspace-strip competitors-strip">
       <div className="strip-head">
         <div>
           <h2>ТОП конкурентов</h2>
-          <p>Только конкуренты, добавленные специалистом вручную: до {topCompetitorLimit} карточек для сравнения цены, спроса, контента и заполнения.</p>
+          <p>Только конкуренты, добавленные специалистом вручную: до {topCompetitorLimit} карточек для сравнения цены, текста, характеристик и изменений по версиям MPStats.</p>
         </div>
         <Tag tone={criticalCount ? "amber" : competitors.length ? "blue" : "green"}>
           {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/${topCompetitorLimit}`}
@@ -6344,7 +6379,7 @@ function TopCompetitorsPanel({
         <div className="competitor-summary">
           <div><span>В списке</span><strong>{competitors.length}/{topCompetitorLimit}</strong></div>
           <div><span>Вручную</span><strong>{competitors.length}</strong></div>
-          <div><span>Автодобор</span><strong>выкл.</strong></div>
+          <div><span>Последняя проверка</span><strong>{latestCheckedAt ? competitorDateText(latestCheckedAt) : "нет"}</strong></div>
           <div><span>Изменения</span><strong>{criticalCount || "нет"}</strong></div>
         </div>
       ) : null}
@@ -6359,7 +6394,7 @@ function TopCompetitorsPanel({
           />
         </label>
         <button className="btn primary" type="button" onClick={onSuggest} disabled={!enabled || busy || !competitors.length}>
-          <Search size={17} />{status === "suggesting" ? "Проверяем" : "Проверить ТОП"}
+          <Search size={17} />{status === "suggesting" ? "Проверяем" : "Проверить карточки"}
         </button>
         <button className="btn" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= topCompetitorLimit}>
           <Plus size={17} />Добавить
@@ -6378,7 +6413,7 @@ function TopCompetitorsPanel({
       ) : (
         <div className="empty-state">
           <strong>ТОП еще не подобран</strong>
-          <span>Добавьте до {topCompetitorLimit} WB-конкурентов вручную, затем проверьте их цену, спрос и заполнение через MPStats.</span>
+          <span>Добавьте до {topCompetitorLimit} WB-конкурентов вручную, затем зафиксируйте цену, текст и характеристики через MPStats.</span>
         </div>
       )}
     </section>
@@ -6423,6 +6458,7 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       <div className="competitor-data-grid">
         <div className="competitor-data-section">
           <span>Как написано сейчас</span>
+          <p><strong>Версия</strong><em>{competitorContentVersionText(snapshot)}</em></p>
           <p><strong>Заголовок</strong><em>{title}</em></p>
           <p><strong>Описание</strong><em>{snapshot.descriptionPreview || "нет данных"}</em></p>
           <p><strong>Длина</strong><em>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · к нашей ${descriptionDelta}` : ""}` : "нет данных"}</em></p>
@@ -6433,6 +6469,7 @@ function CompetitorCard({ competitor, busy, onRemove }) {
           <p><strong>Финальная</strong><em>{competitorPriceText(price)}</em></p>
           <p><strong>До скидки</strong><em>{competitorPriceText(snapshot.price)}</em></p>
           <p><strong>К нашей</strong><em>{priceDelta || "нет данных"}</em></p>
+          <p><strong>Данные</strong><em>{competitorPriceUpdatedText(snapshot)}</em></p>
         </div>
         <div className="competitor-data-section">
           <span>Характеристики конкурента</span>
@@ -6481,8 +6518,8 @@ function CompetitorCard({ competitor, busy, onRemove }) {
               <p key={`${change.field}-${index}`}>
                 <strong>{change.label}</strong>
                 {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
-                {change.field === "characteristics" ? (
-                  <small>{competitorChangeTimingText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</small>
+                {change.detectedAt || change.field === "characteristics" ? (
+                  <small>{competitorChangeTimingText(change, competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</small>
                 ) : null}
                 <small>{change.field === "characteristics" ? characteristicLines.slice(0, 5).join(" · ") : competitorChangeText(change)}</small>
               </p>

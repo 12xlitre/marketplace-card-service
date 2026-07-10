@@ -2276,35 +2276,53 @@ def competitor_characteristics_comparison(current_characteristics, competitor_ch
 
 
 def competitor_snapshot_from_sources(nm_id):
+  nm_id = parse_competitor_nm_id(nm_id)
   warnings = []
   product = fetch_wb_public_product(nm_id, warnings)
   cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   info = {}
   full_payload = {}
+  legacy_item_payload = {}
+  legacy_item = {}
+  legacy_full_payload = {}
+  version_snapshot = {}
+  version_rows = []
   if token:
     period = audit_period_default()
-    info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{parse_competitor_nm_id(nm_id)}", warnings, cache_ttl=86400)
+    info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{nm_id}", warnings, cache_ttl=86400)
     full_payload = audit_mpstats_get(
       token,
-      f"/analytics/v1/wb/items/{parse_competitor_nm_id(nm_id)}/full?{urlencode({'d1': period['d1'], 'd2': period['d2']})}",
+      f"/analytics/v1/wb/items/{nm_id}/full?{urlencode({'d1': period['d1'], 'd2': period['d2']})}",
       warnings,
       cache_ttl=86400,
     )
+    legacy_item_payload = audit_mpstats_get(token, f"/wb/get/item/{nm_id}", warnings, cache_ttl=86400)
+    legacy_item = legacy_item_payload.get("item") if isinstance(legacy_item_payload.get("item"), dict) else {}
+    legacy_full_payload = audit_mpstats_get(
+      token,
+      f"/wb/get/item/{nm_id}/full?{urlencode({'d1': period['d1'], 'd2': period['d2']})}",
+      warnings,
+      cache_ttl=86400,
+    )
+    version_snapshot, version_rows = audit_mpstats_latest_full_page_snapshot(token, nm_id, warnings, cache_ttl=86400)
     photo_history = audit_mpstats_photo_history(token, nm_id, [], cache_ttl=86400)
   else:
     photo_history = []
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
-  mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
+  mpstats_prices = mpstats_price_metrics(info, full_payload, stats, legacy_item_payload, legacy_item, legacy_full_payload)
   photo_block = full_payload.get("photo") if isinstance(full_payload.get("photo"), dict) else {}
   merged = audit_merge_card_content({}, cdn_card)
-  title = audit_str(product.get("name") or merged.get("title") or info.get("name") or full_payload.get("name") or "")
-  brand = audit_str(product.get("brand") or merged.get("brand") or info.get("brand") or full_payload.get("brand") or "")
-  subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or "")
-  description = audit_str(merged.get("description") or "")
-  characteristics = audit_card_characteristics(merged)
+  title = audit_str(product.get("name") or version_snapshot.get("title") or merged.get("title") or legacy_item.get("full_name") or legacy_item.get("name") or info.get("name") or full_payload.get("name") or "")
+  brand = audit_named_value(product.get("brand") or version_snapshot.get("brand") or merged.get("brand") or legacy_item.get("brand") or legacy_full_payload.get("brand") or info.get("brand") or full_payload.get("brand") or "")
+  subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or audit_subject_name_from_payload(legacy_full_payload) or audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or "")
+  fallback_description = audit_str(merged.get("description") or "")
+  description_length = version_snapshot.get("descriptionLength") or len(fallback_description)
+  description_preview = version_snapshot.get("descriptionPreview") or audit_str(fallback_description, 420)
+  description_hash = version_snapshot.get("descriptionHash") or competitor_text_digest(fallback_description)
+  characteristics = version_snapshot.get("characteristics") or audit_card_characteristics(merged)
   price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
   if price is None:
     price = audit_positive_number(mpstats_prices.get("price"), mpstats_prices.get("discountedPrice"), mpstats_prices.get("avgSalePrice"))
@@ -2316,7 +2334,7 @@ def competitor_snapshot_from_sources(nm_id):
     discounted_price = audit_positive_number(mpstats_prices.get("discountedPrice"), mpstats_prices.get("walletPrice"), mpstats_prices.get("avgSalePrice"))
   if discounted_price is None:
     discounted_price = price
-  mpstats_filled = bool(info or full_payload)
+  mpstats_filled = bool(info or full_payload or legacy_item_payload or legacy_full_payload or version_snapshot)
   warning_list = audit_public_warnings(warnings)
   if mpstats_filled and (title or price or discounted_price):
     warning_list = [item for item in warning_list if "WB public detail недоступен" not in item]
@@ -2340,19 +2358,23 @@ def competitor_snapshot_from_sources(nm_id):
     "walletPrice": mpstats_prices.get("walletPrice"),
     "avgSalePrice": mpstats_prices.get("avgSalePrice"),
     "discount": product.get("sale") or product.get("clientSale") or None,
-    "rating": product.get("reviewRating") or product.get("rating") or info.get("rating") or None,
-    "feedbacks": product.get("feedbacks") or product.get("comments") or info.get("comments") or None,
+    "rating": product.get("reviewRating") or product.get("rating") or legacy_item.get("rating") or legacy_full_payload.get("rating") or info.get("rating") or None,
+    "feedbacks": product.get("feedbacks") or product.get("comments") or legacy_item.get("comments") or legacy_full_payload.get("comments") or info.get("comments") or None,
     "sales": audit_int(stats.get("sales"), 0),
     "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
     "revenue": audit_number(stats.get("revenue"), 0),
     "balance": audit_number(stats.get("balance"), 0),
-    "photosCount": product.get("pics") or product.get("photosCount") or audit_int(photo_block.get("count"), 0) or None,
+    "photosCount": product.get("pics") or product.get("photosCount") or version_snapshot.get("photosCount") or audit_int(photo_block.get("count"), 0) or None,
     "photoChangedByMpstats": bool(photo_block.get("is_changed")),
     "photoHistory": photo_history,
     "lastPhotoChangedAt": photo_history[0].get("changedAt") if photo_history else "",
-    "descriptionLength": len(description),
-    "descriptionPreview": audit_str(description, 420),
-    "descriptionHash": competitor_text_digest(description),
+    "mpstatsVersion": version_snapshot.get("version") or "",
+    "mpstatsVersionAt": version_snapshot.get("changedAt") or "",
+    "mpstatsVersions": version_rows[:8],
+    "mpstatsUpdatedAt": mpstats_date_iso(legacy_item.get("updated") or legacy_full_payload.get("updated")),
+    "descriptionLength": description_length,
+    "descriptionPreview": description_preview,
+    "descriptionHash": description_hash,
     "characteristicsCount": len(characteristics),
     "characteristics": characteristics[:40],
     "characteristicsSignature": competitor_characteristic_signature(characteristics),
@@ -2395,6 +2417,8 @@ def competitor_snapshot_changes(previous, current):
   current = current if isinstance(current, dict) else {}
   if not previous:
     return []
+  content_detected_at = audit_str(current.get("mpstatsVersionAt") or "")
+  price_detected_at = audit_str(current.get("mpstatsUpdatedAt") or "")
   fields = [
     ("title", "Заголовок"),
     ("brand", "Бренд"),
@@ -2423,12 +2447,21 @@ def competitor_snapshot_changes(previous, current):
         "изменили описание: "
         f"было {audit_int(previous.get('descriptionLength'), 0)} зн., стало {audit_int(current.get('descriptionLength'), 0)} зн."
       )
+      if content_detected_at:
+        change["detectedAt"] = content_detected_at
+        change["detectedBy"] = "mpstats"
     if key == "discountedPrice":
       old_price = audit_number(previous.get(key), None)
       new_price = audit_number(current.get(key), None)
       if old_price and new_price:
         change["deltaPercent"] = round((new_price - old_price) / old_price * 100, 1)
         change["critical"] = new_price < old_price * 0.97
+      if price_detected_at:
+        change["detectedAt"] = price_detected_at
+        change["detectedBy"] = "mpstats"
+    if key == "title" and content_detected_at:
+      change["detectedAt"] = content_detected_at
+      change["detectedBy"] = "mpstats"
     changes.append(change)
   characteristics_diff = competitor_characteristics_diff(
     previous.get("characteristics") or [],
@@ -2442,6 +2475,8 @@ def competitor_snapshot_changes(previous, current):
       "current": current.get("characteristics") or [],
       "critical": True,
       "details": characteristics_diff,
+      "detectedAt": content_detected_at,
+      "detectedBy": "mpstats" if content_detected_at else "",
       "summary": characteristics_diff.get("summary") or (
         f"изменили характеристики: значений {characteristics_diff['changedCount']}, "
         f"добавлено {characteristics_diff['addedCount']}, убрано {characteristics_diff['removedCount']}"
@@ -2546,6 +2581,10 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "photoChangedByMpstats": bool(candidate.get("photoChangedByMpstats")),
     "photoHistory": photo_history[:12],
     "lastPhotoChangedAt": audit_str(candidate.get("lastPhotoChangedAt") or (photo_history[0].get("changedAt") if photo_history and isinstance(photo_history[0], dict) else "")),
+    "mpstatsVersion": audit_str(candidate.get("mpstatsVersion") or ""),
+    "mpstatsVersionAt": audit_str(candidate.get("mpstatsVersionAt") or ""),
+    "mpstatsVersions": candidate.get("mpstatsVersions")[:8] if isinstance(candidate.get("mpstatsVersions"), list) else [],
+    "mpstatsUpdatedAt": audit_str(candidate.get("mpstatsUpdatedAt") or ""),
     "descriptionLength": description_length,
     "descriptionPreview": description_preview,
     "descriptionHash": description_hash,
@@ -3726,6 +3765,14 @@ def mpstats_price_metrics(*payloads):
   for payload in payloads:
     if not isinstance(payload, dict):
       continue
+    item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else None
+    if item_payload is not None:
+      nested_metrics = mpstats_price_metrics(item_payload)
+      price_sources.append({
+        "price": nested_metrics.get("price"),
+        "finalPrice": nested_metrics.get("discountedPrice"),
+        "walletPrice": nested_metrics.get("walletPrice"),
+      })
     price_block = payload.get("price") if isinstance(payload.get("price"), dict) else {}
     price_sources.append({
       "price": audit_positive_number(
@@ -3741,6 +3788,8 @@ def mpstats_price_metrics(*payloads):
         payload.get("finalPrice"),
         payload.get("sale_price"),
         payload.get("salePrice"),
+        payload.get("client_price"),
+        payload.get("clientPrice"),
       ),
       "walletPrice": audit_positive_number(
         price_block.get("wallet_price"),
@@ -3776,6 +3825,22 @@ def mpstats_timestamp_iso(value):
     return ""
 
 
+def mpstats_date_iso(value):
+  if value in (None, ""):
+    return ""
+  numeric = audit_number(value, None)
+  if numeric is not None:
+    return mpstats_timestamp_iso(numeric)
+  text = audit_str(value)
+  for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    try:
+      parsed = dt.datetime.strptime(text, fmt)
+      return parsed.replace(tzinfo=dt.timezone.utc).isoformat()
+    except ValueError:
+      continue
+  return text
+
+
 def mpstats_photo_history_rows(payload, limit=12):
   rows = []
   for item in audit_extract_list(payload):
@@ -3804,6 +3869,105 @@ def audit_mpstats_photo_history(token, nm_id, warnings, cache_ttl=86400):
     cache_ttl=cache_ttl,
   )
   return mpstats_photo_history_rows(photo_payload)
+
+
+def mpstats_full_page_version_rows(payload, limit=12):
+  rows = []
+  for item in audit_extract_list(payload):
+    if not isinstance(item, dict):
+      continue
+    version = audit_str(item.get("version") or item.get("hash") or item.get("id") or "")
+    if not version:
+      continue
+    changed_at = mpstats_date_iso(item.get("date") or item.get("created") or item.get("created_at") or item.get("updated"))
+    rows.append({
+      "version": version,
+      "changedAt": changed_at,
+    })
+    if len(rows) >= limit:
+      break
+  return rows
+
+
+def mpstats_full_page_characteristics(payload):
+  if not isinstance(payload, dict):
+    return []
+  rows = []
+  seen = set()
+  names = payload.get("param_names") if isinstance(payload.get("param_names"), list) else []
+  values = payload.get("param_values") if isinstance(payload.get("param_values"), list) else []
+  for index, name in enumerate(names):
+    label = audit_str(name)
+    value = values[index] if index < len(values) else ""
+    text = audit_str(value)
+    key = audit_normalized(label)
+    if not label or not text or key in seen:
+      continue
+    seen.add(key)
+    rows.append({"name": label, "value": text})
+  for label, key in (
+    ("Состав", "consist"),
+    ("Цвет", "color"),
+    ("Страна производства", "country"),
+  ):
+    text = audit_str(payload.get(key))
+    normalized_label = audit_normalized(label)
+    if text and normalized_label not in seen:
+      seen.add(normalized_label)
+      rows.append({"name": label, "value": text})
+  return rows
+
+
+def mpstats_full_page_snapshot(payload, version_row=None):
+  if not isinstance(payload, dict) or not payload:
+    return {}
+  version_row = version_row if isinstance(version_row, dict) else {}
+  title = audit_str(payload.get("full_name") or payload.get("name") or "")
+  description = audit_str(payload.get("description") or "")
+  characteristics = audit_card_characteristics({"characteristics": mpstats_full_page_characteristics(payload)})
+  changed_at = version_row.get("changedAt") or mpstats_date_iso(payload.get("data") or payload.get("date"))
+  return {
+    "version": audit_str(version_row.get("version") or payload.get("version") or ""),
+    "changedAt": changed_at,
+    "versionDate": audit_str(payload.get("data") or ""),
+    "title": title,
+    "brand": audit_str(payload.get("brand") or ""),
+    "descriptionLength": len(description),
+    "descriptionPreview": audit_str(description, 420),
+    "descriptionHash": competitor_text_digest(description),
+    "characteristics": characteristics[:80],
+    "characteristicsCount": len(characteristics),
+    "characteristicsSignature": competitor_characteristic_signature(characteristics),
+    "photosCount": audit_int(payload.get("images_count"), 0),
+  }
+
+
+def audit_mpstats_full_page_versions(token, nm_id, warnings, cache_ttl=86400):
+  if not token:
+    return []
+  payload = audit_mpstats_get(
+    token,
+    f"/wb/get/item/{parse_competitor_nm_id(nm_id)}/full_page/versions",
+    warnings,
+    cache_ttl=cache_ttl,
+  )
+  return mpstats_full_page_version_rows(payload)
+
+
+def audit_mpstats_latest_full_page_snapshot(token, nm_id, warnings, cache_ttl=86400):
+  versions = audit_mpstats_full_page_versions(token, nm_id, warnings, cache_ttl=cache_ttl)
+  if not versions:
+    return {}, []
+  version = versions[0].get("version")
+  if not version:
+    return {}, versions
+  payload = audit_mpstats_get(
+    token,
+    f"/wb/get/item/{parse_competitor_nm_id(nm_id)}/full_page?{urlencode({'version': version})}",
+    warnings,
+    cache_ttl=cache_ttl,
+  )
+  return mpstats_full_page_snapshot(payload, versions[0]), versions
 
 
 def audit_int(value, default=0):
@@ -4710,10 +4874,16 @@ def audit_subject_name_from_payload(payload):
   for key in ("subject", "niche", "category"):
     value = payload.get(key)
     if isinstance(value, dict):
-      name = audit_str(value.get("name") or value.get("title") or "")
+      name = audit_str(value.get("name") or value.get("title") or value.get("item") or "")
       if name:
         return name
   return ""
+
+
+def audit_named_value(value):
+  if isinstance(value, dict):
+    return audit_str(value.get("name") or value.get("title") or value.get("item") or value.get("value") or "")
+  return audit_str(value)
 
 
 def audit_card_price(card, market_data):
@@ -4878,29 +5048,43 @@ def audit_trait_conflict(left, right, key):
 
 
 def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
+  competitor_nm_id = parse_competitor_nm_id(competitor_nm_id)
   snapshot = competitor_snapshot_from_sources(competitor_nm_id)
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   info = {}
   full_payload = {}
+  legacy_item_payload = {}
+  legacy_item = {}
+  legacy_full_payload = {}
+  version_snapshot = {}
+  version_rows = []
   if token:
     d1 = period.get("d1")
     d2 = period.get("d2")
     info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}", warnings, cache_ttl=86400)
     full_payload = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}/full?{urlencode({'d1': d1, 'd2': d2})}", warnings, cache_ttl=86400)
+    legacy_item_payload = audit_mpstats_get(token, f"/wb/get/item/{competitor_nm_id}", warnings, cache_ttl=86400)
+    legacy_item = legacy_item_payload.get("item") if isinstance(legacy_item_payload.get("item"), dict) else {}
+    legacy_full_payload = audit_mpstats_get(token, f"/wb/get/item/{competitor_nm_id}/full?{urlencode({'d1': d1, 'd2': d2})}", warnings, cache_ttl=86400)
+    version_snapshot, version_rows = audit_mpstats_latest_full_page_snapshot(token, competitor_nm_id, warnings, cache_ttl=86400)
     photo_history = audit_mpstats_photo_history(token, competitor_nm_id, [], cache_ttl=86400)
   else:
     photo_history = []
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
-  mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
+  mpstats_prices = mpstats_price_metrics(info, full_payload, stats, legacy_item_payload, legacy_item, legacy_full_payload)
   photo_block = full_payload.get("photo") if isinstance(full_payload.get("photo"), dict) else {}
-  subject_name = audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or snapshot.get("subjectName") or ""
+  subject_name = audit_subject_name_from_payload(legacy_full_payload) or audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or snapshot.get("subjectName") or ""
+  description_length = version_snapshot.get("descriptionLength") or snapshot.get("descriptionLength") or 0
+  description_preview = version_snapshot.get("descriptionPreview") or snapshot.get("descriptionPreview") or ""
+  description_hash = version_snapshot.get("descriptionHash") or snapshot.get("descriptionHash") or ""
+  characteristics = version_snapshot.get("characteristics") or snapshot.get("characteristics") or []
   candidate = {
     "nmId": competitor_nm_id,
-    "title": snapshot.get("title") or audit_str(info.get("name") if isinstance(info, dict) else ""),
-    "brand": snapshot.get("brand") or audit_str(info.get("brand") if isinstance(info, dict) else ""),
-    "seller": audit_str(info.get("seller") if isinstance(info, dict) else ""),
+    "title": snapshot.get("title") or version_snapshot.get("title") or audit_str(legacy_item.get("full_name") or legacy_item.get("name") or (info.get("name") if isinstance(info, dict) else "")),
+    "brand": snapshot.get("brand") or audit_named_value(version_snapshot.get("brand") or legacy_item.get("brand") or legacy_full_payload.get("brand") or (info.get("brand") if isinstance(info, dict) else "")),
+    "seller": audit_named_value(legacy_item.get("seller") or legacy_full_payload.get("seller") or (info.get("seller") if isinstance(info, dict) else "")),
     "price": audit_positive_number(
       snapshot.get("price"),
       mpstats_prices.get("price"),
@@ -4921,8 +5105,8 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     "avgSalePrice": mpstats_prices.get("avgSalePrice"),
     "sales": audit_int(stats.get("sales"), 0),
     "revenue": audit_number(stats.get("revenue"), 0),
-    "comments": snapshot.get("feedbacks") or audit_int(info.get("comments") if isinstance(info, dict) else None, 0),
-    "rating": snapshot.get("rating") or audit_number(info.get("rating") if isinstance(info, dict) else None, None),
+    "comments": snapshot.get("feedbacks") or audit_int(legacy_item.get("comments") or legacy_full_payload.get("comments") or (info.get("comments") if isinstance(info, dict) else None), 0),
+    "rating": snapshot.get("rating") or audit_number(legacy_item.get("rating") or legacy_full_payload.get("rating") or (info.get("rating") if isinstance(info, dict) else None), None),
     "position": None,
     "balance": audit_number(stats.get("balance"), 0),
     "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
@@ -4930,12 +5114,16 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     "photoChangedByMpstats": bool(photo_block.get("is_changed")),
     "photoHistory": photo_history,
     "lastPhotoChangedAt": photo_history[0].get("changedAt") if photo_history else "",
-    "descriptionLength": snapshot.get("descriptionLength") or 0,
-    "descriptionPreview": snapshot.get("descriptionPreview") or "",
-    "descriptionHash": snapshot.get("descriptionHash") or "",
-    "characteristics": audit_card_characteristics({"characteristics": snapshot.get("characteristics") or []}),
+    "mpstatsVersion": version_snapshot.get("version") or snapshot.get("mpstatsVersion") or "",
+    "mpstatsVersionAt": version_snapshot.get("changedAt") or snapshot.get("mpstatsVersionAt") or "",
+    "mpstatsVersions": version_rows[:8] or snapshot.get("mpstatsVersions") or [],
+    "mpstatsUpdatedAt": mpstats_date_iso(legacy_item.get("updated") or legacy_full_payload.get("updated") or snapshot.get("mpstatsUpdatedAt")),
+    "descriptionLength": description_length,
+    "descriptionPreview": description_preview,
+    "descriptionHash": description_hash,
+    "characteristics": audit_card_characteristics({"characteristics": characteristics}),
     "subjectName": subject_name,
-    "subjectPath": audit_subject_path_from_info(info, full_payload),
+    "subjectPath": audit_subject_path_from_info(info, full_payload, legacy_full_payload),
     "selectionSource": "manual",
     "source": "manual",
   }
