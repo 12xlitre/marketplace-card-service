@@ -1205,7 +1205,6 @@ def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витр�
       """
       UPDATE portals
       SET
-        name = COALESCE(NULLIF(?, ''), name),
         status = ?,
         api_connected = 0,
         card_count = ?,
@@ -1217,7 +1216,6 @@ def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витр�
       WHERE id = ?
       """,
       (
-        stats.get("portalName", ""),
         status,
         stats.get("cardCount", 0),
         stats.get("workCount", 0),
