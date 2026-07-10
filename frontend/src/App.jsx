@@ -6072,6 +6072,22 @@ function competitorDateText(value) {
   return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
 }
 
+function competitorPhotoHistoryText(snapshot) {
+  const history = Array.isArray(snapshot?.photoHistory) ? snapshot.photoHistory : [];
+  const lastChangedAt = snapshot?.lastPhotoChangedAt || history[0]?.changedAt || "";
+  const parts = [];
+  if (Number(snapshot?.photosCount) > 0) {
+    parts.push(`${formatNumber(snapshot.photosCount)} фото`);
+  }
+  if (lastChangedAt) {
+    parts.push(`MPStats увидел смену ${competitorDateText(lastChangedAt)}`);
+  }
+  if (history.length) {
+    parts.push(`история ${formatNumber(history.length)} сним.`);
+  }
+  return parts.join(" · ") || "нет данных";
+}
+
 function competitorPeriodText(previousSnapshot, snapshot, fallbackDate) {
   const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
   const to = snapshot?.checkedAt || fallbackDate || "";
@@ -6083,12 +6099,12 @@ function competitorChangeTimingText(previousSnapshot, snapshot, fallbackDate) {
   const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
   const to = snapshot?.checkedAt || fallbackDate || "";
   if (from && to) {
-    return `Появилось между ${competitorDateText(from)} и ${competitorDateText(to)}; точное время внутри WB не отдает.`;
+    return `Появилось между ${competitorDateText(from)} и ${competitorDateText(to)}; точную дату по характеристике текущий MPStats API для WB не отдает.`;
   }
   if (to) {
     return `Обнаружено при обновлении ${competitorDateText(to)}; нужен следующий снимок для точного периода.`;
   }
-  return "Обнаружено на текущем снимке; точное время WB не отдает.";
+  return "Обнаружено на текущем снимке; точную дату по характеристике текущий MPStats API для WB не отдает.";
 }
 
 function competitorCharacteristicRows(characteristics, limit = 6) {
@@ -6410,6 +6426,7 @@ function CompetitorCard({ competitor, busy, onRemove }) {
           <p><strong>Заголовок</strong><em>{title}</em></p>
           <p><strong>Описание</strong><em>{snapshot.descriptionPreview || "нет данных"}</em></p>
           <p><strong>Длина</strong><em>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · к нашей ${descriptionDelta}` : ""}` : "нет данных"}</em></p>
+          <p><strong>Фото</strong><em>{competitorPhotoHistoryText(snapshot)}</em></p>
         </div>
         <div className="competitor-data-section">
           <span>Цена</span>

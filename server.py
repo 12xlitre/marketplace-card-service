@@ -2291,10 +2291,14 @@ def competitor_snapshot_from_sources(nm_id):
       warnings,
       cache_ttl=86400,
     )
+    photo_history = audit_mpstats_photo_history(token, nm_id, [], cache_ttl=86400)
+  else:
+    photo_history = []
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
   mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
+  photo_block = full_payload.get("photo") if isinstance(full_payload.get("photo"), dict) else {}
   merged = audit_merge_card_content({}, cdn_card)
   title = audit_str(product.get("name") or merged.get("title") or info.get("name") or full_payload.get("name") or "")
   brand = audit_str(product.get("brand") or merged.get("brand") or info.get("brand") or full_payload.get("brand") or "")
@@ -2342,7 +2346,10 @@ def competitor_snapshot_from_sources(nm_id):
     "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
     "revenue": audit_number(stats.get("revenue"), 0),
     "balance": audit_number(stats.get("balance"), 0),
-    "photosCount": product.get("pics") or product.get("photosCount") or None,
+    "photosCount": product.get("pics") or product.get("photosCount") or audit_int(photo_block.get("count"), 0) or None,
+    "photoChangedByMpstats": bool(photo_block.get("is_changed")),
+    "photoHistory": photo_history,
+    "lastPhotoChangedAt": photo_history[0].get("changedAt") if photo_history else "",
     "descriptionLength": len(description),
     "descriptionPreview": audit_str(description, 420),
     "descriptionHash": competitor_text_digest(description),
@@ -2482,6 +2489,7 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
   description_preview = audit_str(candidate.get("descriptionPreview") or candidate.get("description") or "", 420)
   description_hash = audit_str(candidate.get("descriptionHash") or competitor_text_digest(candidate.get("description") or description_preview))
   characteristics_count = len(characteristics) if characteristics else audit_int(candidate.get("characteristicsCount"), 0)
+  photo_history = candidate.get("photoHistory") if isinstance(candidate.get("photoHistory"), list) else []
   price = audit_positive_number(candidate.get("price"), candidate.get("basePrice"), default=None)
   discounted_price = audit_positive_number(
     candidate.get("discountedPrice"),
@@ -2534,6 +2542,10 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "feedbacks": audit_int(candidate.get("comments"), 0),
     "balance": audit_number(candidate.get("balance"), 0),
     "position": candidate.get("position"),
+    "photosCount": audit_int(candidate.get("photosCount"), 0),
+    "photoChangedByMpstats": bool(candidate.get("photoChangedByMpstats")),
+    "photoHistory": photo_history[:12],
+    "lastPhotoChangedAt": audit_str(candidate.get("lastPhotoChangedAt") or (photo_history[0].get("changedAt") if photo_history and isinstance(photo_history[0], dict) else "")),
     "descriptionLength": description_length,
     "descriptionPreview": description_preview,
     "descriptionHash": description_hash,
@@ -3752,6 +3764,48 @@ def mpstats_price_metrics(*payloads):
   }
 
 
+def mpstats_timestamp_iso(value):
+  number = audit_number(value, None)
+  if number is None or number <= 0:
+    return ""
+  if number > 10000000000:
+    number = number / 1000
+  try:
+    return dt.datetime.fromtimestamp(number, dt.timezone.utc).isoformat()
+  except (OverflowError, OSError, ValueError):
+    return ""
+
+
+def mpstats_photo_history_rows(payload, limit=12):
+  rows = []
+  for item in audit_extract_list(payload):
+    if not isinstance(item, dict):
+      continue
+    changed_at = mpstats_timestamp_iso(item.get("date") or item.get("created") or item.get("created_at") or item.get("updated"))
+    thumb = audit_str(item.get("thumb") or item.get("url") or item.get("photo") or item.get("image") or "")
+    if not changed_at and not thumb:
+      continue
+    rows.append({
+      "changedAt": changed_at,
+      "thumb": thumb,
+    })
+    if len(rows) >= limit:
+      break
+  return rows
+
+
+def audit_mpstats_photo_history(token, nm_id, warnings, cache_ttl=86400):
+  if not token:
+    return []
+  photo_payload = audit_mpstats_get(
+    token,
+    f"/analytics/v1/wb/items/{parse_competitor_nm_id(nm_id)}/photos_history",
+    warnings,
+    cache_ttl=cache_ttl,
+  )
+  return mpstats_photo_history_rows(photo_payload)
+
+
 def audit_int(value, default=0):
   number = audit_number(value)
   if number is None:
@@ -4833,10 +4887,14 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     d2 = period.get("d2")
     info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}", warnings, cache_ttl=86400)
     full_payload = audit_mpstats_get(token, f"/analytics/v1/wb/items/{competitor_nm_id}/full?{urlencode({'d1': d1, 'd2': d2})}", warnings, cache_ttl=86400)
+    photo_history = audit_mpstats_photo_history(token, competitor_nm_id, [], cache_ttl=86400)
+  else:
+    photo_history = []
   stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
   if not isinstance(stats, dict):
     stats = {}
   mpstats_prices = mpstats_price_metrics(info, full_payload, stats)
+  photo_block = full_payload.get("photo") if isinstance(full_payload.get("photo"), dict) else {}
   subject_name = audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or snapshot.get("subjectName") or ""
   candidate = {
     "nmId": competitor_nm_id,
@@ -4868,6 +4926,10 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     "position": None,
     "balance": audit_number(stats.get("balance"), 0),
     "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
+    "photosCount": snapshot.get("photosCount") or audit_int(photo_block.get("count"), 0),
+    "photoChangedByMpstats": bool(photo_block.get("is_changed")),
+    "photoHistory": photo_history,
+    "lastPhotoChangedAt": photo_history[0].get("changedAt") if photo_history else "",
     "descriptionLength": snapshot.get("descriptionLength") or 0,
     "descriptionPreview": snapshot.get("descriptionPreview") or "",
     "descriptionHash": snapshot.get("descriptionHash") or "",
