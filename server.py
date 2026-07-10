@@ -2345,7 +2345,7 @@ def competitor_snapshot_from_sources(nm_id):
     signals.append("есть выручка MPStats")
   if discounted_price:
     signals.append("цена получена")
-  if len(description) > 0:
+  if description_length > 0:
     signals.append("описание доступно")
   snapshot = {
     "nmID": parse_competitor_nm_id(nm_id),
