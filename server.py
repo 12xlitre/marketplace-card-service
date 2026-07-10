@@ -2261,12 +2261,13 @@ def fetch_wb_public_product(nm_id, warnings):
   return {}
 
 
-def wb_public_image_urls(nm_id):
+def wb_public_image_urls(nm_id, image_number=1):
   nm_id = parse_competitor_nm_id(nm_id)
   if not nm_id:
     return []
   try:
     nm_int = int(nm_id)
+    image_number = max(1, int(image_number or 1))
   except ValueError:
     return []
   vol = nm_int // 100000
@@ -2283,10 +2284,22 @@ def wb_public_image_urls(nm_id):
       break
   base = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/images"
   return [
-    f"{base}/big/1.webp",
-    f"{base}/c516x688/1.webp",
-    f"{base}/c246x328/1.webp",
+    f"{base}/big/{image_number}.webp",
+    f"{base}/c516x688/{image_number}.webp",
+    f"{base}/c246x328/{image_number}.webp",
   ]
+
+
+def wb_public_photo_rows(nm_id, pics=1):
+  count = audit_int(pics, 1)
+  if count <= 0:
+    count = 1
+  output = []
+  for image_number in range(1, min(count, 30) + 1):
+    image_urls = wb_public_image_urls(nm_id, image_number)
+    if len(image_urls) >= 3:
+      output.append({"big": image_urls[0], "c516x688": image_urls[1], "c246x328": image_urls[2]})
+  return output
 
 
 def wb_public_seller_ids_from_manual_source(name, store_url, manual_source, limit=5):
@@ -2346,8 +2359,7 @@ def wb_public_catalog_raw_card(product, source="wb-public-seller"):
     return None
   price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
   discounted_price = wb_public_product_price(product, ("salePriceU", "salePrice", "clientSalePriceU", "product", "total")) or price
-  image_urls = wb_public_image_urls(nm_id)
-  photos = [{"big": image_urls[0], "c516x688": image_urls[1], "c246x328": image_urls[2]}] if len(image_urls) >= 3 else []
+  photos = wb_public_photo_rows(nm_id, product.get("pics") or product.get("photosCount") or 1)
   stock = audit_number(product.get("totalQuantity") or product.get("volume"), None)
   sizes = []
   if price is not None or discounted_price is not None or stock is not None:
