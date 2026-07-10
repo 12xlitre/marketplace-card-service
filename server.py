@@ -67,6 +67,7 @@ WB_MARKETPLACE_API_BASE = os.environ.get("WB_MARKETPLACE_API_BASE", "https://mar
 WB_ANALYTICS_API_BASE = os.environ.get("WB_ANALYTICS_API_BASE", "https://seller-analytics-api.wildberries.ru")
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
+WB_PUBLIC_BASKET_CACHE = {}
 MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
 MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
 MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "86400"))
@@ -2261,6 +2262,63 @@ def fetch_wb_public_product(nm_id, warnings):
   return {}
 
 
+def wb_public_basket_guess(nm_int):
+  vol = nm_int // 100000
+  basket_limits = (
+    143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601,
+    1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485,
+    3701, 3917, 4133, 4349, 4565, 4781, 4997,
+  )
+  for index, limit in enumerate(basket_limits, start=1):
+    if vol <= limit:
+      return index
+  return 28
+
+
+def wb_public_basket_candidates(nm_int):
+  guess = wb_public_basket_guess(nm_int)
+  cached = WB_PUBLIC_BASKET_CACHE.get(str(nm_int))
+  candidates = [cached] if cached else []
+  if guess not in candidates:
+    candidates.append(guess)
+  scan = range(28, 61) if guess >= 28 else range(1, 61)
+  for basket in scan:
+    if basket not in candidates:
+      candidates.append(basket)
+  return candidates
+
+
+def wb_public_resource_exists(url):
+  try:
+    request = urlrequest.Request(url, method="HEAD", headers={"Accept": "*/*", "User-Agent": "Mozilla/5.0 OptiCards/0.1 wb-public"})
+    with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+      return 200 <= response.status < 400
+  except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
+    return False
+
+
+def wb_public_resolve_basket(nm_id):
+  nm_id = parse_competitor_nm_id(nm_id)
+  if not nm_id:
+    return None
+  try:
+    nm_int = int(nm_id)
+  except ValueError:
+    return None
+  if nm_id in WB_PUBLIC_BASKET_CACHE:
+    return WB_PUBLIC_BASKET_CACHE[nm_id]
+  vol = nm_int // 100000
+  part = nm_int // 1000
+  for basket in wb_public_basket_candidates(nm_int):
+    url = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/info/ru/card.json"
+    if wb_public_resource_exists(url):
+      WB_PUBLIC_BASKET_CACHE[nm_id] = basket
+      return basket
+  basket = wb_public_basket_guess(nm_int)
+  WB_PUBLIC_BASKET_CACHE[nm_id] = basket
+  return basket
+
+
 def wb_public_image_urls(nm_id, image_number=1):
   nm_id = parse_competitor_nm_id(nm_id)
   if not nm_id:
@@ -2272,16 +2330,9 @@ def wb_public_image_urls(nm_id, image_number=1):
     return []
   vol = nm_int // 100000
   part = nm_int // 1000
-  basket_limits = (
-    143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601,
-    1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485,
-    3701, 3917, 4133, 4349, 4565, 4781, 4997,
-  )
-  basket = 28
-  for index, limit in enumerate(basket_limits, start=1):
-    if vol <= limit:
-      basket = index
-      break
+  basket = wb_public_resolve_basket(nm_id)
+  if not basket:
+    return []
   base = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/images"
   return [
     f"{base}/big/{image_number}.webp",
@@ -5920,11 +5971,12 @@ def audit_fetch_wb_cdn_card(nm_id, warnings):
     return {}
   vol = nm_int // 100000
   part = nm_int // 1000
-  for basket in range(1, 28):
+  for basket in wb_public_basket_candidates(nm_int):
     url = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/info/ru/card.json"
     try:
       request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "OptiCards/0.1 audit-wb-cdn"})
       with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        WB_PUBLIC_BASKET_CACHE[str(nm_int)] = basket
         return json.loads(response.read().decode("utf-8"))
     except (urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError):
       continue
