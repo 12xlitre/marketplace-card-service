@@ -33,6 +33,7 @@ const hardcodedDirectoryFallback = [
 
 const appViewStorageKey = "opticards-active-view";
 const appScreens = new Set(["cabinets", "seller", "card", "settings"]);
+const topCompetitorLimit = 3;
 
 const projectRoleLabels = {
   lead: "Руководитель отдела",
@@ -4934,7 +4935,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       cardKey: draftCardKey,
       nmID: card?.nmID || "",
       vendorCode: card?.vendorCode || "",
-      competitors: nextCompetitors.slice(0, 5).map((item, index) => ({
+      competitors: nextCompetitors.slice(0, topCompetitorLimit).map((item, index) => ({
         competitorNmID: item.competitorNmID || item.nmID || "",
         url: item.url || item.competitorUrl || "",
         note: item.note || "",
@@ -4988,7 +4989,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setCompetitorStatus("duplicate");
       return;
     }
-    if (competitors.length >= 5) {
+    if (competitors.length >= topCompetitorLimit) {
       setCompetitorStatus("limit");
       return;
     }
@@ -5039,6 +5040,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   async function suggestCompetitors() {
     if (!competitorsEnabled) {
       setCompetitorStatus("unavailable");
+      return;
+    }
+    if (!competitors.length) {
+      setCompetitorStatus("empty");
       return;
     }
     setCompetitorStatus("suggesting");
@@ -5543,7 +5548,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <div className="issue-head">
                         <strong>Конкурентный набор аудита</strong>
                         <Tag tone={latestCompetitorSelection.summary?.rejectedManual ? "amber" : "blue"}>
-                          {latestCompetitorSelection.summary?.finalCount || 0}/5
+                          {latestCompetitorSelection.summary?.finalCount || 0}/{topCompetitorLimit}
                         </Tag>
                       </div>
                       <AuditCompetitorSelection selection={latestCompetitorSelection} />
@@ -6079,14 +6084,14 @@ function competitorStatusText(status, enabled) {
     loading: "Загружаем конкурентов...",
     saving: "Сохраняем список...",
     refreshing: "Проверяем конкурентов...",
-    suggesting: "Подбираем ТОП конкурентов через MPStats...",
+    suggesting: "Проверяем ручной ТОП через MPStats...",
     saved: "Список сохранен.",
     refreshed: "Данные конкурентов обновлены.",
-    suggested: "ТОП конкурентов подобран и сохранен.",
+    suggested: "Ручной ТОП конкурентов обновлен.",
     invalid: "Вставьте ссылку WB или nmID конкурента.",
     duplicate: "Этот конкурент уже добавлен.",
-    limit: "Можно добавить до 5 конкурентов.",
-    empty: "Добавьте конкурентов перед обновлением.",
+    limit: `Можно добавить до ${topCompetitorLimit} конкурентов.`,
+    empty: "Добавьте конкурентов вручную перед проверкой.",
     error: "Не удалось обновить конкурентов. Попробуйте еще раз.",
   }[status] || "";
 }
@@ -6171,14 +6176,13 @@ function AuditCompetitorSelection({ selection }) {
   const finalCompetitors = Array.isArray(selection?.finalCompetitors) ? selection.finalCompetitors : [];
   const rejected = Array.isArray(selection?.manualRejected) ? selection.manualRejected : [];
   const accepted = Array.isArray(selection?.manualAccepted) ? selection.manualAccepted : [];
-  const autoSelected = Array.isArray(selection?.autoSelected) ? selection.autoSelected : [];
   const autoSkippedReason = selection?.autoSkippedReason || "";
   return (
     <>
       <p>
         {accepted.length ? `${accepted.length} ручн. принято. ` : ""}
         {rejected.length ? `${rejected.length} ручн. отклонено. ` : ""}
-        {autoSelected.length ? `${autoSelected.length} добран(о) через MPStats.` : autoSkippedReason || "Автодобор MPStats не потребовался."}
+        {autoSkippedReason || "Автодобор выключен: используются только конкуренты специалиста."}
       </p>
       {finalCompetitors.length ? (
         <div className="audit-competitor-rows">
@@ -6237,25 +6241,23 @@ function TopCompetitorsPanel({
 }) {
   const busy = ["loading", "saving", "refreshing", "suggesting"].includes(status);
   const criticalCount = competitors.filter((item) => item.hasCriticalChanges).length;
-  const mpstatsCount = competitors.filter((item) => item.snapshot?.source === "mpstats").length;
-  const manualCount = competitors.filter((item) => item.snapshot?.source === "manual").length;
   const statusText = competitorStatusText(status, enabled);
   return (
     <section className="workspace-strip competitors-strip">
       <div className="strip-head">
         <div>
           <h2>ТОП конкурентов</h2>
-          <p>Автоподбор MPStats по нише и ручные карточки для сравнения цены, спроса, контента и заполнения.</p>
+          <p>Только конкуренты, добавленные специалистом вручную: до {topCompetitorLimit} карточек для сравнения цены, спроса, контента и заполнения.</p>
         </div>
         <Tag tone={criticalCount ? "amber" : competitors.length ? "blue" : "green"}>
-          {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/5`}
+          {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/${topCompetitorLimit}`}
         </Tag>
       </div>
       {competitors.length ? (
         <div className="competitor-summary">
-          <div><span>В списке</span><strong>{competitors.length}/5</strong></div>
-          <div><span>MPStats</span><strong>{mpstatsCount}</strong></div>
-          <div><span>Вручную</span><strong>{manualCount}</strong></div>
+          <div><span>В списке</span><strong>{competitors.length}/{topCompetitorLimit}</strong></div>
+          <div><span>Вручную</span><strong>{competitors.length}</strong></div>
+          <div><span>Автодобор</span><strong>выкл.</strong></div>
           <div><span>Изменения</span><strong>{criticalCount || "нет"}</strong></div>
         </div>
       ) : null}
@@ -6265,14 +6267,14 @@ function TopCompetitorsPanel({
           <input
             value={competitorInput}
             onChange={(event) => onInput(event.target.value)}
-            disabled={!enabled || busy || competitors.length >= 5}
+            disabled={!enabled || busy || competitors.length >= topCompetitorLimit}
             placeholder="https://www.wildberries.ru/catalog/123456789/detail.aspx"
           />
         </label>
-        <button className="btn primary" type="button" onClick={onSuggest} disabled={!enabled || busy}>
-          <Search size={17} />{status === "suggesting" ? "Подбираем" : "Подобрать ТОП"}
+        <button className="btn primary" type="button" onClick={onSuggest} disabled={!enabled || busy || !competitors.length}>
+          <Search size={17} />{status === "suggesting" ? "Проверяем" : "Проверить ТОП"}
         </button>
-        <button className="btn" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= 5}>
+        <button className="btn" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= topCompetitorLimit}>
           <Plus size={17} />Добавить
         </button>
         <button className="btn" type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length}>
@@ -6289,7 +6291,7 @@ function TopCompetitorsPanel({
       ) : (
         <div className="empty-state">
           <strong>ТОП еще не подобран</strong>
-          <span>MPStats-ниша, коммерческая схожесть, цена, спрос и заполнение карточек будут собраны в единый сравнительный список.</span>
+          <span>Добавьте до {topCompetitorLimit} WB-конкурентов вручную, затем проверьте их цену, спрос и заполнение через MPStats.</span>
         </div>
       )}
     </section>

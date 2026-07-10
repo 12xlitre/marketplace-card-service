@@ -70,6 +70,7 @@ MPSTATS_CONNECT_TIMEOUT = float(os.environ.get("MPSTATS_CONNECT_TIMEOUT", "5"))
 MPSTATS_READ_TIMEOUT = float(os.environ.get("MPSTATS_READ_TIMEOUT", "15"))
 MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS = int(os.environ.get("MPSTATS_CHARACTERISTICS_CACHE_TTL_SECONDS", "86400"))
 AUDIT_MARKET_CACHE_TTL_SECONDS = int(os.environ.get("AUDIT_MARKET_CACHE_TTL_SECONDS", "21600"))
+CARD_COMPETITOR_LIMIT = 3
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
@@ -2390,7 +2391,7 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "descriptionLength": description_length,
     "characteristicsCount": characteristics_count,
     "characteristics": characteristics[:40],
-    "source": audit_str(candidate.get("selectionSource") or candidate.get("source") or "mpstats"),
+    "source": audit_str(candidate.get("selectionSource") or candidate.get("source") or "manual"),
     "similarityScore": audit_int(candidate.get("similarityScore"), 0),
     "similarityReasons": audit_unique(candidate.get("similarityReasons") or [], limit=6),
     "reason": audit_str(candidate.get("whyRelevant") or ""),
@@ -2425,6 +2426,35 @@ def public_card_competitor(row):
     "createdAt": row["created_at"] or "",
     "updatedAt": row["updated_at"] or "",
   }
+
+
+def card_competitor_row_is_auto(row):
+  note = audit_normalized(row["note"] if row and "note" in row.keys() else "")
+  snapshot = safe_json_object(row["snapshot_json"] if row and "snapshot_json" in row.keys() else "{}")
+  reason = audit_normalized(snapshot.get("reason") or "")
+  text = f"{note} {reason}"
+  return any(marker in text for marker in (
+    "добран автоматически",
+    "подобран автоматически",
+    "автодобор",
+  ))
+
+
+def prune_card_competitor_rows(numeric_portal_id, card_key, rows):
+  rows = list(rows or [])
+  remove_ids = [row["id"] for row in rows if card_competitor_row_is_auto(row)]
+  kept_rows = [row for row in rows if row["id"] not in remove_ids]
+  extra_rows = kept_rows[CARD_COMPETITOR_LIMIT:]
+  if extra_rows:
+    remove_ids.extend(row["id"] for row in extra_rows)
+    kept_rows = kept_rows[:CARD_COMPETITOR_LIMIT]
+  if remove_ids:
+    with connect_db() as db:
+      db.executemany(
+        "DELETE FROM card_competitors WHERE portal_id = ? AND card_key = ? AND id = ?",
+        [(numeric_portal_id, card_key, row_id) for row_id in remove_ids],
+      )
+  return kept_rows
 
 
 def competitor_snapshot_needs_backfill(snapshot):
@@ -2508,6 +2538,7 @@ def list_card_competitors(portal_id, card_key, user):
       """,
       (numeric_portal_id, card_key),
     ).fetchall()
+  rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
   if backfill_stale_card_competitors(numeric_portal_id, card_key, rows, user):
     with connect_db() as db:
       rows = db.execute(
@@ -2519,6 +2550,7 @@ def list_card_competitors(portal_id, card_key, user):
         """,
         (numeric_portal_id, card_key),
       ).fetchall()
+    rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
   return [public_card_competitor(row) for row in rows]
 
 
@@ -2536,7 +2568,7 @@ def save_card_competitors(portal_id, card_key, nm_id, vendor_code, competitors, 
     raise ValueError("invalid_competitors")
   cleaned = []
   seen = set()
-  for index, item in enumerate(competitors[:5]):
+  for index, item in enumerate(competitors[:CARD_COMPETITOR_LIMIT]):
     raw_value = (item.get("url") or item.get("competitorNmID") or item.get("nmID") or item.get("nmId")) if isinstance(item, dict) else item
     competitor_nm_id = parse_competitor_nm_id(raw_value)
     if not competitor_nm_id or competitor_nm_id in seen:
@@ -2609,6 +2641,17 @@ def refresh_card_competitors(portal_id, card_key, user):
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
   checked_at = utc_now().isoformat()
+  card = content_card_for_portal(numeric_portal_id, card_key, {})
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
+  subject_id = card.get("subjectID") or card.get("subjectId") or raw_fields.get("subjectID") or raw_fields.get("subjectId")
+  period = audit_period_default()
+  base_warnings = []
+  market_data = {}
+  if nm_id:
+    cdn_card = audit_fetch_wb_cdn_card(nm_id, base_warnings)
+    card = audit_merge_card_content(card, cdn_card)
+    market_data = audit_market_data(nm_id, subject_id, period, base_warnings)
   with connect_db() as db:
     rows = db.execute(
       """
@@ -2619,9 +2662,22 @@ def refresh_card_competitors(portal_id, card_key, user):
       """,
       (numeric_portal_id, card_key),
     ).fetchall()
+  rows = prune_card_competitor_rows(numeric_portal_id, card_key, rows)
+  with connect_db() as db:
     for row in rows:
       previous_snapshot = safe_json_object(row["snapshot_json"])
-      current_snapshot = competitor_snapshot_from_sources(row["competitor_nm_id"])
+      if nm_id:
+        row_warnings = list(base_warnings)
+        candidate = audit_manual_competitor_candidate(row["competitor_nm_id"], period, row_warnings)
+        score, reasons = audit_competitor_similarity(card, market_data, candidate)
+        candidate["similarityScore"] = score
+        candidate["similarityReasons"] = reasons
+        candidate["whyRelevant"] = row["note"] or f"Добавлен специалистом; проверка схожести: {', '.join(reasons[:3]) or 'данные сверены через MPStats'}."
+        current_snapshot = competitor_snapshot_from_candidate(candidate, card, market_data)
+        current_snapshot["warnings"] = audit_public_warnings([*current_snapshot.get("warnings", []), *row_warnings])[:4]
+      else:
+        current_snapshot = competitor_snapshot_from_sources(row["competitor_nm_id"])
+        current_snapshot["source"] = "manual"
       has_current_data = bool(current_snapshot.get("title") or current_snapshot.get("price") or current_snapshot.get("discountedPrice"))
       if previous_snapshot and not has_current_data:
         current_snapshot = {
@@ -2683,10 +2739,10 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
     warnings,
     manual_competitors,
     period=period,
-    manual_limit=5,
+    manual_limit=CARD_COMPETITOR_LIMIT,
   )
   if not competitors:
-    warnings.append("ТОП конкурентов не подобран: MPStats не вернул коммерчески похожие карточки.")
+    warnings.append(f"ТОП конкурентов пуст: добавьте до {CARD_COMPETITOR_LIMIT} конкурентов вручную.")
     return {
       "competitors": list_card_competitors(numeric_portal_id, card_key, user),
       "selection": selection,
@@ -2696,21 +2752,23 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
   with connect_db() as db:
     existing_rows = db.execute(
       """
-      SELECT competitor_nm_id, snapshot_json
+      SELECT *
       FROM card_competitors
       WHERE portal_id = ? AND card_key = ?
       """,
       (numeric_portal_id, card_key),
     ).fetchall()
+  existing_rows = prune_card_competitor_rows(numeric_portal_id, card_key, existing_rows)
+  with connect_db() as db:
     previous_by_id = {row["competitor_nm_id"]: safe_json_object(row["snapshot_json"]) for row in existing_rows}
-    selected_ids = {parse_competitor_nm_id(item.get("nmId") or item.get("nmID")) for item in competitors[:5]}
+    selected_ids = {parse_competitor_nm_id(item.get("nmId") or item.get("nmID")) for item in competitors[:CARD_COMPETITOR_LIMIT]}
     for row in existing_rows:
       if row["competitor_nm_id"] not in selected_ids:
         db.execute(
           "DELETE FROM card_competitors WHERE portal_id = ? AND card_key = ? AND competitor_nm_id = ?",
           (numeric_portal_id, card_key, row["competitor_nm_id"]),
         )
-    for index, item in enumerate(competitors[:5]):
+    for index, item in enumerate(competitors[:CARD_COMPETITOR_LIMIT]):
       competitor_nm_id = parse_competitor_nm_id(item.get("nmId") or item.get("nmID"))
       if not competitor_nm_id:
         continue
@@ -2718,7 +2776,7 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
       snapshot["warnings"] = audit_public_warnings([*snapshot.get("warnings", []), *warnings])[:4]
       previous_snapshot = previous_by_id.get(competitor_nm_id, {})
       changes = competitor_snapshot_changes(previous_snapshot, snapshot)
-      note = audit_str(item.get("whyRelevant") or "; ".join(item.get("similarityReasons") or []) or "Подобран автоматически по MPStats.", 500)
+      note = audit_str(item.get("whyRelevant") or "; ".join(item.get("similarityReasons") or []) or "Добавлен специалистом.", 500)
       db.execute(
         """
         INSERT INTO card_competitors (
@@ -4768,7 +4826,8 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
     "manualRejected": [],
     "autoSelected": [],
     "finalCompetitors": [],
-    "method": "manual-priority-plus-mpstats-commercial-similarity-v1",
+    "autoSkippedReason": "Автодобор отключен: используются только конкуренты, добавленные специалистом.",
+    "method": "manual-only-specialist-v1",
   }
   seen = {str(nm_id)}
   period = period if isinstance(period, dict) else audit_period_default()
@@ -4789,57 +4848,16 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
     score, reasons = audit_competitor_similarity(card, market_data, candidate)
     candidate["similarityScore"] = score
     candidate["similarityReasons"] = reasons
-    if score < 40:
-      conflicts = [item for item in reasons if item.startswith("друг") or item.startswith("сильно")]
-      reason = (
-        f"Низкая коммерческая схожесть: {', '.join(conflicts[:3])}."
-        if conflicts
-        else "Низкая коммерческая схожесть с анализируемой карточкой."
-      )
-      selection["manualRejected"].append(audit_competitor_selection_item(candidate, "manual", "rejected", reason, reasons))
-      warnings.append(f"Конкурент WB {competitor_nm_id} не включен в аудит: {reason}")
-      continue
-    candidate["whyRelevant"] = f"Добавлен вручную для аудита; проверка схожести: {', '.join(reasons[:3]) or 'достаточно похож на товар'}."
+    conflicts = [item for item in reasons if item.startswith("друг") or item.startswith("сильно")]
+    if score < 40 and conflicts:
+      candidate["whyRelevant"] = f"Добавлен специалистом; есть риск нерелевантности: {', '.join(conflicts[:3])}."
+    else:
+      candidate["whyRelevant"] = f"Добавлен специалистом; проверка схожести: {', '.join(reasons[:3]) or 'данные сверены через MPStats'}."
     seen.add(competitor_nm_id)
     selection["manualAccepted"].append(audit_competitor_selection_item(candidate, "manual", "accepted", candidate["whyRelevant"], reasons))
     competitors.append(candidate)
-    if len(competitors) >= 5:
+    if len(competitors) >= manual_limit:
       break
-
-  auto_candidates = []
-  manual_set_complete = len(selection["manualRequested"]) >= manual_limit
-  if manual_set_complete:
-    selection["autoSkippedReason"] = f"Пользователь указал {manual_limit} конкурентов, поэтому автодобор MPStats не выполнялся."
-  else:
-    for item in market_data.get("nicheItems", []):
-      if str(item.get("nmId")) in seen:
-        continue
-      candidate = {
-        **item,
-        "subjectName": item.get("subjectName") or card.get("subjectName") or "",
-        "subjectPath": market_data.get("subjectPath"),
-        "selectionSource": "mpstats",
-        "source": "mpstats",
-      }
-      score, reasons = audit_competitor_similarity(card, market_data, candidate)
-      candidate["similarityScore"] = score
-      candidate["similarityReasons"] = reasons
-      revenue = audit_number(candidate.get("revenue"), 0) or 0
-      auto_candidates.append((score, revenue, candidate))
-    auto_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-
-    for _, _, item in auto_candidates:
-      if len(competitors) >= 5:
-        break
-      seen.add(str(item.get("nmId")))
-      item["whyRelevant"] = (
-        "Добран автоматически из MPStats по нише: "
-        f"{', '.join((item.get('similarityReasons') or [])[:3]) or 'коммерчески похожий товар'}."
-      )
-      competitors.append(item)
-      selection["autoSelected"].append(
-        audit_competitor_selection_item(item, "mpstats", "selected", item["whyRelevant"], item.get("similarityReasons"))
-      )
 
   for competitor in competitors:
     if not competitor.get("descriptionLength") or not competitor.get("characteristics"):
@@ -4847,17 +4865,15 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
       cdn_card = audit_fetch_wb_cdn_card(competitor.get("nmId"), cdn_warnings)
       competitor["descriptionLength"] = len(audit_str(cdn_card.get("description") if isinstance(cdn_card, dict) else ""))
       competitor["characteristics"] = audit_card_characteristics(audit_merge_card_content({}, cdn_card))
-  if not competitors and market_data.get("keywords") and not market_data.get("nichePathMissing"):
-    warnings.append("Не удалось выбрать конкурентов из MPStats subject/items")
   selection["finalCompetitors"] = [
     audit_competitor_selection_item(
       item,
-      item.get("selectionSource") or item.get("source") or "mpstats",
+      item.get("selectionSource") or item.get("source") or "manual",
       "selected",
       item.get("whyRelevant") or "",
       item.get("similarityReasons"),
     )
-    for item in competitors[:5]
+    for item in competitors[:manual_limit]
   ]
   selection["summary"] = {
     "requestedManual": len(selection["manualRequested"]),
@@ -5213,15 +5229,15 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
     confidence = 0.9
 
   competitors_result = []
-  for item in competitors[:5]:
-    why = item.get("whyRelevant") or f"Выбран из топа ниши по выручке: {audit_format_count(item.get('revenue'))} ₽ за период."
+  for item in competitors[:CARD_COMPETITOR_LIMIT]:
+    why = item.get("whyRelevant") or "Добавлен специалистом для ручного конкурентного сравнения."
     if item.get("sales") and "Продажи" not in why:
       why += f" Продажи: {audit_format_count(item.get('sales'))}."
     competitors_result.append({
       "nmId": item.get("nmId"),
       "url": f"https://www.wildberries.ru/catalog/{item.get('nmId')}/detail.aspx",
       "position": item.get("position"),
-      "source": item.get("selectionSource") or item.get("source") or "mpstats",
+      "source": item.get("selectionSource") or item.get("source") or "manual",
       "similarityScore": item.get("similarityScore"),
       "whyRelevant": why,
     })
