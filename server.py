@@ -4521,6 +4521,24 @@ def audit_fetch_wb_cdn_card(nm_id, warnings):
   return {}
 
 
+def audit_wb_cdn_characteristic_options(cdn_card):
+  if not isinstance(cdn_card, dict):
+    return []
+  options = cdn_card.get("options")
+  if isinstance(options, list) and options:
+    return [item for item in options if isinstance(item, dict)]
+  flattened = []
+  grouped_options = cdn_card.get("grouped_options")
+  if isinstance(grouped_options, list):
+    for group in grouped_options:
+      if not isinstance(group, dict):
+        continue
+      group_options = group.get("options")
+      if isinstance(group_options, list):
+        flattened.extend(item for item in group_options if isinstance(item, dict))
+  return flattened
+
+
 def audit_merge_card_content(card, cdn_card):
   if not isinstance(card, dict):
     card = {}
@@ -4531,15 +4549,14 @@ def audit_merge_card_content(card, cdn_card):
   description = audit_str(card.get("description") or cdn_card.get("description") or "", 7000)
   characteristics = card.get("characteristics") if isinstance(card.get("characteristics"), list) else []
   if not characteristics:
-    options = cdn_card.get("grouped_options") or cdn_card.get("options") or []
-    if isinstance(options, list):
-      characteristics = [
-        {
-          "name": item.get("name") or item.get("group_name") or item.get("charcName"),
-          "value": item.get("value") or item.get("values"),
-        }
-        for item in options if isinstance(item, dict)
-      ]
+    characteristics = [
+      {
+        "name": item.get("name") or item.get("charcName"),
+        "value": item.get("value") or item.get("values") or item.get("variable_values"),
+      }
+      for item in audit_wb_cdn_characteristic_options(cdn_card)
+      if item.get("name") or item.get("charcName")
+    ]
   return {
     **card,
     "title": title,
