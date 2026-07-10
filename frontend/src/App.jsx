@@ -2515,7 +2515,8 @@ function buildStocksExportSheets(card, draftStocks = {}) {
 }
 
 function clientReportDateLabel(date = new Date()) {
-  return date.toLocaleDateString("ru-RU");
+  const parsed = date instanceof Date ? date : new Date(date);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString("ru-RU");
 }
 
 function clientReportPeriodLabel(date = new Date()) {
@@ -2523,6 +2524,127 @@ function clientReportPeriodLabel(date = new Date()) {
   const start = new Date(date);
   start.setDate(start.getDate() - 6);
   return `${start.toLocaleDateString("ru-RU")} - ${end.toLocaleDateString("ru-RU")}`;
+}
+
+function reportNumber(value, digits = null) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+  return digits === null ? number : Number(number.toFixed(digits));
+}
+
+function reportPercent(value) {
+  return reportNumber(value, 2);
+}
+
+function reportPercentDynamic(current, previous) {
+  const currentNumber = Number(current);
+  const previousNumber = Number(previous);
+  if (!Number.isFinite(currentNumber) || !Number.isFinite(previousNumber) || previousNumber === 0) {
+    return "";
+  }
+  return Number((((currentNumber - previousNumber) / previousNumber) * 100).toFixed(1));
+}
+
+function reportPrice(value) {
+  return reportNumber(value, 2);
+}
+
+function reportMetric(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (value !== null && value !== undefined && value !== "") {
+      return value;
+    }
+  }
+  return "";
+}
+
+function reportReadyTime(value) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const parts = [];
+  if (Number(value.days || 0)) parts.push(`${value.days} д`);
+  if (Number(value.hours || 0)) parts.push(`${value.hours} ч`);
+  if (Number(value.mins || 0)) parts.push(`${value.mins} мин`);
+  return parts.join(" ") || "";
+}
+
+function reportPeriodRange(period, fallbackDate = new Date()) {
+  if (period?.rangeLabel) {
+    return period.rangeLabel;
+  }
+  return clientReportPeriodLabel(fallbackDate);
+}
+
+function reportCardKey(card) {
+  return String(card?.nmID || card?.nmId || card?.vendorCode || "").trim();
+}
+
+function reportNmKey(card) {
+  return String(card?.nmID || card?.nmId || "").trim();
+}
+
+function reportAnalyticsEntry(reportData, period, card) {
+  const nmKey = reportNmKey(card);
+  if (!nmKey || !period?.label) {
+    return {};
+  }
+  return reportData?.analyticsByPeriod?.[period.label]?.[nmKey] || {};
+}
+
+function reportOrdersEntry(reportData, period, card) {
+  const nmKey = reportNmKey(card);
+  if (!nmKey || !period?.label) {
+    return {};
+  }
+  return reportData?.ordersByPeriod?.[period.label]?.[nmKey] || {};
+}
+
+function reportSalesEntry(reportData, period, card) {
+  const nmKey = reportNmKey(card);
+  if (!nmKey || !period?.label) {
+    return {};
+  }
+  return reportData?.salesByPeriod?.[period.label]?.[nmKey] || {};
+}
+
+function reportPreviousPeriod(periods, period) {
+  const index = periods.findIndex((item) => item.label === period?.label);
+  return index >= 0 ? periods[index + 1] : null;
+}
+
+function reportViewsForCard(reportData, period, card) {
+  const analytics = reportAnalyticsEntry(reportData, period, card);
+  const selected = analytics.selected || {};
+  const direct = reportMetric(selected, ["viewCount", "views", "impressions", "showCount"]);
+  if (direct !== "") {
+    return direct;
+  }
+  const nmKey = reportNmKey(card);
+  const ads = reportData?.ads?.stats || [];
+  let views = 0;
+  for (const advert of ads) {
+    for (const day of advert?.days || []) {
+      const dayText = String(day?.date || "").slice(0, 10);
+      if (period?.start && period?.end && (dayText < period.start || dayText > period.end)) {
+        continue;
+      }
+      for (const app of day?.apps || []) {
+        for (const nm of app?.nms || []) {
+          if (String(nm?.nmId || "") === nmKey) {
+            views += Number(nm.views || 0);
+          }
+        }
+      }
+    }
+  }
+  return views || "";
 }
 
 function cardReportPrice(card) {
@@ -2558,7 +2680,23 @@ function cardReportIssueText(card) {
   return "без замечаний";
 }
 
-function clientReportAvailability(cards, portal) {
+function reportStatusLabel(status) {
+  if (status === "ok") return "есть";
+  if (status === "partial") return "частично";
+  if (status === "empty") return "нет данных";
+  if (status === "skipped") return "пропущено";
+  if (status === "error") return "ошибка";
+  return status || "неизвестно";
+}
+
+function clientReportAvailability(cards, portal, reportData = null) {
+  if (Array.isArray(reportData?.sources) && reportData.sources.length) {
+    return reportData.sources.map((source) => [
+      source.title || source.key || "Источник",
+      reportStatusLabel(source.status),
+      [source.source, source.message, source.records !== undefined ? `строк: ${source.records}` : ""].filter(Boolean).join(" · "),
+    ]);
+  }
   const hasCards = cards.length > 0;
   const hasPrices = cards.some((card) => cardReportPrice(card) !== "");
   const hasStocks = cards.some((card) => cardReportStock(card) !== "");
@@ -2575,13 +2713,50 @@ function clientReportAvailability(cards, portal) {
   ];
 }
 
-function buildClientWbReportSheets(portal, cards) {
-  const generatedAt = new Date();
-  const portalName = portalDisplayName(portal);
-  const sourceLabel = portal.apiConnected ? "WB API" : (portal.syncStatus === "mpstats-loaded" ? "MPStats / публичная витрина WB" : "ручной кабинет");
-  const reportRows = [
-    ["Проверка на (дата):", clientReportDateLabel(generatedAt)],
-    ["За период:", clientReportPeriodLabel(generatedAt)],
+function reportComment(reportData, period, card) {
+  const analytics = reportAnalyticsEntry(reportData, period, card);
+  const comments = [];
+  if (!analytics.selected) {
+    comments.push("воронка WB не получена за период");
+  }
+  if (reportViewsForCard(reportData, period, card) === "") {
+    comments.push("показы не вернул sales funnel WB");
+  }
+  if (!cardReportPrice(card)) {
+    comments.push("нет текущей цены");
+  }
+  return comments.join("; ") || "данные собраны автоматически";
+}
+
+function reportOrdersCurrent(reportData, period, card) {
+  const selected = reportAnalyticsEntry(reportData, period, card).selected || {};
+  const orders = reportOrdersEntry(reportData, period, card);
+  return firstDefined(selected.orderCount, orders.ordersCount);
+}
+
+function reportOrdersPast(reportData, periods, period, card) {
+  const entry = reportAnalyticsEntry(reportData, period, card);
+  if (entry.past?.orderCount !== undefined) {
+    return entry.past.orderCount;
+  }
+  const previous = reportPreviousPeriod(periods, period);
+  if (!previous) {
+    return "";
+  }
+  return reportOrdersCurrent(reportData, previous, card);
+}
+
+function reportOrderSum(reportData, period, card) {
+  const selected = reportAnalyticsEntry(reportData, period, card).selected || {};
+  const orders = reportOrdersEntry(reportData, period, card);
+  return firstDefined(selected.orderSum, orders.ordersSum);
+}
+
+function reportWeeklyRows(reportData, portal, cards, period, periods) {
+  return [
+    ["Проверка на (дата):", period?.label || clientReportDateLabel(reportData?.generatedAt || new Date())],
+    ["За период:", reportPeriodRange(period, reportData?.generatedAt || new Date())],
+    ["Кабинет:", portalDisplayName(portal)],
     [],
     [
       "Товар",
@@ -2597,32 +2772,159 @@ function buildClientWbReportSheets(portal, cards) {
       "Остаток на складах, шт",
       "Дней до конца остатка",
       "Локальные заказы %",
-      "Кол-во заказов",
+      "Кол-во заказов (неделя прошлая)",
+      "Кол-во заказов (неделя текущая)",
+      "Динамика заказов",
       "Сумма заказов",
+      "Среднее количество заказов в день, шт",
+      "Выкупы",
+      "Отмены",
       "Комментарий",
     ],
-    ...cards.map((card) => [
-      card?.subjectName || card?.title || "",
-      cardReportColor(card),
-      card?.vendorCode || "",
-      card?.nmID || "",
-      cardReportPrice(card),
-      "",
-      "",
-      "",
-      "",
-      "",
-      cardReportStock(card),
-      "",
-      "",
-      "",
-      "",
-      "Контент, цена и остатки из текущего снимка. Воронка продаж подключается отдельным отчетом WB.",
-    ]),
+    ...cards.map((card) => {
+      const analytics = reportAnalyticsEntry(reportData, period, card);
+      const selected = analytics.selected || {};
+      const comparison = analytics.comparison || {};
+      const orders = reportOrdersEntry(reportData, period, card);
+      const currentOrders = reportOrdersCurrent(reportData, period, card);
+      const pastOrders = reportOrdersPast(reportData, periods, period, card);
+      const views = reportViewsForCard(reportData, period, card);
+      const openCount = reportMetric(selected, ["openCount", "openCardCount", "clickCount"]);
+      const ctr = views && openCount ? reportPercent((Number(openCount) / Number(views)) * 100) : reportPercent(reportMetric(selected, ["ctr", "ctrPercent"]));
+      const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / 7).toFixed(2)) : "");
+      const stock = cardReportStock(card);
+      const daysToStockEnd = stock && avgOrdersPerDay ? reportNumber(Number(stock) / Number(avgOrdersPerDay), 1) : "";
+      return [
+        card?.subjectName || card?.title || "",
+        cardReportColor(card),
+        card?.vendorCode || "",
+        card?.nmID || "",
+        reportPrice(cardReportPrice(card)),
+        reportNumber(views),
+        reportNumber(openCount),
+        ctr,
+        reportNumber(firstDefined(selected.cartCount, selected.addToCartCount)),
+        reportReadyTime(selected.timeToReady),
+        reportNumber(stock),
+        daysToStockEnd,
+        reportPercent(selected.localizationPercent),
+        reportNumber(pastOrders),
+        reportNumber(currentOrders),
+        firstDefined(reportPercent(comparison.orderCountDynamic), reportPercentDynamic(currentOrders, pastOrders)),
+        reportPrice(reportOrderSum(reportData, period, card)),
+        reportNumber(avgOrdersPerDay, 2),
+        reportNumber(selected.buyoutCount),
+        reportNumber(firstDefined(selected.cancelCount, orders.canceledCount)),
+        reportComment(reportData, period, card),
+      ];
+    }),
   ];
+}
+
+function reportCharacteristicRows(cards) {
+  const rows = [["Артикул", "Артикул WB", "Название", "Характеристика", "Значение"]];
+  for (const card of cards) {
+    const characteristics = rawCharacteristicItems(card);
+    if (!characteristics.length) {
+      rows.push([card?.vendorCode || "", card?.nmID || "", card?.title || "", "нет данных", ""]);
+      continue;
+    }
+    for (const item of characteristics) {
+      rows.push([
+        card?.vendorCode || "",
+        card?.nmID || "",
+        card?.title || "",
+        item?.name || item?.charcName || "",
+        rawCharacteristicValueTokens(item?.value ?? item?.values ?? item).join(", "),
+      ]);
+    }
+  }
+  return rows;
+}
+
+function reportPeriodMetricRows(reportData, cards, periods, metricName, dataKey) {
+  const rows = [["Период", "Артикул", "Артикул WB", "Название", ...Object.keys(metricName)]];
+  for (const period of periods) {
+    for (const card of cards) {
+      const entry = reportData?.[dataKey]?.[period.label]?.[reportNmKey(card)] || {};
+      rows.push([
+        period.rangeLabel || period.label,
+        card?.vendorCode || "",
+        card?.nmID || "",
+        card?.title || "",
+        ...Object.values(metricName).map((key) => reportNumber(entry[key], String(key).includes("Sum") || key === "forPay" ? 2 : null)),
+      ]);
+    }
+  }
+  return rows;
+}
+
+function reportAdRows(reportData) {
+  const rows = [["Кампания", "Дата", "Артикул WB", "Название", "Показы", "Клики", "CTR", "Корзина", "Заказы", "ШК", "Расход", "Сумма заказов", "CPC", "CR"]];
+  for (const advert of reportData?.ads?.stats || []) {
+    for (const day of advert?.days || []) {
+      for (const app of day?.apps || []) {
+        for (const nm of app?.nms || []) {
+          rows.push([
+            advert?.advertId || "",
+            String(day?.date || "").slice(0, 10),
+            nm?.nmId || "",
+            nm?.name || "",
+            reportNumber(nm?.views),
+            reportNumber(nm?.clicks),
+            reportPercent(nm?.ctr),
+            reportNumber(nm?.atbs),
+            reportNumber(nm?.orders),
+            reportNumber(nm?.shks),
+            reportPrice(nm?.sum),
+            reportPrice(nm?.sum_price),
+            reportPrice(nm?.cpc),
+            reportPercent(nm?.cr),
+          ]);
+        }
+      }
+    }
+  }
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
+function reportPromotionRows(reportData) {
+  const rows = [["ID акции", "Название", "Тип", "Начало", "Окончание"]];
+  for (const item of reportData?.promotions || []) {
+    rows.push([
+      item?.id || "",
+      item?.name || "",
+      item?.type || "",
+      item?.startDateTime || "",
+      item?.endDateTime || "",
+    ]);
+  }
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", ""]);
+  }
+  return rows;
+}
+
+function buildClientWbReportSheets(portal, cards, reportData = null) {
+  const generatedAt = reportData?.generatedAt ? new Date(reportData.generatedAt) : new Date();
+  const portalName = portalDisplayName(portal);
+  const sourceLabel = portal.apiConnected ? "WB API" : (portal.syncStatus === "mpstats-loaded" ? "MPStats / публичная витрина WB" : "ручной кабинет");
+  const reportCards = Array.isArray(reportData?.cards) && reportData.cards.length ? reportData.cards : cards;
+  const periods = Array.isArray(reportData?.periods) && reportData.periods.length
+    ? reportData.periods
+    : [{ label: clientReportDateLabel(generatedAt), rangeLabel: clientReportPeriodLabel(generatedAt) }];
+  const weeklySheets = periods.map((period) => ({
+    name: period.label || "Период",
+    freezeRows: 5,
+    widths: [22, 16, 20, 18, 16, 14, 18, 10, 18, 20, 18, 18, 18, 22, 22, 18, 16, 24, 12, 12, 52],
+    rows: reportWeeklyRows(reportData || {}, portal, reportCards, period, periods),
+  }));
   const contentRows = [
     ["Артикул", "Артикул WB", "Название", "Предмет", "Бренд", "Описание, знаков", "Характеристик", "Фото", "Замечания"],
-    ...cards.map((card) => [
+    ...reportCards.map((card) => [
       card?.vendorCode || "",
       card?.nmID || "",
       card?.title || "",
@@ -2636,7 +2938,7 @@ function buildClientWbReportSheets(portal, cards) {
   ];
   const commerceRows = [
     ["Артикул", "Артикул WB", "Цена до скидки", "Цена со скидкой", "Скидка", "Остаток всего", "Остаток WB", "Остаток продавца", "Баркод"],
-    ...cards.map((card) => [
+    ...reportCards.map((card) => [
       card?.vendorCode || "",
       card?.nmID || "",
       firstDefined(card?.price, card?.rawFields?.price),
@@ -2650,7 +2952,7 @@ function buildClientWbReportSheets(portal, cards) {
   ];
   const availabilityRows = [
     ["Блок отчета", "Статус", "Источник / комментарий"],
-    ...clientReportAvailability(cards, portal),
+    ...clientReportAvailability(reportCards, portal, reportData),
   ];
   const summaryRows = [
     ["Параметр", "Значение"],
@@ -2658,16 +2960,22 @@ function buildClientWbReportSheets(portal, cards) {
     ["Маркетплейс", portal.marketplace || "Wildberries"],
     ["Источник", sourceLabel],
     ["Дата формирования", generatedAt.toLocaleString("ru-RU")],
-    ["Период", clientReportPeriodLabel(generatedAt)],
-    ["Карточек в отчете", cards.length],
-    ["С замечаниями", cards.filter((card) => cardProblemReasons(card).length).length],
+    ["Периодов в отчете", periods.length],
+    ["Карточек в отчете", reportCards.length],
+    ["С замечаниями", reportCards.filter((card) => cardProblemReasons(card).length).length],
+    ["Вкладки с периодами", periods.map((period) => period.label).join(", ")],
   ];
   return [
     { name: "Свод", freezeRows: 1, widths: [28, 72], rows: summaryRows },
-    { name: "Клиентский срез", freezeRows: 4, widths: [22, 16, 20, 18, 16, 14, 18, 10, 18, 20, 18, 18, 18, 16, 16, 64], rows: reportRows },
+    ...weeklySheets,
     { name: "Контент", freezeRows: 1, widths: [20, 18, 52, 28, 18, 18, 16, 12, 42], rows: contentRows },
+    { name: "Характеристики", freezeRows: 1, widths: [20, 18, 48, 28, 72], rows: reportCharacteristicRows(reportCards) },
     { name: "Цены и остатки", freezeRows: 1, widths: [20, 18, 16, 16, 12, 16, 16, 18, 24], rows: commerceRows },
-    { name: "Доступность данных", freezeRows: 1, widths: [28, 18, 72], rows: availabilityRows },
+    { name: "Заказы WB", freezeRows: 1, widths: [24, 20, 18, 52, 16, 16, 16, 16], rows: reportPeriodMetricRows(reportData || {}, reportCards, periods, { "Заказы": "ordersCount", "Сумма заказов": "ordersSum", "Отмены": "canceledCount", "Сумма отмен": "canceledSum" }, "ordersByPeriod") },
+    { name: "Продажи WB", freezeRows: 1, widths: [24, 20, 18, 52, 16, 16, 16, 16, 16], rows: reportPeriodMetricRows(reportData || {}, reportCards, periods, { "Продажи": "salesCount", "Сумма продаж": "salesSum", "Возвраты": "returnsCount", "Сумма возвратов": "returnsSum", "К перечислению": "forPay" }, "salesByPeriod") },
+    { name: "Реклама", freezeRows: 1, widths: [14, 14, 18, 42, 12, 12, 12, 12, 12, 12, 14, 16, 12, 12], rows: reportAdRows(reportData || {}) },
+    { name: "Акции", freezeRows: 1, widths: [16, 52, 18, 24, 24], rows: reportPromotionRows(reportData || {}) },
+    { name: "Доступность данных", freezeRows: 1, widths: [32, 18, 96], rows: availabilityRows },
   ];
 }
 
@@ -3411,6 +3719,7 @@ export default function App() {
               setPortalModalOpen(true);
             }}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
+            onNotice={setNotice}
           />
         ) : null}
 
@@ -3717,7 +4026,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onNotice }) {
   const owner = findUser(portal.ownerLogin);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
@@ -3732,6 +4041,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
+  const [reportStatus, setReportStatus] = useState("idle");
 
   useEffect(() => {
     if (!teamEditing) {
@@ -3796,12 +4106,26 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setApprovalWorkflowStatus("loaded");
   }
 
-  function downloadClientReport() {
+  async function downloadClientReport() {
     const datePart = new Date().toISOString().slice(0, 10);
-    downloadXlsx(
-      `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
-      buildClientWbReportSheets(portal, cards),
-    );
+    setReportStatus("loading");
+    try {
+      const reportPayload = portal.apiConnected && !portal.isDemo
+        ? await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-client-report?weeks=8`)
+        : { report: null };
+      downloadXlsx(
+        `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
+        buildClientWbReportSheets(portal, cards, reportPayload.report || null),
+      );
+      setReportStatus("done");
+    } catch (error) {
+      downloadXlsx(
+        `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
+        buildClientWbReportSheets(portal, cards),
+      );
+      setReportStatus("error");
+      onNotice?.("WB не отдал часть данных отчета. Скачал файл по текущему снимку карточек; попробуйте повторить позже.");
+    }
   }
 
   return (
@@ -3956,6 +4280,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               portal={portal}
               cards={cards}
               onDownloadClientReport={downloadClientReport}
+              reportStatus={reportStatus}
             />
 
             <section className="workspace-strip">
@@ -3981,20 +4306,21 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   );
 }
 
-function ReportsPanel({ portal, cards, onDownloadClientReport }) {
+function ReportsPanel({ portal, cards, onDownloadClientReport, reportStatus = "idle" }) {
   const availability = clientReportAvailability(cards, portal);
   const availableCount = availability.filter((row) => row[1] === "есть").length;
   const partialCount = availability.filter((row) => row[1] === "частично").length;
   const unavailableCount = availability.filter((row) => row[1] === "не подключено" || row[1] === "нет данных").length;
+  const isLoading = reportStatus === "loading";
   return (
     <section className="workspace-strip reports-strip">
       <div className="strip-head">
         <div>
           <h2>Отчеты</h2>
-          <p>Клиентский XLSX по текущему снимку кабинета WB.</p>
+          <p>Клиентский XLSX по недельным периодам, текущему контенту, ценам, остаткам и доступным WB API-метрикам.</p>
         </div>
-        <button className="btn primary" type="button" onClick={onDownloadClientReport} disabled={!cards.length}>
-          <Download size={17} />Скачать отчет
+        <button className="btn primary" type="button" onClick={onDownloadClientReport} disabled={!cards.length || isLoading}>
+          <Download size={17} />{isLoading ? "Собираем отчет" : "Скачать отчет"}
         </button>
       </div>
       <div className="summary-grid">

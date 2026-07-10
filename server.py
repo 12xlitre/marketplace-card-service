@@ -65,6 +65,9 @@ WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api
 WB_PRICES_API_BASE = os.environ.get("WB_PRICES_API_BASE", "https://discounts-prices-api.wildberries.ru")
 WB_MARKETPLACE_API_BASE = os.environ.get("WB_MARKETPLACE_API_BASE", "https://marketplace-api.wildberries.ru")
 WB_ANALYTICS_API_BASE = os.environ.get("WB_ANALYTICS_API_BASE", "https://seller-analytics-api.wildberries.ru")
+WB_STATISTICS_API_BASE = os.environ.get("WB_STATISTICS_API_BASE", "https://statistics-api.wildberries.ru")
+WB_ADVERT_API_BASE = os.environ.get("WB_ADVERT_API_BASE", "https://advert-api.wildberries.ru")
+WB_PROMO_CALENDAR_API_BASE = os.environ.get("WB_PROMO_CALENDAR_API_BASE", "https://dp-calendar-api.wildberries.ru")
 WB_CONNECT_TIMEOUT = float(os.environ.get("WB_CONNECT_TIMEOUT", "5"))
 WB_READ_TIMEOUT = float(os.environ.get("WB_READ_TIMEOUT", "20"))
 WB_PUBLIC_BASKET_CACHE = {}
@@ -78,6 +81,8 @@ CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS = int(os.environ.get("CARD_COMPETITO
 CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH", "12"))
 CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_ENABLED", "1") != "0"
 MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_MAX_CARDS", "100"))
+WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
+WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
@@ -8389,6 +8394,478 @@ def fetch_wb_cards(token, max_cards=100):
   }
 
 
+def wb_report_int(value, default=0):
+  try:
+    if value in (None, ""):
+      return default
+    return int(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def wb_report_number(value, default=0.0):
+  try:
+    if value in (None, ""):
+      return default
+    return float(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def wb_report_date(value):
+  parsed = parse_iso_datetime(value)
+  if parsed:
+    return parsed.date()
+  text = str(value or "").strip()
+  if len(text) >= 10:
+    try:
+      return dt.date.fromisoformat(text[:10])
+    except ValueError:
+      return None
+  return None
+
+
+def wb_report_date_label(day):
+  return day.strftime("%d.%m.%y")
+
+
+def wb_report_iso(day):
+  return day.isoformat()
+
+
+def wb_report_periods(weeks=None):
+  try:
+    weeks = int(weeks or WB_CLIENT_REPORT_WEEKS)
+  except (TypeError, ValueError):
+    weeks = WB_CLIENT_REPORT_WEEKS
+  weeks = max(1, min(weeks, 12))
+  end_day = utc_now().date() - dt.timedelta(days=1)
+  periods = []
+  for index in range(weeks):
+    period_end = end_day - dt.timedelta(days=index * 7)
+    period_start = period_end - dt.timedelta(days=6)
+    periods.append({
+      "index": index,
+      "label": wb_report_date_label(period_end),
+      "start": wb_report_iso(period_start),
+      "end": wb_report_iso(period_end),
+      "rangeLabel": f"{period_start.strftime('%d.%m.%Y')} - {period_end.strftime('%d.%m.%Y')}",
+    })
+  return periods
+
+
+def wb_report_previous_period(period):
+  period_start = dt.date.fromisoformat(period["start"])
+  past_end = period_start - dt.timedelta(days=1)
+  past_start = past_end - dt.timedelta(days=6)
+  return {
+    "label": wb_report_date_label(past_end),
+    "start": wb_report_iso(past_start),
+    "end": wb_report_iso(past_end),
+    "rangeLabel": f"{past_start.strftime('%d.%m.%Y')} - {past_end.strftime('%d.%m.%Y')}",
+  }
+
+
+def wb_report_source(key, title, status, source, message="", records=None):
+  payload = {
+    "key": key,
+    "title": title,
+    "status": status,
+    "source": source,
+    "message": message,
+  }
+  if records is not None:
+    payload["records"] = records
+  return payload
+
+
+def wb_report_source_error(key, title, source, exc):
+  status = exc.status if isinstance(getattr(exc, "status", None), int) else HTTPStatus.BAD_GATEWAY
+  return wb_report_source(
+    key,
+    title,
+    "error",
+    source,
+    f"WB API {int(status)}: {getattr(exc, 'message', str(exc))}",
+  )
+
+
+def wb_report_nm_id(value):
+  return wb_int(value.get("nmId") or value.get("nmID") or value.get("nm_id")) if isinstance(value, dict) else None
+
+
+def wb_report_period_for_day(day, periods):
+  if not day:
+    return None
+  for period in periods:
+    start = dt.date.fromisoformat(period["start"])
+    end = dt.date.fromisoformat(period["end"])
+    if start <= day <= end:
+      return period
+  return None
+
+
+def wb_report_empty_stat():
+  return {
+    "ordersCount": 0,
+    "ordersSum": 0.0,
+    "canceledCount": 0,
+    "canceledSum": 0.0,
+    "salesCount": 0,
+    "salesSum": 0.0,
+    "returnsCount": 0,
+    "returnsSum": 0.0,
+    "forPay": 0.0,
+  }
+
+
+def wb_report_stat_bucket(output, period_label, nm_id):
+  return output.setdefault(period_label, {}).setdefault(str(nm_id), wb_report_empty_stat())
+
+
+def wb_report_price_from_row(row, keys):
+  for key in keys:
+    value = row.get(key) if isinstance(row, dict) else None
+    number = wb_report_number(value, None)
+    if number is not None and number != 0:
+      return number
+  return 0.0
+
+
+def wb_report_aggregate_orders(rows, periods, nm_ids):
+  nm_set = {str(item) for item in wb_unique_ints(nm_ids)}
+  output = {}
+  matched = 0
+  for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+      continue
+    nm_id = wb_report_nm_id(row)
+    if nm_id is None or str(nm_id) not in nm_set:
+      continue
+    period = wb_report_period_for_day(wb_report_date(row.get("date")), periods)
+    if not period:
+      continue
+    matched += 1
+    bucket = wb_report_stat_bucket(output, period["label"], nm_id)
+    amount = wb_report_price_from_row(row, ("finishedPrice", "priceWithDisc", "totalPrice"))
+    if row.get("isCancel"):
+      bucket["canceledCount"] += 1
+      bucket["canceledSum"] += amount
+    else:
+      bucket["ordersCount"] += 1
+      bucket["ordersSum"] += amount
+  return output, matched
+
+
+def wb_report_aggregate_sales(rows, periods, nm_ids):
+  nm_set = {str(item) for item in wb_unique_ints(nm_ids)}
+  output = {}
+  matched = 0
+  for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+      continue
+    nm_id = wb_report_nm_id(row)
+    if nm_id is None or str(nm_id) not in nm_set:
+      continue
+    period = wb_report_period_for_day(wb_report_date(row.get("date")), periods)
+    if not period:
+      continue
+    matched += 1
+    bucket = wb_report_stat_bucket(output, period["label"], nm_id)
+    amount = wb_report_price_from_row(row, ("priceWithDisc", "finishedPrice", "totalPrice"))
+    for_pay = wb_report_number(row.get("forPay"), 0.0)
+    sale_id = str(row.get("saleID") or row.get("saleId") or "").upper()
+    if sale_id.startswith("R"):
+      bucket["returnsCount"] += 1
+      bucket["returnsSum"] += amount
+    else:
+      bucket["salesCount"] += 1
+      bucket["salesSum"] += amount
+      bucket["forPay"] += for_pay
+  return output, matched
+
+
+def fetch_wb_report_analytics(token, nm_ids, periods, sources):
+  analytics = {period["label"]: {} for period in periods}
+  nm_ids = wb_unique_ints(nm_ids)[:1000]
+  if not nm_ids:
+    sources.append(wb_report_source("analytics", "Воронка продаж", "skipped", "WB Analytics", "В кабинете нет nmID."))
+    return analytics
+
+  max_calls = max(0, min(int(WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS), 6))
+  calls = 0
+  for index in range(0, len(periods), 2):
+    if calls >= max_calls:
+      break
+    selected = periods[index]
+    past = periods[index + 1] if index + 1 < len(periods) else wb_report_previous_period(selected)
+    payload = {
+      "selectedPeriod": {"start": selected["start"], "end": selected["end"]},
+      "pastPeriod": {"start": past["start"], "end": past["end"]},
+      "nmIds": nm_ids,
+      "brandNames": [],
+      "subjectIds": [],
+      "tagIds": [],
+      "skipDeletedNm": False,
+      "orderBy": {"field": "openCard", "mode": "desc"},
+      "limit": min(1000, len(nm_ids)),
+      "offset": 0,
+    }
+    try:
+      response = wb_request_json(
+        token,
+        "/api/analytics/v3/sales-funnel/products",
+        payload,
+        locale=None,
+        base_url=WB_ANALYTICS_API_BASE,
+        attempts=1,
+      )
+    except WbApiError as exc:
+      sources.append(wb_report_source_error(
+        f"analytics-{selected['label']}",
+        f"Воронка продаж {selected['label']}",
+        "WB Analytics",
+        exc,
+      ))
+      if getattr(exc, "status", None) == 429:
+        break
+      calls += 1
+      continue
+
+    products = ((response.get("data") or {}).get("products") or []) if isinstance(response, dict) else []
+    for item in products:
+      if not isinstance(item, dict):
+        continue
+      product = item.get("product") if isinstance(item.get("product"), dict) else {}
+      statistic = item.get("statistic") if isinstance(item.get("statistic"), dict) else {}
+      nm_id = wb_report_nm_id(product)
+      if nm_id is None:
+        continue
+      selected_stats = statistic.get("selected") if isinstance(statistic.get("selected"), dict) else {}
+      past_stats = statistic.get("past") if isinstance(statistic.get("past"), dict) else {}
+      comparison = statistic.get("comparison") if isinstance(statistic.get("comparison"), dict) else {}
+      analytics.setdefault(selected["label"], {})[str(nm_id)] = {
+        "product": public_wb_value(product),
+        "selected": public_wb_value(selected_stats),
+        "past": public_wb_value(past_stats),
+        "comparison": public_wb_value(comparison),
+        "sourceRole": "selectedPeriod",
+      }
+      if index + 1 < len(periods):
+        analytics.setdefault(past["label"], {})[str(nm_id)] = {
+          "product": public_wb_value(product),
+          "selected": public_wb_value(past_stats),
+          "comparison": {},
+          "sourceRole": f"pastPeriod для {selected['label']}",
+        }
+    sources.append(wb_report_source(
+      f"analytics-{selected['label']}",
+      f"Воронка продаж {selected['label']} + {past['label']}",
+      "ok",
+      "WB Analytics",
+      "Показы, переходы, корзина, заказы, локальность и доставка.",
+      records=len(products),
+    ))
+    calls += 1
+
+  covered = sum(1 for period in periods if analytics.get(period["label"]))
+  if covered < len(periods):
+    sources.append(wb_report_source(
+      "analytics-limit",
+      "Воронка продаж по старым неделям",
+      "partial",
+      "WB Analytics",
+      f"Заполнено {covered} из {len(periods)} периодов. Остальные не запрошены из-за лимитов WB.",
+    ))
+  return analytics
+
+
+def fetch_wb_report_orders(token, periods, nm_ids, sources):
+  earliest = periods[-1]["start"]
+  path = f"/api/v1/supplier/orders?{urlencode({'dateFrom': earliest, 'flag': 0})}"
+  try:
+    rows = wb_get_json(token, path, locale=None, base_url=WB_STATISTICS_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("statistics-orders", "Заказы", "WB Statistics", exc))
+    return {}
+  rows = rows if isinstance(rows, list) else []
+  aggregated, matched = wb_report_aggregate_orders(rows, periods, nm_ids)
+  sources.append(wb_report_source(
+    "statistics-orders",
+    "Заказы",
+    "ok",
+    "WB Statistics / supplier/orders",
+    "Операционная выгрузка заказов, данные WB обновляет примерно раз в 30 минут.",
+    records=matched,
+  ))
+  return aggregated
+
+
+def fetch_wb_report_sales(token, periods, nm_ids, sources):
+  earliest = periods[-1]["start"]
+  path = f"/api/v1/supplier/sales?{urlencode({'dateFrom': earliest, 'flag': 0})}"
+  try:
+    rows = wb_get_json(token, path, locale=None, base_url=WB_STATISTICS_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("statistics-sales", "Продажи и возвраты", "WB Statistics", exc))
+    return {}
+  rows = rows if isinstance(rows, list) else []
+  aggregated, matched = wb_report_aggregate_sales(rows, periods, nm_ids)
+  sources.append(wb_report_source(
+    "statistics-sales",
+    "Продажи и возвраты",
+    "ok",
+    "WB Statistics / supplier/sales",
+    "Операционная выгрузка продаж и возвратов; финальные сверки лучше делать по финансовому отчету WB.",
+    records=matched,
+  ))
+  return aggregated
+
+
+def wb_report_advert_ids(count_payload):
+  advert_ids = []
+  for group in (count_payload.get("adverts") or []) if isinstance(count_payload, dict) else []:
+    if not isinstance(group, dict):
+      continue
+    status = wb_report_int(group.get("status"), 0)
+    if status not in {7, 9, 11}:
+      continue
+    for item in group.get("advert_list") or []:
+      advert_id = wb_int(item.get("advertId") if isinstance(item, dict) else None)
+      if advert_id is not None:
+        advert_ids.append(advert_id)
+  return wb_unique_ints(advert_ids)
+
+
+def fetch_wb_report_ads(token, periods, sources):
+  result = {"campaigns": [], "stats": []}
+  try:
+    count_payload = wb_get_json(token, "/adv/v1/promotion/count", locale=None, base_url=WB_ADVERT_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("advert-campaigns", "Рекламные кампании", "WB Promotion", exc))
+    return result
+  result["campaigns"] = public_wb_value((count_payload.get("adverts") or []) if isinstance(count_payload, dict) else [])
+  advert_ids = wb_report_advert_ids(count_payload)
+  sources.append(wb_report_source(
+    "advert-campaigns",
+    "Рекламные кампании",
+    "ok",
+    "WB Promotion / promotion/count",
+    "Список кампаний по статусам.",
+    records=len(advert_ids),
+  ))
+  if not advert_ids or not periods:
+    return result
+
+  latest = periods[0]
+  params = urlencode({
+    "ids": ",".join(str(item) for item in advert_ids[:50]),
+    "beginDate": latest["start"],
+    "endDate": latest["end"],
+  })
+  try:
+    stats = wb_get_json(token, f"/adv/v3/fullstats?{params}", locale=None, base_url=WB_ADVERT_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("advert-stats", f"Статистика рекламы {latest['label']}", "WB Promotion", exc))
+    return result
+  result["stats"] = public_wb_value(stats if isinstance(stats, list) else [])
+  sources.append(wb_report_source(
+    "advert-stats",
+    f"Статистика рекламы {latest['label']}",
+    "ok",
+    "WB Promotion / fullstats",
+    "Расход, показы, клики, заказы по рекламным кампаниям за последний период отчета.",
+    records=len(result["stats"]),
+  ))
+  return result
+
+
+def fetch_wb_report_promotions(token, periods, sources):
+  start_day = dt.date.fromisoformat(periods[0]["end"]) if periods else utc_now().date()
+  end_day = start_day + dt.timedelta(days=60)
+  params = urlencode({
+    "startDateTime": f"{start_day.isoformat()}T00:00:00Z",
+    "endDateTime": f"{end_day.isoformat()}T23:59:59Z",
+    "allPromo": "false",
+    "limit": 100,
+    "offset": 0,
+  })
+  try:
+    payload = wb_get_json(token, f"/api/v1/calendar/promotions?{params}", locale=None, base_url=WB_PROMO_CALENDAR_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("promo-calendar", "Календарь акций", "WB Prices and Discounts", exc))
+    return []
+  promotions = ((payload.get("data") or {}).get("promotions") or []) if isinstance(payload, dict) else []
+  sources.append(wb_report_source(
+    "promo-calendar",
+    "Календарь акций",
+    "ok",
+    "WB Prices and Discounts / calendar/promotions",
+    "Ближайшие доступные акции WB.",
+    records=len(promotions),
+  ))
+  return public_wb_value(promotions)
+
+
+def build_wb_client_report(portal_id, user, weeks=None):
+  row = get_portal_row(portal_id, user)
+  if not row:
+    raise ValueError("portal_not_found")
+  if not user_can_access_portal(user, portal_id):
+    raise PermissionError("forbidden")
+
+  cards = wb_snapshot_cards_from_row(row)
+  nm_ids = wb_cards_nm_ids(cards)
+  periods = wb_report_periods(weeks)
+  sources = [
+    wb_report_source(
+      "snapshot",
+      "Текущий снимок карточек",
+      "ok" if cards else "empty",
+      "OptiCards snapshot + WB Content/Prices/Marketplace",
+      "Контент, текущие цены и остатки из последней загрузки кабинета.",
+      records=len(cards),
+    )
+  ]
+
+  token, token_source = get_wb_token_for_portal(portal_id)
+  if not token:
+    sources.append(wb_report_source("wb-token", "WB API ключ", "error", "OptiCards", "Для полного отчета нужен подключенный WB API."))
+    return {
+      "generatedAt": utc_now().isoformat(),
+      "portal": public_portal_from_row(row),
+      "tokenSource": token_source,
+      "periods": periods,
+      "cards": cards,
+      "analyticsByPeriod": {},
+      "ordersByPeriod": {},
+      "salesByPeriod": {},
+      "ads": {"campaigns": [], "stats": []},
+      "promotions": [],
+      "sources": sources,
+    }
+
+  analytics = fetch_wb_report_analytics(token, nm_ids, periods, sources)
+  orders = fetch_wb_report_orders(token, periods, nm_ids, sources)
+  sales = fetch_wb_report_sales(token, periods, nm_ids, sources)
+  ads = fetch_wb_report_ads(token, periods, sources)
+  promotions = fetch_wb_report_promotions(token, periods, sources)
+
+  return {
+    "generatedAt": utc_now().isoformat(),
+    "portal": public_portal_from_row(row),
+    "tokenSource": token_source,
+    "periods": periods,
+    "cards": public_wb_value(cards),
+    "analyticsByPeriod": analytics,
+    "ordersByPeriod": orders,
+    "salesByPeriod": sales,
+    "ads": ads,
+    "promotions": promotions,
+    "sources": sources,
+  }
+
+
 def clean_portal_team(raw_team):
   if not isinstance(raw_team, dict):
     return {}
@@ -8715,6 +9192,35 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         )
         return
       self.send_json(HTTPStatus.OK, payload)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/wb-client-report"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/wb-client-report")].strip("/")
+      if not user_can_access_portal(user, portal_id_text):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      query = parse_qs(parsed.query)
+      try:
+        weeks = int(query.get("weeks", [str(WB_CLIENT_REPORT_WEEKS)])[0])
+      except ValueError:
+        weeks = WB_CLIENT_REPORT_WEEKS
+      try:
+        report = build_wb_client_report(portal_id_text, user, weeks=weeks)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, {"report": report})
       return
 
     if path == "/api/wb/cards":
