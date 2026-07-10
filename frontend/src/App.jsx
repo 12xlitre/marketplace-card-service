@@ -3422,6 +3422,13 @@ function Rail({ user, screen, onNavigate, onLogout }) {
 
 function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onOpenModal }) {
   const apiCount = activePortals.filter((portal) => portal.apiConnected).length;
+  const manualCount = activePortals.filter((portal) => !portal.apiConnected).length;
+  const apiCardsCount = activePortals
+    .filter((portal) => portal.apiConnected)
+    .reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
+  const manualCardsCount = activePortals
+    .filter((portal) => !portal.apiConnected)
+    .reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
   const cardsCount = activePortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
   const approvalTasksCount = activePortals.reduce((sum, portal) => sum + Number(portal.draftSummary?.approvalPendingCount || 0), 0);
   return (
@@ -3439,10 +3446,26 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
 
       <div className="content">
         <div className="summary-grid">
-          <Metric label="Активные кабинеты" value={formatNumber(activePortals.length)} />
-          <Metric label="Карточки загружены" value={formatNumber(cardsCount)} />
-          <Metric label="Подключены через API" value={formatNumber(apiCount)} />
-          <Metric label="На согласовании" value={formatNumber(approvalTasksCount)} />
+          <Metric
+            label="Кабинеты в работе"
+            value={formatNumber(activePortals.length)}
+            hint={`${formatNumber(apiCount)} API · ${formatNumber(manualCount)} ручной`}
+          />
+          <Metric
+            label="Карточки всего"
+            value={formatNumber(cardsCount)}
+            hint={`${formatNumber(apiCardsCount)} из API · ${formatNumber(manualCardsCount)} ручной импорт`}
+          />
+          <Metric
+            label="API-кабинеты"
+            value={formatNumber(apiCount)}
+            hint={apiCount ? "данные обновляются по WB API" : "нет подключенных API"}
+          />
+          <Metric
+            label="На согласовании"
+            value={formatNumber(approvalTasksCount)}
+            hint={approvalTasksCount ? "ожидают решения" : "нет активных задач"}
+          />
         </div>
 
         <div className="band">
@@ -7792,11 +7815,12 @@ function workRouteRows(portal) {
   };
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, hint = "" }) {
   return (
     <div className="metric">
       <span>{label}</span>
       <strong>{value}</strong>
+      {hint ? <em>{hint}</em> : null}
     </div>
   );
 }

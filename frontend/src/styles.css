@@ -454,7 +454,7 @@ a {
 }
 
 .metric {
-  min-height: 92px;
+  min-height: 104px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -475,6 +475,13 @@ a {
 .metric strong {
   font-size: 25px;
   line-height: 1;
+}
+
+.metric em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.35;
 }
 
 .band {
