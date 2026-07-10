@@ -76,6 +76,7 @@ CARD_COMPETITOR_AUTO_CHECK_DAYS = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK
 CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS", "3600"))
 CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH", "12"))
 CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_ENABLED", "1") != "0"
+MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_MAX_CARDS", "100"))
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
@@ -995,6 +996,7 @@ def public_portal_from_row(row):
   status = row["status"] or ""
   if mode == "manual" and status in ("", "draft"):
     status = "Ручной режим"
+  manual_sync_status = "mpstats-loaded" if mode == "manual" and int(row["card_count"] or 0) > 0 else "manual"
   return {
     "id": str(row["id"]),
     "name": row["name"],
@@ -1013,7 +1015,7 @@ def public_portal_from_row(row):
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
     "realCards": wb_snapshot_cards_from_row(row),
-    "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else "manual"),
+    "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else manual_sync_status),
     "lastSyncAt": row["last_sync_at"] or "",
     "tokenMeta": wb_token_meta_for_portal_row(row),
     "draftSummary": {
@@ -1192,6 +1194,41 @@ def update_portal_sync_stats(portal_id, snapshot):
     )
 
 
+def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витрина"):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return
+  stats = snapshot.get("stats") or {}
+  with connect_db() as db:
+    db.execute(
+      """
+      UPDATE portals
+      SET
+        name = COALESCE(NULLIF(?, ''), name),
+        status = ?,
+        api_connected = 0,
+        card_count = ?,
+        work_count = ?,
+        problem_count = ?,
+        cards_snapshot_json = ?,
+        last_sync_at = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (
+        stats.get("portalName", ""),
+        status,
+        stats.get("cardCount", 0),
+        stats.get("workCount", 0),
+        stats.get("problemCount", 0),
+        wb_snapshot_cards_json(snapshot),
+        stats.get("loadedAt"),
+        numeric_portal_id,
+      ),
+    )
+
+
 def replace_wb_token_for_portal(portal_id, token, snapshot):
   numeric_portal_id = int(portal_id)
   token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
@@ -1233,6 +1270,27 @@ def replace_wb_token_for_portal(portal_id, token, snapshot):
     )
   update_portal_sync_stats(numeric_portal_id, snapshot)
   return get_portal_row(numeric_portal_id)
+
+
+def refresh_manual_portal_from_mpstats(portal_id, user):
+  row = get_portal_row(portal_id, user)
+  if not row:
+    raise ValueError("portal_not_found")
+  if bool(row["api_connected"]):
+    raise ValueError("portal_has_api")
+  snapshot = build_mpstats_storefront_snapshot(
+    row["name"],
+    row["store_url"] or "",
+    row["manual_source"] or "",
+    limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS,
+  )
+  bootstrap = snapshot.get("manualBootstrap") or {}
+  if not snapshot.get("cards"):
+    return row, bootstrap
+  status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
+  update_portal_manual_snapshot(portal_id, snapshot, status=status)
+  updated_row = get_portal_row(portal_id, user)
+  return updated_row, bootstrap
 
 
 def draft_card_key(value):
@@ -4647,6 +4705,373 @@ def audit_extract_list(payload):
     if isinstance(candidate, list):
       return candidate
   return []
+
+
+def mpstats_media_url(value):
+  text = audit_str(value)
+  if text.startswith("//"):
+    return f"https:{text}"
+  if text.startswith("https://") or text.startswith("http://"):
+    return text
+  return ""
+
+
+def mpstats_storefront_label(value):
+  text = unquote(audit_str(value))
+  text = re.sub(r"[_-]+", " ", text)
+  text = re.sub(r"\s+", " ", text).strip(" /")
+  if not text:
+    return ""
+  return " ".join(part.capitalize() if part.islower() else part for part in text.split(" "))
+
+
+def mpstats_manual_source_text(name, store_url, manual_source):
+  return "\n".join(audit_str(value) for value in (name, store_url, manual_source) if audit_str(value))
+
+
+def mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=100):
+  text = mpstats_manual_source_text(name, store_url, manual_source)
+  output = []
+  seen = set()
+  patterns = (
+    r"(?:catalog|item)/(\d{6,12})",
+    r"(?:nm|nmID|nmId|sku|артикул)\D{0,12}(\d{6,12})",
+    r"\b(\d{7,12})\b",
+  )
+  for pattern in patterns:
+    for match in re.findall(pattern, text, flags=re.IGNORECASE):
+      nm_id = parse_competitor_nm_id(match)
+      if nm_id and nm_id not in seen:
+        seen.add(nm_id)
+        output.append(nm_id)
+        if len(output) >= limit:
+          return output
+  return output
+
+
+def mpstats_bootstrap_add_candidate(candidates, seen, kind, path, source):
+  kind = audit_str(kind)
+  path = audit_str(path, 180)
+  normalized = audit_normalized(path)
+  if kind not in {"brand", "seller"} or not path or normalized in {"wb", "wildberries", "кабинет wb"}:
+    return
+  key = f"{kind}:{normalized}"
+  if key in seen:
+    return
+  seen.add(key)
+  candidates.append({"kind": kind, "path": path, "source": source})
+
+
+def mpstats_storefront_candidates(name, store_url, manual_source, seed_cards=None):
+  candidates = []
+  seen = set()
+  seed_cards = seed_cards if isinstance(seed_cards, list) else []
+  source_text = mpstats_manual_source_text(name, store_url, manual_source)
+  generic_names = {"", "кабинет wb", "wildberries", "wb"}
+  portal_name = audit_str(name)
+  if audit_normalized(portal_name) not in generic_names:
+    mpstats_bootstrap_add_candidate(candidates, seen, "seller", portal_name, "portal-name")
+    mpstats_bootstrap_add_candidate(candidates, seen, "brand", portal_name, "portal-name")
+
+  for raw_url in re.findall(r"https?://[^\s,;]+", source_text):
+    parsed = urlparse(raw_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(path_parts):
+      normalized_part = audit_normalized(part)
+      next_part = path_parts[index + 1] if index + 1 < len(path_parts) else ""
+      if normalized_part in {"brands", "brand"} and next_part:
+        mpstats_bootstrap_add_candidate(candidates, seen, "brand", mpstats_storefront_label(next_part), "brand-url")
+      if normalized_part in {"seller", "sellers", "supplier", "suppliers"} and next_part:
+        mpstats_bootstrap_add_candidate(candidates, seen, "seller", mpstats_storefront_label(next_part), "seller-url")
+    query = parse_qs(parsed.query)
+    for key in ("brand", "brandName"):
+      for value in query.get(key, []):
+        mpstats_bootstrap_add_candidate(candidates, seen, "brand", mpstats_storefront_label(value), "query")
+    for key in ("seller", "sellerName", "supplier", "supplier_id", "supplierId"):
+      for value in query.get(key, []):
+        mpstats_bootstrap_add_candidate(candidates, seen, "seller", mpstats_storefront_label(value), "query")
+
+  for pattern, kind in (
+    (r"(?:бренд|brand)\s*[:=]\s*([^\n;,]+)", "brand"),
+    (r"(?:продавец|seller|поставщик|supplier)\s*[:=]\s*([^\n;,]+)", "seller"),
+  ):
+    for match in re.findall(pattern, source_text, flags=re.IGNORECASE):
+      mpstats_bootstrap_add_candidate(candidates, seen, kind, mpstats_storefront_label(match), "manual-source")
+
+  for card in seed_cards:
+    if not isinstance(card, dict):
+      continue
+    mpstats_bootstrap_add_candidate(candidates, seen, "seller", card.get("sellerName") or card.get("seller"), "seed-card")
+    mpstats_bootstrap_add_candidate(candidates, seen, "brand", card.get("brand"), "seed-card")
+
+  return candidates
+
+
+def mpstats_storefront_body(path_value, period, limit):
+  return {
+    "path": path_value,
+    "d1": period["d1"],
+    "d2": period["d2"],
+    "startRow": 0,
+    "endRow": limit,
+    "filterModel": {},
+    "sortModel": [{"colId": "revenue", "sort": "desc"}],
+  }
+
+
+def mpstats_storefront_item_characteristics(item):
+  if not isinstance(item, dict):
+    return []
+  if isinstance(item.get("characteristics"), list):
+    return item.get("characteristics")
+  rows = []
+  for label, keys in (
+    ("Цвет", ("color", "colors")),
+    ("Страна производства", ("country", "countryName")),
+    ("Пол", ("gender",)),
+  ):
+    value = first_nonempty(*(item.get(key) for key in keys))
+    if value:
+      rows.append({"name": label, "value": value})
+  return rows
+
+
+def first_nonempty(*values):
+  for value in values:
+    text = audit_str(value)
+    if text:
+      return text
+  return ""
+
+
+def mpstats_storefront_photo_rows(item):
+  urls = []
+  for key in ("thumb_middle", "thumb", "photo", "image", "url_photo"):
+    url = mpstats_media_url(item.get(key) if isinstance(item, dict) else "")
+    if url:
+      urls.append(url)
+  if isinstance(item, dict) and isinstance(item.get("photos"), list):
+    for photo in item.get("photos"):
+      if isinstance(photo, dict):
+        for value in photo.values():
+          url = mpstats_media_url(value)
+          if url:
+            urls.append(url)
+      else:
+        url = mpstats_media_url(photo)
+        if url:
+          urls.append(url)
+  output = []
+  seen = set()
+  for url in urls:
+    if url in seen:
+      continue
+    seen.add(url)
+    output.append({"big": url, "c516x688": url, "c246x328": url})
+  return output
+
+
+def mpstats_storefront_raw_card(item, source="mpstats-storefront"):
+  if not isinstance(item, dict):
+    return None
+  nm_id = item.get("nmID") or item.get("nmId") or item.get("nm_id") or item.get("id") or item.get("itemid")
+  nm_id = parse_competitor_nm_id(nm_id)
+  if not nm_id:
+    return None
+  price_metrics = mpstats_price_metrics(item)
+  price = audit_positive_number(
+    item.get("start_price"),
+    item.get("basic_price"),
+    item.get("price"),
+    price_metrics.get("price"),
+  )
+  discounted_price = audit_positive_number(
+    item.get("client_price"),
+    item.get("final_price"),
+    item.get("finalPrice"),
+    item.get("discountedPrice"),
+    price_metrics.get("discountedPrice"),
+    price_metrics.get("walletPrice"),
+    price,
+  )
+  category = audit_str(item.get("category") or item.get("categoryName") or "")
+  subject = audit_str(item.get("subject") or item.get("subjectName") or item.get("entity") or "")
+  if not subject and category:
+    subject = category.split("/")[-1].strip()
+  photos = mpstats_storefront_photo_rows(item)
+  stock = audit_number(item.get("balance") or item.get("stock"), None)
+  seller_stock = audit_number(item.get("balance_fbs"), None)
+  wb_stock = audit_number(stock, None)
+  if seller_stock is not None and stock is not None:
+    wb_stock = max(0, stock - seller_stock)
+  sizes = []
+  if price is not None or discounted_price is not None or stock is not None:
+    sizes.append({
+      "techSize": "единый",
+      "price": price,
+      "discountedPrice": discounted_price,
+      "stock": stock,
+      "sellerStock": seller_stock,
+      "wbStock": wb_stock,
+      "skus": [],
+    })
+  return {
+    "nmID": nm_id,
+    "imtID": item.get("imtID") or item.get("imtId") or "",
+    "vendorCode": item.get("vendorCode") or item.get("vendor_code") or "",
+    "title": audit_str(item.get("title") or item.get("name") or item.get("full_name") or f"WB {nm_id}"),
+    "description": audit_str(item.get("description") or item.get("descriptionPreview") or "", 7000),
+    "brand": audit_named_value(item.get("brand") or ""),
+    "sellerName": audit_named_value(item.get("sellerName") or item.get("seller") or item.get("supplier") or ""),
+    "subjectID": item.get("subjectID") or item.get("subjectId") or item.get("subject_id"),
+    "subjectName": subject or "категория не указана",
+    "photos": photos,
+    "photoUrl": first_photo_url({"photos": photos}),
+    "characteristics": mpstats_storefront_item_characteristics(item),
+    "sizes": sizes,
+    "price": price,
+    "discountedPrice": discounted_price,
+    "discount": item.get("basic_sale") or item.get("discount"),
+    "stock": stock,
+    "sellerStock": seller_stock,
+    "wbStock": wb_stock,
+    "rating": audit_number(item.get("rating") or item.get("commentsvaluation"), None),
+    "feedbacks": audit_int(item.get("comments") or item.get("feedbacks"), 0),
+    "createdAt": audit_str(item.get("sku_first_date") or item.get("createdAt") or ""),
+    "updatedAt": utc_now().isoformat(),
+    "mpstats": {
+      "source": source,
+      "sales": audit_int(item.get("sales"), 0),
+      "revenue": audit_number(item.get("revenue"), 0),
+      "salesPerDay": audit_number(item.get("sales_per_day_average") or item.get("salesPerDay"), 0),
+      "supplierId": item.get("supplier_id") or item.get("supplierId"),
+      "url": item.get("url") or wb_public_card_url(nm_id),
+    },
+  }
+
+
+def mpstats_normalized_bootstrap_card(raw_card):
+  normalized = normalize_wb_card(raw_card)
+  for key in ("price", "discountedPrice", "discount", "stock", "sellerStock", "wbStock", "rating", "feedbacks"):
+    if raw_card.get(key) not in (None, ""):
+      normalized[key] = raw_card.get(key)
+  normalized["rawFields"] = public_wb_value(raw_card)
+  return normalized
+
+
+def mpstats_seed_card_from_nm_id(nm_id):
+  snapshot = competitor_snapshot_from_sources(nm_id)
+  raw_card = mpstats_storefront_raw_card({
+    "id": snapshot.get("nmID") or snapshot.get("nmId") or nm_id,
+    "name": snapshot.get("title"),
+    "brand": snapshot.get("brand"),
+    "seller": snapshot.get("seller"),
+    "subjectName": snapshot.get("subjectName"),
+    "price": snapshot.get("price"),
+    "discountedPrice": snapshot.get("discountedPrice"),
+    "rating": snapshot.get("rating"),
+    "comments": snapshot.get("feedbacks"),
+    "descriptionPreview": snapshot.get("descriptionPreview"),
+    "characteristics": snapshot.get("characteristics"),
+    "thumb": snapshot.get("photoUrl"),
+    "sales": snapshot.get("sales"),
+    "revenue": snapshot.get("revenue"),
+  }, source="mpstats-item")
+  return raw_card
+
+
+def fetch_mpstats_storefront_listing(token, candidate, period, limit):
+  payload = mpstats_post_body_json(
+    token,
+    f"/wb/get/{candidate['kind']}",
+    body=mpstats_storefront_body(candidate["path"], period, limit),
+    attempts=2,
+  )
+  rows = audit_extract_list(payload)
+  raw_cards = []
+  for row in rows:
+    raw_card = mpstats_storefront_raw_card(row, source=f"mpstats-{candidate['kind']}")
+    if raw_card:
+      raw_cards.append(raw_card)
+  return raw_cards, payload
+
+
+def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS):
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+  limit = max(1, min(int(limit or MPSTATS_STORE_BOOTSTRAP_MAX_CARDS), 500))
+  period = audit_period_default()
+  warnings = []
+  nm_ids = mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=limit)
+  seed_cards = []
+  for nm_id in nm_ids[:min(limit, 20)]:
+    try:
+      raw_card = mpstats_seed_card_from_nm_id(nm_id)
+    except (RuntimeError, MpstatsApiError, ValueError):
+      raw_card = None
+    if raw_card:
+      seed_cards.append(raw_card)
+
+  candidates = mpstats_storefront_candidates(name, store_url, manual_source, seed_cards)
+  selected_candidate = None
+  raw_cards = []
+  for candidate in candidates:
+    try:
+      raw_cards, _ = fetch_mpstats_storefront_listing(token, candidate, period, limit)
+    except MpstatsApiError as exc:
+      warnings.append(f"MPStats /wb/get/{candidate['kind']} {candidate['path']}: {exc.message}")
+      raw_cards = []
+    if raw_cards:
+      selected_candidate = candidate
+      break
+
+  if not raw_cards and seed_cards:
+    raw_cards = seed_cards
+    selected_candidate = {"kind": "items", "path": ", ".join(nm_ids[:5]), "source": "nm-id"}
+
+  deduped = []
+  seen = set()
+  for raw_card in raw_cards:
+    nm_id = parse_competitor_nm_id(raw_card.get("nmID"))
+    if not nm_id or nm_id in seen:
+      continue
+    seen.add(nm_id)
+    deduped.append(raw_card)
+    if len(deduped) >= limit:
+      break
+
+  cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
+  portal_name = ""
+  if selected_candidate and selected_candidate.get("kind") in {"brand", "seller"}:
+    portal_name = selected_candidate.get("path") or ""
+  portal_name = portal_name or derive_wb_portal_name(cards)
+  loaded_at = utc_now().isoformat()
+  snapshot = {
+    "cards": cards,
+    "raw_count": len(cards),
+    "cursor": {},
+    "tokenMeta": {},
+    "stats": {
+      "cardCount": len(cards),
+      "workCount": 0,
+      "problemCount": sum(1 for card in cards if int(card.get("issueCount") or 0) > 0),
+      "sampleLimit": limit,
+      "loadedAt": loaded_at,
+      "portalName": portal_name,
+      "source": "mpstats",
+      "sourceLabel": f"{selected_candidate.get('kind')}: {selected_candidate.get('path')}" if selected_candidate else "",
+    },
+    "manualBootstrap": {
+      "status": "loaded" if cards else "empty",
+      "cardCount": len(cards),
+      "source": selected_candidate or {},
+      "period": period,
+      "warnings": audit_public_warnings(warnings),
+      "loadedAt": loaded_at,
+    },
+  }
+  return snapshot
 
 
 def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
@@ -8162,19 +8587,30 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
-      self.send_json(
-        HTTPStatus.CREATED,
-        {"portal": public_portal_payload(
-          portal_id,
-          name,
-          marketplace,
-          mode,
-          scope,
-          team,
-          store_url=store_url,
-          manual_source=manual_source,
-        )},
-      )
+      bootstrap = {"status": "skipped", "cardCount": 0, "warnings": []}
+      if store_url or manual_source:
+        try:
+          row, bootstrap = refresh_manual_portal_from_mpstats(portal_id, user)
+        except RuntimeError:
+          row = get_portal_row(portal_id, user)
+          bootstrap = {"status": "error", "cardCount": 0, "warnings": ["Хранилище секретов недоступно: MPStats не запущен."]}
+        except MpstatsApiError as exc:
+          row = get_portal_row(portal_id, user)
+          warning = "MPStats не подключен: кабинет создан без автозагрузки карточек." if exc.message == "mpstats_key_missing" else f"MPStats не загрузил витрину: {exc.message}"
+          bootstrap = {
+            "status": "missing" if exc.message == "mpstats_key_missing" else "error",
+            "cardCount": 0,
+            "warnings": [warning],
+            "retryable": exc.retryable,
+          }
+        except ValueError:
+          row = get_portal_row(portal_id, user)
+          bootstrap = {"status": "empty", "cardCount": 0, "warnings": ["MPStats не нашел карточки по этой ссылке или описанию."]}
+      else:
+        row = get_portal_row(portal_id, user)
+      portal_payload = public_portal_from_row(row)
+      portal_payload["manualBootstrap"] = bootstrap
+      self.send_json(HTTPStatus.CREATED, {"portal": portal_payload})
       return
 
     if path == "/api/users":
@@ -8598,6 +9034,43 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": error_text})
         return
       self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/mpstats-bootstrap"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/mpstats-bootstrap")].strip("/")
+      if not user_can_access_portal(user, portal_id_text):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      try:
+        row, bootstrap = refresh_manual_portal_from_mpstats(portal_id_text, user)
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except MpstatsApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "mpstats_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      portal_payload = public_portal_from_row(row)
+      portal_payload["manualBootstrap"] = bootstrap
+      self.send_json(HTTPStatus.OK, {"portal": portal_payload, "bootstrap": bootstrap})
       return
 
     if path.startswith("/api/portals/") and (path.endswith("/archive") or path.endswith("/restore")):

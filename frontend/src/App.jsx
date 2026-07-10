@@ -872,6 +872,26 @@ function applyWbSnapshotToPortal(portal, payload) {
   });
 }
 
+function manualBootstrapNotice(portal, action = "create") {
+  const bootstrap = portal?.manualBootstrap || {};
+  const count = Number(bootstrap.cardCount || portal?.cardCount || 0);
+  if (count > 0) {
+    return action === "refresh"
+      ? `MPStats обновил витрину: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`
+      : `Кабинет создан, MPStats загрузил ${count} ${pluralRu(count, "карточку", "карточки", "карточек")}.`;
+  }
+  const warning = Array.isArray(bootstrap.warnings) ? bootstrap.warnings[0] : "";
+  if (warning) {
+    return warning;
+  }
+  if (bootstrap.status === "skipped") {
+    return "Кабинет создан без API. Добавьте ссылку на магазин или список nmID, чтобы загрузить карточки через MPStats.";
+  }
+  return action === "refresh"
+    ? "MPStats не нашел карточки по сохраненной ссылке или описанию."
+    : "Кабинет создан без API, карточки пока не загружены.";
+}
+
 function getPortalTeam(portal) {
   const roles = portal?.teamRoles || {};
   return {
@@ -918,17 +938,17 @@ function wbCardUrl(card) {
   return `https://www.wildberries.ru/catalog/${encodeURIComponent(card.nmID)}/detail.aspx?targetUrl=MI`;
 }
 
-function issueCopy(issue) {
+function issueCopy(issue, sourceLabel = "WB API") {
   const copies = {
-    "Нет бренда": "WB API не вернул бренд. Нужно проверить бренд в кабинете и не подставлять его вручную без подтверждения.",
+    "Нет бренда": `${sourceLabel} не вернул бренд. Нужно проверить бренд в кабинете и не подставлять его вручную без подтверждения.`,
     "Нет описания": "В текущем снимке нет описания. Перед правками нужно подтянуть описание или заполнить его вручную.",
-    "Пустые характеристики": "WB API не вернул характеристики. Нужно сверить обязательные поля категории перед публикацией.",
+    "Пустые характеристики": `${sourceLabel} не вернул характеристики. Нужно сверить обязательные поля категории перед публикацией.`,
     "Нет фото": "В текущем снимке нет фото. Нужно проверить медиа в кабинете WB перед аудитом.",
     "Нет названия": "У карточки нет названия. Нужно заполнить заголовок до 60 символов.",
     "Название длиннее 60": "Название превышает лимит WB. Нужно сократить его до 60 символов без потери смысла.",
     "Габариты требуют проверки": "WB пометил габариты как требующие проверки. Перед публикацией нужно сверить размеры.",
   };
-  return copies[issue] || "Карточка требует ручной проверки по данным из WB API.";
+  return copies[issue] || `Карточка требует ручной проверки по данным из ${sourceLabel}.`;
 }
 
 function cardProblemReasons(card) {
@@ -2923,7 +2943,49 @@ export default function App() {
   }
 
   async function refreshPortalCards(portal) {
-    if (!portal || portal.isDemo || !portal.apiConnected) {
+    if (!portal || portal.isDemo) {
+      return;
+    }
+    if (!portal.apiConnected) {
+      if (!portal.storeUrl && !portal.manualSource) {
+        setNotice("Для загрузки через MPStats добавьте ссылку на магазин, карточку или список nmID.");
+        return;
+      }
+      const confirmed = window.confirm(
+        "Обновить ручной кабинет через MPStats? Система попробует заново получить карточки по ссылке на магазин, бренду, продавцу или nmID.",
+      );
+      if (!confirmed) {
+        return;
+      }
+      const portalKey = String(portal.id);
+      setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
+      try {
+        await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-analysis-cache`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        invalidateLocalDraftAuditsForPortal(portal.id);
+        resetPortalAuditSummary(portal.id);
+        const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/mpstats-bootstrap`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        const updatedPortal = normalizePortal(response.portal);
+        replaceUserPortal(updatedPortal);
+        setNotice(manualBootstrapNotice(updatedPortal, "refresh"));
+      } catch (error) {
+        if (error.message === "mpstats_api_error" && error.payload?.message === "mpstats_key_missing") {
+          setNotice("MPStats не подключен: карточки по ссылке магазина загрузить нельзя.");
+        } else {
+          setNotice("Не удалось обновить ручной кабинет через MPStats. Проверьте ссылку и подключение MPStats.");
+        }
+      } finally {
+        setLoadingPortalCards((items) => {
+          const next = { ...items };
+          delete next[portalKey];
+          return next;
+        });
+      }
       return;
     }
     const confirmed = window.confirm(
@@ -3068,6 +3130,9 @@ export default function App() {
     setPortalModalOpen(false);
     setSelectedPortalId(portal.id);
     setScreen("seller");
+    if (portal.mode === "manual") {
+      setNotice(manualBootstrapNotice(portal, "create"));
+    }
   }
 
   async function replacePortalApiToken(targetPortal, payload) {
@@ -3477,6 +3542,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
   const isManual = !isApi;
+  const isMpstatsLoaded = portal.syncStatus === "mpstats-loaded";
+  const canRefreshSource = portal.apiConnected || (isManual && Boolean(portal.storeUrl || portal.manualSource));
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
   const sourceRows = sourceFlowRows(portal, mpstatsIntegration);
   const workRoute = workRouteRows(portal);
@@ -3554,7 +3621,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       <header className="topbar">
         <div className="title">
           <h1>{displayName}</h1>
-          <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isApi ? "API подключение" : "ручной режим")} · ответственный {owner?.full_name}</p>
+          <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Кабинеты</button>
@@ -3646,15 +3713,17 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <h2>Источник данных</h2>
                   <p>{portal.syncStatus === "loaded"
                     ? "Список карточек загружен из WB API через backend. Сейчас OptiCards читает данные и готовит черновики; запись в WB включается отдельно по договоренности с клиентом."
+                    : (isMpstatsLoaded
+                      ? "Кабинет заведен без WB API, а карточки загружены через MPStats по ссылке на магазин, бренд, продавца или nmID. API можно подключить позже."
                     : (isManual
                       ? "Кабинет заведен без WB API. Здесь фиксируем ссылку на магазин, исходные данные от клиента и команду; карточки можно добавить вручную или позже подключить API."
-                      : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы.")}</p>
+                      : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы."))}</p>
                 </div>
-                <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isManual ? "Без API" : "ручной режим")}</Tag>
+                <Tag tone={portal.apiConnected || isMpstatsLoaded ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isMpstatsLoaded ? "MPStats витрина" : (isManual ? "Без API" : "ручной режим"))}</Tag>
               </div>
               <div className="panel-actions">
-                <button className="btn" type="button" onClick={onRefreshCards} disabled={!portal.apiConnected || cardsLoading}>
-                  <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : "Загрузить свежие данные"}
+                <button className="btn" type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading}>
+                  <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
                 </button>
                 <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
                   <Trash2 size={16} />Обнулить работу
@@ -3796,7 +3865,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
         <span>{portal.apiConnected
           ? "Обновите данные WB, чтобы увидеть список."
           : (isManualPortal
-            ? (hasManualSource ? "Ссылка или исходные данные сохранены. Карточки появятся после ручного добавления или подключения API." : "Можно сохранить ссылку на магазин, список nmID или позже подключить API.")
+            ? (hasManualSource ? "Ссылка или исходные данные сохранены. Нажмите «Обновить из MPStats», чтобы повторить загрузку карточек." : "Можно сохранить ссылку на магазин, список nmID или позже подключить API.")
             : "Подключите API или добавьте ручной импорт.")}</span>
       </div>
     );
@@ -4182,6 +4251,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const titleLength = currentTitle.length;
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
   const rawFields = rawFieldsForCard(card);
+  const isMpstatsCard = portal?.syncStatus === "mpstats-loaded" || Boolean(rawFields.mpstats);
+  const cardSourceLabel = isMpstatsCard ? "MPStats" : "WB API";
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
@@ -5675,7 +5746,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <strong>{issueCount ? card.issue : "Критичных проблем нет"}</strong>
                       <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "проверка" : "ок"}</Tag>
                     </div>
-                    <p>{issueCount ? issueCopy(card.issue) : "Карточка выглядит рабочей по текущему снимку WB API. Перед публикацией все равно нужна ручная проверка."}</p>
+                    <p>{issueCount ? issueCopy(card.issue, cardSourceLabel) : `Карточка выглядит рабочей по текущему снимку ${cardSourceLabel}. Перед публикацией все равно нужна ручная проверка.`}</p>
                   </div>
                   <div className="issue audit-competitors-input">
                     <div className="issue-head">
@@ -5810,7 +5881,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         <strong>{currentTitle}</strong>
                         <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
                       </div>
-                      <p>Это текущее название карточки из WB snapshot.</p>
+                      <p>Это текущее название карточки из {cardSourceLabel}.</p>
                     </div>
                   </div>
                   <div className="snapshot-description">
@@ -5834,9 +5905,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <div className="strip-head">
                     <div>
                       <h2>Цены и остатки</h2>
-                      <p>Текущие данные из WB API: цена, скидка и остатки по складам и размерам.</p>
+                      <p>Текущие данные из {cardSourceLabel}: цена, скидка и доступные остатки.</p>
                     </div>
-                    <Tag tone={hasCommercialData ? "blue" : "amber"}>{hasCommercialData ? "данные WB" : "нет данных"}</Tag>
+                    <Tag tone={hasCommercialData ? "blue" : "amber"}>{hasCommercialData ? `данные ${cardSourceLabel}` : "нет данных"}</Tag>
                   </div>
                   <div className="commerce-summary">
                     <div><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
@@ -5872,7 +5943,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                           <span>{valueSummary(row.stock)}</span>
                         </div>
                       )) : (
-                        <div className="empty-state"><span>WB не вернул размерные строки с ценами и остатками.</span></div>
+                        <div className="empty-state"><span>{cardSourceLabel} не вернул размерные строки с ценами и остатками.</span></div>
                       )}
                     </div>
                   </div>
@@ -5880,7 +5951,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
                 <details className="workspace-strip technical-fields">
                   <summary>
-                    <span>Служебные данные WB</span>
+                    <span>Служебные данные {cardSourceLabel}</span>
                     <Tag tone="blue">{Object.keys(rawFields).length} полей</Tag>
                   </summary>
                   <RawFieldsView fields={rawFields} />
@@ -7639,7 +7710,7 @@ function sourceFlowRows(portal, mpstatsIntegration = null) {
     ["Режим запуска", "без API"],
     ["Ссылка или ориентир", portal.storeUrl ? "сохранено" : "не указано"],
     ["Первичный источник", portal.manualSource ? "описан" : "нужно добавить"],
-    ["Карточки", portal.cardCount ? formatNumber(portal.cardCount) : "ожидают ручной ввод"],
+    ["Карточки MPStats", portal.cardCount ? formatNumber(portal.cardCount) : "ожидают загрузку"],
     ["MPStats", mpstatsIntegrationStatusText(mpstatsIntegration)],
   ];
 }
