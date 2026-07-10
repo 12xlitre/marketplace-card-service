@@ -2279,7 +2279,6 @@ def competitor_snapshot_changes(previous, current):
     ("photosCount", "Фото"),
     ("descriptionLength", "Длина описания"),
     ("characteristicsCount", "Характеристики"),
-    ("characteristicsSignature", "Состав характеристик"),
   ]
   changes = []
   for key, label in fields:
@@ -2337,9 +2336,18 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
   characteristics = audit_card_characteristics({"characteristics": candidate.get("characteristics") or []})
   description_length = audit_int(candidate.get("descriptionLength"), 0)
   characteristics_count = len(characteristics) if characteristics else audit_int(candidate.get("characteristicsCount"), 0)
-  price = audit_number(candidate.get("price"), None)
+  price = audit_positive_number(candidate.get("price"), candidate.get("basePrice"), default=None)
+  discounted_price = audit_positive_number(
+    candidate.get("discountedPrice"),
+    candidate.get("finalPrice"),
+    candidate.get("walletPrice"),
+    candidate.get("avgSalePrice"),
+    price,
+    default=None,
+  )
+  comparison_price = discounted_price or price
   comparison = {
-    "priceDeltaPercent": competitor_metric_delta(current.get("price"), price),
+    "priceDeltaPercent": competitor_metric_delta(current.get("price"), comparison_price),
     "descriptionDelta": description_length - audit_int(current.get("descriptionLength"), 0) if description_length else None,
     "characteristicsDelta": characteristics_count - audit_int(current.get("characteristicsCount"), 0) if characteristics_count else None,
     "titleOverlap": round(audit_token_overlap_score(current.get("title"), candidate.get("title")), 2),
@@ -2368,8 +2376,10 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "brand": audit_str(candidate.get("brand") or ""),
     "seller": audit_str(candidate.get("seller") or ""),
     "subjectName": audit_str(candidate.get("subjectName") or current.get("subjectName") or ""),
-    "price": price,
-    "discountedPrice": price,
+    "price": price or discounted_price,
+    "discountedPrice": discounted_price or price,
+    "walletPrice": audit_number(candidate.get("walletPrice"), None),
+    "avgSalePrice": audit_number(candidate.get("avgSalePrice"), None),
     "sales": audit_int(candidate.get("sales"), 0),
     "salesPerDay": audit_number(candidate.get("salesPerDay"), 0),
     "revenue": audit_number(candidate.get("revenue"), 0),
@@ -2417,6 +2427,66 @@ def public_card_competitor(row):
   }
 
 
+def competitor_snapshot_needs_backfill(snapshot):
+  if not isinstance(snapshot, dict) or not snapshot:
+    return True
+  if not audit_positive_number(snapshot.get("discountedPrice"), snapshot.get("price")):
+    return True
+  if not isinstance(snapshot.get("comparison"), dict):
+    return True
+  return False
+
+
+def backfill_stale_card_competitors(numeric_portal_id, card_key, rows, user):
+  stale_rows = [row for row in rows if competitor_snapshot_needs_backfill(safe_json_object(row["snapshot_json"]))]
+  if not stale_rows:
+    return False
+  card = content_card_for_portal(numeric_portal_id, card_key, {})
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
+  if not nm_id:
+    return False
+  subject_id = card.get("subjectID") or card.get("subjectId") or raw_fields.get("subjectID") or raw_fields.get("subjectId")
+  warnings = []
+  period = audit_period_default()
+  cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  card = audit_merge_card_content(card, cdn_card)
+  market_data = audit_market_data(nm_id, subject_id, period, warnings)
+  checked_at = utc_now().isoformat()
+  with connect_db() as db:
+    for row in stale_rows:
+      previous_snapshot = safe_json_object(row["snapshot_json"])
+      candidate = audit_manual_competitor_candidate(row["competitor_nm_id"], period, warnings)
+      score, reasons = audit_competitor_similarity(card, market_data, candidate)
+      candidate["similarityScore"] = score
+      candidate["similarityReasons"] = reasons
+      candidate["whyRelevant"] = row["note"] or f"Ручной конкурент; проверка схожести: {', '.join(reasons[:3]) or 'данные сверены через MPStats'}."
+      snapshot = competitor_snapshot_from_candidate(candidate, card, market_data)
+      snapshot["warnings"] = audit_public_warnings([*snapshot.get("warnings", []), *warnings])[:4]
+      changes = competitor_snapshot_changes(previous_snapshot, snapshot)
+      db.execute(
+        """
+        UPDATE card_competitors
+        SET snapshot_json = ?,
+            previous_snapshot_json = ?,
+            changed_fields_json = ?,
+            last_checked_at = ?,
+            updated_by = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+          json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
+          checked_at,
+          user["login"],
+          row["id"],
+        ),
+      )
+  return True
+
+
 def list_card_competitors(portal_id, card_key, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -2438,6 +2508,17 @@ def list_card_competitors(portal_id, card_key, user):
       """,
       (numeric_portal_id, card_key),
     ).fetchall()
+  if backfill_stale_card_competitors(numeric_portal_id, card_key, rows, user):
+    with connect_db() as db:
+      rows = db.execute(
+        """
+        SELECT *
+        FROM card_competitors
+        WHERE portal_id = ? AND card_key = ?
+        ORDER BY position, updated_at DESC, id
+        """,
+        (numeric_portal_id, card_key),
+      ).fetchall()
   return [public_card_competitor(row) for row in rows]
 
 
@@ -4171,13 +4252,24 @@ def audit_normalize_subject_item(item):
   if not nm_id:
     return None
   price_metrics = mpstats_price_metrics(item)
+  price = audit_positive_number(price_metrics.get("price"), default=0)
+  discounted_price = audit_positive_number(
+    price_metrics.get("discountedPrice"),
+    price_metrics.get("walletPrice"),
+    price_metrics.get("avgSalePrice"),
+    price,
+    default=0,
+  )
   return {
     "nmId": nm_id,
     "title": audit_str(item.get("name") or item.get("title") or ""),
     "brand": audit_str(item.get("brand") or ""),
     "seller": audit_str(item.get("seller") or ""),
     "supplierId": item.get("supplier_id") or item.get("supplierId"),
-    "price": audit_positive_number(price_metrics.get("discountedPrice"), price_metrics.get("price"), default=0),
+    "price": price or discounted_price,
+    "discountedPrice": discounted_price,
+    "walletPrice": price_metrics.get("walletPrice"),
+    "avgSalePrice": price_metrics.get("avgSalePrice"),
     "sales": audit_int(item.get("sales"), 0),
     "revenue": audit_number(item.get("revenue"), 0),
     "comments": audit_int(item.get("comments") or item.get("feedbacks"), 0),
@@ -4528,12 +4620,23 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     "brand": snapshot.get("brand") or audit_str(info.get("brand") if isinstance(info, dict) else ""),
     "seller": audit_str(info.get("seller") if isinstance(info, dict) else ""),
     "price": audit_positive_number(
-      snapshot.get("discountedPrice"),
       snapshot.get("price"),
+      mpstats_prices.get("price"),
+      snapshot.get("discountedPrice"),
       mpstats_prices.get("discountedPrice"),
+      default=0,
+    ),
+    "discountedPrice": audit_positive_number(
+      snapshot.get("discountedPrice"),
+      mpstats_prices.get("discountedPrice"),
+      mpstats_prices.get("walletPrice"),
+      mpstats_prices.get("avgSalePrice"),
+      snapshot.get("price"),
       mpstats_prices.get("price"),
       default=0,
     ),
+    "walletPrice": mpstats_prices.get("walletPrice"),
+    "avgSalePrice": mpstats_prices.get("avgSalePrice"),
     "sales": audit_int(stats.get("sales"), 0),
     "revenue": audit_number(stats.get("revenue"), 0),
     "comments": snapshot.get("feedbacks") or audit_int(info.get("comments") if isinstance(info, dict) else None, 0),
@@ -4560,6 +4663,7 @@ def audit_competitor_selection_item(candidate, source, status="selected", reason
     "brand": audit_str(candidate.get("brand") or ""),
     "subjectName": audit_str(candidate.get("subjectName") or ""),
     "price": audit_number(candidate.get("price"), None),
+    "discountedPrice": audit_number(candidate.get("discountedPrice"), None),
     "sales": audit_int(candidate.get("sales"), 0),
     "revenue": audit_number(candidate.get("revenue"), 0),
     "rating": audit_number(candidate.get("rating"), None),
@@ -4637,7 +4741,7 @@ def audit_competitor_similarity(card, market_data, candidate):
       reasons.append("попадает в поисковый спрос карточки")
 
   current_price = audit_card_price(card, market_data)
-  candidate_price = audit_number(candidate.get("price"), None)
+  candidate_price = audit_positive_number(candidate.get("discountedPrice"), candidate.get("price"), default=None)
   if current_price and candidate_price:
     ratio = min(current_price, candidate_price) / max(current_price, candidate_price)
     if ratio >= 0.75:

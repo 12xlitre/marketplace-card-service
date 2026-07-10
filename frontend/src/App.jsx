@@ -6116,8 +6116,9 @@ function auditEngineLabel(engine) {
 
 function auditCompetitorMetricText(item) {
   const parts = [];
-  if (Number(item?.price) > 0) {
-    parts.push(competitorPriceText(item.price));
+  const displayPrice = Number(item?.discountedPrice) > 0 ? item.discountedPrice : item?.price;
+  if (Number(displayPrice) > 0) {
+    parts.push(competitorPriceText(displayPrice));
   }
   if (Number(item?.sales) > 0) {
     parts.push(`${formatNumber(item.sales)} продаж`);
