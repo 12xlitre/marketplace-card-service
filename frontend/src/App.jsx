@@ -20,6 +20,7 @@ import {
   Tags,
   Trash2,
   Upload,
+  WandSparkles,
   Warehouse,
   X,
 } from "lucide-react";
@@ -4106,6 +4107,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
   const [semanticCoreError, setSemanticCoreError] = useState("");
   const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
+  const [semanticContentStatus, setSemanticContentStatus] = useState("");
+  const [semanticContentError, setSemanticContentError] = useState("");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticActiveReportId, setSemanticActiveReportId] = useState("");
@@ -4198,6 +4201,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
   const latestCompetitorSelection = latestAuditEntry.competitorSelection || null;
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+  const semanticContentRunning = semanticContentStatus === "loading";
+  const canReoptimizeContent = Boolean(semanticCoreSelected.length && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
 
   useEffect(() => {
@@ -4206,6 +4211,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticSearch("");
     setSemanticExcludeWords("");
     setSemanticSaveStatus("");
+    setSemanticContentStatus("");
+    setSemanticContentError("");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -4231,6 +4238,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setMpstatsCharacteristicsMeta({});
     setSemanticCore(null);
     setSemanticCoreStatus("idle");
+    setSemanticContentStatus("");
+    setSemanticContentError("");
     setSemanticCoreSelected([]);
     setSemanticCoreReports([]);
     setSemanticActiveReportId("");
@@ -4585,6 +4594,75 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     persistSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
   }
 
+  async function reoptimizeContentFromSemanticCore() {
+    if (!semanticCoreSelected.length || approvalReadOnly) {
+      return;
+    }
+    setSemanticContentStatus("loading");
+    setSemanticContentError("");
+    try {
+      const payload = await apiRequest("/api/card-content-reoptimize", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal?.id,
+          cardKey: draftCardKey,
+          card,
+          selectedKeywords: semanticCoreSelected,
+          currentKeywords: activeSemanticCore?.current || [],
+          draft: {
+            title: draftTitle,
+            description: draftDescription,
+          },
+        }),
+      });
+      const titleDraft = payload.draftContent?.title || {};
+      const descriptionDraft = payload.draftContent?.description || {};
+      const nextTitle = titleDraft.value || draftTitle || currentTitle;
+      const nextDescription = descriptionDraft.value || draftDescription || description;
+      const nextTitleReason = titleDraft.reason || "Заголовок переписан с учетом выбранного СЯ.";
+      const nextDescriptionReason = descriptionDraft.reason || "Описание переписано с учетом выбранного СЯ.";
+      const structuredDraft = buildStructuredCardDraft({
+        auditStatus,
+        auditHistory,
+        approval,
+        approvalSections,
+        title: nextTitle,
+        description: nextDescription,
+        titleSource: "semantic",
+        descriptionSource: "semantic",
+        titleReason: nextTitleReason,
+        descriptionReason: nextDescriptionReason,
+        characteristics: draftCharacteristics,
+        prices: draftPrices,
+        stocks: draftStocks,
+        semanticCoreSelected,
+        semanticCoreReports,
+        card,
+      });
+      setDraftTitle(nextTitle);
+      setDraftDescription(nextDescription);
+      setDraftTitleSource("semantic");
+      setDraftDescriptionSource("semantic");
+      setDraftTitleReason(nextTitleReason);
+      setDraftDescriptionReason(nextDescriptionReason);
+      setChangesTab("content");
+      setActiveTab("changes");
+      if (onDraftActivity) {
+        onDraftActivity({ draft: true });
+      }
+      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      setSemanticContentStatus("done");
+    } catch (error) {
+      const message = error.message === "llm_key_missing"
+        ? "GigaChat не подключен: добавьте ключ на backend."
+        : error.status === 502
+          ? "GigaChat не смог подготовить текст. Повторите позже."
+          : "Не удалось переоптимизировать контент по СЯ.";
+      setSemanticContentError(message);
+      setSemanticContentStatus("error");
+    }
+  }
+
   async function runAudit(nextTab = "changes") {
     const targetTab = typeof nextTab === "string" ? nextTab : "changes";
     setAuditStatus("loading");
@@ -4856,7 +4934,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       cardKey: draftCardKey,
       nmID: card?.nmID || "",
       vendorCode: card?.vendorCode || "",
-      competitors: nextCompetitors.slice(0, 3).map((item, index) => ({
+      competitors: nextCompetitors.slice(0, 5).map((item, index) => ({
         competitorNmID: item.competitorNmID || item.nmID || "",
         url: item.url || item.competitorUrl || "",
         note: item.note || "",
@@ -4880,7 +4958,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setCompetitors(savedCompetitors);
       setCompetitorStatus("saved");
       if (refreshAfter && savedCompetitors.length) {
-        await refreshCompetitors({ statusOnDone: "saved", force: true });
+        const suggestedPayload = await apiRequest("/api/card-competitors/suggest", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal?.id,
+            cardKey: draftCardKey,
+            card,
+            competitors: savedCompetitors.map((item) => ({
+              competitorNmID: item.competitorNmID,
+              url: item.url,
+              note: item.note,
+            })),
+          }),
+        });
+        setCompetitors(Array.isArray(suggestedPayload.competitors) ? suggestedPayload.competitors : savedCompetitors);
       }
     } catch {
       setCompetitorStatus("error");
@@ -4897,7 +4988,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setCompetitorStatus("duplicate");
       return;
     }
-    if (competitors.length >= 3) {
+    if (competitors.length >= 5) {
       setCompetitorStatus("limit");
       return;
     }
@@ -4925,15 +5016,48 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     setCompetitorStatus("refreshing");
     try {
-      const payload = await apiRequest("/api/card-competitors/refresh", {
+      const payload = await apiRequest("/api/card-competitors/suggest", {
         method: "POST",
         body: JSON.stringify({
           portalId: portal?.id,
           cardKey: draftCardKey,
+          card,
+          competitors: competitors.map((item) => ({
+            competitorNmID: item.competitorNmID,
+            url: item.url,
+            note: item.note,
+          })),
         }),
       });
       setCompetitors(Array.isArray(payload.competitors) ? payload.competitors : []);
       setCompetitorStatus(statusOnDone);
+    } catch {
+      setCompetitorStatus("error");
+    }
+  }
+
+  async function suggestCompetitors() {
+    if (!competitorsEnabled) {
+      setCompetitorStatus("unavailable");
+      return;
+    }
+    setCompetitorStatus("suggesting");
+    try {
+      const payload = await apiRequest("/api/card-competitors/suggest", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal?.id,
+          cardKey: draftCardKey,
+          card,
+          competitors: competitors.map((item) => ({
+            competitorNmID: item.competitorNmID,
+            url: item.url,
+            note: item.note,
+          })),
+        }),
+      });
+      setCompetitors(Array.isArray(payload.competitors) ? payload.competitors : []);
+      setCompetitorStatus("suggested");
     } catch {
       setCompetitorStatus("error");
     }
@@ -5324,9 +5448,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
+                  {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок и описание...</span> : null}
+                  {semanticContentStatus === "done" ? <span className="status-note">Черновик контента переоптимизирован по выбранному СЯ.</span> : null}
+                  {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
                   <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore}>
                     <Download size={17} />Скачать выбранное
+                  </button>
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={reoptimizeContentFromSemanticCore}
+                    disabled={!canReoptimizeContent}
+                    title={semanticCoreSelected.length ? "Переписать заголовок и описание с учетом выбранных запросов" : "Сначала добавьте запросы в работу"}
+                  >
+                    <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
                   <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
                     <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : activeSemanticCore ? "Обновить подбор" : "Подобрать запросы"}
@@ -5599,6 +5735,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 enabled={competitorsEnabled}
                 onInput={setCompetitorInput}
                 onAdd={addCompetitor}
+                onSuggest={suggestCompetitors}
                 onRefresh={() => refreshCompetitors()}
                 onRemove={removeCompetitor}
               />
@@ -5671,7 +5808,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <div className="field-box">
                     <strong>Черновик заголовка</strong>
                     <textarea
-                      className={draftTitleSource === "audit" ? "short audit-suggestion-field" : "short"}
+                      className={["audit", "semantic"].includes(draftTitleSource) ? "short audit-suggestion-field" : "short"}
                       value={draftTitle}
                       disabled={approvalReadOnly}
                       onChange={(event) => {
@@ -5694,7 +5831,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <div className="field-box description-box">
                     <strong>Черновик описания</strong>
                     <textarea
-                      className={`description-editor ${draftDescriptionSource === "audit" ? "audit-suggestion-field" : ""}`}
+                      className={`description-editor ${["audit", "semantic"].includes(draftDescriptionSource) ? "audit-suggestion-field" : ""}`}
                       value={draftDescription}
                       disabled={approvalReadOnly}
                       onChange={(event) => {
@@ -5913,6 +6050,19 @@ function competitorPriceText(value) {
   return `${formatNumber(Math.round(number))} ₽`;
 }
 
+function competitorSignedPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  if (Math.abs(number) < 0.1) return "рядом";
+  return `${number > 0 ? "+" : ""}${number}%`;
+}
+
+function competitorSignedNumber(value, suffix = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return `${number > 0 ? "+" : ""}${formatNumber(number)}${suffix}`;
+}
+
 function competitorDateText(value) {
   return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
 }
@@ -5923,11 +6073,13 @@ function competitorStatusText(status, enabled) {
     loading: "Загружаем конкурентов...",
     saving: "Сохраняем список...",
     refreshing: "Проверяем конкурентов...",
+    suggesting: "Подбираем ТОП конкурентов через MPStats...",
     saved: "Список сохранен.",
     refreshed: "Данные конкурентов обновлены.",
+    suggested: "ТОП конкурентов подобран и сохранен.",
     invalid: "Вставьте ссылку WB или nmID конкурента.",
     duplicate: "Этот конкурент уже добавлен.",
-    limit: "Можно добавить до 3 конкурентов.",
+    limit: "Можно добавить до 5 конкурентов.",
     empty: "Добавьте конкурентов перед обновлением.",
     error: "Не удалось обновить конкурентов. Попробуйте еще раз.",
   }[status] || "";
@@ -5971,6 +6123,41 @@ function auditCompetitorMetricText(item) {
     parts.push(`схожесть ${item.similarityScore}`);
   }
   return parts.join(" · ");
+}
+
+function competitorVerdict(snapshot, competitor) {
+  const signals = Array.isArray(snapshot?.signals) ? snapshot.signals : [];
+  const reasons = Array.isArray(snapshot?.similarityReasons) ? snapshot.similarityReasons : [];
+  const comparison = snapshot?.comparison || {};
+  const parts = [];
+  if (Number(snapshot?.sales) > 0 || Number(snapshot?.revenue) > 0) {
+    parts.push(`рыночный спрос подтвержден${Number(snapshot?.sales) > 0 ? `: ${formatNumber(snapshot.sales)} продаж` : ""}`);
+  }
+  if (Number.isFinite(Number(comparison.priceDeltaPercent))) {
+    const delta = Number(comparison.priceDeltaPercent);
+    if (delta <= -7) parts.push(`дешевле нашей карточки на ${Math.abs(delta)}%`);
+    else if (delta >= 7) parts.push(`дороже нашей карточки на ${delta}%`);
+    else parts.push("в близком ценовом сегменте");
+  }
+  if (Number(comparison.descriptionDelta) > 150) {
+    parts.push("описание заметно подробнее");
+  }
+  if (Number(comparison.characteristicsDelta) > 2) {
+    parts.push("характеристик заполнено больше");
+  }
+  if (reasons.length) {
+    parts.push(reasons.slice(0, 2).join(", "));
+  }
+  if (!parts.length && signals.length) {
+    parts.push(signals.slice(0, 3).join(", "));
+  }
+  if (!parts.length && competitor?.note) {
+    parts.push(competitor.note);
+  }
+  if (!parts.length && Array.isArray(snapshot?.warnings) && snapshot.warnings.length) {
+    return "Данных недостаточно для вывода: источник конкурента не отдал метрики.";
+  }
+  return parts.length ? parts.join(". ") + "." : "Конкурент сохранен для мониторинга, но значимых отличий пока не найдено.";
 }
 
 function AuditCompetitorSelection({ selection }) {
@@ -6037,38 +6224,52 @@ function TopCompetitorsPanel({
   enabled,
   onInput,
   onAdd,
+  onSuggest,
   onRefresh,
   onRemove,
 }) {
-  const busy = ["loading", "saving", "refreshing"].includes(status);
+  const busy = ["loading", "saving", "refreshing", "suggesting"].includes(status);
   const criticalCount = competitors.filter((item) => item.hasCriticalChanges).length;
+  const mpstatsCount = competitors.filter((item) => item.snapshot?.source === "mpstats").length;
+  const manualCount = competitors.filter((item) => item.snapshot?.source === "manual").length;
   const statusText = competitorStatusText(status, enabled);
   return (
     <section className="workspace-strip competitors-strip">
       <div className="strip-head">
         <div>
           <h2>ТОП конкурентов</h2>
-          <p>До 3 выбранных вручную карточек WB для контроля цены, контента, фото и характеристик.</p>
+          <p>Автоподбор MPStats по нише и ручные карточки для сравнения цены, спроса, контента и заполнения.</p>
         </div>
         <Tag tone={criticalCount ? "amber" : competitors.length ? "blue" : "green"}>
-          {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/3`}
+          {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/5`}
         </Tag>
       </div>
+      {competitors.length ? (
+        <div className="competitor-summary">
+          <div><span>В списке</span><strong>{competitors.length}/5</strong></div>
+          <div><span>MPStats</span><strong>{mpstatsCount}</strong></div>
+          <div><span>Вручную</span><strong>{manualCount}</strong></div>
+          <div><span>Изменения</span><strong>{criticalCount || "нет"}</strong></div>
+        </div>
+      ) : null}
       <div className="competitor-toolbar">
         <label className="competitor-input">
-          <span>Ссылка или nmID конкурента</span>
+          <span>Добавить вручную</span>
           <input
             value={competitorInput}
             onChange={(event) => onInput(event.target.value)}
-            disabled={!enabled || busy || competitors.length >= 3}
+            disabled={!enabled || busy || competitors.length >= 5}
             placeholder="https://www.wildberries.ru/catalog/123456789/detail.aspx"
           />
         </label>
-        <button className="btn primary" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= 3}>
+        <button className="btn primary" type="button" onClick={onSuggest} disabled={!enabled || busy}>
+          <Search size={17} />{status === "suggesting" ? "Подбираем" : "Подобрать ТОП"}
+        </button>
+        <button className="btn" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= 5}>
           <Plus size={17} />Добавить
         </button>
         <button className="btn" type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length}>
-          <RefreshCw size={17} />Проверить конкурентов
+          <RefreshCw size={17} />Обновить снимки
         </button>
       </div>
       {statusText ? <div className={`competitor-status status-${status}`}>{statusText}</div> : null}
@@ -6079,7 +6280,10 @@ function TopCompetitorsPanel({
           ))}
         </div>
       ) : (
-        <div className="empty-state"><span>Добавьте 1-3 ссылки на карточки конкурентов. После проверки появятся данные WB.</span></div>
+        <div className="empty-state">
+          <strong>ТОП еще не подобран</strong>
+          <span>MPStats-ниша, коммерческая схожесть, цена, спрос и заполнение карточек будут собраны в единый сравнительный список.</span>
+        </div>
       )}
     </section>
   );
@@ -6091,15 +6295,24 @@ function CompetitorCard({ competitor, busy, onRemove }) {
   const criticalChanges = changes.filter((item) => item?.critical);
   const title = snapshot.title || `WB ${competitor.competitorNmID}`;
   const price = snapshot.discountedPrice || snapshot.price;
+  const comparison = snapshot.comparison || {};
+  const signals = Array.isArray(snapshot.signals) ? snapshot.signals : [];
+  const reasons = Array.isArray(snapshot.similarityReasons) ? snapshot.similarityReasons : [];
+  const hasPreviousSnapshot = Boolean(competitor.previousSnapshot && Object.keys(competitor.previousSnapshot).length);
+  const priceDelta = competitorSignedPercent(comparison.priceDeltaPercent);
+  const descriptionDelta = competitorSignedNumber(comparison.descriptionDelta, " зн.");
+  const characteristicsDelta = competitorSignedNumber(comparison.characteristicsDelta, "");
+  const verdict = competitorVerdict(snapshot, competitor);
   return (
     <article className={`competitor-card ${competitor.hasCriticalChanges ? "critical" : ""}`}>
       <div className="competitor-card-head">
         <div>
           <strong>{title}</strong>
-          <span>WB {competitor.competitorNmID} · {competitorDateText(competitor.lastCheckedAt || snapshot.checkedAt)}</span>
+          <span>WB {competitor.competitorNmID} · {snapshot.subjectName || "категория не указана"} · {competitorDateText(competitor.lastCheckedAt || snapshot.checkedAt)}</span>
         </div>
         <div className="competitor-actions">
-          {competitor.hasCriticalChanges ? <Tag tone="amber"><AlertTriangle size={13} />важно</Tag> : <Tag tone="green">спокойно</Tag>}
+          {snapshot.source ? <Tag tone={snapshot.source === "manual" ? "blue" : "green"}>{auditCompetitorSourceText(snapshot.source)}</Tag> : null}
+          {competitor.hasCriticalChanges ? <Tag tone="amber"><AlertTriangle size={13} />важно</Tag> : null}
           <a className="icon-link" href={competitor.url || wbCompetitorUrl(competitor.competitorNmID)} target="_blank" rel="noreferrer" title="Открыть WB">
             <ExternalLink size={16} />
           </a>
@@ -6110,12 +6323,34 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       </div>
       <div className="competitor-metrics">
         <div><span>Цена</span><strong>{competitorPriceText(price)}</strong></div>
+        <div><span>К нашей цене</span><strong>{priceDelta || "нет данных"}</strong></div>
+        <div><span>Продажи MPStats</span><strong>{snapshot.sales ? formatNumber(snapshot.sales) : "нет данных"}</strong></div>
+        <div><span>Выручка MPStats</span><strong>{snapshot.revenue ? `${formatNumber(Math.round(snapshot.revenue))} ₽` : "нет данных"}</strong></div>
         <div><span>Рейтинг</span><strong>{valueSummary(snapshot.rating)}</strong></div>
         <div><span>Отзывы</span><strong>{valueSummary(snapshot.feedbacks)}</strong></div>
-        <div><span>Фото</span><strong>{valueSummary(snapshot.photosCount)}</strong></div>
-        <div><span>Описание</span><strong>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.` : "нет данных"}</strong></div>
-        <div><span>Характеристики</span><strong>{valueSummary(snapshot.characteristicsCount)}</strong></div>
+        <div><span>Описание</span><strong>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · ${descriptionDelta}` : ""}` : "нет данных"}</strong></div>
+        <div><span>Характеристики</span><strong>{valueSummary(snapshot.characteristicsCount)}{characteristicsDelta ? ` · ${characteristicsDelta}` : ""}</strong></div>
       </div>
+      <div className="competitor-verdict">
+        <span>Вывод</span>
+        <p>{verdict}</p>
+      </div>
+      {signals.length || reasons.length || competitor.note ? (
+        <div className="competitor-insights">
+          {signals.length ? (
+            <div>
+              <span>Сигналы</span>
+              <p>{signals.slice(0, 4).join(" · ")}</p>
+            </div>
+          ) : null}
+          {reasons.length || competitor.note ? (
+            <div>
+              <span>Почему в ТОПе</span>
+              <p>{reasons.slice(0, 4).join(" · ") || competitor.note}</p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {changes.length ? (
         <div className="competitor-changes">
           <span>{criticalChanges.length ? "Критичные изменения" : "Изменения после прошлой проверки"}</span>
@@ -6129,8 +6364,8 @@ function CompetitorCard({ competitor, busy, onRemove }) {
         </div>
       ) : (
         <div className="competitor-changes empty">
-          <span>Изменений нет</span>
-          <p>После второго обновления система покажет, что изменилось у конкурента.</p>
+          <span>Мониторинг изменений</span>
+          <p>{hasPreviousSnapshot ? "Отличий от прошлого сохраненного снимка не найдено." : "Первый снимок сохранен; изменения появятся после следующего обновления."}</p>
         </div>
       )}
       {Array.isArray(snapshot.warnings) && snapshot.warnings.length ? (
@@ -6282,6 +6517,13 @@ function contentSummaryState({ changed, source, reason, emptyText }) {
       tone: changed ? "amber" : "green",
       label: changed ? "предложение аудита" : "аудит оставил",
       reason: reason || "Аудит не нашел причины менять значение.",
+    };
+  }
+  if (source === "semantic") {
+    return {
+      tone: changed ? "amber" : "green",
+      label: changed ? "по СЯ" : "СЯ оставило",
+      reason: reason || "Контент переоптимизирован по выбранным запросам.",
     };
   }
   return {
@@ -6742,6 +6984,9 @@ function DraftReason({ reason, compact = false }) {
 function DraftSourceMark({ source }) {
   if (source === "audit") {
     return <Tag tone="blue">рекомендация аудита</Tag>;
+  }
+  if (source === "semantic") {
+    return <Tag tone="blue">переоптимизация СЯ</Tag>;
   }
   if (source === "manual") {
     return <span className="draft-source-manual">ручная правка</span>;

@@ -2168,18 +2168,50 @@ def competitor_snapshot_from_sources(nm_id):
   warnings = []
   product = fetch_wb_public_product(nm_id, warnings)
   cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  info = {}
+  full_payload = {}
+  if token:
+    period = audit_period_default()
+    info = audit_mpstats_get(token, f"/analytics/v1/wb/items/{parse_competitor_nm_id(nm_id)}", warnings, cache_ttl=86400)
+    full_payload = audit_mpstats_get(
+      token,
+      f"/analytics/v1/wb/items/{parse_competitor_nm_id(nm_id)}/full?{urlencode({'d1': period['d1'], 'd2': period['d2']})}",
+      warnings,
+      cache_ttl=86400,
+    )
+  stats = full_payload.get("period_stats") if isinstance(full_payload, dict) else {}
+  if not isinstance(stats, dict):
+    stats = {}
   merged = audit_merge_card_content({}, cdn_card)
-  title = audit_str(product.get("name") or merged.get("title") or "")
-  brand = audit_str(product.get("brand") or merged.get("brand") or "")
-  subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or "")
+  title = audit_str(product.get("name") or merged.get("title") or info.get("name") or full_payload.get("name") or "")
+  brand = audit_str(product.get("brand") or merged.get("brand") or info.get("brand") or full_payload.get("brand") or "")
+  subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or "")
   characteristics = audit_card_characteristics(merged)
   price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
+  if price is None:
+    price = audit_number(info.get("final_price") or info.get("price") or stats.get("final_price") or stats.get("price"), None)
   extended = product.get("extended") if isinstance(product.get("extended"), dict) else {}
   discounted_price = wb_public_product_price(product, ("salePriceU", "salePrice", "clientSalePriceU", "product", "total"))
   if discounted_price is None:
     discounted_price = wb_public_price(extended.get("clientPriceU"))
   if discounted_price is None:
+    discounted_price = audit_number(info.get("final_price") or stats.get("final_price"), None)
+  if discounted_price is None:
     discounted_price = price
+  mpstats_filled = bool(info or full_payload)
+  warning_list = audit_public_warnings(warnings)
+  if mpstats_filled and (title or price or discounted_price):
+    warning_list = [item for item in warning_list if "WB public detail недоступен" not in item]
+  signals = []
+  if audit_int(stats.get("sales"), 0):
+    signals.append("есть продажи MPStats")
+  if audit_number(stats.get("revenue"), 0):
+    signals.append("есть выручка MPStats")
+  if discounted_price:
+    signals.append("цена получена")
+  if len(audit_str(merged.get("description") or "")) > 0:
+    signals.append("описание доступно")
   snapshot = {
     "nmID": parse_competitor_nm_id(nm_id),
     "url": wb_public_card_url(nm_id),
@@ -2189,15 +2221,21 @@ def competitor_snapshot_from_sources(nm_id):
     "price": price,
     "discountedPrice": discounted_price,
     "discount": product.get("sale") or product.get("clientSale") or None,
-    "rating": product.get("reviewRating") or product.get("rating") or None,
-    "feedbacks": product.get("feedbacks") or product.get("comments") or None,
+    "rating": product.get("reviewRating") or product.get("rating") or info.get("rating") or None,
+    "feedbacks": product.get("feedbacks") or product.get("comments") or info.get("comments") or None,
+    "sales": audit_int(stats.get("sales"), 0),
+    "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
+    "revenue": audit_number(stats.get("revenue"), 0),
+    "balance": audit_number(stats.get("balance"), 0),
     "photosCount": product.get("pics") or product.get("photosCount") or None,
     "descriptionLength": len(audit_str(merged.get("description") or "")),
     "characteristicsCount": len(characteristics),
     "characteristics": characteristics[:40],
     "characteristicsSignature": competitor_characteristic_signature(merged.get("characteristics") or []),
+    "source": "mpstats" if mpstats_filled else "wb_public",
+    "signals": audit_unique(signals, limit=8),
     "checkedAt": utc_now().isoformat(),
-    "warnings": audit_public_warnings(warnings),
+    "warnings": warning_list,
   }
   return snapshot
 
@@ -2246,6 +2284,93 @@ def competitor_snapshot_changes(previous, current):
         change["critical"] = new_price < old_price * 0.97
     changes.append(change)
   return changes[:12]
+
+
+def competitor_metric_delta(current_value, competitor_value):
+  current_number = audit_number(current_value, None)
+  competitor_number = audit_number(competitor_value, None)
+  if not current_number or not competitor_number:
+    return None
+  return round((competitor_number - current_number) / current_number * 100, 1)
+
+
+def card_competitor_baseline(card, market_data):
+  card = card if isinstance(card, dict) else {}
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  description = audit_str(card.get("description") or raw_fields.get("description") or "")
+  characteristics = audit_card_characteristics(card)
+  photos = card.get("photos") if isinstance(card.get("photos"), list) else raw_fields.get("photos")
+  return {
+    "nmID": audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or ""),
+    "title": audit_str(card.get("title") or raw_fields.get("title") or ""),
+    "brand": audit_str(card.get("brand") or raw_fields.get("brand") or ""),
+    "subjectName": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or ""),
+    "price": audit_card_price(card, market_data),
+    "descriptionLength": len(description),
+    "characteristicsCount": len(characteristics),
+    "photosCount": len(photos) if isinstance(photos, list) else audit_int(card.get("photosCount") or raw_fields.get("photosCount"), 0),
+  }
+
+
+def competitor_snapshot_from_candidate(candidate, current_card, market_data):
+  candidate = candidate if isinstance(candidate, dict) else {}
+  current = card_competitor_baseline(current_card, market_data)
+  nm_id = parse_competitor_nm_id(candidate.get("nmId") or candidate.get("nmID") or "")
+  characteristics = audit_card_characteristics({"characteristics": candidate.get("characteristics") or []})
+  description_length = audit_int(candidate.get("descriptionLength"), 0)
+  characteristics_count = len(characteristics) if characteristics else audit_int(candidate.get("characteristicsCount"), 0)
+  price = audit_number(candidate.get("price"), None)
+  comparison = {
+    "priceDeltaPercent": competitor_metric_delta(current.get("price"), price),
+    "descriptionDelta": description_length - audit_int(current.get("descriptionLength"), 0) if description_length else None,
+    "characteristicsDelta": characteristics_count - audit_int(current.get("characteristicsCount"), 0) if characteristics_count else None,
+    "titleOverlap": round(audit_token_overlap_score(current.get("title"), candidate.get("title")), 2),
+    "current": current,
+  }
+  signals = []
+  if comparison["priceDeltaPercent"] is not None:
+    if comparison["priceDeltaPercent"] <= -7:
+      signals.append("конкурент дешевле")
+    elif comparison["priceDeltaPercent"] >= 7:
+      signals.append("конкурент дороже")
+    else:
+      signals.append("цена рядом")
+  if audit_int(candidate.get("sales"), 0) > 0:
+    signals.append("есть продажи MPStats")
+  if audit_number(candidate.get("revenue"), 0):
+    signals.append("есть выручка MPStats")
+  if comparison["descriptionDelta"] is not None and comparison["descriptionDelta"] > 150:
+    signals.append("описание подробнее")
+  if comparison["characteristicsDelta"] is not None and comparison["characteristicsDelta"] > 2:
+    signals.append("характеристик больше")
+  return {
+    "nmID": nm_id,
+    "url": wb_public_card_url(nm_id),
+    "title": audit_str(candidate.get("title") or ""),
+    "brand": audit_str(candidate.get("brand") or ""),
+    "seller": audit_str(candidate.get("seller") or ""),
+    "subjectName": audit_str(candidate.get("subjectName") or current.get("subjectName") or ""),
+    "price": price,
+    "discountedPrice": price,
+    "sales": audit_int(candidate.get("sales"), 0),
+    "salesPerDay": audit_number(candidate.get("salesPerDay"), 0),
+    "revenue": audit_number(candidate.get("revenue"), 0),
+    "rating": audit_number(candidate.get("rating"), None),
+    "feedbacks": audit_int(candidate.get("comments"), 0),
+    "balance": audit_number(candidate.get("balance"), 0),
+    "position": candidate.get("position"),
+    "descriptionLength": description_length,
+    "characteristicsCount": characteristics_count,
+    "characteristics": characteristics[:40],
+    "source": audit_str(candidate.get("selectionSource") or candidate.get("source") or "mpstats"),
+    "similarityScore": audit_int(candidate.get("similarityScore"), 0),
+    "similarityReasons": audit_unique(candidate.get("similarityReasons") or [], limit=6),
+    "reason": audit_str(candidate.get("whyRelevant") or ""),
+    "comparison": comparison,
+    "signals": audit_unique(signals, limit=8),
+    "checkedAt": utc_now().isoformat(),
+    "warnings": [],
+  }
 
 
 def public_card_competitor(row):
@@ -2312,8 +2437,8 @@ def save_card_competitors(portal_id, card_key, nm_id, vendor_code, competitors, 
     raise ValueError("invalid_competitors")
   cleaned = []
   seen = set()
-  for index, item in enumerate(competitors[:3]):
-    raw_value = (item.get("url") or item.get("competitorNmID") or item.get("nmID")) if isinstance(item, dict) else item
+  for index, item in enumerate(competitors[:5]):
+    raw_value = (item.get("url") or item.get("competitorNmID") or item.get("nmID") or item.get("nmId")) if isinstance(item, dict) else item
     competitor_nm_id = parse_competitor_nm_id(raw_value)
     if not competitor_nm_id or competitor_nm_id in seen:
       continue
@@ -2429,6 +2554,115 @@ def refresh_card_competitors(portal_id, card_key, user):
         ),
       )
   return list_card_competitors(numeric_portal_id, card_key, user)
+
+
+def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_key = draft_card_key(card_key)
+  if not card_key:
+    raise ValueError("invalid_card_key")
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  card = content_card_for_portal(numeric_portal_id, card_key, raw_card)
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or "")
+  if not nm_id:
+    raise ValueError("missing_nm_id")
+  subject_id = card.get("subjectID") or card.get("subjectId") or raw_fields.get("subjectID") or raw_fields.get("subjectId")
+  warnings = []
+  period = audit_period_default()
+  cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  card = audit_merge_card_content(card, cdn_card)
+  market_data = audit_market_data(nm_id, subject_id, period, warnings)
+  competitors, selection = audit_pick_competitors(
+    nm_id,
+    card,
+    market_data,
+    warnings,
+    manual_competitors,
+    period=period,
+    manual_limit=5,
+  )
+  if not competitors:
+    warnings.append("ТОП конкурентов не подобран: MPStats не вернул коммерчески похожие карточки.")
+    return {
+      "competitors": list_card_competitors(numeric_portal_id, card_key, user),
+      "selection": selection,
+      "warnings": audit_public_warnings(warnings),
+    }
+  checked_at = utc_now().isoformat()
+  with connect_db() as db:
+    existing_rows = db.execute(
+      """
+      SELECT competitor_nm_id, snapshot_json
+      FROM card_competitors
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchall()
+    previous_by_id = {row["competitor_nm_id"]: safe_json_object(row["snapshot_json"]) for row in existing_rows}
+    selected_ids = {parse_competitor_nm_id(item.get("nmId") or item.get("nmID")) for item in competitors[:5]}
+    for row in existing_rows:
+      if row["competitor_nm_id"] not in selected_ids:
+        db.execute(
+          "DELETE FROM card_competitors WHERE portal_id = ? AND card_key = ? AND competitor_nm_id = ?",
+          (numeric_portal_id, card_key, row["competitor_nm_id"]),
+        )
+    for index, item in enumerate(competitors[:5]):
+      competitor_nm_id = parse_competitor_nm_id(item.get("nmId") or item.get("nmID"))
+      if not competitor_nm_id:
+        continue
+      snapshot = competitor_snapshot_from_candidate(item, card, market_data)
+      snapshot["warnings"] = audit_public_warnings([*snapshot.get("warnings", []), *warnings])[:4]
+      previous_snapshot = previous_by_id.get(competitor_nm_id, {})
+      changes = competitor_snapshot_changes(previous_snapshot, snapshot)
+      note = audit_str(item.get("whyRelevant") or "; ".join(item.get("similarityReasons") or []) or "Подобран автоматически по MPStats.", 500)
+      db.execute(
+        """
+        INSERT INTO card_competitors (
+          portal_id, card_key, nm_id, vendor_code, competitor_nm_id,
+          competitor_url, note, position, snapshot_json, previous_snapshot_json,
+          changed_fields_json, last_checked_at, created_by, updated_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(portal_id, card_key, competitor_nm_id) DO UPDATE SET
+          nm_id = excluded.nm_id,
+          vendor_code = excluded.vendor_code,
+          competitor_url = excluded.competitor_url,
+          note = excluded.note,
+          position = excluded.position,
+          snapshot_json = excluded.snapshot_json,
+          previous_snapshot_json = excluded.previous_snapshot_json,
+          changed_fields_json = excluded.changed_fields_json,
+          last_checked_at = excluded.last_checked_at,
+          updated_by = excluded.updated_by,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+          numeric_portal_id,
+          card_key,
+          nm_id[:80],
+          audit_str(card.get("vendorCode") or raw_fields.get("vendorCode") or "", 120),
+          competitor_nm_id,
+          wb_public_card_url(competitor_nm_id),
+          note,
+          index,
+          json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(previous_snapshot, ensure_ascii=False, separators=(",", ":")),
+          json.dumps(changes, ensure_ascii=False, separators=(",", ":")),
+          checked_at,
+          user["login"],
+          user["login"],
+        ),
+      )
+  return {
+    "competitors": list_card_competitors(numeric_portal_id, card_key, user),
+    "selection": selection,
+    "warnings": audit_public_warnings(warnings),
+  }
 
 
 def public_service_integration(row):
@@ -3094,6 +3328,25 @@ description.recommended должен быть готовым переписан�
 Верни строго JSON без текста вокруг. Не добавляй поля кроме допустимых верхнеуровневых блоков и _meta.
 """.strip()
 
+CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
+Ты — SEO-редактор карточек Wildberries. Перепиши заголовок и описание карточки под новое семантическое ядро.
+
+Правила:
+- используй только факты из evidenceBundle;
+- не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
+- новые ключевые запросы нужно включить естественно, без переспама и повторов;
+- заголовок должен быть готовым названием карточки WB длиной до 60 символов;
+- описание должно быть готовым текстом карточки, а не советом специалисту;
+- не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
+
+Верни строго JSON:
+{
+  "title": {"value": "...", "reason": "...", "keywords": ["..."]},
+  "description": {"value": "...", "reason": "...", "keywords": ["..."]},
+  "_meta": {"warnings": ["..."]}
+}
+""".strip()
+
 
 def audit_period_default():
   d2 = (utc_now().date() - dt.timedelta(days=14))
@@ -3106,6 +3359,20 @@ def audit_str(value, limit=None):
   if limit and len(text) > limit:
     return text[:limit].rstrip()
   return text
+
+
+def content_title_limit(value, limit=60):
+  text = audit_str(value)
+  if len(text) <= limit:
+    return text
+  words = text.split()
+  output = ""
+  for word in words:
+    candidate = f"{output} {word}".strip()
+    if len(candidate) > limit:
+      break
+    output = candidate
+  return output or text[:limit].rstrip()
 
 
 def audit_number(value, default=None):
@@ -4301,10 +4568,10 @@ def audit_competitor_similarity(card, market_data, candidate):
   return max(0, score), reasons
 
 
-def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitors=None, period=None):
+def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitors=None, period=None, manual_limit=3):
   competitors = []
   selection = {
-    "manualRequested": audit_competitor_ids_from_payload(manual_competitors),
+    "manualRequested": audit_competitor_ids_from_payload(manual_competitors, limit=manual_limit),
     "manualAccepted": [],
     "manualRejected": [],
     "autoSelected": [],
@@ -4348,9 +4615,9 @@ def audit_pick_competitors(nm_id, card, market_data, warnings, manual_competitor
       break
 
   auto_candidates = []
-  manual_set_complete = len(selection["manualRequested"]) >= 3
+  manual_set_complete = len(selection["manualRequested"]) >= manual_limit
   if manual_set_complete:
-    selection["autoSkippedReason"] = "Пользователь указал 3 конкурента для аудита, поэтому автодобор MPStats не выполнялся."
+    selection["autoSkippedReason"] = f"Пользователь указал {manual_limit} конкурентов, поэтому автодобор MPStats не выполнялся."
   else:
     for item in market_data.get("nicheItems", []):
       if str(item.get("nmId")) in seen:
@@ -4975,6 +5242,152 @@ def audit_llm_refine(evidence, base_result, warnings):
   except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
     warnings.append(f"LLM refinement недоступен: {type(exc).__name__}")
     return base_result
+
+
+def content_keywords_from_payload(items, limit=80):
+  output = []
+  seen = set()
+  for item in items if isinstance(items, list) else []:
+    if isinstance(item, str):
+      query = audit_str(item, 120)
+      source = {}
+    elif isinstance(item, dict):
+      query = audit_str(item.get("query") or item.get("keyword") or item.get("text") or "", 120)
+      source = item
+    else:
+      continue
+    key = audit_normalized(query)
+    if not query or key in seen:
+      continue
+    seen.add(key)
+    output.append({
+      "query": query,
+      "cluster": audit_str(source.get("cluster") or "", 120) if isinstance(source, dict) else "",
+      "prioritySubject": audit_str(source.get("prioritySubject") or "", 120) if isinstance(source, dict) else "",
+      "wbCount": audit_int(source.get("wbCount"), 0) if isinstance(source, dict) else 0,
+      "priority": audit_str(source.get("priority") or "", 20) if isinstance(source, dict) else "",
+    })
+    if len(output) >= limit:
+      break
+  return output
+
+
+def content_reoptimization_configured():
+  if OPTICARDS_LLM_PROVIDER == "gigachat":
+    return bool(GIGACHAT_AUTH_KEY)
+  return bool(audit_str(OPTICARDS_LLM_API_KEY))
+
+
+def content_card_for_portal(portal_id, card_key, raw_card):
+  card = raw_card if isinstance(raw_card, dict) else {}
+  if portal_id and str(portal_id) != "demo-wb":
+    init_db()
+    with connect_db() as db:
+      row = db.execute("SELECT cards_snapshot_json FROM portals WHERE id = ?", (int(portal_id),)).fetchone()
+    snapshot_card = snapshot_card_lookup(row["cards_snapshot_json"] if row else "").get(card_key)
+    if snapshot_card:
+      card = snapshot_card
+  return card
+
+
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, draft=None):
+  selected = content_keywords_from_payload(selected_keywords, limit=120)
+  current = content_keywords_from_payload(current_keywords, limit=80)
+  if not selected:
+    raise ValueError("missing_semantic_keywords")
+  if not content_reoptimization_configured():
+    raise ValueError("llm_key_missing")
+
+  card = content_card_for_portal(portal_id, card_key, raw_card)
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  draft = draft if isinstance(draft, dict) else {}
+  draft_title = audit_str(draft.get("title") or draft.get("titleValue") or "", 200)
+  draft_description = audit_str(draft.get("description") or draft.get("descriptionValue") or "", 7000)
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
+  characteristics = audit_card_characteristics(card)[:80]
+  evidence = {
+    "card": {
+      "nmId": audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or ""),
+      "vendorCode": audit_str(card.get("vendorCode") or raw_fields.get("vendorCode") or ""),
+      "brand": audit_str(card.get("brand") or raw_fields.get("brand") or ""),
+      "subject": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or ""),
+      "title": title,
+      "description": description,
+      "characteristics": characteristics,
+    },
+    "draft": {
+      "title": draft_title,
+      "description": draft_description,
+    },
+    "semanticCore": {
+      "selectedKeywords": selected,
+      "currentKeywords": current,
+    },
+    "constraints": {
+      "titleMaxChars": 60,
+      "descriptionMaxChars": 5000,
+      "language": "ru",
+    },
+  }
+  messages = [
+    {"role": "system", "content": CONTENT_REOPTIMIZE_SYSTEM_PROMPT},
+    {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
+  ]
+  try:
+    payload, model, provider = audit_llm_chat_completion(messages)
+    if not payload:
+      raise ValueError("llm_key_missing")
+    content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+    parsed = parse_llm_json_content(content)
+    if not isinstance(parsed, dict):
+      raise RuntimeError("llm_content_reoptimization_invalid_json")
+  except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+    raise RuntimeError(f"llm_content_reoptimization_failed:{type(exc).__name__}") from exc
+
+  title_block = parsed.get("title") if isinstance(parsed.get("title"), dict) else {}
+  description_block = parsed.get("description") if isinstance(parsed.get("description"), dict) else {}
+  next_title = content_title_limit(title_block.get("value") or title_block.get("recommended") or draft_title or title)
+  next_description = audit_str(description_block.get("value") or description_block.get("recommended") or draft_description or description, 5000)
+  if not next_title or not next_description:
+    raise RuntimeError("llm_content_reoptimization_empty")
+
+  combined_text = f"{next_title} {next_description}"
+  used_keywords = [
+    item["query"]
+    for item in selected
+    if audit_contains_phrase(combined_text, item["query"])
+  ][:80]
+  title_reason = audit_str(title_block.get("reason") or "Заголовок переписан с учетом выбранных запросов СЯ.", 500)
+  description_reason = audit_str(description_block.get("reason") or "Описание переписано с учетом выбранных запросов СЯ.", 700)
+  return {
+    "draftContent": {
+      "title": {
+        "value": next_title,
+        "source": "semantic",
+        "reason": title_reason,
+      },
+      "description": {
+        "value": next_description,
+        "source": "semantic",
+        "reason": description_reason,
+      },
+    },
+    "contentOptimization": {
+      "id": f"semantic-content-{int(time.time() * 1000)}",
+      "createdAt": utc_now().isoformat(),
+      "engine": "opticards-semantic-content-v1",
+      "provider": provider,
+      "model": model,
+      "selectedKeywords": len(selected),
+      "currentKeywords": len(current),
+      "usedKeywords": used_keywords,
+      "unusedKeywords": [item["query"] for item in selected if item["query"] not in used_keywords][:80],
+      "titleLength": len(next_title),
+      "descriptionLength": len(next_description),
+      "warnings": parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else [],
+    },
+  }
 
 
 def audit_draft_from_result(result, characteristic_draft):
@@ -6366,6 +6779,42 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, result)
       return
 
+    if path == "/api/card-content-reoptimize":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      portal_id = str(payload.get("portalId") or payload.get("portal_id") or "demo-wb")
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key") or "")
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      if not card_key:
+        card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
+      if not card_key:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_card_key"})
+        return
+      try:
+        result = build_card_content_reoptimization(
+          portal_id,
+          card_key,
+          raw_card,
+          selected_keywords=payload.get("selectedKeywords") or payload.get("semanticCoreSelected"),
+          current_keywords=payload.get("currentKeywords") or payload.get("semanticCoreCurrent"),
+          draft=payload.get("draft"),
+        )
+      except ValueError as exc:
+        message = str(exc) or "invalid_content_reoptimization_request"
+        status = HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": message})
+        return
+      except RuntimeError as exc:
+        self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc) or "llm_content_reoptimization_failed"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
     if path == "/api/mpstats/keywords":
       user = self.require_user()
       if not user:
@@ -6502,6 +6951,35 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitors"})
         return
       self.send_json(HTTPStatus.OK, {"competitors": competitors})
+      return
+
+    if path == "/api/card-competitors/suggest":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key") or "")
+      raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+      if not card_key:
+        card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
+      try:
+        result = suggest_card_competitors(
+          payload.get("portalId"),
+          card_key,
+          raw_card,
+          payload.get("competitors") or payload.get("manualCompetitors"),
+          user,
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_competitors"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path == "/api/card-workset":
