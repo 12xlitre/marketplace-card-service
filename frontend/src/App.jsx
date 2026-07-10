@@ -6137,6 +6137,36 @@ function competitorChangeTimingText(change, previousSnapshot, snapshot, fallback
   return "Обнаружено на текущем снимке.";
 }
 
+function competitorMonitoringConclusion(changes, hasPreviousSnapshot, previousSnapshot, snapshot) {
+  const visible = Array.isArray(changes) ? changes : [];
+  if (!hasPreviousSnapshot) {
+    return "Зафиксировали стартовое состояние конкурента: цену, текст и товарные характеристики. После следующего обновления будет видно, что именно поменялось.";
+  }
+  if (!visible.length) {
+    const sameMpstatsVersion = previousSnapshot?.mpstatsVersionAt && snapshot?.mpstatsVersionAt && previousSnapshot.mpstatsVersionAt === snapshot.mpstatsVersionAt;
+    const parts = [];
+    parts.push(sameMpstatsVersion ? "MPStats не показал новой версии контента" : "Новых отличий между сохраненными снимками не найдено");
+    parts.push("цена, заголовок, описание и товарные характеристики остались без изменений");
+    if (snapshot?.mpstatsUpdatedAt) {
+      parts.push(`цена актуальна на ${competitorDateText(snapshot.mpstatsUpdatedAt)}`);
+    }
+    return `${parts.join("; ")}.`;
+  }
+  const labels = visible.map((change) => change?.label).filter(Boolean);
+  const uniqueLabels = [...new Set(labels)];
+  const hints = [];
+  if (visible.some((change) => ["discountedPrice", "price"].includes(change?.field))) {
+    hints.push("проверьте ценовую позицию относительно нашей карточки");
+  }
+  if (visible.some((change) => ["title", "descriptionHash"].includes(change?.field))) {
+    hints.push("сравните, не усилили ли конкурентный текст");
+  }
+  if (visible.some((change) => change?.field === "characteristics")) {
+    hints.push("посмотрите, не добавили ли они важные товарные свойства");
+  }
+  return `За период изменилось: ${uniqueLabels.join(", ") || "контент конкурента"}. ${hints.join("; ") || "Изменения стоит учитывать при следующей переоптимизации"}.`;
+}
+
 function competitorCharacteristicRows(characteristics, limit = 6) {
   return (Array.isArray(characteristics) ? characteristics : [])
     .map((item) => ({
@@ -6516,6 +6546,10 @@ function CompetitorCard({ competitor, busy, onRemove }) {
         <div className="competitor-changes">
           <span>Что изменилось за период</span>
           <p className="competitor-change-period">{competitorPeriodText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</p>
+          <p>
+            <strong>Вывод за период</strong>
+            <small>{competitorMonitoringConclusion(visibleChanges, hasPreviousSnapshot, competitor.previousSnapshot, snapshot)}</small>
+          </p>
           {visibleChanges.slice(0, 5).map((change, index) => {
             const characteristicLines = change.field === "characteristics" ? competitorCharacteristicChangeLines(change) : [];
             return (
@@ -6533,7 +6567,11 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       ) : (
         <div className="competitor-changes empty">
           <span>Мониторинг изменений</span>
-          <p>{hasPreviousSnapshot ? "За этот период изменений в цене, тексте или характеристиках не найдено." : "Первый снимок сохранен; при следующем обновлении появится текст, что именно поменялось."}</p>
+          <p className="competitor-change-period">{hasPreviousSnapshot ? "За этот период изменений в цене, тексте или характеристиках не найдено." : "Первый снимок сохранен."}</p>
+          <p>
+            <strong>Вывод за период</strong>
+            <small>{competitorMonitoringConclusion([], hasPreviousSnapshot, competitor.previousSnapshot, snapshot)}</small>
+          </p>
         </div>
       )}
       {Array.isArray(snapshot.warnings) && snapshot.warnings.length ? (
