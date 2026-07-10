@@ -6144,6 +6144,7 @@ function competitorCharacteristicRows(characteristics, limit = 6) {
       value: Array.isArray(item?.values) ? item.values.filter(Boolean).join(", ") : item?.value,
     }))
     .filter((item) => item.name && item.name !== "—" && item.value)
+    .filter((item) => !competitorIsServiceCharacteristic(item))
     .slice(0, limit);
 }
 
@@ -6157,6 +6158,9 @@ function competitorNormalizedText(value) {
 
 function competitorIsServiceCharacteristic(item) {
   const name = competitorNormalizedText(item?.name);
+  if (["документы проверены", "тнвэд", "декларация соответствия", "сертификат соответствия"].includes(name)) {
+    return true;
+  }
   if (!["основная информация", "дополнительная информация"].includes(name)) return false;
   return [item?.value, item?.previous, item?.current, item?.competitor]
     .some((value) => competitorNormalizedText(value) === name);

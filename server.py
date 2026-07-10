@@ -2179,6 +2179,16 @@ def competitor_characteristic_public(row):
   }
 
 
+COMPETITOR_IGNORED_CHARACTERISTIC_NAMES = {
+  "основная информация",
+  "дополнительная информация",
+  "документы проверены",
+  "тнвэд",
+  "декларация соответствия",
+  "сертификат соответствия",
+}
+
+
 def competitor_characteristic_rows(characteristics):
   rows = []
   for row in audit_card_characteristics({"characteristics": characteristics}):
@@ -2186,6 +2196,8 @@ def competitor_characteristic_rows(characteristics):
     normalized_name = audit_normalized(public_row.get("name"))
     normalized_value = audit_normalized(public_row.get("value"))
     if not normalized_name or not normalized_value:
+      continue
+    if normalized_name in COMPETITOR_IGNORED_CHARACTERISTIC_NAMES:
       continue
     if normalized_name in {"основная информация", "дополнительная информация"} and normalized_name == normalized_value:
       continue
