@@ -2263,6 +2263,187 @@ def fetch_wb_public_product(nm_id, warnings):
   return {}
 
 
+def wb_public_image_urls(nm_id):
+  nm_id = parse_competitor_nm_id(nm_id)
+  if not nm_id:
+    return []
+  try:
+    nm_int = int(nm_id)
+  except ValueError:
+    return []
+  vol = nm_int // 100000
+  part = nm_int // 1000
+  basket_limits = (
+    143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601,
+    1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485,
+    3701, 3917, 4133, 4349, 4565, 4781, 4997,
+  )
+  basket = 28
+  for index, limit in enumerate(basket_limits, start=1):
+    if vol <= limit:
+      basket = index
+      break
+  base = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_int}/images"
+  return [
+    f"{base}/big/1.webp",
+    f"{base}/c516x688/1.webp",
+    f"{base}/c246x328/1.webp",
+  ]
+
+
+def wb_public_seller_ids_from_manual_source(name, store_url, manual_source, limit=5):
+  text = mpstats_manual_source_text(name, store_url, manual_source)
+  output = []
+  seen = set()
+  for raw_url in re.findall(r"https?://[^\s,;]+", text):
+    parsed = urlparse(raw_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(path_parts):
+      normalized_part = audit_normalized(part)
+      next_part = path_parts[index + 1] if index + 1 < len(path_parts) else ""
+      if normalized_part in {"seller", "sellers", "supplier", "suppliers"}:
+        seller_id = parse_wb_seller_id(next_part)
+        if seller_id and seller_id not in seen:
+          seen.add(seller_id)
+          output.append(seller_id)
+          if len(output) >= limit:
+            return output
+    query = parse_qs(parsed.query)
+    for key in ("seller", "supplier", "supplier_id", "supplierId"):
+      for value in query.get(key, []):
+        seller_id = parse_wb_seller_id(value)
+        if seller_id and seller_id not in seen:
+          seen.add(seller_id)
+          output.append(seller_id)
+          if len(output) >= limit:
+            return output
+  return output
+
+
+def parse_wb_seller_id(value):
+  text = str(value or "").strip()
+  if not text:
+    return ""
+  matches = re.findall(r"\d{3,12}", text)
+  return matches[-1] if matches else ""
+
+
+def wb_public_catalog_characteristics(product):
+  rows = []
+  colors = product.get("colors") if isinstance(product, dict) and isinstance(product.get("colors"), list) else []
+  color_names = audit_unique(
+    color.get("name") if isinstance(color, dict) else color
+    for color in colors
+  )
+  if color_names:
+    rows.append({"name": "Цвет", "value": ", ".join(color_names)})
+  return rows
+
+
+def wb_public_catalog_raw_card(product, source="wb-public-seller"):
+  if not isinstance(product, dict):
+    return None
+  nm_id = parse_competitor_nm_id(product.get("id") or product.get("nmID") or product.get("nmId"))
+  if not nm_id:
+    return None
+  price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
+  discounted_price = wb_public_product_price(product, ("salePriceU", "salePrice", "clientSalePriceU", "product", "total")) or price
+  image_urls = wb_public_image_urls(nm_id)
+  photos = [{"big": image_urls[0], "c516x688": image_urls[1], "c246x328": image_urls[2]}] if len(image_urls) >= 3 else []
+  stock = audit_number(product.get("totalQuantity") or product.get("volume"), None)
+  sizes = []
+  if price is not None or discounted_price is not None or stock is not None:
+    sizes.append({
+      "techSize": "единый",
+      "price": price,
+      "discountedPrice": discounted_price,
+      "stock": stock,
+      "sellerStock": None,
+      "wbStock": stock,
+      "skus": [],
+    })
+  return {
+    "nmID": nm_id,
+    "imtID": product.get("root") or product.get("rootId") or "",
+    "vendorCode": product.get("supplierArticle") or product.get("vendorCode") or "",
+    "title": audit_str(product.get("name") or f"WB {nm_id}"),
+    "description": "",
+    "brand": audit_named_value(product.get("brand") or ""),
+    "sellerName": audit_named_value(product.get("supplier") or product.get("supplierName") or ""),
+    "subjectID": product.get("subjectId") or product.get("subjectID"),
+    "subjectName": audit_str(product.get("entity") or product.get("subjectName") or product.get("subject") or "категория не указана"),
+    "photos": photos,
+    "photoUrl": first_photo_url({"photos": photos}),
+    "characteristics": wb_public_catalog_characteristics(product),
+    "sizes": sizes,
+    "price": price,
+    "discountedPrice": discounted_price,
+    "discount": product.get("sale") or product.get("clientSale"),
+    "stock": stock,
+    "sellerStock": None,
+    "wbStock": stock,
+    "rating": audit_number(product.get("reviewRating") or product.get("rating"), None),
+    "feedbacks": audit_int(product.get("feedbacks") or product.get("comments"), 0),
+    "createdAt": "",
+    "updatedAt": utc_now().isoformat(),
+    "mpstats": {
+      "source": source,
+      "supplierId": product.get("supplierId") or product.get("supplier_id"),
+      "url": wb_public_card_url(nm_id),
+    },
+  }
+
+
+def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
+  seller_id = parse_wb_seller_id(seller_id)
+  if not seller_id:
+    return []
+  warnings = warnings if isinstance(warnings, list) else []
+  limit = max(1, min(int(limit or 100), 500))
+  rows = []
+  page = 1
+  while len(rows) < limit and page <= 10:
+    params = urlencode({
+      "appType": "1",
+      "curr": "rub",
+      "dest": "-1257786",
+      "lang": "ru",
+      "page": page,
+      "sort": "popular",
+      "spp": "30",
+      "supplier": seller_id,
+    })
+    url = f"https://catalog.wb.ru/sellers/v4/catalog?{params}"
+    try:
+      request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 OptiCards/0.1 seller-bootstrap"})
+      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as exc:
+      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+      if exc.code == 429 and retry_after is not None and retry_after <= 3:
+        time.sleep(retry_after)
+        continue
+      warnings.append(f"WB seller catalog {seller_id}: HTTP {exc.code}")
+      break
+    except (urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
+      warnings.append(f"WB seller catalog {seller_id}: {type(exc).__name__}")
+      break
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    products = payload.get("products") if isinstance(payload, dict) else []
+    if not isinstance(products, list) or not products:
+      products = data.get("products") if isinstance(data, dict) else []
+    if not products:
+      break
+    for product in products:
+      raw_card = wb_public_catalog_raw_card(product)
+      if raw_card:
+        rows.append(raw_card)
+        if len(rows) >= limit:
+          break
+    page += 1
+  return rows
+
+
 def competitor_text_digest(value):
   text = audit_normalized(value)
   return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
@@ -5035,6 +5216,14 @@ def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPST
   if not raw_cards and seed_cards:
     raw_cards = seed_cards
     selected_candidate = {"kind": "items", "path": ", ".join(nm_ids[:5]), "source": "nm-id"}
+
+  if not raw_cards:
+    seller_ids = wb_public_seller_ids_from_manual_source(name, store_url, manual_source)
+    for seller_id in seller_ids:
+      raw_cards = fetch_wb_public_seller_catalog(seller_id, limit=limit, warnings=warnings)
+      if raw_cards:
+        selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
+        break
 
   deduped = []
   seen = set()
