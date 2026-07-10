@@ -2025,6 +2025,20 @@ tr:last-child td {
   gap: 7px;
 }
 
+.competitor-characteristics-list p {
+  grid-template-columns: minmax(0, 42%) minmax(0, 1fr);
+  align-items: start;
+}
+
+.competitor-characteristics-list strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.competitor-characteristics-list em {
+  overflow-wrap: anywhere;
+}
+
 .competitor-verdict {
   border: 1px solid #bfd6ed;
   border-radius: 8px;
