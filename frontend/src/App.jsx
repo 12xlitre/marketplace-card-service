@@ -6300,7 +6300,6 @@ function auditCompetitorMetricText(item) {
 }
 
 function competitorVerdict(snapshot, competitor) {
-  const reasons = Array.isArray(snapshot?.similarityReasons) ? snapshot.similarityReasons : [];
   const comparison = snapshot?.comparison || {};
   const parts = [];
   if (Number.isFinite(Number(comparison.priceDeltaPercent))) {
@@ -6311,9 +6310,6 @@ function competitorVerdict(snapshot, competitor) {
   }
   if (snapshot?.descriptionPreview) parts.push("описание зафиксировано");
   parts.push(`характеристики: ${competitorCharacteristicsComparisonText(comparison)}`);
-  if (reasons.length) {
-    parts.push(reasons.slice(0, 2).join(", "));
-  }
   if (!parts.length && competitor?.note) {
     parts.push(competitor.note);
   }
@@ -6461,7 +6457,6 @@ function CompetitorCard({ competitor, busy, onRemove }) {
   const title = snapshot.title || `WB ${competitor.competitorNmID}`;
   const price = snapshot.discountedPrice || snapshot.price;
   const comparison = snapshot.comparison || {};
-  const reasons = Array.isArray(snapshot.similarityReasons) ? snapshot.similarityReasons : [];
   const hasPreviousSnapshot = Boolean(competitor.previousSnapshot && Object.keys(competitor.previousSnapshot).length);
   const priceDelta = competitorSignedPercent(comparison.priceDeltaPercent);
   const descriptionDelta = competitorSignedNumber(comparison.descriptionDelta, " зн.");
@@ -6532,16 +6527,6 @@ function CompetitorCard({ competitor, busy, onRemove }) {
         <span>Вывод</span>
         <p>{verdict}</p>
       </div>
-      {reasons.length || competitor.note ? (
-        <div className="competitor-insights">
-          {reasons.length || competitor.note ? (
-            <div>
-              <span>Почему сравниваем</span>
-              <p>{reasons.slice(0, 4).join(" · ") || competitor.note}</p>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
       {visibleChanges.length ? (
         <div className="competitor-changes">
           <span>Что изменилось за период</span>

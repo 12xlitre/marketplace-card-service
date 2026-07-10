@@ -2065,30 +2065,6 @@ tr:last-child td {
   line-height: 1.4;
 }
 
-.competitor-insights {
-  display: grid;
-  gap: 8px;
-}
-
-.competitor-insights div {
-  border-left: 3px solid #9fc5b4;
-  padding-left: 8px;
-}
-
-.competitor-insights span {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  font-weight: 800;
-}
-
-.competitor-insights p {
-  margin: 4px 0 0;
-  color: var(--ink-soft);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
 .competitor-changes {
   display: grid;
   gap: 6px;
