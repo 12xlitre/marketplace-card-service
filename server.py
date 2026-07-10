@@ -1228,6 +1228,54 @@ def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витр�
     )
 
 
+def build_saved_manual_portal_snapshot(row, bootstrap=None, limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS):
+  existing_cards = wb_snapshot_cards_from_row(row)
+  if not existing_cards:
+    return {}
+  bootstrap = bootstrap if isinstance(bootstrap, dict) else {}
+  warnings = list(bootstrap.get("warnings") or [])
+  raw_cards = []
+  for card in existing_cards[:max(1, min(int(limit or MPSTATS_STORE_BOOTSTRAP_MAX_CARDS), 500))]:
+    raw_card = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+    if not raw_card:
+      raw_card = card if isinstance(card, dict) else {}
+    if raw_card:
+      raw_cards.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
+  cards = [mpstats_normalized_bootstrap_card(raw_card) for raw_card in raw_cards if isinstance(raw_card, dict)]
+  if not cards:
+    return {}
+  period = bootstrap.get("period") if isinstance(bootstrap.get("period"), dict) else audit_period_default()
+  loaded_at = utc_now().isoformat()
+  source = {
+    "kind": "saved-snapshot",
+    "source": "wb-public-card-details",
+  }
+  return {
+    "cards": cards,
+    "raw_count": len(cards),
+    "cursor": {},
+    "tokenMeta": {},
+    "stats": {
+      "cardCount": len(cards),
+      "workCount": 0,
+      "problemCount": sum(1 for card in cards if int(card.get("issueCount") or 0) > 0),
+      "sampleLimit": limit,
+      "loadedAt": loaded_at,
+      "portalName": "",
+      "source": "saved-snapshot",
+      "sourceLabel": "saved-snapshot: wb-public-card-details",
+    },
+    "manualBootstrap": {
+      "status": "loaded",
+      "cardCount": len(cards),
+      "source": source,
+      "period": period,
+      "warnings": audit_public_warnings(warnings),
+      "loadedAt": loaded_at,
+    },
+  }
+
+
 def replace_wb_token_for_portal(portal_id, token, snapshot):
   numeric_portal_id = int(portal_id)
   token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
@@ -1285,7 +1333,10 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   )
   bootstrap = snapshot.get("manualBootstrap") or {}
   if not snapshot.get("cards"):
-    return row, bootstrap
+    snapshot = build_saved_manual_portal_snapshot(row, bootstrap)
+    bootstrap = snapshot.get("manualBootstrap") or bootstrap
+    if not snapshot.get("cards"):
+      return row, bootstrap
   status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
   update_portal_manual_snapshot(portal_id, snapshot, status=status)
   updated_row = get_portal_row(portal_id, user)
@@ -2434,6 +2485,7 @@ def wb_public_catalog_raw_card(product, source="wb-public-seller"):
     "subjectID": product.get("subjectId") or product.get("subjectID"),
     "subjectName": audit_str(product.get("entity") or product.get("subjectName") or product.get("subject") or "категория не указана"),
     "photos": photos,
+    "photosCount": product.get("pics") or product.get("photosCount") or len(photos),
     "photoUrl": first_photo_url({"photos": photos}),
     "characteristics": wb_public_catalog_characteristics(product),
     "sizes": sizes,
@@ -5214,7 +5266,16 @@ def enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings):
   cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
   if not cdn_card:
     return raw_card
-  return audit_merge_card_content(raw_card, cdn_card)
+  merged = audit_merge_card_content(raw_card, cdn_card)
+  source = raw_card.get("mpstats", {}).get("source") if isinstance(raw_card.get("mpstats"), dict) else ""
+  photo_count = audit_int(raw_card.get("photosCount") or len(raw_card.get("photos") or []), 0)
+  if source == "wb-public-seller" and photo_count > 0:
+    photos = wb_public_photo_rows(nm_id, photo_count)
+    if photos:
+      merged["photos"] = photos
+      merged["photoUrl"] = first_photo_url({"photos": photos})
+      merged["photosCount"] = photo_count
+  return merged
 
 
 def mpstats_normalized_bootstrap_card(raw_card):
