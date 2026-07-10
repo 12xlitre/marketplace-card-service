@@ -1577,6 +1577,19 @@ tr:last-child td {
     linear-gradient(135deg, #f3e1c3 0 48%, #e4eef8 48% 100%);
 }
 
+.thumb.has-image {
+  background: #fff;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  position: relative;
+  z-index: 1;
+}
+
 .thumb.has-image:after {
   content: none;
 }

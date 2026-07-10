@@ -7830,8 +7830,11 @@ function TeamSummary({ portal, findUser, fallbackOwner }) {
 
 function Thumb({ url, alt = false }) {
   const photoUrl = safeHttpsUrl(url);
-  const style = photoUrl ? { backgroundImage: `url("${photoUrl}")` } : undefined;
-  return <div className={`thumb ${alt ? "alt" : ""} ${photoUrl ? "has-image" : ""}`} style={style} />;
+  return (
+    <div className={`thumb ${alt ? "alt" : ""} ${photoUrl ? "has-image" : ""}`}>
+      {photoUrl ? <img src={photoUrl} alt="" loading="lazy" decoding="async" /> : null}
+    </div>
+  );
 }
 
 function PlaceholderScreen({ title, copy }) {
