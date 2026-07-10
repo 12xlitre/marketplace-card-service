@@ -2157,12 +2157,116 @@ def fetch_wb_public_product(nm_id, warnings):
   return {}
 
 
+def competitor_text_digest(value):
+  text = audit_normalized(value)
+  return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+
+
+def competitor_characteristic_value_text(row):
+  values = row.get("values") if isinstance(row, dict) else []
+  if not isinstance(values, list):
+    values = [values]
+  text = ", ".join(audit_str(value) for value in values if audit_str(value))
+  unit = audit_str(row.get("unitName") if isinstance(row, dict) else "")
+  return f"{text} {unit}".strip() if text and unit else text
+
+
+def competitor_characteristic_public(row):
+  return {
+    "key": audit_str(row.get("key") or f"charc-name:{audit_normalized(row.get('name'))}"),
+    "name": audit_str(row.get("name") or "Характеристика"),
+    "value": competitor_characteristic_value_text(row),
+  }
+
+
+def competitor_characteristic_rows(characteristics):
+  return [
+    competitor_characteristic_public(row)
+    for row in audit_card_characteristics({"characteristics": characteristics})
+    if audit_str(row.get("name")) and competitor_characteristic_value_text(row)
+  ]
+
+
 def competitor_characteristic_signature(characteristics):
-  rows = audit_card_characteristics({"characteristics": characteristics})
   return "|".join(
-    f"{audit_str(row.get('name')).lower()}={audit_str(row.get('value')).lower()}"
-    for row in rows[:80]
+    f"{audit_normalized(row.get('name'))}={audit_normalized(row.get('value'))}"
+    for row in competitor_characteristic_rows(characteristics)[:80]
   )
+
+
+def competitor_characteristic_map(characteristics):
+  output = {}
+  for row in competitor_characteristic_rows(characteristics):
+    key = row.get("key") or f"charc-name:{audit_normalized(row.get('name'))}"
+    output[key] = row
+  return output
+
+
+def competitor_characteristics_diff(previous_characteristics, current_characteristics, limit=6):
+  previous_map = competitor_characteristic_map(previous_characteristics)
+  current_map = competitor_characteristic_map(current_characteristics)
+  added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
+  removed = [previous_map[key] for key in previous_map.keys() - current_map.keys()]
+  changed = []
+  for key in previous_map.keys() & current_map.keys():
+    before = previous_map[key]
+    after = current_map[key]
+    if audit_normalized(before.get("value")) != audit_normalized(after.get("value")):
+      changed.append({
+        "name": after.get("name") or before.get("name"),
+        "previous": before.get("value"),
+        "current": after.get("value"),
+      })
+  summary_parts = []
+  if changed:
+    item = changed[0]
+    summary_parts.append(f"{item['name']}: было {item['previous'] or 'пусто'}, стало {item['current'] or 'пусто'}")
+  if added:
+    item = added[0]
+    summary_parts.append(f"добавили {item['name']}: {item['value']}")
+  if removed:
+    item = removed[0]
+    summary_parts.append(f"убрали {item['name']}: {item['value']}")
+  return {
+    "added": added[:limit],
+    "removed": removed[:limit],
+    "changed": changed[:limit],
+    "addedCount": len(added),
+    "removedCount": len(removed),
+    "changedCount": len(changed),
+    "summary": "; ".join(summary_parts),
+  }
+
+
+def competitor_characteristics_comparison(current_characteristics, competitor_characteristics, limit=6):
+  current_map = competitor_characteristic_map(current_characteristics)
+  competitor_map = competitor_characteristic_map(competitor_characteristics)
+  same = []
+  different = []
+  for key in current_map.keys() & competitor_map.keys():
+    current = current_map[key]
+    competitor = competitor_map[key]
+    row = {
+      "name": competitor.get("name") or current.get("name"),
+      "current": current.get("value"),
+      "competitor": competitor.get("value"),
+    }
+    if audit_normalized(current.get("value")) == audit_normalized(competitor.get("value")):
+      same.append(row)
+    else:
+      different.append(row)
+  only_competitor = [competitor_map[key] for key in competitor_map.keys() - current_map.keys()]
+  only_current = [current_map[key] for key in current_map.keys() - competitor_map.keys()]
+  return {
+    "same": same[:limit],
+    "different": different[:limit],
+    "onlyCompetitor": only_competitor[:limit],
+    "onlyCurrent": only_current[:limit],
+    "sameCount": len(same),
+    "differentCount": len(different),
+    "onlyCompetitorCount": len(only_competitor),
+    "onlyCurrentCount": len(only_current),
+  }
 
 
 def competitor_snapshot_from_sources(nm_id):
@@ -2189,6 +2293,7 @@ def competitor_snapshot_from_sources(nm_id):
   title = audit_str(product.get("name") or merged.get("title") or info.get("name") or full_payload.get("name") or "")
   brand = audit_str(product.get("brand") or merged.get("brand") or info.get("brand") or full_payload.get("brand") or "")
   subject = audit_str(product.get("subjectName") or product.get("entity") or merged.get("subjectName") or audit_subject_name_from_payload(full_payload) or audit_subject_name_from_payload(info) or "")
+  description = audit_str(merged.get("description") or "")
   characteristics = audit_card_characteristics(merged)
   price = wb_public_product_price(product, ("priceU", "price", "basicPriceU", "basic", "total"))
   if price is None:
@@ -2212,7 +2317,7 @@ def competitor_snapshot_from_sources(nm_id):
     signals.append("есть выручка MPStats")
   if discounted_price:
     signals.append("цена получена")
-  if len(audit_str(merged.get("description") or "")) > 0:
+  if len(description) > 0:
     signals.append("описание доступно")
   snapshot = {
     "nmID": parse_competitor_nm_id(nm_id),
@@ -2232,10 +2337,12 @@ def competitor_snapshot_from_sources(nm_id):
     "revenue": audit_number(stats.get("revenue"), 0),
     "balance": audit_number(stats.get("balance"), 0),
     "photosCount": product.get("pics") or product.get("photosCount") or None,
-    "descriptionLength": len(audit_str(merged.get("description") or "")),
+    "descriptionLength": len(description),
+    "descriptionPreview": audit_str(description, 420),
+    "descriptionHash": competitor_text_digest(description),
     "characteristicsCount": len(characteristics),
     "characteristics": characteristics[:40],
-    "characteristicsSignature": competitor_characteristic_signature(merged.get("characteristics") or []),
+    "characteristicsSignature": competitor_characteristic_signature(characteristics),
     "source": "mpstats" if mpstats_filled else "wb_public",
     "signals": audit_unique(signals, limit=8),
     "checkedAt": utc_now().isoformat(),
@@ -2263,6 +2370,10 @@ def competitor_snapshot_values_equal(previous, current, key):
     return competitor_subject_leaf(previous.get(key)) == competitor_subject_leaf(current.get(key))
   if key in {"discountedPrice", "price"}:
     return competitor_snapshot_value(previous, key) == competitor_snapshot_value(current, key)
+  if key == "descriptionHash":
+    previous_hash = audit_str(previous.get("descriptionHash") or competitor_text_digest(previous.get("descriptionPreview") or ""))
+    current_hash = audit_str(current.get("descriptionHash") or competitor_text_digest(current.get("descriptionPreview") or ""))
+    return previous_hash == current_hash
   return competitor_snapshot_value(previous, key) == competitor_snapshot_value(current, key)
 
 
@@ -2277,9 +2388,7 @@ def competitor_snapshot_changes(previous, current):
     ("subjectName", "Категория"),
     ("discountedPrice", "Цена со скидкой"),
     ("price", "Цена до скидки"),
-    ("photosCount", "Фото"),
-    ("descriptionLength", "Длина описания"),
-    ("characteristicsCount", "Характеристики"),
+    ("descriptionHash", "Описание"),
   ]
   changes = []
   for key, label in fields:
@@ -2292,8 +2401,15 @@ def competitor_snapshot_changes(previous, current):
       "label": label,
       "previous": previous.get(key),
       "current": current.get(key),
-      "critical": key in {"title", "discountedPrice", "photosCount", "descriptionLength"},
+      "critical": key in {"title", "discountedPrice", "descriptionHash"},
     }
+    if key == "descriptionHash":
+      change["previous"] = previous.get("descriptionPreview") or f"{audit_int(previous.get('descriptionLength'), 0)} зн."
+      change["current"] = current.get("descriptionPreview") or f"{audit_int(current.get('descriptionLength'), 0)} зн."
+      change["summary"] = (
+        "изменили описание: "
+        f"было {audit_int(previous.get('descriptionLength'), 0)} зн., стало {audit_int(current.get('descriptionLength'), 0)} зн."
+      )
     if key == "discountedPrice":
       old_price = audit_number(previous.get(key), None)
       new_price = audit_number(current.get(key), None)
@@ -2301,6 +2417,23 @@ def competitor_snapshot_changes(previous, current):
         change["deltaPercent"] = round((new_price - old_price) / old_price * 100, 1)
         change["critical"] = new_price < old_price * 0.97
     changes.append(change)
+  characteristics_diff = competitor_characteristics_diff(
+    previous.get("characteristics") or [],
+    current.get("characteristics") or [],
+  )
+  if characteristics_diff["addedCount"] or characteristics_diff["removedCount"] or characteristics_diff["changedCount"]:
+    changes.append({
+      "field": "characteristics",
+      "label": "Характеристики",
+      "previous": previous.get("characteristics") or [],
+      "current": current.get("characteristics") or [],
+      "critical": True,
+      "details": characteristics_diff,
+      "summary": characteristics_diff.get("summary") or (
+        f"изменили характеристики: значений {characteristics_diff['changedCount']}, "
+        f"добавлено {characteristics_diff['addedCount']}, убрано {characteristics_diff['removedCount']}"
+      ),
+    })
   return changes[:12]
 
 
@@ -2325,7 +2458,11 @@ def card_competitor_baseline(card, market_data):
     "subjectName": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or ""),
     "price": audit_card_price(card, market_data),
     "descriptionLength": len(description),
+    "descriptionPreview": audit_str(description, 420),
+    "descriptionHash": competitor_text_digest(description),
     "characteristicsCount": len(characteristics),
+    "characteristics": characteristics[:80],
+    "characteristicsSignature": competitor_characteristic_signature(characteristics),
     "photosCount": len(photos) if isinstance(photos, list) else audit_int(card.get("photosCount") or raw_fields.get("photosCount"), 0),
   }
 
@@ -2336,6 +2473,8 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
   nm_id = parse_competitor_nm_id(candidate.get("nmId") or candidate.get("nmID") or "")
   characteristics = audit_card_characteristics({"characteristics": candidate.get("characteristics") or []})
   description_length = audit_int(candidate.get("descriptionLength"), 0)
+  description_preview = audit_str(candidate.get("descriptionPreview") or candidate.get("description") or "", 420)
+  description_hash = audit_str(candidate.get("descriptionHash") or competitor_text_digest(candidate.get("description") or description_preview))
   characteristics_count = len(characteristics) if characteristics else audit_int(candidate.get("characteristicsCount"), 0)
   price = audit_positive_number(candidate.get("price"), candidate.get("basePrice"), default=None)
   discounted_price = audit_positive_number(
@@ -2351,6 +2490,7 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "priceDeltaPercent": competitor_metric_delta(current.get("price"), comparison_price),
     "descriptionDelta": description_length - audit_int(current.get("descriptionLength"), 0) if description_length else None,
     "characteristicsDelta": characteristics_count - audit_int(current.get("characteristicsCount"), 0) if characteristics_count else None,
+    "characteristics": competitor_characteristics_comparison(current.get("characteristics") or [], characteristics),
     "titleOverlap": round(audit_token_overlap_score(current.get("title"), candidate.get("title")), 2),
     "current": current,
   }
@@ -2389,8 +2529,11 @@ def competitor_snapshot_from_candidate(candidate, current_card, market_data):
     "balance": audit_number(candidate.get("balance"), 0),
     "position": candidate.get("position"),
     "descriptionLength": description_length,
+    "descriptionPreview": description_preview,
+    "descriptionHash": description_hash,
     "characteristicsCount": characteristics_count,
     "characteristics": characteristics[:40],
+    "characteristicsSignature": competitor_characteristic_signature(characteristics),
     "source": audit_str(candidate.get("selectionSource") or candidate.get("source") or "manual"),
     "similarityScore": audit_int(candidate.get("similarityScore"), 0),
     "similarityReasons": audit_unique(candidate.get("similarityReasons") or [], limit=6),
@@ -4703,6 +4846,8 @@ def audit_manual_competitor_candidate(competitor_nm_id, period, warnings):
     "balance": audit_number(stats.get("balance"), 0),
     "salesPerDay": audit_number(stats.get("sales_per_day") or stats.get("salesPerDay"), 0),
     "descriptionLength": snapshot.get("descriptionLength") or 0,
+    "descriptionPreview": snapshot.get("descriptionPreview") or "",
+    "descriptionHash": snapshot.get("descriptionHash") or "",
     "characteristics": audit_card_characteristics({"characteristics": snapshot.get("characteristics") or []}),
     "subjectName": subject_name,
     "subjectPath": audit_subject_path_from_info(info, full_payload),

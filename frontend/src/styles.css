@@ -2020,6 +2020,11 @@ tr:last-child td {
   word-break: normal;
 }
 
+.competitor-characteristics-list {
+  display: grid;
+  gap: 7px;
+}
+
 .competitor-verdict {
   border: 1px solid #bfd6ed;
   border-radius: 8px;
@@ -2081,6 +2086,13 @@ tr:last-child td {
   color: var(--ink-soft);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.competitor-changes p.competitor-change-period {
+  border-color: #bfd6ed;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-weight: 800;
 }
 
 .competitor-changes strong {

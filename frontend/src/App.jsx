@@ -6068,14 +6068,78 @@ function competitorSignedNumber(value, suffix = "") {
   return `${number > 0 ? "+" : ""}${formatNumber(number)}${suffix}`;
 }
 
-function competitorPlainNumber(value, suffix = "") {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return "нет данных";
-  return `${formatNumber(Math.round(number * 10) / 10)}${suffix}`;
-}
-
 function competitorDateText(value) {
   return value ? new Date(value).toLocaleString("ru-RU") : "еще не обновляли";
+}
+
+function competitorPeriodText(previousSnapshot, snapshot, fallbackDate) {
+  const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
+  const to = snapshot?.checkedAt || fallbackDate || "";
+  if (from && to) return `За период с ${competitorDateText(from)} по ${competitorDateText(to)} поменялось следующее:`;
+  return "С прошлого сохраненного снимка поменялось следующее:";
+}
+
+function competitorCharacteristicRows(characteristics, limit = 6) {
+  return (Array.isArray(characteristics) ? characteristics : [])
+    .map((item) => ({
+      name: textOrDash(item?.name),
+      value: Array.isArray(item?.values) ? item.values.filter(Boolean).join(", ") : item?.value,
+    }))
+    .filter((item) => item.name && item.name !== "—" && item.value)
+    .slice(0, limit);
+}
+
+function competitorCharacteristicLine(item) {
+  return `${item?.name || "Характеристика"}: ${item?.value || item?.current || item?.competitor || "нет данных"}`;
+}
+
+function competitorCharacteristicsComparisonText(comparison) {
+  const data = comparison?.characteristics || {};
+  const same = Number(data.sameCount || 0);
+  const different = Number(data.differentCount || 0);
+  const extra = Number(data.onlyCompetitorCount || 0);
+  const missing = Number(data.onlyCurrentCount || 0);
+  const parts = [];
+  if (same) parts.push(`совпадает ${same}`);
+  if (different) parts.push(`отличается ${different}`);
+  if (extra) parts.push(`у конкурента дополнительно ${extra}`);
+  if (missing) parts.push(`у нас дополнительно ${missing}`);
+  return parts.join(" · ") || "нет данных для сравнения";
+}
+
+function competitorChangeText(change) {
+  if (change?.summary) return change.summary;
+  if (change?.field === "discountedPrice") {
+    return `финальная цена: было ${competitorPriceText(change.previous)}, стало ${competitorPriceText(change.current)}`;
+  }
+  if (change?.field === "price") {
+    return `цена до скидки: было ${competitorPriceText(change.previous)}, стало ${competitorPriceText(change.current)}`;
+  }
+  if (change?.field === "title") {
+    return `заголовок: было ${textOrDash(change.previous)}, стало ${textOrDash(change.current)}`;
+  }
+  if (change?.field === "brand") {
+    return `бренд: было ${textOrDash(change.previous)}, стало ${textOrDash(change.current)}`;
+  }
+  if (change?.field === "subjectName") {
+    return `категория: было ${textOrDash(change.previous)}, стало ${textOrDash(change.current)}`;
+  }
+  return `${change?.label || "Поле"}: было ${textOrDash(change?.previous)}, стало ${textOrDash(change?.current)}`;
+}
+
+function competitorCharacteristicChangeLines(change) {
+  const details = change?.details || {};
+  const lines = [];
+  (details.changed || []).slice(0, 3).forEach((item) => {
+    lines.push(`${item.name}: было ${item.previous || "пусто"}, стало ${item.current || "пусто"}`);
+  });
+  (details.added || []).slice(0, 2).forEach((item) => {
+    lines.push(`добавили ${competitorCharacteristicLine(item)}`);
+  });
+  (details.removed || []).slice(0, 2).forEach((item) => {
+    lines.push(`убрали ${competitorCharacteristicLine(item)}`);
+  });
+  return lines;
 }
 
 function competitorStatusText(status, enabled) {
@@ -6094,16 +6158,6 @@ function competitorStatusText(status, enabled) {
     empty: "Добавьте конкурентов вручную перед проверкой.",
     error: "Не удалось обновить конкурентов. Попробуйте еще раз.",
   }[status] || "";
-}
-
-function competitorChangeValue(change, key = "current") {
-  if (change?.field === "characteristicsSignature") {
-    return "изменился состав";
-  }
-  if (change?.field === "discountedPrice" || change?.field === "price") {
-    return competitorPriceText(change?.[key]);
-  }
-  return textOrDash(change?.[key]);
 }
 
 function auditCompetitorSourceText(source) {
@@ -6138,30 +6192,19 @@ function auditCompetitorMetricText(item) {
 }
 
 function competitorVerdict(snapshot, competitor) {
-  const signals = Array.isArray(snapshot?.signals) ? snapshot.signals : [];
   const reasons = Array.isArray(snapshot?.similarityReasons) ? snapshot.similarityReasons : [];
   const comparison = snapshot?.comparison || {};
   const parts = [];
-  if (Number(snapshot?.sales) > 0 || Number(snapshot?.revenue) > 0) {
-    parts.push(`рыночный спрос подтвержден${Number(snapshot?.sales) > 0 ? `: ${formatNumber(snapshot.sales)} продаж` : ""}`);
-  }
   if (Number.isFinite(Number(comparison.priceDeltaPercent))) {
     const delta = Number(comparison.priceDeltaPercent);
     if (delta <= -7) parts.push(`дешевле нашей карточки на ${Math.abs(delta)}%`);
     else if (delta >= 7) parts.push(`дороже нашей карточки на ${delta}%`);
     else parts.push("в близком ценовом сегменте");
   }
-  if (Number(comparison.descriptionDelta) > 150) {
-    parts.push("описание заметно подробнее");
-  }
-  if (Number(comparison.characteristicsDelta) > 2) {
-    parts.push("характеристик заполнено больше");
-  }
+  if (snapshot?.descriptionPreview) parts.push("описание зафиксировано");
+  parts.push(`характеристики: ${competitorCharacteristicsComparisonText(comparison)}`);
   if (reasons.length) {
     parts.push(reasons.slice(0, 2).join(", "));
-  }
-  if (!parts.length && signals.length) {
-    parts.push(signals.slice(0, 3).join(", "));
   }
   if (!parts.length && competitor?.note) {
     parts.push(competitor.note);
@@ -6169,7 +6212,7 @@ function competitorVerdict(snapshot, competitor) {
   if (!parts.length && Array.isArray(snapshot?.warnings) && snapshot.warnings.length) {
     return "Данных недостаточно для вывода: источник конкурента не отдал метрики.";
   }
-  return parts.length ? parts.join(". ") + "." : "Конкурент сохранен для мониторинга, но значимых отличий пока не найдено.";
+  return parts.length ? parts.join(". ") + "." : "Конкурент сохранен: текущие данные зафиксированы для следующего сравнения.";
 }
 
 function AuditCompetitorSelection({ selection }) {
@@ -6301,17 +6344,18 @@ function TopCompetitorsPanel({
 function CompetitorCard({ competitor, busy, onRemove }) {
   const snapshot = competitor.snapshot || {};
   const changes = Array.isArray(competitor.changes) ? competitor.changes : [];
-  const criticalChanges = changes.filter((item) => item?.critical);
   const title = snapshot.title || `WB ${competitor.competitorNmID}`;
   const price = snapshot.discountedPrice || snapshot.price;
   const comparison = snapshot.comparison || {};
-  const signals = Array.isArray(snapshot.signals) ? snapshot.signals : [];
   const reasons = Array.isArray(snapshot.similarityReasons) ? snapshot.similarityReasons : [];
   const hasPreviousSnapshot = Boolean(competitor.previousSnapshot && Object.keys(competitor.previousSnapshot).length);
   const priceDelta = competitorSignedPercent(comparison.priceDeltaPercent);
   const descriptionDelta = competitorSignedNumber(comparison.descriptionDelta, " зн.");
-  const characteristicsDelta = competitorSignedNumber(comparison.characteristicsDelta, "");
   const titleOverlap = Number(comparison.titleOverlap);
+  const characteristicRows = competitorCharacteristicRows(snapshot.characteristics, 7);
+  const comparisonCharacteristics = comparison.characteristics || {};
+  const firstDifferentCharacteristic = Array.isArray(comparisonCharacteristics.different) ? comparisonCharacteristics.different[0] : null;
+  const firstExtraCharacteristic = Array.isArray(comparisonCharacteristics.onlyCompetitor) ? comparisonCharacteristics.onlyCompetitor[0] : null;
   const verdict = competitorVerdict(snapshot, competitor);
   return (
     <article className={`competitor-card ${competitor.hasCriticalChanges ? "critical" : ""}`}>
@@ -6333,42 +6377,49 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       </div>
       <div className="competitor-data-grid">
         <div className="competitor-data-section">
-          <span>Рынок MPStats</span>
-          <p><strong>Продажи</strong><em>{snapshot.sales ? formatNumber(snapshot.sales) : "нет данных"}</em></p>
-          <p><strong>Выручка</strong><em>{snapshot.revenue ? `${formatNumber(Math.round(snapshot.revenue))} ₽` : "нет данных"}</em></p>
-          <p><strong>В день</strong><em>{competitorPlainNumber(snapshot.salesPerDay, " шт.")}</em></p>
-          <p><strong>Остаток</strong><em>{competitorPlainNumber(snapshot.balance, " шт.")}</em></p>
+          <span>Как написано сейчас</span>
+          <p><strong>Заголовок</strong><em>{title}</em></p>
+          <p><strong>Описание</strong><em>{snapshot.descriptionPreview || "нет данных"}</em></p>
+          <p><strong>Длина</strong><em>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · к нашей ${descriptionDelta}` : ""}` : "нет данных"}</em></p>
         </div>
         <div className="competitor-data-section">
           <span>Цена</span>
           <p><strong>Финальная</strong><em>{competitorPriceText(price)}</em></p>
           <p><strong>До скидки</strong><em>{competitorPriceText(snapshot.price)}</em></p>
           <p><strong>К нашей</strong><em>{priceDelta || "нет данных"}</em></p>
-          <p><strong>Средняя продажа</strong><em>{snapshot.avgSalePrice ? competitorPriceText(snapshot.avgSalePrice) : "нет данных"}</em></p>
         </div>
         <div className="competitor-data-section">
-          <span>Контент</span>
-          <p><strong>Описание</strong><em>{snapshot.descriptionLength ? `${formatNumber(snapshot.descriptionLength)} зн.${descriptionDelta ? ` · ${descriptionDelta}` : ""}` : "нет данных"}</em></p>
-          <p><strong>Характеристики</strong><em>{valueSummary(snapshot.characteristicsCount)}{characteristicsDelta ? ` · ${characteristicsDelta}` : ""}</em></p>
-          <p><strong>Схожесть названия</strong><em>{Number.isFinite(titleOverlap) ? `${Math.round(titleOverlap * 100)}%` : "нет данных"}</em></p>
-          <p><strong>Отзывы</strong><em>{valueSummary(snapshot.feedbacks)}</em></p>
+          <span>Характеристики конкурента</span>
+          {characteristicRows.length ? (
+            <div className="competitor-characteristics-list">
+              {characteristicRows.map((item) => (
+                <p key={`${item.name}-${item.value}`}><strong>{item.name}</strong><em>{item.value}</em></p>
+              ))}
+            </div>
+          ) : (
+            <p><strong>Данные</strong><em>нет данных</em></p>
+          )}
+        </div>
+        <div className="competitor-data-section">
+          <span>Сравнение с нашей</span>
+          <p><strong>Название</strong><em>{Number.isFinite(titleOverlap) ? `${Math.round(titleOverlap * 100)}% схожести` : "нет данных"}</em></p>
+          <p><strong>Характеристики</strong><em>{competitorCharacteristicsComparisonText(comparison)}</em></p>
+          {firstDifferentCharacteristic ? (
+            <p><strong>{firstDifferentCharacteristic.name}</strong><em>у нас: {firstDifferentCharacteristic.current || "пусто"} · у них: {firstDifferentCharacteristic.competitor || "пусто"}</em></p>
+          ) : firstExtraCharacteristic ? (
+            <p><strong>{firstExtraCharacteristic.name}</strong><em>есть у конкурента: {firstExtraCharacteristic.value}</em></p>
+          ) : null}
         </div>
       </div>
       <div className="competitor-verdict">
         <span>Вывод</span>
         <p>{verdict}</p>
       </div>
-      {signals.length || reasons.length || competitor.note ? (
+      {reasons.length || competitor.note ? (
         <div className="competitor-insights">
-          {signals.length ? (
-            <div>
-              <span>Сигналы</span>
-              <p>{signals.slice(0, 4).join(" · ")}</p>
-            </div>
-          ) : null}
           {reasons.length || competitor.note ? (
             <div>
-              <span>Почему в ТОПе</span>
+              <span>Почему сравниваем</span>
               <p>{reasons.slice(0, 4).join(" · ") || competitor.note}</p>
             </div>
           ) : null}
@@ -6376,19 +6427,23 @@ function CompetitorCard({ competitor, busy, onRemove }) {
       ) : null}
       {changes.length ? (
         <div className="competitor-changes">
-          <span>{criticalChanges.length ? "Критичные изменения" : "Изменения после прошлой проверки"}</span>
+          <span>Что изменилось за период</span>
+          <p className="competitor-change-period">{competitorPeriodText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</p>
           {changes.slice(0, 5).map((change, index) => (
             <p key={`${change.field}-${index}`}>
               <strong>{change.label}</strong>
               {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
-              <small>{competitorChangeValue(change, "previous")} → {competitorChangeValue(change, "current")}</small>
+              <small>{competitorChangeText(change)}</small>
+              {change.field === "characteristics" ? (
+                <small>{competitorCharacteristicChangeLines(change).slice(0, 4).join(" · ")}</small>
+              ) : null}
             </p>
           ))}
         </div>
       ) : (
         <div className="competitor-changes empty">
           <span>Мониторинг изменений</span>
-          <p>{hasPreviousSnapshot ? "Отличий от прошлого сохраненного снимка не найдено." : "Первый снимок сохранен; изменения появятся после следующего обновления."}</p>
+          <p>{hasPreviousSnapshot ? "За этот период изменений в цене, тексте или характеристиках не найдено." : "Первый снимок сохранен; при следующем обновлении появится текст, что именно поменялось."}</p>
         </div>
       )}
       {Array.isArray(snapshot.warnings) && snapshot.warnings.length ? (
