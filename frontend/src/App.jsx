@@ -4082,7 +4082,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
                     </td>
                     <td>
                       <div className="product-cell">
-                        <Thumb url={card.photoUrl} alt={index % 2 === 1} />
+                        <Thumb url={bestPhotoUrl(card)} alt={index % 2 === 1} />
                         <div className="product-name">
                           <strong>{card.title || "Карточка WB"}</strong>
                           <span>категория: {card.subjectName || "не указана"} · артикул {textOrDash(card.vendorCode)}</span>

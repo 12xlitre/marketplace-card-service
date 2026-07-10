@@ -5146,6 +5146,26 @@ def mpstats_storefront_raw_card(item, source="mpstats-storefront"):
   }
 
 
+def enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings):
+  if not isinstance(raw_card, dict):
+    return raw_card
+  nm_id = parse_competitor_nm_id(raw_card.get("nmID") or raw_card.get("nmId") or raw_card.get("id"))
+  if not nm_id:
+    return raw_card
+  characteristics = raw_card.get("characteristics") if isinstance(raw_card.get("characteristics"), list) else []
+  needs_details = (
+    not audit_str(raw_card.get("description"))
+    or len(characteristics) <= 2
+    or not audit_str(raw_card.get("subjectName"))
+  )
+  if not needs_details:
+    return raw_card
+  cdn_card = audit_fetch_wb_cdn_card(nm_id, warnings)
+  if not cdn_card:
+    return raw_card
+  return audit_merge_card_content(raw_card, cdn_card)
+
+
 def mpstats_normalized_bootstrap_card(raw_card):
   normalized = normalize_wb_card(raw_card)
   for key in ("price", "discountedPrice", "discount", "stock", "sellerStock", "wbStock", "rating", "feedbacks"):
@@ -5242,7 +5262,7 @@ def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPST
     if not nm_id or nm_id in seen:
       continue
     seen.add(nm_id)
-    deduped.append(raw_card)
+    deduped.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
     if len(deduped) >= limit:
       break
 
@@ -5930,6 +5950,63 @@ def audit_wb_cdn_characteristic_options(cdn_card):
   return flattened
 
 
+def audit_public_characteristic_rows(items):
+  rows = []
+  seen = set()
+  for index, item in enumerate(items if isinstance(items, list) else []):
+    if isinstance(item, dict):
+      name = audit_str(item.get("name") or item.get("charcName") or item.get("id") or item.get("charcID") or f"Характеристика {index + 1}")
+      value = "; ".join(audit_card_values_from_characteristic(item))
+      charc_id = item.get("charcID") or item.get("charcId") or item.get("id")
+      unit_name = audit_str(item.get("unitName") or item.get("unit_name") or "")
+    else:
+      name = f"Характеристика {index + 1}"
+      value = audit_str(item)
+      charc_id = None
+      unit_name = ""
+    key = audit_normalized(name)
+    if not key or key in seen or not value:
+      continue
+    seen.add(key)
+    row = {"name": name, "value": value}
+    if charc_id:
+      row["charcID"] = charc_id
+    if unit_name:
+      row["unitName"] = unit_name
+    rows.append(row)
+  return rows
+
+
+def audit_merge_public_characteristics(card_characteristics, cdn_card):
+  rows = []
+  seen = set()
+
+  def add_row(row):
+    if not isinstance(row, dict):
+      return
+    name = audit_str(row.get("name") or row.get("charcName") or "")
+    value = row.get("value") if "value" in row else row.get("values")
+    values = audit_card_values_from_characteristic({"value": value})
+    text = "; ".join(values)
+    key = audit_normalized(name)
+    if not key or key in seen or not text:
+      return
+    seen.add(key)
+    output = {**row, "name": name, "value": text}
+    output.pop("values", None)
+    rows.append(output)
+
+  for row in audit_public_characteristic_rows(card_characteristics):
+    add_row(row)
+  for row in audit_public_characteristic_rows(audit_wb_cdn_characteristic_options(cdn_card)):
+    add_row(row)
+
+  contents = audit_str(cdn_card.get("contents") if isinstance(cdn_card, dict) else "")
+  if contents and "комплектация" not in seen:
+    add_row({"name": "Комплектация", "value": contents})
+  return rows
+
+
 def audit_merge_card_content(card, cdn_card):
   if not isinstance(card, dict):
     card = {}
@@ -5938,16 +6015,10 @@ def audit_merge_card_content(card, cdn_card):
   selling = cdn_card.get("selling") if isinstance(cdn_card.get("selling"), dict) else {}
   title = audit_str(card.get("title") or cdn_card.get("imt_name") or cdn_card.get("imtName") or cdn_card.get("name") or "")
   description = audit_str(card.get("description") or cdn_card.get("description") or "", 7000)
-  characteristics = card.get("characteristics") if isinstance(card.get("characteristics"), list) else []
-  if not characteristics:
-    characteristics = [
-      {
-        "name": item.get("name") or item.get("charcName"),
-        "value": item.get("value") or item.get("values") or item.get("variable_values"),
-      }
-      for item in audit_wb_cdn_characteristic_options(cdn_card)
-      if item.get("name") or item.get("charcName")
-    ]
+  characteristics = audit_merge_public_characteristics(
+    card.get("characteristics") if isinstance(card.get("characteristics"), list) else [],
+    cdn_card,
+  )
   return {
     **card,
     "title": title,
