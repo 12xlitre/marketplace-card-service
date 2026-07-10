@@ -1168,6 +1168,51 @@ tr.selected-row td {
   line-height: 1.2;
 }
 
+.manual-source-box {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.manual-source-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.34fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  align-items: start;
+  min-width: 0;
+}
+
+.manual-source-row:first-child {
+  border-top: 0;
+}
+
+.manual-source-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.manual-source-row strong,
+.manual-source-row a,
+.manual-source-row p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.manual-source-row a {
+  color: var(--brand);
+}
+
 .pipeline {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

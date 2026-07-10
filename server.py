@@ -196,6 +196,8 @@ def init_db():
         work_count INTEGER NOT NULL DEFAULT 0,
         problem_count INTEGER NOT NULL DEFAULT 0,
         cards_snapshot_json TEXT NOT NULL DEFAULT '',
+        store_url TEXT NOT NULL DEFAULT '',
+        manual_source TEXT NOT NULL DEFAULT '',
         created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -329,6 +331,10 @@ def init_db():
       db.execute("ALTER TABLE portals ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
     if "cards_snapshot_json" not in portal_columns:
       db.execute("ALTER TABLE portals ADD COLUMN cards_snapshot_json TEXT NOT NULL DEFAULT ''")
+    if "store_url" not in portal_columns:
+      db.execute("ALTER TABLE portals ADD COLUMN store_url TEXT NOT NULL DEFAULT ''")
+    if "manual_source" not in portal_columns:
+      db.execute("ALTER TABLE portals ADD COLUMN manual_source TEXT NOT NULL DEFAULT ''")
     integration_columns = {row["name"] for row in db.execute("PRAGMA table_info(portal_integrations)").fetchall()}
     if "external_key" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN external_key TEXT NOT NULL DEFAULT ''")
@@ -708,15 +714,15 @@ def wb_snapshot_cards_from_row(row):
   return cards if isinstance(cards, list) else []
 
 
-def create_portal(name, marketplace, scope, created_by, team):
+def create_portal(name, marketplace, scope, created_by, team, store_url="", manual_source=""):
   init_db()
   with connect_db() as db:
     cursor = db.execute(
       """
-      INSERT INTO portals (name, marketplace, scope, status, created_by)
-      VALUES (?, ?, ?, 'draft', ?)
+      INSERT INTO portals (name, marketplace, scope, status, store_url, manual_source, created_by)
+      VALUES (?, ?, ?, 'Ручной режим', ?, ?, ?)
       """,
-      (name, marketplace, scope, created_by),
+      (name, marketplace, scope, store_url, manual_source, created_by),
     )
     portal_id = cursor.lastrowid
     for project_role, user_login in team.items():
@@ -909,6 +915,8 @@ def list_portals(user=None):
         portals.work_count,
         portals.problem_count,
         portals.cards_snapshot_json,
+        portals.store_url,
+        portals.manual_source,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
@@ -984,19 +992,24 @@ def public_portal_from_row(row):
   has_wb_integration = "wb:" in integrations
   api_connected = bool(row["api_connected"])
   mode = "api" if api_connected or has_wb_integration else "manual"
+  status = row["status"] or ""
+  if mode == "manual" and status in ("", "draft"):
+    status = "Ручной режим"
   return {
     "id": str(row["id"]),
     "name": row["name"],
     "marketplace": row["marketplace"],
     "mode": mode,
     "scope": row["scope"],
-    "status": row["status"],
+    "status": status,
     "isActive": bool(row["is_active"]),
     "ownerLogin": team.get("lead", ""),
     "cardCount": row["card_count"],
     "workCount": row["work_count"],
     "problemCount": row["problem_count"],
     "apiConnected": api_connected,
+    "storeUrl": row["store_url"] or "",
+    "manualSource": row["manual_source"] or "",
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
     "realCards": wb_snapshot_cards_from_row(row),
@@ -1047,6 +1060,8 @@ def get_portal_row(portal_id, user=None):
         portals.work_count,
         portals.problem_count,
         portals.cards_snapshot_json,
+        portals.store_url,
+        portals.manual_source,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
@@ -7570,7 +7585,14 @@ def clean_portal_team(raw_team):
   }
 
 
-def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot=None):
+def clean_portal_manual_text(value, max_length, error_code):
+  text = str(value or "").strip()
+  if len(text) > max_length:
+    raise ValueError(error_code)
+  return text
+
+
+def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot=None, store_url="", manual_source=""):
   stats = (snapshot or {}).get("stats") or {}
   cards = (snapshot or {}).get("cards") or []
   token_meta = (snapshot or {}).get("tokenMeta") or {}
@@ -7587,6 +7609,8 @@ def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snaps
     "workCount": stats.get("workCount", 0),
     "problemCount": stats.get("problemCount", 0),
     "apiConnected": mode == "api",
+    "storeUrl": store_url if mode == "manual" else "",
+    "manualSource": manual_source if mode == "manual" else "",
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
     "realCards": cards,
@@ -8069,6 +8093,12 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if len(name) > 120:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "portal_name_too_long"})
         return
+      try:
+        store_url = clean_portal_manual_text(payload.get("storeUrl") or payload.get("store_url"), 500, "store_url_too_long")
+        manual_source = clean_portal_manual_text(payload.get("manualSource") or payload.get("manual_source"), 1200, "manual_source_too_long")
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "manual_portal_field_too_long"})
+        return
 
       if mode == "api":
         if marketplace != "Wildberries":
@@ -8128,13 +8158,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
 
       try:
-        portal_id = create_portal(name, marketplace, scope, user["login"], team)
+        portal_id = create_portal(name, marketplace, scope, user["login"], team, store_url, manual_source)
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
       self.send_json(
         HTTPStatus.CREATED,
-        {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team)},
+        {"portal": public_portal_payload(
+          portal_id,
+          name,
+          marketplace,
+          mode,
+          scope,
+          team,
+          store_url=store_url,
+          manual_source=manual_source,
+        )},
       )
       return
 

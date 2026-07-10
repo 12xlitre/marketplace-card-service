@@ -639,6 +639,8 @@ function normalizePortal(portal) {
   return {
     ...portal,
     apiConnected: Boolean(portal.apiConnected),
+    storeUrl: String(portal.storeUrl || portal.store_url || "").trim(),
+    manualSource: String(portal.manualSource || portal.manual_source || "").trim(),
     isActive: portal.isActive !== false,
     status: portal.mode === "api" && !portal.apiConnected ? "API ожидает подключения" : portal.status,
     ownerLogin: teamRoles.lead || portal.ownerLogin,
@@ -3474,6 +3476,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const owner = findUser(portal.ownerLogin);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
+  const isManual = !isApi;
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
   const sourceRows = sourceFlowRows(portal, mpstatsIntegration);
   const workRoute = workRouteRows(portal);
@@ -3567,9 +3570,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <div className="strip-head">
                 <div>
                   <h2>Обзор кабинета</h2>
-                  <p>Фактическое состояние подключенного источника и карточек.</p>
+                  <p>Фактическое состояние источника данных и карточек.</p>
                 </div>
-                <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : "API ожидает"}</Tag>
+                <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isManual ? "Без API" : "API ожидает")}</Tag>
               </div>
               <div className="summary-grid">
                 <Metric label="Карточек в кабинете" value={formatNumber(portal.cardCount)} />
@@ -3627,12 +3630,12 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <section className="workspace-strip security-strip">
                 <div>
                   <h2>Контур безопасности</h2>
-                  <p>Как сейчас разрешено использовать API по этому кабинету.</p>
+                  <p>{portal.apiConnected ? "Как сейчас разрешено использовать API по этому кабинету." : "Что хранится по кабинету без ключа WB."}</p>
                 </div>
                 <div className="security-inline-list">
-                  <div><span>Чтение WB</span><strong>{portal.apiConnected ? "включено" : "ожидает ключ"}</strong></div>
-                  <div><span>Запись в WB</span><strong>{portal.wbWriteEnabled ? "включена" : "отдельное включение"}</strong></div>
-                  <div><span>Токен</span><strong>backend + AES-GCM</strong></div>
+                  <div><span>Чтение WB</span><strong>{portal.apiConnected ? "включено" : (isManual ? "без API" : "ожидает ключ")}</strong></div>
+                  <div><span>Запись в WB</span><strong>{portal.wbWriteEnabled ? "включена" : (isManual ? "недоступна без API" : "отдельное включение")}</strong></div>
+                  <div><span>Токен</span><strong>{portal.apiConnected ? "backend + AES-GCM" : "не хранится"}</strong></div>
                 </div>
               </section>
             </div>
@@ -3643,9 +3646,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <h2>Источник данных</h2>
                   <p>{portal.syncStatus === "loaded"
                     ? "Список карточек загружен из WB API через backend. Сейчас OptiCards читает данные и готовит черновики; запись в WB включается отдельно по договоренности с клиентом."
-                    : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы."}</p>
+                    : (isManual
+                      ? "Кабинет заведен без WB API. Здесь фиксируем ссылку на магазин, исходные данные от клиента и команду; карточки можно добавить вручную или позже подключить API."
+                      : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы.")}</p>
                 </div>
-                <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : "ручной режим"}</Tag>
+                <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isManual ? "Без API" : "ручной режим")}</Tag>
               </div>
               <div className="panel-actions">
                 <button className="btn" type="button" onClick={onRefreshCards} disabled={!portal.apiConnected || cardsLoading}>
@@ -3661,6 +3666,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
                 ))}
               </div>
+              {isManual ? <ManualPortalSource portal={portal} /> : null}
             </section>
 
             <section className="workspace-strip">
@@ -3782,10 +3788,16 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   }, [storageKey, selectedKeys, worksetLoaded, portal?.id, portal?.isDemo, cardKeySignature]);
 
   if (!cards.length) {
+    const isManualPortal = portal.mode === "manual";
+    const hasManualSource = Boolean(portal.storeUrl || portal.manualSource);
     return (
       <div className="empty-state">
-        <strong>{portal.apiConnected ? "Карточки еще не загружены" : "Нет источника карточек"}</strong>
-        <span>{portal.apiConnected ? "Обновите данные WB, чтобы увидеть список." : "Подключите API или добавьте ручной импорт."}</span>
+        <strong>{portal.apiConnected ? "Карточки еще не загружены" : (isManualPortal ? "Кабинет заведен без API" : "Нет источника карточек")}</strong>
+        <span>{portal.apiConnected
+          ? "Обновите данные WB, чтобы увидеть список."
+          : (isManualPortal
+            ? (hasManualSource ? "Ссылка или исходные данные сохранены. Карточки появятся после ручного добавления или подключения API." : "Можно сохранить ссылку на магазин, список nmID или позже подключить API.")
+            : "Подключите API или добавьте ручной импорт.")}</span>
       </div>
     );
   }
@@ -7475,6 +7487,8 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
     }
     if (errorObject.message === "wb_token_required") return "Введите WB API ключ для подключения кабинета.";
     if (errorObject.message === "wb_api_error") return `WB API не подключился: ${errorObject.payload?.message || "WB отклонил запрос."}`;
+    if (errorObject.message === "store_url_too_long") return "Ссылка или ориентир по магазину слишком длинные. Оставьте ссылку на магазин или первую карточку.";
+    if (errorObject.message === "manual_source_too_long") return "Описание первичного источника слишком длинное. Оставьте кратко: таблица, список nmID или комментарий от клиента.";
     if (errorObject.message === "secret_storage_unavailable") return "На backend не настроен ключ шифрования.";
     if (errorObject.status === 401) return "Сессия истекла. Войдите заново.";
     return isReplacement ? "Не удалось заменить WB API ключ. Проверьте ключ и попробуйте еще раз." : "Не удалось добавить кабинет. Проверьте данные и попробуйте еще раз.";
@@ -7516,7 +7530,9 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
             <h2>{isReplacement ? "Заменить WB API ключ" : "Добавить кабинет"}</h2>
             <p>{isReplacement
               ? `Ключ будет заменен только в кабинете ${targetPortal?.name || "Wildberries"}, после проверки read-only запросом WB.`
-              : "API-ключ отправляется только на backend, проверяется read-only запросом WB и не хранится в браузере."}</p>
+              : (mode === "api"
+                ? "API-ключ отправляется только на backend, проверяется read-only запросом WB и не хранится в браузере."
+                : "Создаем рабочий кабинет без ключа WB: команда, ссылка на магазин и первичный источник сохраняются в OptiCards.")}</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
@@ -7527,8 +7543,8 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
               <span>Определить кабинет и загрузить карточки.</span>
             </button>
             <button className={mode === "manual" ? "active" : ""} type="button" onClick={() => onMode("manual")}>
-              <strong>Ручной портал</strong>
-              <span>Подготовить пространство под таблицы.</span>
+              <strong>Без API</strong>
+              <span>Завести магазин по ссылке, таблице или списку карточек.</span>
             </button>
           </div> : null}
           {!isReplacement && mode === "manual" ? (
@@ -7566,11 +7582,11 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
             <>
               <label className="field-label">
                 Ссылка на магазин или первую карточку
-                <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} />
+                <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.wildberries.ru/brands/... или ссылка на карточку" />
               </label>
               <label className="field-label">
-                Первичный источник карточек
-                <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} />
+                Что есть на старте
+                <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: клиент прислал Excel, список nmID, ссылку на магазин или 3 карточки для ручного старта." />
               </label>
             </>
           )}
@@ -7578,7 +7594,7 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose}>Отмена</button>
-          <button className="btn primary" type="submit" disabled={loading}>{loading ? "Проверяем..." : (isReplacement ? "Заменить ключ" : "Добавить кабинет")}</button>
+          <button className="btn primary" type="submit" disabled={loading}>{loading ? (mode === "manual" && !isReplacement ? "Создаем..." : "Проверяем...") : (isReplacement ? "Заменить ключ" : (mode === "manual" ? "Создать без API" : "Добавить кабинет"))}</button>
         </div>
       </form>
     </div>
@@ -7620,11 +7636,32 @@ function sourceFlowRows(portal, mpstatsIntegration = null) {
     ];
   }
   return [
-    ["Ссылка на магазин/карточку", portal.storeUrl ? "добавлена" : "не указана"],
-    ["Первичный источник", portal.manualSource ? "описан" : "ожидает таблицу"],
-    ["Автозагрузка карточек", "нужен API"],
+    ["Режим запуска", "без API"],
+    ["Ссылка или ориентир", portal.storeUrl ? "сохранено" : "не указано"],
+    ["Первичный источник", portal.manualSource ? "описан" : "нужно добавить"],
+    ["Карточки", portal.cardCount ? formatNumber(portal.cardCount) : "ожидают ручной ввод"],
     ["MPStats", mpstatsIntegrationStatusText(mpstatsIntegration)],
   ];
+}
+
+function ManualPortalSource({ portal }) {
+  const storeUrl = String(portal.storeUrl || "").trim();
+  const manualSource = String(portal.manualSource || "").trim();
+  const safeUrl = safeHttpsUrl(storeUrl);
+  return (
+    <div className="manual-source-box">
+      <div className="manual-source-row">
+        <span>Ссылка или ориентир</span>
+        {storeUrl ? (
+          safeUrl ? <a href={safeUrl} target="_blank" rel="noreferrer">{storeUrl}</a> : <strong>{storeUrl}</strong>
+        ) : <strong>не указано</strong>}
+      </div>
+      <div className="manual-source-row">
+        <span>Исходные данные</span>
+        <p>{manualSource || "Пока не описаны"}</p>
+      </div>
+    </div>
+  );
 }
 
 function workRouteRows(portal) {
