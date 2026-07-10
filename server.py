@@ -545,7 +545,7 @@ def wb_effective_token_expiry(expires_at, issued_at=None):
 
 def wb_token_days_left(expires_at, now):
   seconds_left = (expires_at - now).total_seconds()
-  raw_days_left = int((seconds_left + 86399) // 86400)
+  raw_days_left = int(seconds_left // 86400)
   return max(0, min(WB_TOKEN_LIFETIME_DAYS, raw_days_left)), seconds_left
 
 
@@ -7074,6 +7074,25 @@ def normalize_wb_card(card):
   status = "Без сигналов" if not issues else "Автосигнал"
   status_class = "green" if not issues else "amber"
   title = str(card.get("title") or "").strip() or str(card.get("vendorCode") or "Карточка WB")
+  selling = card.get("selling") if isinstance(card.get("selling"), dict) else {}
+  brand = (
+    card.get("brand")
+    or card.get("brandName")
+    or card.get("brand_name")
+    or selling.get("brand")
+    or selling.get("brandName")
+    or ""
+  )
+  seller_name = (
+    card.get("seller")
+    or card.get("sellerName")
+    or card.get("supplier")
+    or card.get("supplierName")
+    or card.get("shopName")
+    or card.get("storeName")
+    or card.get("legalName")
+    or ""
+  )
   return {
     "nmID": card.get("nmID"),
     "imtID": card.get("imtID"),
@@ -7081,7 +7100,8 @@ def normalize_wb_card(card):
     "vendorCode": card.get("vendorCode") or "",
     "title": title,
     "description": card.get("description") or "",
-    "brand": card.get("brand") or "",
+    "brand": brand or "",
+    "sellerName": seller_name or "",
     "subjectID": card.get("subjectID"),
     "subjectName": card.get("subjectName") or "категория не указана",
     "photoUrl": first_photo_url(card),
@@ -7241,9 +7261,20 @@ def most_common_nonempty(values):
 
 
 def derive_wb_portal_name(cards):
-  brand = most_common_nonempty(card.get("brand") for card in cards)
+  seller = most_common_nonempty(
+    card.get("sellerName")
+    or card.get("seller")
+    or card.get("supplier")
+    or card.get("supplierName")
+    or card.get("shopName")
+    or card.get("storeName")
+    for card in cards
+  )
+  if seller:
+    return seller
+  brand = most_common_nonempty(card.get("brand") or card.get("brandName") for card in cards)
   if brand:
-    return f"{brand} WB"
+    return brand
   subject = most_common_nonempty(card.get("subjectName") for card in cards)
   if subject:
     return f"{subject} WB"

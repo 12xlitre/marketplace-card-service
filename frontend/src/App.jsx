@@ -419,7 +419,15 @@ function tokenDaysLeftText(tokenMeta) {
   if (tokenMeta?.status === "expired") {
     return "срок истек";
   }
-  return `осталось ${daysLeft} ${pluralRu(daysLeft, "день", "дня", "дней")}`;
+  const expiresAt = tokenMeta?.expiresAt ? new Date(tokenMeta.expiresAt) : null;
+  const expiresText = expiresAt && !Number.isNaN(expiresAt.getTime())
+    ? ` · до ${expiresAt.toLocaleDateString("ru-RU")}`
+    : "";
+  return `осталось ${daysLeft} ${pluralRu(daysLeft, "полный день", "полных дня", "полных дней")}${expiresText}`;
+}
+
+function apiConnectButtonText(portal) {
+  return portal?.apiConnected ? "Заменить API" : "Подключить API";
 }
 
 function pluralRu(value, one, few, many) {
@@ -550,6 +558,35 @@ function initials(name) {
     .map((part) => part[0])
     .join("")
     .toUpperCase();
+}
+
+function firstUsefulPortalCardName(cards = []) {
+  const candidates = [];
+  (Array.isArray(cards) ? cards : []).forEach((card) => {
+    const raw = card?.rawFields || {};
+    candidates.push(
+      card?.sellerName,
+      raw.sellerName,
+      raw.supplierName,
+      raw.shopName,
+      raw.storeName,
+      card?.brand,
+      raw.brand,
+      raw.brandName,
+    );
+  });
+  return candidates
+    .map((value) => String(value || "").trim())
+    .find((value) => value && !["wildberries", "wb", "не указано"].includes(value.toLowerCase())) || "";
+}
+
+function portalDisplayName(portal) {
+  const currentName = String(portal?.name || "").trim();
+  const cardName = firstUsefulPortalCardName(portal?.realCards || []);
+  if (cardName && (!currentName || / wb$/i.test(currentName) || currentName === "Кабинет WB" || currentName === "Wildberries")) {
+    return cardName;
+  }
+  return currentName || cardName || "Кабинет WB";
 }
 
 function uniqueLogins(logins) {
@@ -817,15 +854,16 @@ function defaultTeamFromUsers(displayUsers) {
 
 function applyWbSnapshotToPortal(portal, payload) {
   const stats = payload.stats || {};
+  const realCards = payload.cards || [];
   return normalizePortal({
     ...portal,
-    name: stats.portalName || portal.name,
+    realCards,
+    name: stats.portalName || firstUsefulPortalCardName(realCards) || portal.name,
     status: "WB read-only",
     apiConnected: true,
     cardCount: stats.cardCount || 0,
     workCount: 0,
     problemCount: stats.problemCount || 0,
-    realCards: payload.cards || [],
     lastSyncAt: stats.loadedAt || "",
     tokenMeta: payload.tokenMeta || portal.tokenMeta || {},
     syncStatus: "loaded",
@@ -3390,13 +3428,14 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
 
 function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onRestore }) {
   const inactive = portal.isActive === false;
+  const displayName = portalDisplayName(portal);
   return (
     <article className={`workspace-card ${inactive ? "inactive" : ""}`}>
       <div className="card-head">
         <div className="seller">
-          <div className="seller-logo">{initials(portal.name || "WB")}</div>
+          <div className="seller-logo">{initials(displayName || "WB")}</div>
           <div>
-            <h2>{portal.name}</h2>
+            <h2>{displayName}</h2>
             <p>{portal.marketplace} · {owner?.full_name || "ответственный не указан"}</p>
           </div>
         </div>
@@ -3433,6 +3472,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
 
 function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam }) {
   const owner = findUser(portal.ownerLogin);
+  const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный магазин";
   const sourceRows = sourceFlowRows(portal, mpstatsIntegration);
@@ -3510,12 +3550,12 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     <section className="screen active">
       <header className="topbar">
         <div className="title">
-          <h1>{portal.name}</h1>
+          <h1>{displayName}</h1>
           <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isApi ? "API подключение" : "ручной режим")} · ответственный {owner?.full_name}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Кабинеты</button>
-          <button className="btn" type="button" onClick={() => onOpenModal("api")}><Upload size={17} />Подключить API</button>
+          <button className="btn" type="button" onClick={() => onOpenModal("api")}><Upload size={17} />{apiConnectButtonText(portal)}</button>
           <button className="btn primary" type="button" disabled title="Черновики и задачи включим после настройки хранения"><Plus size={17} />Создать задачу</button>
         </div>
       </header>
@@ -3587,11 +3627,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <section className="workspace-strip security-strip">
                 <div>
                   <h2>Контур безопасности</h2>
-                  <p>Служебные ограничения текущего подключения.</p>
+                  <p>Как сейчас разрешено использовать API по этому кабинету.</p>
                 </div>
                 <div className="security-inline-list">
-                  <div><span>Wildberries API</span><strong>только чтение</strong></div>
-                  <div><span>Публикация</span><strong>отключена</strong></div>
+                  <div><span>Чтение WB</span><strong>{portal.apiConnected ? "включено" : "ожидает ключ"}</strong></div>
+                  <div><span>Запись в WB</span><strong>{portal.wbWriteEnabled ? "включена" : "отдельное включение"}</strong></div>
                   <div><span>Токен</span><strong>backend + AES-GCM</strong></div>
                 </div>
               </section>
@@ -3602,8 +3642,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <div>
                   <h2>Источник данных</h2>
                   <p>{portal.syncStatus === "loaded"
-                    ? "Список карточек загружен из WB API через backend. Создание, обновление, удаление и публикация изменений отключены."
-                    : "Кабинет подключается только для чтения данных. Запись в WB отключена."}</p>
+                    ? "Список карточек загружен из WB API через backend. Сейчас OptiCards читает данные и готовит черновики; запись в WB включается отдельно по договоренности с клиентом."
+                    : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы."}</p>
                 </div>
                 <Tag tone={portal.apiConnected ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : "ручной режим"}</Tag>
               </div>
@@ -3614,7 +3654,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
                   <Trash2 size={16} />Обнулить работу
                 </button>
-                <button className="btn" type="button" onClick={() => onOpenModal("api")}>Подключить API</button>
+                <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
               </div>
               <div className="source-flow">
                 {sourceRows.map(([label, value]) => (
@@ -3864,7 +3904,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
             <strong>{formatNumber(problemCards.length)}</strong>
           </div>
           <div className="work-summary-item">
-            <span>Только сигналы WB</span>
+            <span>Некритичные замечания</span>
             <strong>{formatNumber(signalOnlyCards.length)}</strong>
           </div>
           <div className="work-summary-item">
@@ -3893,7 +3933,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
           <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
             <option value="all">Все карточки</option>
             <option value="problems">Требуют внимания</option>
-            <option value="signals">Есть сигналы WB</option>
+            <option value="signals">Есть замечания WB API</option>
             <option value="clean">Без пробелов</option>
             <option value="selected">Рабочий набор</option>
           </select>
@@ -3941,7 +3981,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
                 <th>Карточка</th>
                 <th>nmID</th>
                 <th>Заполненность</th>
-                <th>Сигналы WB</th>
+                <th>Замечания по данным</th>
                 <th>Работа</th>
                 <th>Детали</th>
               </tr>
@@ -3974,7 +4014,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
                       <div className="problem-reasons">
                         {reasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
                         {!reasons.length && signals.length ? signals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>) : null}
-                        {!reasons.length && !signals.length ? <Tag tone="green">нет сигналов</Tag> : null}
+                        {!reasons.length && !signals.length ? <Tag tone="green">без замечаний</Tag> : null}
                       </div>
                     </td>
                     <td><Tag tone={workState.tone}>{workState.label}</Tag></td>
@@ -4126,6 +4166,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
+  const portalName = portalDisplayName(portal);
   const titleLength = currentTitle.length;
   const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
   const rawFields = rawFieldsForCard(card);
@@ -4201,6 +4242,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const latestQuickWins = Array.isArray(latestAuditSummary.quickWins) ? latestAuditSummary.quickWins : [];
   const latestRiskNotes = auditPublicWarnings(latestAuditSummary.riskNotes);
   const latestCompetitorSelection = latestAuditEntry.competitorSelection || null;
+  const latestAuditInsight = auditInsightText({
+    mainProblems: latestMainProblems,
+    quickWins: latestQuickWins,
+    riskNotes: latestRiskNotes,
+    mpstatsMatches,
+    promotionRelevantCount,
+    competitorSelection: latestCompetitorSelection,
+  });
+  const latestAuditFacts = auditFactRows({
+    mpstatsGroups: mpstatsCharacteristics.length,
+    mpstatsMatches,
+    promotionRelevantCount,
+    competitorSelection: latestCompetitorSelection,
+    riskNotes: latestRiskNotes,
+  });
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
   const semanticContentRunning = semanticContentStatus === "loading";
   const canReoptimizeContent = Boolean(semanticCoreSelected.length && !approvalReadOnly && !semanticContentRunning);
@@ -5460,7 +5516,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
             <section className="panel">
               <h2>Данные карточки</h2>
               <div className="panel-list">
-                <div className="list-row"><span>Кабинет</span><strong>{portal?.name}</strong></div>
+                <div className="list-row"><span>Кабинет</span><strong>{portalName}</strong></div>
                 <div className="list-row"><span>WB ID</span><strong>{valueSummary(card?.nmID)}</strong></div>
                 <div className="list-row"><span>Артикул продавца</span><strong>{valueSummary(card?.vendorCode)}</strong></div>
                 <div className="list-row"><span>Категория</span><strong>{valueSummary(card?.subjectName)}</strong></div>
@@ -5552,7 +5608,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   />
                 ) : (
                   <div className="empty-state">
-                    <strong>СЯ еще не собрано</strong>
+                    <strong>Семантическое ядро еще не собрано</strong>
                     <span>Введите релевантный запрос и запустите подбор. MPStats вернет расширение запросов, кластеры, предметы и частотность.</span>
                   </div>
                 )}
@@ -5661,11 +5717,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       <AuditCompetitorSelection selection={latestCompetitorSelection} />
                     </div>
                   ) : null}
-	                  {auditDone && (latestMainProblems.length || latestQuickWins.length || latestRiskNotes.length) ? (
+	                  {auditDone ? (
                     <div className="issue audit-findings">
                       <div className="issue-head">
                         <strong>Выводы аудита</strong>
                         <Tag tone={latestRiskNotes.length ? "amber" : "green"}>{latestRiskNotes.length ? "есть ограничения" : "доказательно"}</Tag>
+                      </div>
+                      <p className="audit-finding-lead">{latestAuditInsight}</p>
+                      <div className="audit-fact-grid">
+                        {latestAuditFacts.map(([label, value]) => (
+                          <div key={label}>
+                            <span>{label}</span>
+                            <strong>{value}</strong>
+                          </div>
+                        ))}
                       </div>
                       {latestMainProblems.length ? (
                         <div className="audit-finding-group">
@@ -5719,36 +5784,38 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
             {activeTab === "card" ? (
               <>
-                <section className="workspace-strip card-snapshot-strip">
-                  <div className="card-snapshot-main">
-                    <div className="card-snapshot-content">
-                      <div className="strip-head">
-                        <div>
-                          <h2>{currentTitle}</h2>
-                          <p>WB {textOrDash(card?.nmID)} · артикул {textOrDash(card?.vendorCode)} · {textOrDash(card?.subjectName)}</p>
-                        </div>
-                        <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "есть сигналы" : "снимок ok"}</Tag>
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Заголовок</h2>
+                      <p>Исходное название и описание из текущего снимка WB.</p>
+                    </div>
+                    <Tag tone={titleLength <= 60 ? "green" : "amber"}>лимит WB 60</Tag>
+                  </div>
+                  <div className="option-list">
+                    <div className="option-row">
+                      <div className="option-head">
+                        <strong>{currentTitle}</strong>
+                        <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
                       </div>
-                      <div className="snapshot-facts">
-                        <div><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
-                        <div><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
-                        <div><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
-                        <div><span>Размеры</span><strong>{valueSummary(sizes)}</strong></div>
-                        <div><span>Габариты</span><strong>{valueSummary(dimensions)}</strong></div>
-                        <div><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
-                        <div><span>Цена</span><strong>{valueSummary(priceValue)}</strong></div>
-                        <div><span>Скидка</span><strong>{valueSummary(discountValue)}</strong></div>
-                        <div><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
-                        <div><span>Остаток всего</span><strong>{valueSummary(stockValue)}</strong></div>
-                        <div><span>FBO / WB</span><strong>{valueSummary(wbStockValue)}</strong></div>
-                        <div><span>FBS / продавец</span><strong>{valueSummary(sellerStockValue)}</strong></div>
-                      </div>
-                      <div className="snapshot-description">
-                        <span>Описание</span>
-                        <p>{isEmptyValue(description) ? "Пусто" : description}</p>
-                      </div>
+                      <p>Это текущее название карточки из WB snapshot.</p>
                     </div>
                   </div>
+                  <div className="snapshot-description">
+                    <span>Описание</span>
+                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                  </div>
+                </section>
+
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Характеристики</h2>
+                      <p>Значения из карточки WB без технического JSON-формата.</p>
+                    </div>
+                    <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
+                  </div>
+                  <CharacteristicsBlock items={characteristics} />
                 </section>
 
                 <section className="workspace-strip commerce-strip">
@@ -5795,36 +5862,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       )) : (
                         <div className="empty-state"><span>WB не вернул размерные строки с ценами и остатками.</span></div>
                       )}
-                    </div>
-                  </div>
-                </section>
-
-                <section className="workspace-strip">
-                  <div className="strip-head">
-                    <div>
-                      <h2>Характеристики</h2>
-                      <p>Значения из карточки WB без технического JSON-формата.</p>
-                    </div>
-                    <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
-                  </div>
-                  <CharacteristicsBlock items={characteristics} />
-                </section>
-
-                <section className="workspace-strip">
-                  <div className="strip-head">
-                    <div>
-                      <h2>Заголовок</h2>
-                      <p>Сейчас это исходное значение из WB. SEO-варианты появятся после подключения MPStats и правил категории.</p>
-                    </div>
-                    <Tag tone={titleLength <= 60 ? "green" : "amber"}>лимит WB 60</Tag>
-                  </div>
-                  <div className="option-list">
-                    <div className="option-row">
-                      <div className="option-head">
-                        <strong>{currentTitle}</strong>
-                        <span className={`char-counter ${titleLength <= 60 ? "ok" : ""}`}>{titleLength}/60</span>
-                      </div>
-                      <p>Это не рекомендация, а текущее название карточки из WB snapshot.</p>
                     </div>
                   </div>
                 </section>
@@ -6397,6 +6434,43 @@ function competitorReviewStatusText(review) {
     return `Задача техспецу${review.assigneeLogin ? `: ${review.assigneeLogin}` : ""}${date ? ` · MPStats: ${date}` : ""}.`;
   }
   return "";
+}
+
+function auditInsightText({ mainProblems, quickWins, riskNotes, mpstatsMatches, promotionRelevantCount, competitorSelection }) {
+  const problems = Array.isArray(mainProblems) ? mainProblems : [];
+  const wins = Array.isArray(quickWins) ? quickWins : [];
+  const risks = Array.isArray(riskNotes) ? riskNotes : [];
+  const competitorCount = Number(competitorSelection?.summary?.finalCount || competitorSelection?.finalCompetitors?.length || 0);
+  const parts = [];
+  if (problems.length) {
+    parts.push(`Главный фокус: ${problems[0]}`);
+  } else {
+    parts.push("Критичных блокеров по текущему снимку не видно, но карточку все равно стоит сверить по фактам ниже.");
+  }
+  if (wins.length) {
+    parts.push(`Ближайшая правка: ${wins[0]}`);
+  }
+  if (Number(mpstatsMatches) > 0 || Number(promotionRelevantCount) > 0) {
+    parts.push(`MPStats подтвердил ${formatNumber(mpstatsMatches)} совпадений с текущими характеристиками; в фокусе ${formatNumber(promotionRelevantCount)} полей для продвижения.`);
+  }
+  if (competitorCount > 0) {
+    parts.push(`Для сравнения учтено ${competitorCount}/${topCompetitorLimit} конкурентов.`);
+  }
+  if (risks.length) {
+    parts.push(`Вручную проверить: ${risks[0]}`);
+  }
+  return parts.join(" ");
+}
+
+function auditFactRows({ mpstatsGroups, mpstatsMatches, promotionRelevantCount, competitorSelection, riskNotes }) {
+  const competitorCount = Number(competitorSelection?.summary?.finalCount || competitorSelection?.finalCompetitors?.length || 0);
+  return [
+    ["MPStats групп", formatNumber(mpstatsGroups || 0)],
+    ["Совпало с карточкой", formatNumber(mpstatsMatches || 0)],
+    ["Поля в фокусе", formatNumber(promotionRelevantCount || 0)],
+    ["Конкуренты", `${competitorCount}/${topCompetitorLimit}`],
+    ["Ручная проверка", formatNumber((riskNotes || []).length)],
+  ];
 }
 
 function auditCompetitorSourceText(source) {
@@ -7542,7 +7616,7 @@ function sourceFlowRows(portal, mpstatsIntegration = null) {
       ["Проверка WB API ключа", tokenStatus],
       ["Карточки из кабинета", portal.apiConnected ? formatNumber(portal.cardCount) : "после подключения"],
       ["MPStats", mpstatsIntegrationStatusText(mpstatsIntegration)],
-      ["Запись в WB", "отключена"],
+      ["Режим WB API", portal.wbWriteEnabled ? "чтение + запись" : "чтение сейчас · запись отдельно"],
     ];
   }
   return [
@@ -7590,7 +7664,11 @@ function workRouteRows(portal) {
             : "нет задач",
       className: hasApproval ? "active" : "off",
     },
-    { title: "Публикация", status: "запись в WB отключена", className: "off" },
+    {
+      title: "Конкуренты",
+      status: hasCards ? "мониторинг раз в 7 дней" : "после загрузки карточек",
+      className: hasCards ? "active" : "paused",
+    },
   ];
   const done = rows.filter((step) => step.className === "active").length;
   return {
@@ -7601,7 +7679,7 @@ function workRouteRows(portal) {
       : hasDrafts
         ? `Данные WB загружены. Найдено ${draftCount} ${pluralRu(draftCount, "черновик правок", "черновика правок", "черновиков правок")}${hasAudit ? ` и ${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}` : ""}.`
       : hasCards
-        ? "Данные WB загружены. Аудит по карточкам и черновики правок появятся здесь после сохранения изменений."
+        ? "Данные WB загружены. Аудит, черновики и мониторинг конкурентов появятся здесь после начала работы."
         : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.",
   };
 }
