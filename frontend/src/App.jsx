@@ -6079,6 +6079,18 @@ function competitorPeriodText(previousSnapshot, snapshot, fallbackDate) {
   return "С прошлого сохраненного снимка поменялось следующее:";
 }
 
+function competitorChangeTimingText(previousSnapshot, snapshot, fallbackDate) {
+  const from = previousSnapshot?.checkedAt || previousSnapshot?.updatedAt || "";
+  const to = snapshot?.checkedAt || fallbackDate || "";
+  if (from && to) {
+    return `Появилось между ${competitorDateText(from)} и ${competitorDateText(to)}; точное время внутри WB не отдает.`;
+  }
+  if (to) {
+    return `Обнаружено при обновлении ${competitorDateText(to)}; нужен следующий снимок для точного периода.`;
+  }
+  return "Обнаружено на текущем снимке; точное время WB не отдает.";
+}
+
 function competitorCharacteristicRows(characteristics, limit = 6) {
   return (Array.isArray(characteristics) ? characteristics : [])
     .map((item) => ({
@@ -6452,6 +6464,9 @@ function CompetitorCard({ competitor, busy, onRemove }) {
               <p key={`${change.field}-${index}`}>
                 <strong>{change.label}</strong>
                 {change.deltaPercent ? <em>{change.deltaPercent > 0 ? "+" : ""}{change.deltaPercent}%</em> : null}
+                {change.field === "characteristics" ? (
+                  <small>{competitorChangeTimingText(competitor.previousSnapshot, snapshot, competitor.lastCheckedAt)}</small>
+                ) : null}
                 <small>{change.field === "characteristics" ? characteristicLines.slice(0, 5).join(" · ") : competitorChangeText(change)}</small>
               </p>
             );
