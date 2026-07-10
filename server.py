@@ -3847,7 +3847,7 @@ def mpstats_date_iso(value):
   for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
     try:
       parsed = dt.datetime.strptime(text, fmt)
-      return parsed.replace(tzinfo=dt.timezone.utc).isoformat()
+      return parsed.isoformat()
     except ValueError:
       continue
   return text
