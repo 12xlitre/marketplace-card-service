@@ -1822,7 +1822,10 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       warnings = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
       existing_count = int(row["card_count"] or 0)
       if existing_count > 0:
-        source_limited = any("HTTP 429" in str(warning) for warning in warnings)
+        source_limited = any(
+          "HTTP 429" in str(warning) or "empty page" in str(warning)
+          for warning in warnings
+        )
         strict_seller_source = bool(bootstrap.get("strictSellerSource"))
         replace_existing = bool(bootstrap.get("replaceExisting"))
         previous_count = existing_count
@@ -1886,7 +1889,10 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
     updated_row = get_portal_row(portal_id, user)
     portal_payload = public_portal_from_row(updated_row) if updated_row else None
     warning_texts = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
-    source_limited = any("HTTP 429" in str(warning) for warning in warning_texts)
+    source_limited = any(
+      "HTTP 429" in str(warning) or "empty page" in str(warning)
+      for warning in warning_texts
+    )
     loaded_count = len(snapshot.get("cards") or [])
     mpstats_store_import_update(
       job_id,
@@ -3389,8 +3395,20 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None, skip_key
     if not isinstance(products, list) or not products:
       products = data.get("products") if isinstance(data, dict) else []
     if not products:
+      total_count = audit_int(
+        payload.get("total")
+        or payload.get("totalCount")
+        or (data.get("total") if isinstance(data, dict) else 0)
+        or (data.get("totalCount") if isinstance(data, dict) else 0),
+        0,
+      )
+      if total_count > (page - 1) * 100:
+        warnings.append(f"WB seller catalog {seller_id}: empty page {page} before total {total_count}")
       break
     for product in products:
+      nm_id = parse_competitor_nm_id(product.get("id") or product.get("nmID") or product.get("nmId"))
+      if nm_id and draft_card_key(nm_id) in skip_keys:
+        continue
       raw_card = wb_public_catalog_raw_card(product)
       key = raw_storefront_card_key(raw_card)
       if raw_card and key not in skip_keys:
@@ -6531,7 +6549,6 @@ def build_mpstats_storefront_snapshot_paged(
     selected_candidate = None
     raw_cards = []
     for seller_id in seller_ids:
-      start_page = max(1, existing_count // 100 + 1)
       mpstats_store_import_update(
         job_id,
         phase="requesting",
@@ -6544,7 +6561,7 @@ def build_mpstats_storefront_snapshot_paged(
         limit=remaining_needed,
         warnings=warnings,
         skip_keys=existing_keys,
-        start_page=start_page,
+        start_page=1,
       )
       if raw_cards:
         selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
