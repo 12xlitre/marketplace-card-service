@@ -82,6 +82,8 @@ CARD_COMPETITOR_AUTO_CHECK_INTERVAL_SECONDS = int(os.environ.get("CARD_COMPETITO
 CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH = int(os.environ.get("CARD_COMPETITOR_AUTO_CHECK_MAX_BATCH", "12"))
 CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_ENABLED", "1") != "0"
 MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_MAX_CARDS", "100"))
+MPSTATS_STORE_FULL_IMPORT_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_FULL_IMPORT_MAX_CARDS", "1000"))
+MPSTATS_STORE_IMPORT_BATCH_SIZE = int(os.environ.get("MPSTATS_STORE_IMPORT_BATCH_SIZE", "100"))
 WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
 WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
 WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
@@ -105,6 +107,8 @@ GIGACHAT_TOKEN_CACHE = {"accessToken": "", "expiresAt": 0}
 MPSTATS_USAGE_CONTEXT = contextvars.ContextVar("mpstats_usage", default=None)
 CARD_COMPETITOR_AUTO_CHECK_LOCK = threading.Lock()
 CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED = False
+MPSTATS_STORE_IMPORT_LOCK = threading.Lock()
+MPSTATS_STORE_IMPORT_JOBS = {}
 
 
 def utc_now():
@@ -1706,6 +1710,120 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   update_portal_manual_snapshot(portal_id, snapshot, status=status)
   updated_row = get_portal_row(portal_id, user)
   return updated_row, bootstrap
+
+
+def mpstats_store_import_worker(job_id, portal_id, user, limit):
+  try:
+    row = get_portal_row(portal_id, user)
+    if not row:
+      raise ValueError("portal_not_found")
+    if bool(row["api_connected"]):
+      raise ValueError("portal_has_api")
+    mpstats_store_import_update(
+      job_id,
+      status="running",
+      phase="starting",
+      message="Готовим расширенную загрузку",
+      loadedCount=int(row["card_count"] or 0),
+      totalEstimate=max(int(row["card_count"] or 0), int(limit or 0)),
+    )
+    snapshot = build_mpstats_storefront_snapshot_paged(
+      row["name"],
+      row["store_url"] or "",
+      row["manual_source"] or "",
+      limit=limit,
+      job_id=job_id,
+    )
+    bootstrap = snapshot.get("manualBootstrap") or {}
+    if not snapshot.get("cards"):
+      raise ValueError("mpstats_cards_empty")
+    status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
+    update_portal_manual_snapshot(portal_id, snapshot, status=status)
+    updated_row = get_portal_row(portal_id, user)
+    portal_payload = public_portal_from_row(updated_row) if updated_row else None
+    mpstats_store_import_update(
+      job_id,
+      status="done",
+      phase="done",
+      message=f"Загружено {len(snapshot.get('cards') or [])} карточек",
+      loadedCount=len(snapshot.get("cards") or []),
+      totalEstimate=len(snapshot.get("cards") or []),
+      finishedAt=utc_now().isoformat(),
+      portal=portal_payload,
+      bootstrap=bootstrap,
+    )
+  except Exception as exc:
+    mpstats_store_import_update(
+      job_id,
+      status="error",
+      phase="error",
+      message="Загрузка карточек прервалась",
+      error=str(exc) or type(exc).__name__,
+      finishedAt=utc_now().isoformat(),
+    )
+
+
+def start_mpstats_store_import(portal_id, user, limit=MPSTATS_STORE_FULL_IMPORT_MAX_CARDS):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  row = get_portal_row(numeric_portal_id, user)
+  if not row:
+    raise ValueError("portal_not_found")
+  if bool(row["api_connected"]):
+    raise ValueError("portal_has_api")
+  if not (row["store_url"] or row["manual_source"]):
+    raise ValueError("manual_source_missing")
+  limit = max(MPSTATS_STORE_BOOTSTRAP_MAX_CARDS, min(int(limit or MPSTATS_STORE_FULL_IMPORT_MAX_CARDS), 5000))
+  with MPSTATS_STORE_IMPORT_LOCK:
+    for job in MPSTATS_STORE_IMPORT_JOBS.values():
+      if str(job.get("portalId")) == str(numeric_portal_id) and job.get("status") in {"queued", "running"}:
+        return public_mpstats_store_import_job(job)
+    job_id = f"store-import-{numeric_portal_id}-{int(time.time())}-{secrets.token_hex(4)}"
+    now = utc_now().isoformat()
+    job = {
+      "id": job_id,
+      "portalId": str(numeric_portal_id),
+      "status": "queued",
+      "phase": "queued",
+      "message": "Загрузка поставлена в очередь",
+      "loadedCount": int(row["card_count"] or 0),
+      "totalEstimate": limit,
+      "limit": limit,
+      "sourceLabel": "",
+      "error": "",
+      "startedAt": now,
+      "updatedAt": now,
+    }
+    MPSTATS_STORE_IMPORT_JOBS[job_id] = job
+  worker_user = dict(user)
+  worker = threading.Thread(
+    target=mpstats_store_import_worker,
+    args=(job_id, numeric_portal_id, worker_user, limit),
+    daemon=True,
+  )
+  worker.start()
+  return public_mpstats_store_import_job(job)
+
+
+def get_mpstats_store_import_job(job_id, portal_id, user):
+  if not user_can_access_portal(user, portal_id):
+    raise PermissionError("forbidden")
+  with MPSTATS_STORE_IMPORT_LOCK:
+    job = MPSTATS_STORE_IMPORT_JOBS.get(str(job_id or ""))
+    if not job or str(job.get("portalId")) != str(portal_id):
+      return None
+    public_job = public_mpstats_store_import_job(job)
+    portal_payload = job.get("portal") if isinstance(job.get("portal"), dict) else None
+    bootstrap = job.get("bootstrap") if isinstance(job.get("bootstrap"), dict) else None
+  return {
+    "job": public_job,
+    "portal": portal_payload,
+    "bootstrap": bootstrap,
+  }
 
 
 def draft_card_key(value):
@@ -5677,10 +5795,12 @@ def mpstats_storefront_params(path_value, period):
   }
 
 
-def mpstats_storefront_body(limit):
+def mpstats_storefront_body(limit, start_row=0):
+  start_row = max(0, int(start_row or 0))
+  limit = max(1, int(limit or 1))
   return {
-    "startRow": 0,
-    "endRow": limit,
+    "startRow": start_row,
+    "endRow": start_row + limit,
     "filterModel": {},
     "sortModel": [{"colId": "revenue", "sort": "desc"}],
   }
@@ -5876,11 +5996,11 @@ def mpstats_seed_card_from_nm_id(nm_id):
   return raw_card
 
 
-def fetch_mpstats_storefront_listing(token, candidate, period, limit):
+def fetch_mpstats_storefront_listing(token, candidate, period, limit, start_row=0):
   payload = mpstats_post_body_json(
     token,
     f"/wb/get/{candidate['kind']}",
-    body=mpstats_storefront_body(limit),
+    body=mpstats_storefront_body(limit, start_row=start_row),
     params=mpstats_storefront_params(candidate["path"], period),
     attempts=2,
   )
@@ -5891,6 +6011,71 @@ def fetch_mpstats_storefront_listing(token, candidate, period, limit):
     if raw_card:
       raw_cards.append(raw_card)
   return raw_cards, payload
+
+
+def mpstats_payload_total_count(payload):
+  candidates = []
+  if isinstance(payload, dict):
+    candidates.extend([
+      payload.get("total"),
+      payload.get("totalCount"),
+      payload.get("recordsTotal"),
+      payload.get("recordsFiltered"),
+      payload.get("count"),
+    ])
+    data = payload.get("data")
+    if isinstance(data, dict):
+      candidates.extend([
+        data.get("total"),
+        data.get("totalCount"),
+        data.get("recordsTotal"),
+        data.get("recordsFiltered"),
+        data.get("count"),
+      ])
+  for value in candidates:
+    number = audit_int(value, 0)
+    if number > 0:
+      return number
+  return 0
+
+
+def mpstats_store_import_update(job_id, **changes):
+  if not job_id:
+    return
+  with MPSTATS_STORE_IMPORT_LOCK:
+    job = MPSTATS_STORE_IMPORT_JOBS.get(job_id)
+    if not job:
+      return
+    job.update(changes)
+    job["updatedAt"] = utc_now().isoformat()
+
+
+def public_mpstats_store_import_job(job):
+  if not isinstance(job, dict):
+    return None
+  output = {
+    key: job.get(key)
+    for key in (
+      "id",
+      "portalId",
+      "status",
+      "phase",
+      "message",
+      "loadedCount",
+      "totalEstimate",
+      "limit",
+      "sourceLabel",
+      "error",
+      "startedAt",
+      "updatedAt",
+      "finishedAt",
+    )
+    if key in job
+  }
+  output["loadedCount"] = int(output.get("loadedCount") or 0)
+  output["totalEstimate"] = int(output.get("totalEstimate") or 0)
+  output["limit"] = int(output.get("limit") or 0)
+  return output
 
 
 def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS):
@@ -5977,6 +6162,152 @@ def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPST
     },
   }
   return snapshot
+
+
+def build_mpstats_storefront_snapshot_paged(
+  name,
+  store_url,
+  manual_source,
+  limit=MPSTATS_STORE_FULL_IMPORT_MAX_CARDS,
+  batch_size=MPSTATS_STORE_IMPORT_BATCH_SIZE,
+  job_id="",
+):
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+  limit = max(1, min(int(limit or MPSTATS_STORE_FULL_IMPORT_MAX_CARDS), 5000))
+  batch_size = max(20, min(int(batch_size or MPSTATS_STORE_IMPORT_BATCH_SIZE), 500))
+  period = audit_period_default()
+  warnings = []
+  nm_ids = mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=limit)
+  seed_cards = []
+  for nm_id in nm_ids[:min(limit, 20)]:
+    try:
+      raw_card = mpstats_seed_card_from_nm_id(nm_id)
+    except (RuntimeError, MpstatsApiError, ValueError):
+      raw_card = None
+    if raw_card:
+      seed_cards.append(raw_card)
+
+  candidates = mpstats_storefront_candidates(name, store_url, manual_source, seed_cards)
+  selected_candidate = None
+  raw_cards = []
+  total_estimate = 0
+
+  for candidate in candidates:
+    candidate_rows = []
+    offset = 0
+    mpstats_store_import_update(
+      job_id,
+      phase="requesting",
+      sourceLabel=f"{candidate.get('kind')}: {candidate.get('path')}",
+      message="Запрашиваем витрину MPStats",
+      totalEstimate=limit,
+    )
+    while offset < limit:
+      page_limit = min(batch_size, limit - offset)
+      try:
+        page_rows, payload = fetch_mpstats_storefront_listing(token, candidate, period, page_limit, start_row=offset)
+      except MpstatsApiError as exc:
+        warnings.append(f"MPStats /wb/get/{candidate['kind']} {candidate['path']} [{offset}]: {exc.message}")
+        break
+      if offset == 0:
+        total_estimate = mpstats_payload_total_count(payload)
+        if total_estimate > 0:
+          total_estimate = min(total_estimate, limit)
+          mpstats_store_import_update(job_id, totalEstimate=total_estimate)
+      if not page_rows:
+        break
+      candidate_rows.extend(page_rows)
+      offset += len(page_rows)
+      mpstats_store_import_update(
+        job_id,
+        loadedCount=len(candidate_rows),
+        phase="requesting",
+        message=f"MPStats вернул {len(candidate_rows)} карточек",
+      )
+      if len(page_rows) < page_limit:
+        break
+      if total_estimate and len(candidate_rows) >= total_estimate:
+        break
+    if candidate_rows:
+      raw_cards = candidate_rows
+      selected_candidate = candidate
+      break
+
+  if not raw_cards and seed_cards:
+    raw_cards = seed_cards[:limit]
+    selected_candidate = {"kind": "items", "path": ", ".join(nm_ids[:5]), "source": "nm-id"}
+    total_estimate = len(raw_cards)
+
+  if not raw_cards:
+    seller_ids = wb_public_seller_ids_from_manual_source(name, store_url, manual_source)
+    for seller_id in seller_ids:
+      mpstats_store_import_update(
+        job_id,
+        phase="requesting",
+        sourceLabel=f"seller: {seller_id}",
+        message="Пробуем публичную витрину WB",
+        totalEstimate=limit,
+      )
+      raw_cards = fetch_wb_public_seller_catalog(seller_id, limit=limit, warnings=warnings)
+      if raw_cards:
+        selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
+        total_estimate = len(raw_cards)
+        break
+
+  deduped = []
+  seen = set()
+  total_for_progress = total_estimate if total_estimate > 0 else min(len(raw_cards), limit) or limit
+  mpstats_store_import_update(
+    job_id,
+    phase="normalizing",
+    message="Обогащаем карточки данными WB",
+    totalEstimate=total_for_progress,
+  )
+  for raw_card in raw_cards:
+    nm_id = parse_competitor_nm_id(raw_card.get("nmID"))
+    if not nm_id or nm_id in seen:
+      continue
+    seen.add(nm_id)
+    deduped.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
+    mpstats_store_import_update(job_id, loadedCount=len(deduped))
+    if len(deduped) >= limit:
+      break
+
+  cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
+  portal_name = ""
+  if selected_candidate and selected_candidate.get("kind") == "brand":
+    portal_name = selected_candidate.get("path") or ""
+  portal_name = portal_name or derive_wb_portal_name(cards)
+  loaded_at = utc_now().isoformat()
+  source_label = f"{selected_candidate.get('kind')}: {selected_candidate.get('path')}" if selected_candidate else ""
+  return {
+    "cards": cards,
+    "raw_count": len(cards),
+    "cursor": {},
+    "tokenMeta": {},
+    "stats": {
+      "cardCount": len(cards),
+      "workCount": 0,
+      "problemCount": sum(1 for card in cards if int(card.get("issueCount") or 0) > 0),
+      "sampleLimit": limit,
+      "loadedAt": loaded_at,
+      "portalName": portal_name,
+      "source": "mpstats",
+      "sourceLabel": source_label,
+    },
+    "manualBootstrap": {
+      "status": "loaded" if cards else "empty",
+      "cardCount": len(cards),
+      "source": selected_candidate or {},
+      "period": period,
+      "warnings": audit_public_warnings(warnings),
+      "loadedAt": loaded_at,
+      "totalEstimate": total_estimate,
+      "limit": limit,
+    },
+  }
 
 
 def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
@@ -9854,6 +10185,27 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       )
       return
 
+    if path.startswith("/api/portal-imports/"):
+      user = self.require_user()
+      if not user:
+        return
+      job_id = path[len("/api/portal-imports/"):].strip("/")
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not job_id or not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_import_status_request"})
+        return
+      try:
+        result = get_mpstats_store_import_job(job_id, portal_id, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      if not result:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "import_job_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
     if path == "/api/integrations/mpstats":
       if not self.require_user():
         return
@@ -10878,6 +11230,29 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_payload = public_portal_from_row(row)
       portal_payload["manualBootstrap"] = bootstrap
       self.send_json(HTTPStatus.OK, {"portal": portal_payload, "bootstrap": bootstrap})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/mpstats-import-all"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/mpstats-import-all")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        limit = int(payload.get("limit") or MPSTATS_STORE_FULL_IMPORT_MAX_CARDS)
+      except (TypeError, ValueError):
+        limit = MPSTATS_STORE_FULL_IMPORT_MAX_CARDS
+      try:
+        job = start_mpstats_store_import(portal_id_text, user, limit=limit)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_import_request"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.ACCEPTED, {"job": job})
       return
 
     if path.startswith("/api/portals/") and (path.endswith("/archive") or path.endswith("/restore")):

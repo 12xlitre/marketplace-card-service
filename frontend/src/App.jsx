@@ -4166,6 +4166,7 @@ export default function App() {
             }}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
             onUpdateName={(name) => updatePortalName(currentPortal, name)}
+            onPortalUpdated={replaceUserPortal}
             onNotice={setNotice}
             helpEnabled={helpEnabled}
           />
@@ -4505,7 +4506,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onNotice, helpEnabled = false }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
@@ -4525,6 +4526,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
+  const [importJob, setImportJob] = useState(null);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -4537,6 +4539,45 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       setNameDraft(displayName);
     }
   }, [displayName, nameEditing]);
+
+  useEffect(() => {
+    setImportJob(null);
+  }, [portal.id]);
+
+  useEffect(() => {
+    if (!importJob?.id || !["queued", "running"].includes(importJob.status)) {
+      return undefined;
+    }
+    let active = true;
+    const poll = async () => {
+      try {
+        const payload = await apiRequest(`/api/portal-imports/${encodeURIComponent(importJob.id)}?portal_id=${encodeURIComponent(portal.id)}`);
+        if (!active) return;
+        if (payload.job) {
+          setImportJob(payload.job);
+        }
+        if (payload.portal) {
+          onPortalUpdated?.(payload.portal);
+        }
+        if (payload.job?.status === "done") {
+          onNotice?.(payload.job.message || "Карточки загружены.");
+        }
+        if (payload.job?.status === "error") {
+          onNotice?.("Загрузка карточек прервалась. Можно повторить.");
+        }
+      } catch {
+        if (active) {
+          setImportJob((current) => current ? { ...current, status: "error", message: "Не удалось получить прогресс загрузки" } : current);
+        }
+      }
+    };
+    const timer = window.setInterval(poll, 1200);
+    poll();
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [importJob?.id, importJob?.status, portal.id, onNotice, onPortalUpdated]);
 
   useEffect(() => {
     let active = true;
@@ -4607,10 +4648,46 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function startFullImport() {
+    if (!isManual || !canRefreshSource || importJob?.status === "queued" || importJob?.status === "running") {
+      return;
+    }
+    setImportJob({
+      status: "queued",
+      message: "Запускаем расширенную загрузку",
+      loadedCount: Number(portal.cardCount || cards.length || 0),
+      totalEstimate: Math.max(Number(portal.cardCount || cards.length || 0), 1000),
+    });
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/mpstats-import-all`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 1000 }),
+      });
+      setImportJob(payload.job || null);
+      onNotice?.("Расширенная загрузка карточек запущена.");
+    } catch (error) {
+      const message = error.message === "mpstats_key_missing"
+        ? "MPStats не подключен: загрузить все карточки нельзя."
+        : error.message === "manual_source_missing"
+          ? "Добавьте ссылку на магазин или исходные данные для MPStats."
+          : "Не удалось запустить расширенную загрузку карточек.";
+      setImportJob({ status: "error", message, loadedCount: Number(portal.cardCount || cards.length || 0), totalEstimate: 0 });
+      onNotice?.(message);
+    }
+  }
+
   function replaceApprovalWorkflow(workflow) {
     setApprovalWorkflow(normalizeApprovalWorkflow(workflow));
     setApprovalWorkflowStatus("loaded");
   }
+
+  const importRunning = ["queued", "running"].includes(importJob?.status);
+  const importLoaded = Number(importJob?.loadedCount || 0);
+  const importTotal = Number(importJob?.totalEstimate || 0);
+  const importPercent = importTotal > 0 ? Math.max(4, Math.min(100, Math.round((importLoaded / importTotal) * 100))) : 0;
+  const importProgressText = importTotal > 0
+    ? `${formatNumber(importLoaded)} из ${formatNumber(importTotal)}`
+    : `найдено ${formatNumber(importLoaded)}`;
 
   return (
     <section className="screen active">
@@ -4758,11 +4835,28 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <button className="btn" type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading}>
                   <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
                 </button>
+                {isManual ? (
+                  <button className="btn primary" type="button" onClick={startFullImport} disabled={!canRefreshSource || cardsLoading || importRunning}>
+                    <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
+                  </button>
+                ) : null}
                 <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
                   <Trash2 size={16} />Обнулить работу
                 </button>
                 <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
               </div>
+              {importJob ? (
+                <div className={`store-import-progress ${importJob.status || "idle"}`}>
+                  <div className="store-import-progress-head">
+                    <strong>{importJob.status === "done" ? "Загрузка завершена" : importJob.status === "error" ? "Загрузка прервалась" : "Загружаем карточки"}</strong>
+                    <span>{importProgressText}</span>
+                  </div>
+                  <div className={`store-import-bar ${importTotal ? "" : "indeterminate"}`}>
+                    <span style={{ width: importTotal ? `${importPercent}%` : undefined }} />
+                  </div>
+                  <p>{importJob.message || (importRunning ? "MPStats добирает карточки пачками." : "")}</p>
+                </div>
+              ) : null}
               <div className="source-flow">
                 {sourceRows.map(([label, value]) => (
                   <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
