@@ -903,20 +903,23 @@ function applyWbSnapshotToPortal(portal, payload) {
 function manualBootstrapNotice(portal, action = "create") {
   const bootstrap = portal?.manualBootstrap || {};
   const count = Number(bootstrap.cardCount || portal?.cardCount || 0);
+  const source = bootstrap.source || {};
+  const isWbSeller = source.source === "wb-public-seller";
+  const sourceLabel = isWbSeller ? "WB seller" : "MPStats";
   if (count > 0) {
     return action === "refresh"
-      ? `MPStats обновил витрину: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`
-      : `Кабинет создан, MPStats загрузил ${count} ${pluralRu(count, "карточку", "карточки", "карточек")}.`;
+      ? `${sourceLabel} обновил витрину: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`
+      : `Кабинет создан, ${sourceLabel} загрузил ${count} ${pluralRu(count, "карточку", "карточки", "карточек")}.`;
   }
   const warning = Array.isArray(bootstrap.warnings) ? bootstrap.warnings[0] : "";
   if (warning) {
     return warning;
   }
   if (bootstrap.status === "skipped") {
-    return "Кабинет создан без API. Добавьте ссылку на магазин или список nmID, чтобы загрузить карточки через MPStats.";
+    return "Кабинет создан без API. Добавьте ссылку на магазин, seller-ссылку или список nmID, чтобы загрузить карточки.";
   }
   return action === "refresh"
-    ? "MPStats не нашел карточки по сохраненной ссылке или описанию."
+    ? `${sourceLabel} не нашел карточки по сохраненной ссылке или описанию.`
     : "Кабинет создан без API, карточки пока не загружены.";
 }
 
@@ -960,7 +963,47 @@ function safeHttpsUrl(value) {
   }
 }
 
+function wbPublicBasketNumber(nmID) {
+  const nm = Number.parseInt(String(nmID || "").replace(/\D/g, ""), 10);
+  if (!Number.isFinite(nm)) {
+    return 0;
+  }
+  const vol = Math.floor(nm / 100000);
+  const limits = [
+    143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601,
+    1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485,
+    3701, 3917, 4133, 4349, 4565, 4781, 5183, 5501, 5797, 6235,
+    6553, 6861, 7205, 7597, 8081, 8533, 9017, 9437, 9885, 10293,
+    10709, 11157, 11621, 12093, 12597, 13045, 13505, 13969, 14457,
+    14941, 15421, 15881, 16369, 16853, 17333, 17817, 18297, 18777,
+    19257,
+  ];
+  const index = limits.findIndex((limit) => vol <= limit);
+  return index >= 0 ? index + 1 : limits.length;
+}
+
+function wbPublicImageUrl(nmID, size = "c246x328") {
+  const nm = Number.parseInt(String(nmID || "").replace(/\D/g, ""), 10);
+  const basket = wbPublicBasketNumber(nm);
+  if (!Number.isFinite(nm) || !basket) {
+    return "";
+  }
+  const vol = Math.floor(nm / 100000);
+  const part = Math.floor(nm / 1000);
+  return `https://basket-${String(basket).padStart(2, "0")}.wbbasket.ru/vol${vol}/part${part}/${nm}/images/${size}/1.webp`;
+}
+
 function bestPhotoUrl(card) {
+  const rawFields = rawFieldsForCard(card);
+  const rawMpstats = rawFields.mpstats || {};
+  const cardMpstats = card?.mpstats || {};
+  const isPublicSeller = rawMpstats.source === "wb-public-seller" || cardMpstats.source === "wb-public-seller";
+  if (isPublicSeller) {
+    const publicUrl = safeHttpsUrl(wbPublicImageUrl(card?.nmID || rawFields.nmID, "c246x328"));
+    if (publicUrl) {
+      return publicUrl;
+    }
+  }
   const photos = Array.isArray(card?.photos) ? card.photos : [];
   const preferredKeys = ["big", "c516x688", "c246x328", "square", "tm"];
   for (const photo of photos) {

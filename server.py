@@ -1703,6 +1703,45 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   bootstrap = snapshot.get("manualBootstrap") or {}
   if not snapshot.get("cards"):
     if bootstrap.get("strictSellerSource"):
+      seller_ids = wb_public_seller_ids_from_manual_source(
+        row["name"],
+        row["store_url"] or "",
+        row["manual_source"] or "",
+      )
+      existing_cards = wb_snapshot_cards_from_row(row)
+      if existing_cards and not snapshot_cards_match_wb_seller(existing_cards, seller_ids):
+        loaded_at = utc_now().isoformat()
+        source = bootstrap.get("source") if isinstance(bootstrap.get("source"), dict) else {}
+        source_label = f"seller: {source.get('path')}" if source.get("path") else (f"seller: {seller_ids[0]}" if seller_ids else "")
+        empty_snapshot = {
+          "cards": [],
+          "raw_count": 0,
+          "cursor": {},
+          "tokenMeta": {},
+          "stats": {
+            "cardCount": 0,
+            "workCount": 0,
+            "problemCount": 0,
+            "sampleLimit": bootstrap.get("limit") or MPSTATS_STORE_BOOTSTRAP_MAX_CARDS,
+            "loadedAt": loaded_at,
+            "portalName": "",
+            "source": "wb-public-seller",
+            "sourceLabel": source_label,
+          },
+          "manualBootstrap": {
+            **bootstrap,
+            "status": "empty",
+            "cardCount": 0,
+            "warnings": audit_public_warnings(bootstrap.get("warnings") or []),
+            "loadedAt": loaded_at,
+            "strictSellerSource": True,
+            "replaceExisting": True,
+            "clearedMismatchedSnapshot": True,
+          },
+        }
+        update_portal_manual_snapshot(portal_id, empty_snapshot, status="WB seller ожидает загрузку")
+        updated_row = get_portal_row(portal_id, user)
+        return updated_row, empty_snapshot.get("manualBootstrap") or bootstrap
       return row, bootstrap
     snapshot = build_saved_manual_portal_snapshot(row, bootstrap)
     bootstrap = snapshot.get("manualBootstrap") or bootstrap
@@ -2135,18 +2174,31 @@ def snapshot_cards_match_wb_seller(cards, seller_ids):
   if not seller_ids or not isinstance(cards, list) or not cards:
     return True
   checked = 0
-  matched = 0
   for card in cards:
     if not isinstance(card, dict):
       continue
-    raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
-    mpstats = raw_fields.get("mpstats") if isinstance(raw_fields.get("mpstats"), dict) else {}
-    source = audit_str(mpstats.get("source") or "")
-    supplier_id = parse_wb_seller_id(mpstats.get("supplierId") or raw_fields.get("supplierId") or raw_fields.get("supplier_id"))
     checked += 1
-    if source == "wb-public-seller" and supplier_id in seller_ids:
-      matched += 1
-  return checked > 0 and matched / checked >= 0.8
+    if not snapshot_card_matches_wb_seller(card, seller_ids):
+      return False
+  return checked > 0
+
+
+def snapshot_card_matches_wb_seller(card, seller_ids):
+  if not isinstance(card, dict):
+    return False
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  raw_mpstats = raw_fields.get("mpstats") if isinstance(raw_fields.get("mpstats"), dict) else {}
+  card_mpstats = card.get("mpstats") if isinstance(card.get("mpstats"), dict) else {}
+  source = audit_str(raw_mpstats.get("source") or card_mpstats.get("source") or "")
+  supplier_id = parse_wb_seller_id(
+    raw_mpstats.get("supplierId")
+    or raw_fields.get("supplierId")
+    or raw_fields.get("supplier_id")
+    or card_mpstats.get("supplierId")
+    or card.get("supplierId")
+    or card.get("supplier_id")
+  )
+  return source == "wb-public-seller" and supplier_id in seller_ids
 
 
 def snapshot_card_lookup(snapshot_json):
@@ -3091,12 +3143,16 @@ def wb_public_basket_guess(nm_int):
   basket_limits = (
     143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601,
     1655, 1919, 2045, 2189, 2405, 2621, 2837, 3053, 3269, 3485,
-    3701, 3917, 4133, 4349, 4565, 4781, 4997,
+    3701, 3917, 4133, 4349, 4565, 4781, 5183, 5501, 5797, 6235,
+    6553, 6861, 7205, 7597, 8081, 8533, 9017, 9437, 9885, 10293,
+    10709, 11157, 11621, 12093, 12597, 13045, 13505, 13969, 14457,
+    14941, 15421, 15881, 16369, 16853, 17333, 17817, 18297, 18777,
+    19257,
   )
   for index, limit in enumerate(basket_limits, start=1):
     if vol <= limit:
       return index
-  return 28
+  return len(basket_limits)
 
 
 def wb_public_basket_candidates(nm_int):
@@ -3105,7 +3161,13 @@ def wb_public_basket_candidates(nm_int):
   candidates = [cached] if cached else []
   if guess not in candidates:
     candidates.append(guess)
-  scan = range(28, 61) if guess >= 28 else range(1, 61)
+  scan = range(max(1, guess - 2), min(80, guess + 3))
+  for basket in scan:
+    if basket not in candidates:
+      candidates.append(basket)
+  if guess >= 27:
+    return candidates
+  scan = range(1, 61)
   for basket in scan:
     if basket not in candidates:
       candidates.append(basket)
