@@ -9301,11 +9301,11 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
   const isReplacement = Boolean(targetPortal);
   const [form, setForm] = useState({
     name: "",
-    marketplace: "Wildberries",
-    scope: "full",
-    lead: users[0]?.login || "",
-    tech: users.find((user) => getUserRoleType(user) === "tech")?.login || users[0]?.login || "",
-    manager: users.find((user) => getUserRoleType(user) === "manager")?.login || users[0]?.login || "",
+    marketplace: "",
+    scope: "",
+    lead: "",
+    tech: "",
+    manager: "",
     apiKey: "",
     storeUrl: "",
     manualSource: "",
@@ -9338,6 +9338,18 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
     setError("");
     if ((isReplacement || mode === "api") && !form.apiKey.trim()) {
       setError("Введите WB API ключ.");
+      return;
+    }
+    if (!isReplacement && !form.marketplace) {
+      setError("Выберите маркетплейс.");
+      return;
+    }
+    if (!isReplacement && !form.scope) {
+      setError("Выберите охват кабинета.");
+      return;
+    }
+    if (!isReplacement && (!form.lead || !form.tech || !form.manager)) {
+      setError("Выберите руководителя отдела, технического специалиста и аккаунт-менеджера.");
       return;
     }
     setLoading(true);
@@ -9395,13 +9407,15 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
           {!isReplacement ? <div className="form-two">
             <label className="field-label">
               Маркетплейс
-              <select className="select" value={form.marketplace} onChange={(event) => update("marketplace", event.target.value)}>
-                <option>Wildberries</option>
+              <select className="select" value={form.marketplace} onChange={(event) => update("marketplace", event.target.value)} required>
+                <option value="" disabled>Выберите маркетплейс</option>
+                <option value="Wildberries">Wildberries</option>
               </select>
             </label>
             <label className="field-label">
               Охват
-              <select className="select" value={form.scope} onChange={(event) => update("scope", event.target.value)}>
+              <select className="select" value={form.scope} onChange={(event) => update("scope", event.target.value)} required>
+                <option value="" disabled>Выберите охват</option>
                 <option value="full">Полный магазин</option>
                 <option value="selected">Выбранные карточки</option>
               </select>
@@ -9444,7 +9458,8 @@ function UserSelect({ label, value, users, onChange }) {
   return (
     <label className="field-label">
       {label}
-      <select className="select" value={value} onChange={(event) => onChange(event.target.value)}>
+      <select className="select" value={value} onChange={(event) => onChange(event.target.value)} required>
+        <option value="" disabled>Выберите сотрудника</option>
         {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
       </select>
     </label>
