@@ -1776,6 +1776,27 @@ def merge_card_draft_semantics(next_payload, previous_payload):
   }
 
 
+def merge_card_draft_work_context(next_payload, previous_payload):
+  if not isinstance(next_payload, dict) or not isinstance(previous_payload, dict):
+    return next_payload
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  if not previous_meta:
+    return next_payload
+  next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
+  merged_meta = {**next_meta}
+  for key in ("batch", "auditInvalidatedAt", "auditInvalidatedReason"):
+    if key not in merged_meta and key in previous_meta:
+      merged_meta[key] = previous_meta[key]
+  previous_card = previous_meta.get("card") if isinstance(previous_meta.get("card"), dict) else {}
+  next_card = merged_meta.get("card") if isinstance(merged_meta.get("card"), dict) else {}
+  if previous_card:
+    merged_meta["card"] = {**previous_card, **next_card}
+  return {
+    **next_payload,
+    "meta": merged_meta,
+  }
+
+
 def sanitize_audit_summary(summary):
   if not isinstance(summary, dict):
     return summary
@@ -2014,9 +2035,21 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
       "submittedBy": approval.get("submittedBy") or "",
       "assigneeLogin": approval.get("assigneeLogin") or assignee_login,
     }
+  approval_sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+  next_approval_sections = {**approval_sections}
+  for work_type in work_types:
+    section = next_approval_sections.get(work_type) if isinstance(next_approval_sections.get(work_type), dict) else {}
+    if str(section.get("status") or "draft") == "draft":
+      next_approval_sections[work_type] = {
+        **section,
+        "status": "draft",
+        "submittedBy": section.get("submittedBy") or "",
+        "assigneeLogin": section.get("assigneeLogin") or assignee_login,
+      }
   payload["meta"] = {
     **meta,
     "approval": approval,
+    "approvalSections": next_approval_sections,
     "card": {
       "nmID": card["nmID"],
       "vendorCode": card["vendorCode"],
@@ -2629,6 +2662,7 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
         previous_payload = normalize_card_draft_payload({})
     previous_payload = normalize_card_draft_payload(previous_payload)
     normalized_payload = merge_card_draft_semantics(normalized_payload, previous_payload)
+    normalized_payload = merge_card_draft_work_context(normalized_payload, previous_payload)
     payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
     if restricted_approval_changes(normalized_payload, previous_payload) and not user_can_review_portal_approval(user, numeric_portal_id):
       raise PermissionError("approval_forbidden")

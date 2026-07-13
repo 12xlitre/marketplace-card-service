@@ -8690,6 +8690,18 @@ function ApprovalPanel({
             </button>
         </div>
       ) : null}
+      {status === "approval-submitted" ? (
+        <div className="approval-note">
+          <span>Статус сохранен</span>
+          <p>Блок отправлен аккаунт-менеджеру на согласование.</p>
+        </div>
+      ) : null}
+      {status === "approval-save-error" ? (
+        <div className="approval-note">
+          <span>Не сохранилось</span>
+          <p>Backend не принял изменение статуса. Проверьте доступ и попробуйте отправить еще раз.</p>
+        </div>
+      ) : null}
       {lastEvent ? (
         <div className="approval-history-line">
           <span>Последнее действие: {approvalEventLabel(lastEvent.action)} · {lastEvent.createdAt ? new Date(lastEvent.createdAt).toLocaleString("ru-RU") : "без даты"} · {lastEvent.userName || lastEvent.userLogin || currentUser?.login}</span>
