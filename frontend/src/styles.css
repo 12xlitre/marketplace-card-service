@@ -3619,9 +3619,25 @@ tr:last-child td {
 
 .semantic-query-bar {
   display: grid;
-  grid-template-columns: minmax(180px, 1.1fr) minmax(180px, 1fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
   gap: 12px;
   align-items: end;
+}
+
+.semantic-query-bar .field-label {
+  min-width: 0;
+}
+
+.semantic-query-bar .field-label > span {
+  min-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.semantic-query-bar input,
+.semantic-query-bar .select {
+  height: 40px;
 }
 
 .semantic-history {
@@ -3683,12 +3699,31 @@ tr:last-child td {
   gap: 1px;
 }
 
-.semantic-core-metrics div {
+.semantic-metric {
   min-width: 0;
   display: grid;
   gap: 4px;
   padding: 10px;
+  border: 0;
   background: var(--surface-soft);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  font: inherit;
+}
+
+.semantic-metric:hover {
+  background: var(--soft);
+}
+
+.semantic-metric.active {
+  background: var(--blue-soft);
+}
+
+.semantic-metric:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
 }
 
 .semantic-core-metrics span {

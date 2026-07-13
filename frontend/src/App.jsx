@@ -8719,7 +8719,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const allKeywords = Array.isArray(semanticCore?.allKeywords) ? semanticCore.allKeywords : [];
   const selectedItems = current.filter((item) => item.status === "selected");
   const currentItems = current.filter((item) => item.status !== "selected");
-  const rankedCurrentCount = currentItems.filter(semanticHasKeywordRank).length;
+  const rankedCurrentItems = currentItems.filter(semanticHasKeywordRank);
+  const rankedCurrentCount = rankedCurrentItems.length;
   const currentRankValues = currentItems
     .flatMap((item) => [semanticRankValue(item.orgPos), semanticRankValue(item.avgPos), semanticRankValue(item.adPos)])
     .filter(Boolean);
@@ -8731,6 +8732,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const workLimit = compact ? 4 : standalone ? 250 : 8;
   const workPageSize = standalone ? 250 : workLimit;
   const [visibleWorkLimit, setVisibleWorkLimit] = useState(workLimit);
+  const [metricFilter, setMetricFilter] = useState("all");
   const searchText = String(search || "").trim().toLowerCase();
   const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
@@ -8745,7 +8747,26 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   useEffect(() => {
     setVisibleWorkLimit(workLimit);
   }, [workLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
+  useEffect(() => {
+    setMetricFilter("all");
+  }, [semanticCore?.seedQuery, reportTotal]);
   const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
+  const toggleMetricFilter = (filter) => {
+    setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
+  };
+  const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
+  const displayedCurrentItems = metricFilter === "ranked"
+    ? rankedCurrentItems
+    : metricFilter === "current" || metricFilter === "all"
+      ? currentItems
+      : [];
+  const leftListTitle = metricFilter === "ranked"
+    ? "Действующие с позициями"
+    : metricFilter === "current"
+      ? "Действующие ключи"
+      : metricFilter === "selected"
+        ? "Добавленные в работу"
+        : "Выбранные и добавленные";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
@@ -8755,19 +8776,31 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
-          <div><span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong></div>
-          <div><span>С позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong></div>
-          <div><span>Лучшая позиция</span><strong>{bestCurrentRank ? `#${formatNumber(bestCurrentRank)}` : "—"}</strong></div>
-          <div><span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
-          <div><span>По фильтрам</span><strong>{formatNumber(filteredSourceItems.length)}</strong></div>
-          <div><span>Отчет MPStats</span><strong>{formatNumber(reportTotal)}</strong></div>
+          <button className={`semantic-metric ${metricFilter === "current" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("current")}>
+            <span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong>
+          </button>
+          <button className={`semantic-metric ${metricFilter === "ranked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("ranked")}>
+            <span>С позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong>
+          </button>
+          <button className={`semantic-metric ${metricFilter === "ranked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("ranked")}>
+            <span>Лучшая позиция</span><strong>{bestCurrentRank ? `#${formatNumber(bestCurrentRank)}` : "—"}</strong>
+          </button>
+          <button className={`semantic-metric ${metricFilter === "selected" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("selected")}>
+            <span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong>
+          </button>
+          <button className="semantic-metric" type="button" onClick={() => setMetricFilter("all")}>
+            <span>По фильтрам</span><strong>{formatNumber(filteredSourceItems.length)}</strong>
+          </button>
+          <button className="semantic-metric" type="button" onClick={() => setMetricFilter("all")}>
+            <span>Отчет MPStats</span><strong>{formatNumber(reportTotal)}</strong>
+          </button>
         </div>
       ) : null}
       <div className="semantic-core-grid">
         <div>
-          <span>Выбранные и добавленные</span>
+          <span>{leftListTitle}</span>
           <div className="semantic-keyword-list">
-            {selectedItems.length ? selectedItems.slice(0, selectedLimit).map((item) => (
+            {displayedSelectedItems.length ? displayedSelectedItems.slice(0, selectedLimit).map((item) => (
               <div className="semantic-keyword selected" key={`selected-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -8781,8 +8814,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             )) : null}
-            {selectedItems.length > selectedLimit ? <p>Показано {formatNumber(selectedLimit)} из {formatNumber(selectedItems.length)} выбранных. Полный список попадет в Excel.</p> : null}
-            {currentItems.length ? currentItems.slice(0, currentLimit).map((item) => (
+            {displayedSelectedItems.length > selectedLimit ? <p>Показано {formatNumber(selectedLimit)} из {formatNumber(displayedSelectedItems.length)} выбранных. Полный список попадет в Excel.</p> : null}
+            {displayedCurrentItems.length ? displayedCurrentItems.slice(0, currentLimit).map((item) => (
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -8795,7 +8828,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {!selectedItems.length && !currentItems.length ? <p>Пока нет выбранных запросов.</p> : null}
+            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} действующих. Полный список попадет в Excel.</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
           </div>
         </div>
         <div>
