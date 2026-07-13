@@ -2341,38 +2341,49 @@ function normalizeSemanticSelection(items) {
 
 function compactSemanticCore(core) {
   if (!core || typeof core !== "object") return null;
-  const compactItems = (items, limit) => (Array.isArray(items) ? items : [])
-    .map((item) => ({
-      query: item.query || "",
-      cluster: item.cluster || "",
-      prioritySubject: item.prioritySubject || "",
-      prioritySubjectId: item.prioritySubjectId || "",
-      wbCount: Number(item.wbCount || 0),
-      ozonCount: Number(item.ozonCount || 0),
-      results: Number(item.results || 0),
-      orgPos: semanticRankValue(item.orgPos),
-      adPos: semanticRankValue(item.adPos),
-      avgPos: semanticRankValue(item.avgPos),
-      totalFound: Number(item.totalFound || 0),
-      frequency365: item.frequency365 || "",
-      uniqueDays: Number(item.uniqueDays || 0),
-      source: item.source || "mpstats-expanding",
-      rankPeriod: item.rankPeriod || "",
-      priority: item.priority || "",
-      field: item.field || "",
-      status: item.status || "",
-      reason: item.reason || "",
-    }))
-    .filter((item) => item.query)
-    .slice(0, limit);
+  const compactItems = (items, limit) => {
+    const seen = new Set();
+    const output = [];
+    (Array.isArray(items) ? items : []).forEach((item) => {
+      const query = String(item?.query || "").trim();
+      const key = semanticQueryKey(query);
+      if (!query || seen.has(key) || output.length >= limit) return;
+      seen.add(key);
+      output.push({
+        query: item.query || "",
+        cluster: item.cluster || "",
+        prioritySubject: item.prioritySubject || "",
+        prioritySubjectId: item.prioritySubjectId || "",
+        wbCount: Number(item.wbCount || 0),
+        ozonCount: Number(item.ozonCount || 0),
+        results: Number(item.results || 0),
+        orgPos: semanticRankValue(item.orgPos),
+        adPos: semanticRankValue(item.adPos),
+        avgPos: semanticRankValue(item.avgPos),
+        totalFound: Number(item.totalFound || 0),
+        frequency365: item.frequency365 || "",
+        uniqueDays: Number(item.uniqueDays || 0),
+        source: item.source || "mpstats-expanding",
+        rankPeriod: item.rankPeriod || "",
+        priority: item.priority || "",
+        field: item.field || "",
+        status: item.status || "",
+        reason: item.reason || "",
+      });
+    });
+    return output;
+  };
+  const recommendedSource = Array.isArray(core.recommended) && core.recommended.length ? core.recommended : core.missing;
+  const compactCurrent = compactItems(core.current, 400);
+  const compactRecommended = compactItems(recommendedSource, 1200);
   return {
     source: core.source || "mpstats-expanding",
     seedQuery: core.seedQuery || "",
     period: core.period || {},
-    current: compactItems(core.current, 300),
-    recommended: compactItems(core.recommended, 5000),
-    missing: compactItems(core.missing, 5000),
-    allKeywords: compactItems(core.allKeywords, 5000),
+    current: compactCurrent,
+    recommended: compactRecommended,
+    missing: [],
+    allKeywords: [],
     subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, 200),
     totalKeywords: Number(core.totalKeywords || 0),
     coveragePercent: core.coveragePercent ?? null,
