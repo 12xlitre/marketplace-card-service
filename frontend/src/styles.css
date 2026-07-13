@@ -3742,6 +3742,10 @@ tr:last-child td {
   gap: 10px;
 }
 
+.semantic-core-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .semantic-core-panel.standalone .semantic-core-grid {
   align-items: start;
 }
@@ -3765,6 +3769,10 @@ tr:last-child td {
   max-height: 560px;
   overflow: auto;
   padding-right: 2px;
+}
+
+.semantic-core-grid.single .semantic-keyword-list {
+  max-height: 680px;
 }
 
 .semantic-keyword {

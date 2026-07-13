@@ -6047,6 +6047,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticCoreStatus("loading");
     setSemanticCoreError("");
     setSemanticRankStatus("idle");
+    setSemanticSaveStatus("");
     try {
       const payload = await apiRequest("/api/mpstats/semantic-expansion", {
         method: "POST",
@@ -6095,7 +6096,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           semanticCoreReports: nextReports,
           card,
         });
-        persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" }).catch(() => {});
+        setSemanticSaveStatus("saving");
+        const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+        setSemanticSaveStatus(["backend", "local", "local-fallback"].includes(persistStatus) ? "saved" : "error");
       }
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
@@ -7134,6 +7137,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул позиции по действующим ключам.</span> : null}
                   {semanticRankStatus === "error" ? <span className="status-note">СЯ собрано, но позиции ключей сейчас не загрузились.</span> : null}
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
+                  {semanticSaveStatus === "saved" ? <span className="status-note">СЯ сохранено в истории карточки.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок и описание...</span> : null}
                   {semanticContentStatus === "done" ? <span className="status-note">Черновик контента переоптимизирован по выбранному СЯ.</span> : null}
@@ -8767,6 +8771,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       : metricFilter === "selected"
         ? "Добавленные в работу"
         : "Выбранные и добавленные";
+  const showWorkColumn = metricFilter === "all";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
@@ -8796,7 +8801,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
           </button>
         </div>
       ) : null}
-      <div className="semantic-core-grid">
+      <div className={`semantic-core-grid ${showWorkColumn ? "" : "single"}`}>
         <div>
           <span>{leftListTitle}</span>
           <div className="semantic-keyword-list">
@@ -8832,6 +8837,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
           </div>
         </div>
+        {showWorkColumn ? (
         <div>
           <span>Найденные запросы MPStats · к добавлению {formatNumber(filteredWorkItems.length)}</span>
           <div className="semantic-keyword-list">
@@ -8869,6 +8875,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             {!filteredWorkItems.length ? <p>По текущим фильтрам запросы не найдены.</p> : null}
           </div>
         </div>
+        ) : null}
       </div>
     </div>
   );
