@@ -1783,14 +1783,16 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       if existing_count > 0:
         updated_row = get_portal_row(portal_id, user)
         portal_payload = public_portal_from_row(updated_row) if updated_row else None
-        warning = warnings[0] if warnings else "MPStats не вернул новые карточки"
+        source_limited = any("HTTP 429" in str(warning) for warning in warnings)
+        strict_seller_source = bool(bootstrap.get("strictSellerSource"))
+        warning = warnings[0] if warnings else ""
         mpstats_store_import_update(
           job_id,
-          status="paused",
-          phase="paused",
-          message=f"Остановлено лимитом источника. В кабинете сохранено {existing_count} карточек.",
+          status="paused" if source_limited else "done",
+          phase="paused" if source_limited else "done",
+          message=f"Остановлено лимитом источника. В кабинете сохранено {existing_count} карточек." if source_limited else f"Новых карточек не найдено. В кабинете сохранено {existing_count} карточек.",
           loadedCount=existing_count,
-          totalEstimate=0,
+          totalEstimate=existing_count if strict_seller_source else 0,
           error=warning,
           finishedAt=utc_now().isoformat(),
           portal=portal_payload,
