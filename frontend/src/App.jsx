@@ -5185,9 +5185,18 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
     setCategoryFilter("all");
   }
 
+  function isSummaryFilterActive({ issue = "all", work = "all" }) {
+    return issueFilter === issue && workFilter === work;
+  }
+
   function applySummaryFilter({ issue = "all", work = "all" }) {
     setQuery("");
     setCategoryFilter("all");
+    if (isSummaryFilterActive({ issue, work })) {
+      setIssueFilter("all");
+      setWorkFilter("all");
+      return;
+    }
     setIssueFilter(issue);
     setWorkFilter(work);
   }
@@ -5223,41 +5232,46 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
       <div className="cards-control-panel">
         <div className="cards-work-summary">
           <button
-            className={`work-summary-item ${issueFilter === "problems" && workFilter === "all" ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ issue: "problems" }) ? "active" : ""}`}
             type="button"
             onClick={() => applySummaryFilter({ issue: "problems" })}
+            title={isSummaryFilterActive({ issue: "problems" }) ? "Показать все карточки" : "Показать карточки, требующие внимания"}
           >
             <span>Требуют внимания</span>
             <strong>{formatNumber(problemCards.length)}</strong>
           </button>
           <button
-            className={`work-summary-item ${issueFilter === "signals" && workFilter === "all" ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ issue: "signals" }) ? "active" : ""}`}
             type="button"
             onClick={() => applySummaryFilter({ issue: "signals" })}
+            title={isSummaryFilterActive({ issue: "signals" }) ? "Показать все карточки" : "Показать карточки с некритичными замечаниями"}
           >
             <span>Некритичные замечания</span>
             <strong>{formatNumber(signalOnlyCards.length)}</strong>
           </button>
           <button
-            className={`work-summary-item ${issueFilter === "clean" && workFilter === "all" ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ issue: "clean" }) ? "active" : ""}`}
             type="button"
             onClick={() => applySummaryFilter({ issue: "clean" })}
+            title={isSummaryFilterActive({ issue: "clean" }) ? "Показать все карточки" : "Показать карточки без замечаний"}
           >
             <span>Без проблем</span>
             <strong>{formatNumber(cleanCards)}</strong>
           </button>
           <button
-            className={`work-summary-item ${issueFilter === "all" && workFilter === "tasks" ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ work: "tasks" }) ? "active" : ""}`}
             type="button"
             onClick={() => applySummaryFilter({ work: "tasks" })}
+            title={isSummaryFilterActive({ work: "tasks" }) ? "Показать все карточки" : "Показать карточки в задачах"}
           >
             <span>В задачах</span>
             <strong>{formatNumber(taskCards.length)}</strong>
           </button>
           <button
-            className={`work-summary-item ${issueFilter === "all" && workFilter === "selected" ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ work: "selected" }) ? "active" : ""}`}
             type="button"
             onClick={() => applySummaryFilter({ work: "selected" })}
+            title={isSummaryFilterActive({ work: "selected" }) ? "Показать все карточки" : "Показать рабочий набор"}
           >
             <span>В рабочем наборе</span>
             <strong>{formatNumber(selectedCards.length)}</strong>
