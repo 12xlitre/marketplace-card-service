@@ -7950,7 +7950,7 @@ function ApprovalPanel({
               ? "Этот блок принят и готов к выгрузке."
               : approval.status === "changes_requested"
                 ? "Этот блок возвращен специалисту на доработку."
-                : "Когда блок готов, отправьте его аккаунт-менеджеру на проверку."}</p>
+                : "Когда блок готов, отправьте его аккаунт-менеджеру на согласование."}</p>
         </div>
         <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
       </div>
@@ -7987,7 +7987,7 @@ function ApprovalPanel({
       {canSubmit ? (
         <div className="approval-buttons">
             <button className="btn primary" type="button" onClick={onSubmit} disabled={busy}>
-              <Upload size={17} />Отправить блок
+              <Upload size={17} />Отправить на согласование
             </button>
         </div>
       ) : null}
