@@ -2201,6 +2201,82 @@ function semanticQueryKey(value) {
 
 const semanticSelectionLimit = 2000;
 
+function semanticRankValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : "";
+}
+
+function semanticRankExportValue(value) {
+  const number = semanticRankValue(value);
+  return number === "" ? "" : number;
+}
+
+function semanticHasKeywordRank(item) {
+  return Boolean(semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos));
+}
+
+function semanticKeywordRankParts(item) {
+  const parts = [];
+  const orgPos = semanticRankValue(item?.orgPos);
+  const avgPos = semanticRankValue(item?.avgPos);
+  const adPos = semanticRankValue(item?.adPos);
+  if (orgPos) parts.push(`органика #${formatNumber(orgPos)}`);
+  if (avgPos) parts.push(`средняя #${formatNumber(avgPos)}`);
+  if (adPos) parts.push(`реклама #${formatNumber(adPos)}`);
+  return parts;
+}
+
+function semanticKeywordRankLabel(item) {
+  const parts = semanticKeywordRankParts(item);
+  return parts.length ? parts.join(" · ") : "позиция не получена";
+}
+
+function semanticRankFields(item, period = null) {
+  const fields = {};
+  const orgPos = semanticRankValue(item?.orgPos);
+  const adPos = semanticRankValue(item?.adPos);
+  const avgPos = semanticRankValue(item?.avgPos);
+  const totalFound = Number(item?.totalFound || 0);
+  if (orgPos) fields.orgPos = orgPos;
+  if (adPos) fields.adPos = adPos;
+  if (avgPos) fields.avgPos = avgPos;
+  if (Number.isFinite(totalFound) && totalFound > 0) fields.totalFound = totalFound;
+  if (period && Object.keys(fields).length) fields.rankPeriod = period;
+  return fields;
+}
+
+function semanticMergeKeywordRankings(core, payload) {
+  if (!core || typeof core !== "object" || !payload || typeof payload !== "object") return core;
+  const rankingRows = [
+    ...(Array.isArray(payload.keywords) ? payload.keywords : []),
+    ...(Array.isArray(payload.semanticCore?.current) ? payload.semanticCore.current : []),
+    ...(Array.isArray(payload.semanticCore?.missing) ? payload.semanticCore.missing : []),
+    ...(Array.isArray(payload.semanticCore?.recommended) ? payload.semanticCore.recommended : []),
+  ];
+  const rankingByKey = new Map();
+  rankingRows.forEach((item) => {
+    const key = semanticQueryKey(item);
+    const fields = semanticRankFields(item, payload.period || null);
+    if (key && Object.keys(fields).length) {
+      rankingByKey.set(key, fields);
+    }
+  });
+  if (!rankingByKey.size) return core;
+  const mergeItems = (items) => (Array.isArray(items) ? items : []).map((item) => {
+    const fields = rankingByKey.get(semanticQueryKey(item));
+    return fields ? { ...item, ...fields } : item;
+  });
+  return {
+    ...core,
+    current: mergeItems(core.current),
+    recommended: mergeItems(core.recommended),
+    missing: mergeItems(core.missing),
+    allKeywords: mergeItems(core.allKeywords),
+    rankingSource: payload.source || "mpstats",
+    rankingPeriod: payload.period || core.rankingPeriod,
+  };
+}
+
 function normalizeSemanticSelection(items) {
   const output = [];
   const seen = new Set();
@@ -2230,9 +2306,14 @@ function compactSemanticCore(core) {
       wbCount: Number(item.wbCount || 0),
       ozonCount: Number(item.ozonCount || 0),
       results: Number(item.results || 0),
+      orgPos: semanticRankValue(item.orgPos),
+      adPos: semanticRankValue(item.adPos),
+      avgPos: semanticRankValue(item.avgPos),
+      totalFound: Number(item.totalFound || 0),
       frequency365: item.frequency365 || "",
       uniqueDays: Number(item.uniqueDays || 0),
       source: item.source || "mpstats-expanding",
+      rankPeriod: item.rankPeriod || "",
       priority: item.priority || "",
       field: item.field || "",
       status: item.status || "",
@@ -2251,6 +2332,8 @@ function compactSemanticCore(core) {
     subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, 200),
     totalKeywords: Number(core.totalKeywords || 0),
     coveragePercent: core.coveragePercent ?? null,
+    rankingSource: core.rankingSource || "",
+    rankingPeriod: core.rankingPeriod || null,
     reason: core.reason || "",
   };
 }
@@ -5335,6 +5418,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCore, setSemanticCore] = useState(null);
   const [semanticCoreStatus, setSemanticCoreStatus] = useState("idle");
   const [semanticCoreError, setSemanticCoreError] = useState("");
+  const [semanticRankStatus, setSemanticRankStatus] = useState("idle");
   const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
   const [semanticContentStatus, setSemanticContentStatus] = useState("");
   const [semanticContentError, setSemanticContentError] = useState("");
@@ -5553,6 +5637,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticSaveStatus("");
     setSemanticContentStatus("");
     setSemanticContentError("");
+    setSemanticRankStatus("idle");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -5578,6 +5663,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setMpstatsCharacteristicsMeta({});
     setSemanticCore(null);
     setSemanticCoreStatus("idle");
+    setSemanticRankStatus("idle");
     setSemanticContentStatus("");
     setSemanticContentError("");
     setSemanticCoreSelected([]);
@@ -5813,14 +5899,57 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     ));
   }
 
+  async function enrichSemanticCoreWithRanks(core, { forceRefresh = false } = {}) {
+    if (!core || !portal?.id || !card?.nmID) {
+      setSemanticRankStatus("idle");
+      return core;
+    }
+    setSemanticRankStatus("loading");
+    try {
+      const payload = await apiRequest("/api/mpstats/keywords", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          card,
+          refresh: forceRefresh,
+        }),
+      });
+      const enrichedCore = semanticMergeKeywordRankings(core, payload);
+      setSemanticRankStatus(enrichedCore === core ? "empty" : "loaded");
+      return enrichedCore;
+    } catch {
+      setSemanticRankStatus("error");
+      return core;
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+    if (!semanticCore || semanticCore.rankingSource || !portal?.id || !card?.nmID) {
+      return () => {
+        active = false;
+      };
+    }
+    enrichSemanticCoreWithRanks(semanticCore, { forceRefresh: false }).then((enrichedCore) => {
+      if (active && enrichedCore !== semanticCore) {
+        setSemanticCore(enrichedCore);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [semanticCore, portal?.id, card?.nmID]);
+
   async function loadSemanticCore({ forceRefresh = false } = {}) {
     if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
       setSemanticCoreStatus("missing-card");
       setSemanticCoreError("");
+      setSemanticRankStatus("idle");
       return null;
     }
     setSemanticCoreStatus("loading");
     setSemanticCoreError("");
+    setSemanticRankStatus("idle");
     try {
       const payload = await apiRequest("/api/mpstats/semantic-expansion", {
         method: "POST",
@@ -5831,7 +5960,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           refresh: forceRefresh,
         }),
       });
-      const nextSemanticCore = payload.semanticCore || null;
+      const nextSemanticCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
       setSemanticCore(nextSemanticCore);
       const cardSubject = String(card?.subjectName || "").trim().toLowerCase();
       let nextSubjectFilter = semanticSubjectFilter;
@@ -6752,11 +6881,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
       name: "СЯ в работу",
       freezeRows: 1,
-      widths: [44, 44],
+      widths: [44, 16, 16, 16, 16, 44],
       rows: [
-        ["Действующие до подбора", "Добавленные в работу"],
+        ["Действующие до подбора", "Органика", "Средняя", "Реклама", "Найдено товаров", "Добавленные в работу"],
         ...Array.from({ length: rowCount }, (_, index) => [
           currentRows[index]?.query || "",
+          semanticRankExportValue(currentRows[index]?.orgPos),
+          semanticRankExportValue(currentRows[index]?.avgPos),
+          semanticRankExportValue(currentRows[index]?.adPos),
+          Number(currentRows[index]?.totalFound || 0) || "",
           selectedRowsNormalized[index]?.query || "",
         ]),
       ],
@@ -6900,6 +7033,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 )}
                 <div className="tab-actions">
                   {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
+                  {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем позиции действующих ключей...</span> : null}
+                  {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул позиции по действующим ключам.</span> : null}
+                  {semanticRankStatus === "error" ? <span className="status-note">СЯ собрано, но позиции ключей сейчас не загрузились.</span> : null}
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок и описание...</span> : null}
@@ -8441,8 +8577,9 @@ function semanticKeywordMeta(item) {
   if (item?.prioritySubject) {
     parts.push(item.prioritySubject);
   }
-  if (item?.orgPos) {
-    parts.push(`органика ${item.orgPos}`);
+  parts.push(...semanticKeywordRankParts(item));
+  if (Number(item?.totalFound || 0) > 0) {
+    parts.push(`найдено ${formatNumber(item.totalFound)}`);
   }
   if (item?.status === "selected") {
     parts.push("в работе");
@@ -8485,6 +8622,11 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const allKeywords = Array.isArray(semanticCore?.allKeywords) ? semanticCore.allKeywords : [];
   const selectedItems = current.filter((item) => item.status === "selected");
   const currentItems = current.filter((item) => item.status !== "selected");
+  const rankedCurrentCount = currentItems.filter(semanticHasKeywordRank).length;
+  const currentRankValues = currentItems
+    .flatMap((item) => [semanticRankValue(item.orgPos), semanticRankValue(item.avgPos), semanticRankValue(item.adPos)])
+    .filter(Boolean);
+  const bestCurrentRank = currentRankValues.length ? Math.min(...currentRankValues) : "";
   const workItems = recommended.length ? recommended : missing;
   const coverage = semanticCore?.coveragePercent;
   const selectedLimit = compact ? 4 : standalone ? 500 : 8;
@@ -8516,7 +8658,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
-          <div><span>Действующие</span><strong>{formatNumber(current.length)}</strong></div>
+          <div><span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong></div>
+          <div><span>С позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong></div>
+          <div><span>Лучшая позиция</span><strong>{bestCurrentRank ? `#${formatNumber(bestCurrentRank)}` : "—"}</strong></div>
           <div><span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong></div>
           <div><span>По фильтрам</span><strong>{formatNumber(filteredSourceItems.length)}</strong></div>
           <div><span>Отчет MPStats</span><strong>{formatNumber(reportTotal)}</strong></div>
@@ -8531,6 +8675,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
                   <em>{semanticKeywordMeta(item) || "взято в работу"}</em>
+                  {semanticHasKeywordRank(item) ? <span className="semantic-keyword-rank">{semanticKeywordRankLabel(item)}</span> : null}
                 </div>
                 {standalone && onRemoveKeyword ? (
                   <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)}>
@@ -8545,6 +8690,11 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
                   <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                  {standalone ? (
+                    <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
+                      {semanticKeywordRankLabel(item)}
+                    </span>
+                  ) : null}
                 </div>
               </div>
             )) : null}

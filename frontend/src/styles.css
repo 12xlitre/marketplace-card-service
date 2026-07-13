@@ -3778,6 +3778,26 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.semantic-keyword-rank {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 6px;
+  border: 1px solid #9fc5b4;
+  border-radius: 999px;
+  background: #eef8f2;
+  color: #1f5f48;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.semantic-keyword-rank.muted {
+  border-color: var(--line);
+  background: var(--soft);
+  color: var(--muted);
+}
+
 .semantic-keyword .btn {
   flex: 0 0 auto;
 }

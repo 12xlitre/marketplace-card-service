@@ -6136,6 +6136,14 @@ def audit_format_count(value):
   return f"{int(number):,}".replace(",", " ")
 
 
+def audit_position_value(*values):
+  for value in values:
+    number = audit_number(value)
+    if number is not None and number > 0:
+      return int(number) if float(number).is_integer() else number
+  return None
+
+
 def audit_keywords_from_payload(payload):
   data = payload.get("data") if isinstance(payload, dict) else {}
   words = []
@@ -6155,9 +6163,30 @@ def audit_keywords_from_payload(payload):
     output.append({
       "query": query,
       "wbCount": audit_int(item.get("wb_count") or item.get("wbCount") or item.get("count"), 0),
-      "orgPos": item.get("avg_organic_position") or item.get("orgPos") or item.get("organic_position"),
-      "adPos": item.get("avg_ad_position") or item.get("adPos") or item.get("ad_position"),
-      "avgPos": item.get("avg_position") or item.get("avgPos") or item.get("position"),
+      "orgPos": audit_position_value(
+        item.get("avg_organic_position"),
+        item.get("avgOrganicPosition"),
+        item.get("orgPos"),
+        item.get("organic_position"),
+        item.get("organicPosition"),
+        item.get("organic_pos"),
+      ),
+      "adPos": audit_position_value(
+        item.get("avg_ad_position"),
+        item.get("avgAdPosition"),
+        item.get("adPos"),
+        item.get("ad_position"),
+        item.get("adPosition"),
+        item.get("promo_position"),
+        item.get("advert_position"),
+      ),
+      "avgPos": audit_position_value(
+        item.get("avg_position"),
+        item.get("avgPosition"),
+        item.get("avgPos"),
+        item.get("position"),
+        item.get("rank"),
+      ),
       "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
     })
   return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:80]
@@ -6293,6 +6322,30 @@ def normalize_mpstats_expanding_query(item):
     "wbCount": audit_int(item.get("wbcount") or item.get("wb_count"), 0),
     "ozonCount": audit_int(item.get("count"), 0),
     "results": audit_int(item.get("total") or item.get("items_count"), 0),
+    "orgPos": audit_position_value(
+      item.get("avg_organic_position"),
+      item.get("avgOrganicPosition"),
+      item.get("orgPos"),
+      item.get("organic_position"),
+      item.get("organicPosition"),
+      item.get("organic_pos"),
+    ),
+    "adPos": audit_position_value(
+      item.get("avg_ad_position"),
+      item.get("avgAdPosition"),
+      item.get("adPos"),
+      item.get("ad_position"),
+      item.get("adPosition"),
+      item.get("promo_position"),
+      item.get("advert_position"),
+    ),
+    "avgPos": audit_position_value(
+      item.get("avg_position"),
+      item.get("avgPosition"),
+      item.get("avgPos"),
+      item.get("rank"),
+    ),
+    "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
     "frequency365": item.get("freq_365") or item.get("freq365") or "",
     "uniqueDays": audit_int(item.get("unique_days"), 0),
     "source": "mpstats-expanding",
