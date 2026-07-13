@@ -1702,6 +1702,8 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   )
   bootstrap = snapshot.get("manualBootstrap") or {}
   if not snapshot.get("cards"):
+    if bootstrap.get("strictSellerSource"):
+      return row, bootstrap
     snapshot = build_saved_manual_portal_snapshot(row, bootstrap)
     bootstrap = snapshot.get("manualBootstrap") or bootstrap
     if not snapshot.get("cards"):
@@ -1781,19 +1783,56 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       warnings = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
       existing_count = int(row["card_count"] or 0)
       if existing_count > 0:
-        updated_row = get_portal_row(portal_id, user)
-        portal_payload = public_portal_from_row(updated_row) if updated_row else None
         source_limited = any("HTTP 429" in str(warning) for warning in warnings)
         strict_seller_source = bool(bootstrap.get("strictSellerSource"))
+        replace_existing = bool(bootstrap.get("replaceExisting"))
+        previous_count = existing_count
+        if replace_existing:
+          loaded_at = utc_now().isoformat()
+          source = bootstrap.get("source") if isinstance(bootstrap.get("source"), dict) else {}
+          source_label = f"seller: {source.get('path')}" if source.get("path") else ""
+          update_portal_manual_snapshot(portal_id, {
+            "cards": [],
+            "raw_count": 0,
+            "cursor": {},
+            "tokenMeta": {},
+            "stats": {
+              "cardCount": 0,
+              "workCount": 0,
+              "problemCount": 0,
+              "sampleLimit": bootstrap.get("limit") or limit,
+              "loadedAt": loaded_at,
+              "portalName": "",
+              "source": "wb-public-seller" if strict_seller_source else "mpstats",
+              "sourceLabel": source_label,
+            },
+            "manualBootstrap": {
+              **bootstrap,
+              "status": "empty",
+              "cardCount": 0,
+              "warnings": audit_public_warnings(warnings),
+              "loadedAt": loaded_at,
+              "clearedMismatchedSnapshot": True,
+            },
+          }, status="WB seller ожидает загрузку")
+          existing_count = 0
+        updated_row = get_portal_row(portal_id, user)
+        portal_payload = public_portal_from_row(updated_row) if updated_row else None
         warning = warnings[0] if warnings else ""
+        if replace_existing:
+          message = f"Старый список из {previous_count} карточек очищен: он не совпадал с WB seller. Источник пока не отдал новые карточки, повторите загрузку позже."
+        elif source_limited:
+          message = f"Остановлено лимитом источника. В кабинете сохранено {existing_count} карточек."
+        else:
+          message = f"Новых карточек не найдено. В кабинете сохранено {existing_count} карточек."
         mpstats_store_import_update(
           job_id,
-          status="paused" if source_limited else "done",
-          phase="paused" if source_limited else "done",
-          message=f"Остановлено лимитом источника. В кабинете сохранено {existing_count} карточек." if source_limited else f"Новых карточек не найдено. В кабинете сохранено {existing_count} карточек.",
+          status="paused" if source_limited or replace_existing else "done",
+          phase="paused" if source_limited or replace_existing else "done",
+          message=message,
           loadedCount=existing_count,
           totalEstimate=existing_count if strict_seller_source else 0,
-          error=warning,
+          error=warning or ("Старый снимок собран не из WB seller" if replace_existing else ""),
           finishedAt=utc_now().isoformat(),
           portal=portal_payload,
           bootstrap=bootstrap,
