@@ -2365,10 +2365,19 @@ function normalizeSemanticSelection(items) {
 
 function compactSemanticCore(core) {
   if (!core || typeof core !== "object") return null;
-  const compactItems = (items, limit) => {
+  const compactItems = (items, limit, options = {}) => {
+    const sourceItems = Array.isArray(items) ? [...items] : [];
+    if (options.prioritizeRanked) {
+      sourceItems.sort((left, right) => {
+        const leftRanked = semanticHasKeywordRank(left) ? 1 : 0;
+        const rightRanked = semanticHasKeywordRank(right) ? 1 : 0;
+        if (leftRanked !== rightRanked) return rightRanked - leftRanked;
+        return Number(right?.wbCount || 0) - Number(left?.wbCount || 0);
+      });
+    }
     const seen = new Set();
     const output = [];
-    (Array.isArray(items) ? items : []).forEach((item) => {
+    sourceItems.forEach((item) => {
       const query = String(item?.query || "").trim();
       const key = semanticQueryKey(query);
       if (!query || seen.has(key) || output.length >= limit) return;
@@ -2398,7 +2407,7 @@ function compactSemanticCore(core) {
     return output;
   };
   const recommendedSource = Array.isArray(core.recommended) && core.recommended.length ? core.recommended : core.missing;
-  const compactCurrent = compactItems(core.current, 400);
+  const compactCurrent = compactItems(core.current, 800, { prioritizeRanked: true });
   const compactRecommended = compactItems(recommendedSource, 1200);
   return {
     source: core.source || "mpstats-expanding",

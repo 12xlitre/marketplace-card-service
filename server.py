@@ -6241,7 +6241,7 @@ def audit_position_value(*values):
   return None
 
 
-def audit_keywords_from_payload(payload):
+def audit_keywords_from_payload(payload, limit=500):
   data = payload.get("data") if isinstance(payload, dict) else {}
   words = []
   if isinstance(data, dict) and isinstance(data.get("words"), list):
@@ -6286,7 +6286,10 @@ def audit_keywords_from_payload(payload):
       ),
       "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
     })
-  return sorted(output, key=lambda item: item["wbCount"], reverse=True)[:80]
+  output = sorted(output, key=lambda item: item["wbCount"], reverse=True)
+  if limit is None:
+    return output
+  return output[: max(0, int(limit))]
 
 
 def audit_keyword_entry(item, status, field):
@@ -6377,7 +6380,7 @@ def fetch_mpstats_keywords_core(card, force_refresh=False):
     audit_cache_set(cache_key, payload, AUDIT_MARKET_CACHE_TTL_SECONDS)
     cached_flag = False
 
-  keywords = audit_keywords_from_payload(payload)
+  keywords = audit_keywords_from_payload(payload, limit=500)
   semantic_core = audit_build_semantic_core(card, keywords)
   return {
     "source": "mpstats",
@@ -6536,7 +6539,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
       "source": "mpstats-expanding",
       "seedQuery": seed_query,
       "period": period,
-      "current": current[:300],
+      "current": current[:1000],
       "recommended": recommended[:5000],
       "missing": recommended[:5000],
       "allKeywords": rows[:5000],
