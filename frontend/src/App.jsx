@@ -2133,6 +2133,50 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   };
 }
 
+function storedDraftPayload(storedDraft) {
+  return storedDraft?.draft && typeof storedDraft.draft === "object"
+    ? storedDraft.draft
+    : storedDraft || {};
+}
+
+function storedDraftMeta(storedDraft) {
+  const payload = storedDraftPayload(storedDraft);
+  return payload.meta && typeof payload.meta === "object" ? payload.meta : {};
+}
+
+function storedDraftTimestamp(storedDraft) {
+  const payload = storedDraftPayload(storedDraft);
+  return Date.parse(storedDraft?.updatedAt || storedDraft?.savedAt || payload.savedAt || "") || 0;
+}
+
+function storedDraftSemanticReports(storedDraft) {
+  return normalizeSemanticReports(storedDraftMeta(storedDraft).semanticCoreReports);
+}
+
+function mergeStoredDraftSemantics(primaryDraft, fallbackDraft) {
+  if (!primaryDraft || !fallbackDraft) return primaryDraft;
+  const primaryReports = storedDraftSemanticReports(primaryDraft);
+  const fallbackReports = storedDraftSemanticReports(fallbackDraft);
+  if (!fallbackReports.length) return primaryDraft;
+  const fallbackIsBetter = !primaryReports.length
+    || fallbackReports.length > primaryReports.length
+    || (storedDraftTimestamp(fallbackDraft) > storedDraftTimestamp(primaryDraft) && fallbackReports.length >= primaryReports.length);
+  if (!fallbackIsBetter) return primaryDraft;
+  const primaryPayload = storedDraftPayload(primaryDraft);
+  const fallbackMeta = storedDraftMeta(fallbackDraft);
+  const mergedPayload = {
+    ...primaryPayload,
+    meta: {
+      ...(primaryPayload.meta && typeof primaryPayload.meta === "object" ? primaryPayload.meta : {}),
+      semanticCoreSelected: normalizeSemanticSelection(fallbackMeta.semanticCoreSelected),
+      semanticCoreReports: fallbackReports,
+    },
+  };
+  return primaryDraft?.draft && typeof primaryDraft.draft === "object"
+    ? { ...primaryDraft, draft: mergedPayload }
+    : mergedPayload;
+}
+
 function countChangedDraftCharacteristics(drafts, rows) {
   return Object.entries(drafts || {}).filter(([key, draft]) => {
     const currentRow = rows.find((row) => row.key === key);
@@ -5701,6 +5745,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setDraftSavedAt("");
     setDraftSaveStatus("");
     setAuditCompetitorInput("");
+    let localStoredDraft = null;
     const applyDraft = (storedDraft) => {
       const normalized = contentFromStoredDraft(storedDraft, card);
       setDraftTitle(normalized.title);
@@ -5722,6 +5767,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         setSemanticSubjectFilter(latestReport.subjectFilter || "");
         setSemanticSearch(latestReport.search || "");
         setSemanticExcludeWords(latestReport.excludeWords || "");
+      } else {
+        setSemanticActiveReportId("");
+        setSemanticCore(null);
       }
       setApproval(normalized.approval);
       setApprovalSections(normalized.approvalSections);
@@ -5733,6 +5781,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     try {
       const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
       if (saved) {
+        localStoredDraft = saved;
         applyDraft(saved);
       } else {
         setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
@@ -5745,8 +5794,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`)
         .then((payload) => {
           if (!active || !payload.draft) return;
-          applyDraft(payload.draft);
-          setDraftSaveStatus("backend");
+          const mergedDraft = mergeStoredDraftSemantics(payload.draft, localStoredDraft);
+          applyDraft(mergedDraft);
+          if (mergedDraft !== payload.draft) {
+            const repaired = contentFromStoredDraft(mergedDraft, card);
+            persistStructuredDraft(storedDraftPayload(mergedDraft), { auditDone: repaired.auditStatus === "done" }).catch(() => {});
+          } else {
+            setDraftSaveStatus("backend");
+          }
         })
         .catch(() => {
           if (active) {
