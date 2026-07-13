@@ -411,6 +411,38 @@ a {
   line-height: 1.4;
 }
 
+.seller-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.seller-title-row h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.seller-name-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.seller-name-editor input {
+  width: min(460px, 58vw);
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 12px;
+  font: inherit;
+}
+
 .toolbar,
 .panel-actions,
 .portal-actions {
@@ -4061,6 +4093,15 @@ tr:last-child td {
     align-items: flex-start;
     flex-direction: column;
     padding: 18px;
+  }
+
+  .seller-title-row,
+  .seller-name-editor {
+    width: 100%;
+  }
+
+  .seller-name-editor input {
+    width: 100%;
   }
 
   .detail-tabs {

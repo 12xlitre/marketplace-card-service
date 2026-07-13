@@ -62,6 +62,7 @@ MPSTATS_API_BASE = os.environ.get("MPSTATS_API_BASE", "https://mpstats.io/api")
 MPSTATS_CHECK_ITEM_ID = os.environ.get("MPSTATS_CHECK_ITEM_ID", "265906486")
 WB_ENV_TOKEN = "WB_API_TOKEN"
 WB_CONTENT_API_BASE = os.environ.get("WB_CONTENT_API_BASE", "https://content-api.wildberries.ru")
+WB_COMMON_API_BASE = os.environ.get("WB_COMMON_API_BASE", "https://common-api.wildberries.ru")
 WB_PRICES_API_BASE = os.environ.get("WB_PRICES_API_BASE", "https://discounts-prices-api.wildberries.ru")
 WB_MARKETPLACE_API_BASE = os.environ.get("WB_MARKETPLACE_API_BASE", "https://marketplace-api.wildberries.ru")
 WB_ANALYTICS_API_BASE = os.environ.get("WB_ANALYTICS_API_BASE", "https://seller-analytics-api.wildberries.ru")
@@ -1130,6 +1131,28 @@ def update_portal_team(portal_id, team):
   return get_portal_row(portal_id)
 
 
+def update_portal_name(portal_id, name):
+  clean_name = wb_clean_portal_name(name)
+  if not clean_name:
+    raise ValueError("portal_name_required")
+  if len(str(name or "").strip()) > 120:
+    raise ValueError("portal_name_too_long")
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    if not portal:
+      return None
+    db.execute(
+      """
+      UPDATE portals
+      SET name = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (clean_name, portal_id),
+    )
+  return get_portal_row(portal_id)
+
+
 def set_portal_active(portal_id, is_active):
   init_db()
   with connect_db() as db:
@@ -1155,7 +1178,11 @@ def update_portal_sync_stats(portal_id, snapshot):
   stats = snapshot.get("stats") or {}
   token_meta = snapshot.get("tokenMeta") or {}
   external_key = wb_snapshot_external_key(snapshot)
+  next_name = wb_clean_portal_name(stats.get("portalName", ""))
   with connect_db() as db:
+    portal = db.execute("SELECT name FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    current_name = portal["name"] if portal else ""
+    stored_name = next_name if should_replace_portal_name(current_name, next_name) else current_name
     db.execute(
       """
       UPDATE portals
@@ -1172,7 +1199,7 @@ def update_portal_sync_stats(portal_id, snapshot):
       WHERE id = ?
       """,
       (
-        stats.get("portalName", ""),
+        stored_name,
         stats.get("cardCount", 0),
         stats.get("workCount", 0),
         stats.get("problemCount", 0),
@@ -1207,11 +1234,16 @@ def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витр�
   except (TypeError, ValueError):
     return
   stats = snapshot.get("stats") or {}
+  next_name = wb_clean_portal_name(stats.get("portalName", ""))
   with connect_db() as db:
+    portal = db.execute("SELECT name FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    current_name = portal["name"] if portal else ""
+    stored_name = next_name if should_replace_portal_name(current_name, next_name) else current_name
     db.execute(
       """
       UPDATE portals
       SET
+        name = COALESCE(NULLIF(?, ''), name),
         status = ?,
         api_connected = 0,
         card_count = ?,
@@ -1223,6 +1255,7 @@ def update_portal_manual_snapshot(portal_id, snapshot, status="MPStats витр�
       WHERE id = ?
       """,
       (
+        stored_name,
         status,
         stats.get("cardCount", 0),
         stats.get("workCount", 0),
@@ -5386,7 +5419,7 @@ def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPST
 
   cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
   portal_name = ""
-  if selected_candidate and selected_candidate.get("kind") in {"brand", "seller"}:
+  if selected_candidate and selected_candidate.get("kind") == "brand":
     portal_name = selected_candidate.get("path") or ""
   portal_name = portal_name or derive_wb_portal_name(cards)
   loaded_at = utc_now().isoformat()
@@ -8095,6 +8128,36 @@ def most_common_nonempty(values):
   return max(order, key=lambda value: counts[value])
 
 
+def wb_clean_portal_name(value):
+  return str(value or "").strip()[:120]
+
+
+def wb_seller_info_name(info):
+  if not isinstance(info, dict):
+    return ""
+  for key in ("tradeMark", "trademark", "tradeName", "sellerName", "name"):
+    name = wb_clean_portal_name(info.get(key))
+    if name and name.lower() not in ("wildberries", "wb", "не указано"):
+      return name
+  return ""
+
+
+def should_replace_portal_name(current_name, next_name):
+  current = wb_clean_portal_name(current_name)
+  next_value = wb_clean_portal_name(next_name)
+  if not next_value:
+    return False
+  if not current:
+    return True
+  normalized = current.lower()
+  return normalized in ("кабинет wb", "wildberries", "wb") or normalized.endswith(" wb")
+
+
+def fetch_wb_seller_info(token):
+  payload = wb_get_json(token, "/api/v1/seller-info", locale=None, attempts=1, base_url=WB_COMMON_API_BASE)
+  return payload if isinstance(payload, dict) else {}
+
+
 def derive_wb_portal_name(cards):
   seller = most_common_nonempty(
     card.get("sellerName")
@@ -8329,6 +8392,13 @@ def fetch_wb_cards(token, max_cards=100):
   max_cards = max(1, min(int(max_cards), WB_MAX_CARDS_PER_SYNC))
   cards = []
   cursor = {"limit": min(100, max_cards)}
+  seller_info = {}
+  seller_info_warning = None
+
+  try:
+    seller_info = fetch_wb_seller_info(token)
+  except WbApiError as exc:
+    seller_info_warning = wb_warning("seller_info", exc)
 
   while len(cards) < max_cards:
     cursor["limit"] = min(100, max_cards - len(cards))
@@ -8374,10 +8444,13 @@ def fetch_wb_cards(token, max_cards=100):
     wb_stock_rows = fetch_wb_analytics_wb_stocks(token, nm_ids, chrt_ids)
   except WbApiError as exc:
     wb_warnings.append(wb_warning("wb_stocks", exc))
+  if seller_info_warning:
+    wb_warnings.append(seller_info_warning)
   normalized_cards = enrich_wb_cards_with_commercial_data(normalized_cards, price_items, seller_stock_rows, wb_stock_rows)
   problem_count = sum(1 for card in normalized_cards if card["issueCount"] > 0)
   work_count = problem_count
-  portal_name = derive_wb_portal_name(normalized_cards)
+  seller_info_name = wb_seller_info_name(seller_info)
+  portal_name = seller_info_name or derive_wb_portal_name(normalized_cards)
   return {
     "cards": normalized_cards,
     "raw_count": len(cards),
@@ -8391,6 +8464,7 @@ def fetch_wb_cards(token, max_cards=100):
       "sampleLimit": max_cards,
       "loadedAt": utc_now().isoformat(),
       "portalName": portal_name,
+      "portalNameSource": "wb-seller-info" if seller_info_name else "wb-cards",
     },
   }
 
@@ -10178,6 +10252,31 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         row = update_portal_team(portal_id, team)
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
+        return
+      if not row:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/name"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/name")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        row = update_portal_name(portal_id, payload.get("name"))
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_name"})
         return
       if not row:
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})

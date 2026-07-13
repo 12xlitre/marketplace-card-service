@@ -12,6 +12,7 @@ import {
   HelpCircle,
   LayoutDashboard,
   LogOut,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -3822,6 +3823,34 @@ export default function App() {
     }
   }
 
+  async function updatePortalName(portal, name) {
+    const cleanName = String(name || "").trim();
+    if (!cleanName) {
+      setNotice("Название кабинета не может быть пустым.");
+      return false;
+    }
+    if (portal.isDemo) {
+      setDemoPortal((item) => ({ ...item, name: cleanName }));
+      return true;
+    }
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/name`, {
+        method: "POST",
+        body: JSON.stringify({ name: cleanName }),
+      });
+      replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
+      setNotice("Название кабинета сохранено.");
+      return true;
+    } catch (error) {
+      if (error.message === "portal_name_too_long") {
+        setNotice("Название слишком длинное. Оставьте до 120 символов.");
+      } else {
+        setNotice("Не удалось сохранить название кабинета.");
+      }
+      return false;
+    }
+  }
+
   const currentPortalCards = cardsForPortal(currentPortal);
   const selectedCardFromPortal = currentPortalCards.find((card) => cardDraftKey(card) === selectedCardKey) || null;
   const currentPortalKey = String(currentPortal?.id || "");
@@ -3904,6 +3933,7 @@ export default function App() {
               setPortalModalOpen(true);
             }}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
+            onUpdateName={(name) => updatePortalName(currentPortal, name)}
             onNotice={setNotice}
             helpEnabled={helpEnabled}
           />
@@ -4235,7 +4265,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onNotice, helpEnabled = false }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
@@ -4251,12 +4281,21 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
   const [sellerTab, setSellerTab] = useState("work");
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(displayName);
+  const [nameSaving, setNameSaving] = useState(false);
 
   useEffect(() => {
     if (!teamEditing) {
       setTeamDraft(team);
     }
   }, [portal.id, team.lead, team.tech, team.manager, teamEditing]);
+
+  useEffect(() => {
+    if (!nameEditing) {
+      setNameDraft(displayName);
+    }
+  }, [displayName, nameEditing]);
 
   useEffect(() => {
     let active = true;
@@ -4299,6 +4338,23 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setTeamEditing(false);
   }
 
+  async function saveNameDraft() {
+    const cleanName = nameDraft.trim();
+    if (!cleanName) {
+      onNotice?.("Название кабинета не может быть пустым.");
+      return;
+    }
+    setNameSaving(true);
+    try {
+      const saved = await onUpdateName?.(cleanName);
+      if (saved !== false) {
+        setNameEditing(false);
+      }
+    } finally {
+      setNameSaving(false);
+    }
+  }
+
   function openApprovalTask(task) {
     const card = cards.find((item) => (
       cardDraftKey(item) === task.cardKey
@@ -4319,7 +4375,31 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     <section className="screen active">
       <header className="topbar">
         <div className="title">
-          <h1>{displayName}</h1>
+          <div className="seller-title-row">
+            {nameEditing ? (
+              <div className="seller-name-editor">
+                <input
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  maxLength={120}
+                  autoFocus
+                />
+                <button className="btn primary" type="button" onClick={saveNameDraft} disabled={nameSaving}>
+                  {nameSaving ? "Сохраняем" : "Сохранить"}
+                </button>
+                <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>
+                  Отмена
+                </button>
+              </div>
+            ) : (
+              <>
+                <h1>{displayName}</h1>
+                {canManage ? (
+                  <IconButton icon={Pencil} label="Редактировать название кабинета" onClick={() => setNameEditing(true)} />
+                ) : null}
+              </>
+            )}
+          </div>
           <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name}</p>
         </div>
         <div className="toolbar">
