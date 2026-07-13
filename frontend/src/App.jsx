@@ -5280,9 +5280,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     : auditDone
       ? {
-        title: "Проверьте изменения",
-        copy: "Черновик уже подготовлен. Перейдите во вкладку изменений, примите или поправьте поля и отправьте результат на согласование.",
-        action: "Перейти к изменениям",
+        title: "Проверьте черновик",
+        copy: "Аудит подготовил черновик. Откройте вкладку Изменения, примите или поправьте поля и отправьте результат на согласование.",
+        action: "Перейти к черновику",
       }
       : auditStale
         ? {
@@ -5298,7 +5298,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const auditFlowSteps = [
     { title: "Подготовка", status: auditRunning || auditDone ? "done" : "active", copy: auditCompetitorIds.length ? `${auditCompetitorIds.length}/3 конкурента задано` : "конкуренты необязательны" },
     { title: "Результат аудита", status: auditDone ? "done" : auditRunning ? "active" : "pending", copy: auditDone ? "выводы готовы" : auditRunning ? "собираем данные" : "появится после запуска" },
-    { title: "Изменения", status: auditDone ? "active" : "pending", copy: auditDone ? `${auditPreparedChangesCount} ${pluralRu(auditPreparedChangesCount, "правка", "правки", "правок")}` : "после аудита" },
+    { title: "Черновик готов", status: auditDone ? "active" : "pending", copy: auditDone ? `${auditPreparedChangesCount} ${pluralRu(auditPreparedChangesCount, "правка", "правки", "правок")}` : "после аудита" },
   ];
 
   useEffect(() => {
@@ -6696,7 +6696,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   items={[
                     "Если есть важные конкуренты, вставьте ссылки WB или nmID в поле Конкуренты для этого аудита.",
                     "Если конкурентов нет, оставьте поле пустым: система сама подберет похожие карточки через MPStats.",
-                    "Нажмите Запустить аудит. После завершения появятся выводы, история и черновик правок во вкладке Изменения.",
+                    "Нажмите Запустить аудит. После завершения появятся выводы, история и черновик правок. Проверять его нужно во вкладке Изменения.",
                   ]}
                 />
                 <div className="audit-flow">
@@ -6777,7 +6777,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         </div>
                         <div>
                           <span>Что предлагаем изменить</span>
-                          {latestQuickWins.length ? latestQuickWins.slice(0, 4).map((item, index) => <p key={`quick-${index}`}>{item}</p>) : <p>Черновик изменений подготовлен во вкладке Изменения.</p>}
+                          {latestQuickWins.length ? latestQuickWins.slice(0, 4).map((item, index) => <p key={`quick-${index}`}>{item}</p>) : <p>Черновик подготовлен во вкладке Изменения.</p>}
                         </div>
                         <div>
                           <span>Что проверить вручную</span>
@@ -6786,7 +6786,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       </div>
                       <div className="audit-result-actions">
                         <button className="btn primary" type="button" onClick={() => setActiveTab("changes")}>
-                          <CheckSquare size={17} />Перейти к изменениям
+                          <CheckSquare size={17} />Перейти к черновику
                         </button>
                         <span>{auditPreparedChangesCount} {pluralRu(auditPreparedChangesCount, "правка", "правки", "правок")} в черновике</span>
                       </div>
