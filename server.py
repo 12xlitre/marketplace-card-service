@@ -1725,7 +1725,7 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       phase="starting",
       message="Готовим расширенную загрузку",
       loadedCount=int(row["card_count"] or 0),
-      totalEstimate=max(int(row["card_count"] or 0), int(limit or 0)),
+      totalEstimate=0,
     )
     snapshot = build_mpstats_storefront_snapshot_paged(
       row["name"],
@@ -1736,7 +1736,8 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
     )
     bootstrap = snapshot.get("manualBootstrap") or {}
     if not snapshot.get("cards"):
-      raise ValueError("mpstats_cards_empty")
+      warnings = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
+      raise ValueError(warnings[0] if warnings else "mpstats_cards_empty")
     status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
     update_portal_manual_snapshot(portal_id, snapshot, status=status)
     updated_row = get_portal_row(portal_id, user)
@@ -1753,12 +1754,15 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       bootstrap=bootstrap,
     )
   except Exception as exc:
+    error_text = str(exc) or type(exc).__name__
+    if error_text == "mpstats_cards_empty":
+      error_text = "MPStats не вернул карточки по сохраненной ссылке или описанию"
     mpstats_store_import_update(
       job_id,
       status="error",
       phase="error",
       message="Загрузка карточек прервалась",
-      error=str(exc) or type(exc).__name__,
+      error=error_text,
       finishedAt=utc_now().isoformat(),
     )
 
@@ -1791,7 +1795,7 @@ def start_mpstats_store_import(portal_id, user, limit=MPSTATS_STORE_FULL_IMPORT_
       "phase": "queued",
       "message": "Загрузка поставлена в очередь",
       "loadedCount": int(row["card_count"] or 0),
-      "totalEstimate": limit,
+      "totalEstimate": 0,
       "limit": limit,
       "sourceLabel": "",
       "error": "",
@@ -6202,7 +6206,7 @@ def build_mpstats_storefront_snapshot_paged(
       phase="requesting",
       sourceLabel=f"{candidate.get('kind')}: {candidate.get('path')}",
       message="Запрашиваем витрину MPStats",
-      totalEstimate=limit,
+      totalEstimate=0,
     )
     while offset < limit:
       page_limit = min(batch_size, limit - offset)
@@ -6248,7 +6252,7 @@ def build_mpstats_storefront_snapshot_paged(
         phase="requesting",
         sourceLabel=f"seller: {seller_id}",
         message="Пробуем публичную витрину WB",
-        totalEstimate=limit,
+        totalEstimate=0,
       )
       raw_cards = fetch_wb_public_seller_catalog(seller_id, limit=limit, warnings=warnings)
       if raw_cards:

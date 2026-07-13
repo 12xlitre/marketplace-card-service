@@ -4563,7 +4563,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
           onNotice?.(payload.job.message || "Карточки загружены.");
         }
         if (payload.job?.status === "error") {
-          onNotice?.("Загрузка карточек прервалась. Можно повторить.");
+          onNotice?.(payload.job.error ? `Загрузка карточек прервалась: ${payload.job.error}` : "Загрузка карточек прервалась. Можно повторить.");
         }
       } catch {
         if (active) {
@@ -4656,7 +4656,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       status: "queued",
       message: "Запускаем расширенную загрузку",
       loadedCount: Number(portal.cardCount || cards.length || 0),
-      totalEstimate: Math.max(Number(portal.cardCount || cards.length || 0), 1000),
+      totalEstimate: 0,
+      limit: 1000,
     });
     try {
       const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/mpstats-import-all`, {
@@ -4671,7 +4672,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
         : error.message === "manual_source_missing"
           ? "Добавьте ссылку на магазин или исходные данные для MPStats."
           : "Не удалось запустить расширенную загрузку карточек.";
-      setImportJob({ status: "error", message, loadedCount: Number(portal.cardCount || cards.length || 0), totalEstimate: 0 });
+      setImportJob({ status: "error", message, loadedCount: Number(portal.cardCount || cards.length || 0), totalEstimate: 0, limit: 1000 });
       onNotice?.(message);
     }
   }
@@ -4684,10 +4685,14 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const importRunning = ["queued", "running"].includes(importJob?.status);
   const importLoaded = Number(importJob?.loadedCount || 0);
   const importTotal = Number(importJob?.totalEstimate || 0);
+  const importLimit = Number(importJob?.limit || 0);
   const importPercent = importTotal > 0 ? Math.max(4, Math.min(100, Math.round((importLoaded / importTotal) * 100))) : 0;
   const importProgressText = importTotal > 0
     ? `${formatNumber(importLoaded)} из ${formatNumber(importTotal)}`
-    : `найдено ${formatNumber(importLoaded)}`;
+    : `найдено ${formatNumber(importLoaded)}${importLimit ? ` · лимит до ${formatNumber(importLimit)}` : ""}`;
+  const importMessage = importJob?.status === "error" && importJob?.error
+    ? `${importJob.message || "Загрузка карточек прервалась"}: ${importJob.error}`
+    : importJob?.message || (importRunning ? "MPStats добирает карточки пачками." : "");
 
   return (
     <section className="screen active">
@@ -4854,7 +4859,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <div className={`store-import-bar ${importTotal ? "" : "indeterminate"}`}>
                     <span style={{ width: importTotal ? `${importPercent}%` : undefined }} />
                   </div>
-                  <p>{importJob.message || (importRunning ? "MPStats добирает карточки пачками." : "")}</p>
+                  <p>{importMessage}</p>
                 </div>
               ) : null}
               <div className="source-flow">
