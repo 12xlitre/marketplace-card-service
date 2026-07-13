@@ -9,6 +9,7 @@ import {
   Download,
   Eye,
   ExternalLink,
+  HelpCircle,
   LayoutDashboard,
   LogOut,
   Plus,
@@ -32,6 +33,7 @@ const hardcodedDirectoryFallback = [
 ];
 
 const appViewStorageKey = "opticards-active-view";
+const helpModeStorageKey = "opticards-help-mode";
 const appScreens = new Set(["cabinets", "seller", "card", "settings"]);
 const topCompetitorLimit = 3;
 
@@ -3134,6 +3136,38 @@ function IconButton({ icon: Icon, label, onClick, disabled = false }) {
   );
 }
 
+function HelpHint({ enabled, title, children }) {
+  if (!enabled) {
+    return null;
+  }
+  return (
+    <div className="help-hint">
+      <HelpCircle size={18} />
+      <div>
+        <strong>{title}</strong>
+        <p>{children}</p>
+      </div>
+    </div>
+  );
+}
+
+function HelpList({ enabled, title, items }) {
+  if (!enabled) {
+    return null;
+  }
+  return (
+    <div className="help-hint help-list">
+      <HelpCircle size={18} />
+      <div>
+        <strong>{title}</strong>
+        <ul>
+          {items.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [initialView] = useState(readSavedAppView);
   const [sessionLoading, setSessionLoading] = useState(true);
@@ -3156,6 +3190,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
+  const [helpEnabled, setHelpEnabled] = useState(() => localStorage.getItem(helpModeStorageKey) === "1");
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
@@ -3202,6 +3237,10 @@ export default function App() {
       cardKey: selectedCardKey,
     }));
   }, [currentUser, screen, selectedPortalId, selectedCardKey]);
+
+  useEffect(() => {
+    localStorage.setItem(helpModeStorageKey, helpEnabled ? "1" : "0");
+  }, [helpEnabled]);
 
   useEffect(() => {
     if (screen !== "card") {
@@ -3813,6 +3852,8 @@ export default function App() {
       <Rail
         user={currentUser}
         screen={screen}
+        helpEnabled={helpEnabled}
+        onHelpToggle={setHelpEnabled}
         onNavigate={setScreen}
         onLogout={logout}
       />
@@ -3835,6 +3876,7 @@ export default function App() {
             onOpen={showSeller}
             onArchive={(portal) => setPortalActive(portal, false)}
             onRestore={(portal) => setPortalActive(portal, true)}
+            helpEnabled={helpEnabled}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
               setPortalModalTarget(null);
@@ -3863,6 +3905,7 @@ export default function App() {
             }}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
             onNotice={setNotice}
+            helpEnabled={helpEnabled}
           />
         ) : null}
 
@@ -3876,6 +3919,7 @@ export default function App() {
             onDraftSaved={refreshPortals}
             onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
             onDraftReset={() => resetPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal))}
+            helpEnabled={helpEnabled}
           />
         ) : null}
 
@@ -3893,6 +3937,7 @@ export default function App() {
             onMpstatsIntegrationChange={setMpstatsIntegration}
             onCreateUser={createUserAccount}
             onResetPassword={resetUserPassword}
+            helpEnabled={helpEnabled}
           />
         ) : null}
       </main>
@@ -3980,7 +4025,7 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function Rail({ user, screen, onNavigate, onLogout }) {
+function Rail({ user, screen, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
     { key: "cabinets", label: "Кабинеты", Icon: LayoutDashboard },
     { key: "audit", label: "Аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
@@ -4014,6 +4059,18 @@ function Rail({ user, screen, onNavigate, onLogout }) {
           </button>
         ))}
       </nav>
+      <button
+        className={`help-switch ${helpEnabled ? "active" : ""}`}
+        type="button"
+        onClick={() => onHelpToggle(!helpEnabled)}
+        aria-pressed={helpEnabled}
+      >
+        <span className="switch-track"><span /></span>
+        <div>
+          <strong>Подсказки</strong>
+          <em>{helpEnabled ? "включены" : "выключены"}</em>
+        </div>
+      </button>
       <div className="rail-user">
         <div className="avatar">{initials(user.full_name)}</div>
         <div>
@@ -4029,7 +4086,7 @@ function Rail({ user, screen, onNavigate, onLogout }) {
   );
 }
 
-function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onOpenModal }) {
+function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onOpenModal, helpEnabled = false }) {
   const apiCount = activePortals.filter((portal) => portal.apiConnected).length;
   const manualCount = activePortals.filter((portal) => !portal.apiConnected).length;
   const apiCardsCount = activePortals
@@ -4054,6 +4111,15 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
       </header>
 
       <div className="content">
+        <HelpList
+          enabled={helpEnabled}
+          title="Как начать работу"
+          items={[
+            "Нажмите Добавить кабинет, чтобы подключить новый WB-кабинет или завести ручной кабинет.",
+            "Откройте нужный кабинет, чтобы увидеть карточки, отчеты и маршрут работы по клиенту.",
+            "Фильтр Активные / Неактивные помогает спрятать завершенные кабинеты без удаления истории.",
+          ]}
+        />
         <div className="summary-grid">
           <Metric
             label="Кабинеты в работе"
@@ -4169,7 +4235,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onNotice }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
@@ -4270,6 +4336,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <button className={sellerTab === "work" ? "active" : ""} type="button" onClick={() => setSellerTab("work")}>Работа</button>
               <button className={sellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
             </div>
+            <HelpHint enabled={helpEnabled} title="Где что находится">
+              Вкладка Работа нужна для карточек, аудита и согласования. Вкладка Отчеты нужна, когда сотруднику нужно выбрать период и скачать готовую XLSX-выгрузку по этому кабинету.
+            </HelpHint>
 
             {sellerTab === "work" ? (
               <>
@@ -4361,6 +4430,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={portal.apiConnected || isMpstatsLoaded ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isMpstatsLoaded ? "MPStats витрина" : (isManual ? "Без API" : "ручной режим"))}</Tag>
               </div>
+              <HelpHint enabled={helpEnabled} title="Когда нажимать обновление">
+                Нажимайте Загрузить свежие данные перед новой волной аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
+              </HelpHint>
               <div className="panel-actions">
                 <button className="btn" type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading}>
                   <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
@@ -4386,6 +4458,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={workRoute.done ? "blue" : "amber"}>{workRoute.done ? `Факт: ${workRoute.done} из 5` : "Ожидает данные"}</Tag>
               </div>
+              <HelpHint enabled={helpEnabled} title="Маршрут работы по кабинету">
+                Идите слева направо: загрузили данные, открыли карточки, запустили аудит, проверили изменения, отправили на согласование. Счетчики показывают, где работа уже началась.
+              </HelpHint>
               <div className="pipeline">
                 {workRoute.rows.map((step) => (
                   <div className={`step ${step.className}`} key={step.title}>
@@ -4412,6 +4487,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
+              <HelpHint enabled={helpEnabled} title="Как открыть аудит карточки">
+                Найдите карточку по артикулу или WB ID и нажмите Открыть. Внутри карточки перейдите на вкладку Аудит и нажмите Запустить аудит.
+              </HelpHint>
               <CardsTable
                 cards={cards}
                 portal={portal}
@@ -4422,7 +4500,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             </section>
               </>
             ) : (
-              <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} />
+              <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
             )}
           </div>
         </div>
@@ -4431,7 +4509,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   );
 }
 
-function ReportsPanel({ portal, cards, onNotice }) {
+function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   const [period, setPeriod] = useState(defaultClientReportRange);
   const [selectedReportId, setSelectedReportId] = useState(sellerReportTemplates[0].id);
   const [history, setHistory] = useState(() => readReportHistory(portal?.id));
@@ -4525,6 +4603,15 @@ function ReportsPanel({ portal, cards, onNotice }) {
           </div>
           <Tag tone={portal?.apiConnected ? "blue" : "amber"}>{portal?.apiConnected ? "WB API" : "снимок карточек"}</Tag>
         </div>
+        <HelpList
+          enabled={helpEnabled}
+          title="Как скачать отчет"
+          items={[
+            "Выберите тип отчета. Сейчас доступен клиентский WB-отчет.",
+            "Выберите период С какого числа и По какое число.",
+            "Нажмите Сформировать. Файл XLSX с вкладками Остатки, Акции и выбранным периодом скачается автоматически.",
+          ]}
+        />
         <div className="report-builder">
           <div className="report-template-list">
             {sellerReportTemplates.map((template) => (
@@ -4571,6 +4658,9 @@ function ReportsPanel({ portal, cards, onNotice }) {
             <Metric label="Частично" value={formatNumber(partialCount)} hint="нужна проверка" />
             <Metric label="Нет данных" value={formatNumber(unavailableCount)} hint="зависит от API" />
           </div>
+          <HelpHint enabled={helpEnabled} title="Что означает доступность данных">
+            Эти строки показывают, какие блоки WB API доступны для отчета. Если часть данных недоступна, файл все равно скачивается, но соответствующие колонки будут пустыми или частичными.
+          </HelpHint>
           <div className="report-availability">
             {availability.map(([label, status, source]) => (
               <div className="report-availability-row" key={label}>
@@ -4595,6 +4685,9 @@ function ReportsPanel({ portal, cards, onNotice }) {
           </div>
           <Tag tone={history.length ? "blue" : "amber"}>{history.length || "пусто"}</Tag>
         </div>
+        <HelpHint enabled={helpEnabled} title="Зачем нужна история">
+          История хранится внутри этого кабинета в браузере сотрудника. По кнопке Сформировать снова можно повторить выгрузку с тем же периодом.
+        </HelpHint>
         {history.length ? (
           <div className="report-history-list">
             {history.map((item) => (
@@ -5032,7 +5125,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
   );
 }
 
-function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onDraftActivity, onDraftReset }) {
+function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
   const [activeTab, setActiveTab] = useState("card");
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
@@ -6457,6 +6550,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
               <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
               <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => setActiveTab("competitors")}>ТОП конкурентов</button>
             </nav>
+            <HelpHint enabled={helpEnabled} title="Как работать с карточкой">
+              Сначала можно собрать Семантическое ядро, затем запустить Аудит. После аудита проверьте вкладку Изменения и отправьте готовые правки на согласование.
+            </HelpHint>
 
             {activeTab === "semantic" ? (
               <section className="workspace-strip semantic-core-workspace">
@@ -6561,6 +6657,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                   <Tag tone={auditRunning ? "blue" : (auditDone ? "green" : "amber")}>{auditRunning ? "идет аудит" : (auditDone ? "аудит готов" : (auditStale ? "аудит сброшен" : "не запускался"))}</Tag>
                 </div>
+                <HelpList
+                  enabled={helpEnabled}
+                  title="Как сделать аудит"
+                  items={[
+                    "Если есть важные конкуренты, вставьте ссылки WB или nmID в поле Конкуренты для этого аудита.",
+                    "Если конкурентов нет, оставьте поле пустым: система сама подберет похожие карточки через MPStats.",
+                    "Нажмите Запустить аудит. После завершения появятся выводы, история и черновик правок во вкладке Изменения.",
+                  ]}
+                />
                 <div className="audit-list">
                   {auditStale ? (
                     <div className="issue">
