@@ -5069,23 +5069,24 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   const problemCards = cards.filter((card) => cardProblemReasons(card).length);
   const signalCards = cards.filter((card) => cardDataSignals(card).length);
   const signalOnlyCards = signalCards.filter((card) => !cardProblemReasons(card).length);
-  const cleanCards = cards.length - problemCards.length;
+  const cleanCards = cards.filter((card) => !cardProblemReasons(card).length && !cardDataSignals(card).length).length;
   const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
   const taskCards = cards.filter((card) => approvalTaskForCard(card, approvalTaskLookup));
   const visibleCards = cards.filter((card) => {
     const key = cardStableKey(card);
     const hasProblems = cardProblemReasons(card).length > 0;
+    const hasSignals = cardDataSignals(card).length > 0;
     const hasTask = Boolean(approvalTaskForCard(card, approvalTaskLookup));
     if (issueFilter === "problems" && !hasProblems) {
       return false;
     }
-    if (issueFilter === "clean" && hasProblems) {
+    if (issueFilter === "clean" && (hasProblems || hasSignals)) {
       return false;
     }
     if (issueFilter === "selected" && !selectedSet.has(key)) {
       return false;
     }
-    if (issueFilter === "signals" && !cardDataSignals(card).length) {
+    if (issueFilter === "signals" && (!hasSignals || hasProblems)) {
       return false;
     }
     if (workFilter === "tasks" && !hasTask) {
@@ -5140,6 +5141,13 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
     setCategoryFilter("all");
   }
 
+  function applySummaryFilter({ issue = "all", work = "all" }) {
+    setQuery("");
+    setCategoryFilter("all");
+    setIssueFilter(issue);
+    setWorkFilter(work);
+  }
+
   async function createWorkPackage() {
     if (!selectedCards.length || portal?.isDemo) {
       return;
@@ -5170,26 +5178,46 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
     <div className="cards-workspace">
       <div className="cards-control-panel">
         <div className="cards-work-summary">
-          <div className="work-summary-item">
+          <button
+            className={`work-summary-item ${issueFilter === "problems" && workFilter === "all" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ issue: "problems" })}
+          >
             <span>Требуют внимания</span>
             <strong>{formatNumber(problemCards.length)}</strong>
-          </div>
-          <div className="work-summary-item">
+          </button>
+          <button
+            className={`work-summary-item ${issueFilter === "signals" && workFilter === "all" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ issue: "signals" })}
+          >
             <span>Некритичные замечания</span>
             <strong>{formatNumber(signalOnlyCards.length)}</strong>
-          </div>
-          <div className="work-summary-item">
-            <span>Без пробелов</span>
+          </button>
+          <button
+            className={`work-summary-item ${issueFilter === "clean" && workFilter === "all" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ issue: "clean" })}
+          >
+            <span>Без проблем</span>
             <strong>{formatNumber(cleanCards)}</strong>
-          </div>
-          <div className="work-summary-item active">
+          </button>
+          <button
+            className={`work-summary-item ${issueFilter === "all" && workFilter === "tasks" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ work: "tasks" })}
+          >
             <span>В задачах</span>
             <strong>{formatNumber(taskCards.length)}</strong>
-          </div>
-          <div className="work-summary-item">
+          </button>
+          <button
+            className={`work-summary-item ${issueFilter === "all" && workFilter === "selected" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ work: "selected" })}
+          >
             <span>В рабочем наборе</span>
             <strong>{formatNumber(selectedCards.length)}</strong>
-          </div>
+          </button>
           <div className="work-summary-note">
             <strong>{selectedCards.length ? `${selectedProblemCount} с проблемами` : "Набор пуст"}</strong>
             <span>{selectedCards.length ? `первая категория: ${dominantCategory}` : "выберите видимые строки или отдельные карточки"}</span>
@@ -5204,8 +5232,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
           <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
             <option value="all">Все карточки</option>
             <option value="problems">Требуют внимания</option>
-            <option value="signals">Есть замечания WB API</option>
-            <option value="clean">Без пробелов</option>
+            <option value="signals">Некритичные замечания</option>
+            <option value="clean">Без проблем</option>
             <option value="selected">Рабочий набор</option>
           </select>
           <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>

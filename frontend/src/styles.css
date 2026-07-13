@@ -853,6 +853,24 @@ a {
   gap: 6px;
 }
 
+.work-summary-item {
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  font: inherit;
+}
+
+.work-summary-item:hover {
+  background: var(--soft);
+}
+
+.work-summary-item:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
 .work-summary-item.active {
   background: var(--blue-soft);
 }
