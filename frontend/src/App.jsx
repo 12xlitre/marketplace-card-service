@@ -5267,6 +5267,39 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const semanticContentRunning = semanticContentStatus === "loading";
   const canReoptimizeContent = Boolean(semanticCoreSelected.length && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
+  const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
+    || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
+  const auditPreparedChangesCount = changedDraftCharacteristicsCount + (auditContentChanged ? 1 : 0);
+  const auditStatusText = auditRunning ? "Идет аудит" : auditDone ? "Аудит готов" : auditStale ? "Аудит устарел" : "Аудит не запускался";
+  const auditStatusTone = auditRunning ? "blue" : auditDone ? "green" : auditStale ? "amber" : "amber";
+  const auditNextStep = auditRunning
+    ? {
+      title: "Дождитесь результата",
+      copy: "MPStats и backend собирают рекомендации. После завершения появится краткий вывод и кнопка перехода к изменениям.",
+      action: "Аудит идет",
+    }
+    : auditDone
+      ? {
+        title: "Проверьте изменения",
+        copy: "Черновик уже подготовлен. Перейдите во вкладку изменений, примите или поправьте поля и отправьте результат на согласование.",
+        action: "Перейти к изменениям",
+      }
+      : auditStale
+        ? {
+          title: "Запустите аудит заново",
+          copy: "Данные WB обновились, поэтому прежняя аналитика устарела. Черновик сохранен, но рекомендации лучше пересчитать.",
+          action: "Запустить заново",
+        }
+        : {
+          title: "Запустите аудит",
+          copy: "Можно оставить конкурентов пустыми: система сама подберет похожие карточки через MPStats и подготовит черновик правок.",
+          action: "Запустить аудит",
+        };
+  const auditFlowSteps = [
+    { title: "Подготовка", status: auditRunning || auditDone ? "done" : "active", copy: auditCompetitorIds.length ? `${auditCompetitorIds.length}/3 конкурента задано` : "конкуренты необязательны" },
+    { title: "Результат аудита", status: auditDone ? "done" : auditRunning ? "active" : "pending", copy: auditDone ? "выводы готовы" : auditRunning ? "собираем данные" : "появится после запуска" },
+    { title: "Изменения", status: auditDone ? "active" : "pending", copy: auditDone ? `${auditPreparedChangesCount} ${pluralRu(auditPreparedChangesCount, "правка", "правки", "правок")}` : "после аудита" },
+  ];
 
   useEffect(() => {
     setSemanticSeedQuery(defaultSemanticSeedQuery(card));
@@ -6649,13 +6682,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
             ) : null}
 
             {activeTab === "audit" ? (
-              <section className="workspace-strip">
+              <section className="workspace-strip audit-workspace">
                 <div className="strip-head">
                   <div>
                     <h2>Аудит карточки</h2>
-                    <p>Запускает аналитику MPStats, сохраняет результат в кэш и готовит черновик изменений.</p>
+                    <p>{auditNextStep.copy}</p>
                   </div>
-                  <Tag tone={auditRunning ? "blue" : (auditDone ? "green" : "amber")}>{auditRunning ? "идет аудит" : (auditDone ? "аудит готов" : (auditStale ? "аудит сброшен" : "не запускался"))}</Tag>
+                  <Tag tone={auditStatusTone}>{auditStatusText}</Tag>
                 </div>
                 <HelpList
                   enabled={helpEnabled}
@@ -6666,7 +6699,40 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     "Нажмите Запустить аудит. После завершения появятся выводы, история и черновик правок во вкладке Изменения.",
                   ]}
                 />
-                <div className="audit-list">
+                <div className="audit-flow">
+                  {auditFlowSteps.map((step) => (
+                    <div className={`audit-flow-step ${step.status}`} key={step.title}>
+                      <strong>{step.title}</strong>
+                      <span>{step.copy}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="audit-next-step">
+                  <div>
+                    <span>Следующий шаг</span>
+                    <strong>{auditNextStep.title}</strong>
+                    <p>{auditNextStep.copy}</p>
+                  </div>
+                  <div className="audit-next-actions">
+                    {auditDone ? (
+                      <button className="btn primary" type="button" onClick={() => setActiveTab("changes")}>
+                        <CheckSquare size={17} />{auditNextStep.action}
+                      </button>
+                    ) : (
+                      <button className="btn primary" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}>
+                        <ClipboardList size={17} />{auditRunning ? "Аудит идет" : auditNextStep.action}
+                      </button>
+                    )}
+                    {auditDone ? (
+                      <button className="btn" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}>
+                        <RefreshCw size={16} />Запустить заново
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="audit-list audit-main-list">
                   {auditStale ? (
                     <div className="issue">
                       <div className="issue-head">
@@ -6697,106 +6763,118 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     />
                     <p>{auditCompetitorIds.length ? "Эти карточки будут проверены на коммерческую схожесть и получат приоритет в аудите." : "Если оставить поле пустым, аудит сам подберет конкурентов через MPStats."}</p>
                   </div>
-                  <div className="issue">
-                    <div className="issue-head">
-                      <strong>Аналитика MPStats</strong>
-                      <Tag tone={mpstatsHintsTone}>{mpstatsHintsLabel}</Tag>
-                    </div>
-                    <p>{mpstatsCharacteristicsStatus === "loaded"
-                      ? `Найдено ${mpstatsCharacteristics.length} групп характеристик, ${mpstatsMatches} совпало с карточкой. Эти значения уже подмешиваются в правки.`
-                      : mpstatsCharacteristicsStatus === "loading"
-                        ? "Запрашиваем отчет MPStats. Это расходует запрос аналитики и может занять несколько секунд."
-                        : "Будет запрошена при запуске аудита. После этого результат сохранится в кэше и будет использоваться в ручных правках."}</p>
-                  </div>
-                  <div className="issue">
-                    <div className="issue-head">
-                      <strong>Характеристики для продвижения</strong>
-                      <Tag tone={promotionRelevantCount ? "amber" : "green"}>{promotionRelevantCount || "нет"} в фокусе</Tag>
-                    </div>
-                    <p>В фокус попадают обязательные, популярные и фильтруемые поля WB. Если MPStats отдаст отдельный признак влияния на продвижение, он тоже будет учтен.</p>
-                  </div>
                   {auditDone ? (
-                    <div className="issue">
+                    <div className="issue audit-result-card">
                       <div className="issue-head">
-                        <strong>Предложения подготовлены</strong>
-                        <Tag tone="blue">черновик</Tag>
-                      </div>
-                      <p>Система заполнила вкладку изменений вариантами для ручной проверки.</p>
-                    </div>
-                  ) : null}
-                  {auditDone && latestCompetitorSelection ? (
-                    <div className="issue audit-competitor-selection">
-                      <div className="issue-head">
-                        <strong>Конкурентный набор аудита</strong>
-                        <Tag tone={latestCompetitorSelection.summary?.rejectedManual ? "amber" : "blue"}>
-                          {latestCompetitorSelection.summary?.finalCount || 0}/{topCompetitorLimit}
-                        </Tag>
-                      </div>
-                      <AuditCompetitorSelection selection={latestCompetitorSelection} />
-                    </div>
-                  ) : null}
-	                  {auditDone ? (
-                    <div className="issue audit-findings">
-                      <div className="issue-head">
-                        <strong>Выводы аудита</strong>
-                        <Tag tone={latestRiskNotes.length ? "amber" : "green"}>{latestRiskNotes.length ? "есть ограничения" : "доказательно"}</Tag>
+                        <strong>Результат аудита</strong>
+                        <Tag tone={latestRiskNotes.length ? "amber" : "green"}>{latestRiskNotes.length ? "есть ручная проверка" : "готово"}</Tag>
                       </div>
                       <p className="audit-finding-lead">{latestAuditInsight}</p>
-                      <div className="audit-fact-grid">
-                        {latestAuditFacts.map(([label, value]) => (
-                          <div key={label}>
-                            <span>{label}</span>
-                            <strong>{value}</strong>
-                          </div>
-                        ))}
-                      </div>
-                      {latestMainProblems.length ? (
-                        <div className="audit-finding-group">
-                          <span>Главное</span>
-                          {latestMainProblems.slice(0, 3).map((item, index) => <p key={`problem-${index}`}>{item}</p>)}
+                      <div className="audit-result-columns">
+                        <div>
+                          <span>Что не так</span>
+                          {latestMainProblems.length ? latestMainProblems.slice(0, 3).map((item, index) => <p key={`problem-${index}`}>{item}</p>) : <p>Критичных проблем по текущим данным не найдено.</p>}
                         </div>
-                      ) : null}
-                      {latestQuickWins.length ? (
-                        <div className="audit-finding-group">
-                          <span>Быстрые правки</span>
-                          {latestQuickWins.slice(0, 4).map((item, index) => <p key={`quick-${index}`}>{item}</p>)}
+                        <div>
+                          <span>Что предлагаем изменить</span>
+                          {latestQuickWins.length ? latestQuickWins.slice(0, 4).map((item, index) => <p key={`quick-${index}`}>{item}</p>) : <p>Черновик изменений подготовлен во вкладке Изменения.</p>}
                         </div>
-                      ) : null}
-                      {latestRiskNotes.length ? (
-                        <div className="audit-finding-group muted">
+                        <div>
                           <span>Что проверить вручную</span>
-                          {latestRiskNotes.slice(0, 3).map((item, index) => <p key={`risk-${index}`}>{item}</p>)}
+                          {latestRiskNotes.length ? latestRiskNotes.slice(0, 3).map((item, index) => <p key={`risk-${index}`}>{item}</p>) : <p>Особых ограничений в ответах API нет.</p>}
                         </div>
-                      ) : null}
-	                    </div>
-	                  ) : null}
-	                  <div className="issue audit-history">
-                    <div className="issue-head">
-                      <strong>История аудитов</strong>
-                      <Tag tone={auditHistory.length ? "blue" : "green"}>{auditHistory.length || "пусто"}</Tag>
-                    </div>
-                    {auditHistory.length ? (
-                      <div className="audit-history-list">
-                        {auditHistory.slice(0, 5).map((item) => (
-                          <div className="audit-history-row" key={item.id || item.createdAt}>
-                            <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"} · {auditEngineLabel(item.engine)}</span>
-                            <em>
-                              {item.mpstatsGroups || 0} MPStats · {Number.isFinite(Number(item.mpstatsCredits)) ? `${item.mpstatsCredits} кредитов · ` : ""}
-                              {Number.isFinite(Number(item.mpstatsCacheHits)) ? `${item.mpstatsCacheHits} кэш · ` : ""}
-                              {item.competitors || 0} конкурентов{item.manualCompetitors ? `, ${item.manualCompetitors} вручную` : ""} ·
-                              {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено
-                            </em>
-                          </div>
-                        ))}
                       </div>
-                    ) : (
-                      <p>{auditStale ? "История аудита очищена после обновления данных WB. Черновик изменений сохранен." : "После запуска аудита здесь появятся даты и краткий итог. История сохранится вместе с черновиком."}</p>
-                    )}
+                      <div className="audit-result-actions">
+                        <button className="btn primary" type="button" onClick={() => setActiveTab("changes")}>
+                          <CheckSquare size={17} />Перейти к изменениям
+                        </button>
+                        <span>{auditPreparedChangesCount} {pluralRu(auditPreparedChangesCount, "правка", "правки", "правок")} в черновике</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="empty-state audit-empty-state">
+                      <strong>{auditRunning ? "Аудит выполняется" : "Результат появится здесь"}</strong>
+                      <span>{auditRunning ? "После завершения мы покажем выводы и подготовим черновик изменений." : "Запустите аудит, чтобы получить краткие выводы и готовые поля для проверки."}</span>
+                    </div>
+                  )}
+                </div>
+
+                <details className="audit-technical-details">
+                  <summary>
+                    <span>Технические детали аудита</span>
+                    <Tag tone={auditHistory.length ? "blue" : "green"}>{auditHistory.length || "пусто"}</Tag>
+                  </summary>
+                  <div className="audit-list">
+                    <div className="issue">
+                      <div className="issue-head">
+                        <strong>Аналитика MPStats</strong>
+                        <Tag tone={mpstatsHintsTone}>{mpstatsHintsLabel}</Tag>
+                      </div>
+                      <p>{mpstatsCharacteristicsStatus === "loaded"
+                        ? `Найдено ${mpstatsCharacteristics.length} групп характеристик, ${mpstatsMatches} совпало с карточкой. Эти значения уже подмешиваются в правки.`
+                        : mpstatsCharacteristicsStatus === "loading"
+                          ? "Запрашиваем отчет MPStats. Это расходует запрос аналитики и может занять несколько секунд."
+                          : "Будет запрошена при запуске аудита. После этого результат сохранится в кэше и будет использоваться в ручных правках."}</p>
+                    </div>
+                    <div className="issue">
+                      <div className="issue-head">
+                        <strong>Характеристики для продвижения</strong>
+                        <Tag tone={promotionRelevantCount ? "amber" : "green"}>{promotionRelevantCount || "нет"} в фокусе</Tag>
+                      </div>
+                      <p>В фокус попадают обязательные, популярные и фильтруемые поля WB. Если MPStats отдаст отдельный признак влияния на продвижение, он тоже будет учтен.</p>
+                    </div>
+                    {auditDone && latestCompetitorSelection ? (
+                      <div className="issue audit-competitor-selection">
+                        <div className="issue-head">
+                          <strong>Конкурентный набор аудита</strong>
+                          <Tag tone={latestCompetitorSelection.summary?.rejectedManual ? "amber" : "blue"}>
+                            {latestCompetitorSelection.summary?.finalCount || 0}/{topCompetitorLimit}
+                          </Tag>
+                        </div>
+                        <AuditCompetitorSelection selection={latestCompetitorSelection} />
+                      </div>
+                    ) : null}
+                    {auditDone ? (
+                      <div className="issue audit-findings">
+                        <div className="issue-head">
+                          <strong>Факты аудита</strong>
+                          <Tag tone={latestRiskNotes.length ? "amber" : "green"}>{latestRiskNotes.length ? "есть ограничения" : "доказательно"}</Tag>
+                        </div>
+                        <div className="audit-fact-grid">
+                          {latestAuditFacts.map(([label, value]) => (
+                            <div key={label}>
+                              <span>{label}</span>
+                              <strong>{value}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="issue audit-history">
+                      <div className="issue-head">
+                        <strong>История аудитов</strong>
+                        <Tag tone={auditHistory.length ? "blue" : "green"}>{auditHistory.length || "пусто"}</Tag>
+                      </div>
+                      {auditHistory.length ? (
+                        <div className="audit-history-list">
+                          {auditHistory.slice(0, 5).map((item) => (
+                            <div className="audit-history-row" key={item.id || item.createdAt}>
+                              <span>{item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Без даты"} · {auditEngineLabel(item.engine)}</span>
+                              <em>
+                                {item.mpstatsGroups || 0} MPStats · {Number.isFinite(Number(item.mpstatsCredits)) ? `${item.mpstatsCredits} кредитов · ` : ""}
+                                {Number.isFinite(Number(item.mpstatsCacheHits)) ? `${item.mpstatsCacheHits} кэш · ` : ""}
+                                {item.competitors || 0} конкурентов{item.manualCompetitors ? `, ${item.manualCompetitors} вручную` : ""} ·
+                                {item.mpstatsMatches || 0} совпало · {item.changedCharacteristics || 0} изменено
+                              </em>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p>{auditStale ? "История аудита очищена после обновления данных WB. Черновик изменений сохранен." : "После запуска аудита здесь появятся даты и краткий итог. История сохранится вместе с черновиком."}</p>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="tab-actions">
-                  <button className="btn primary" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}><ClipboardList size={17} />{auditRunning ? "Аудит идет" : "Запустить аудит"}</button>
-                </div>
+                </details>
               </section>
             ) : null}
 
