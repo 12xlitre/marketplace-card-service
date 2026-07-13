@@ -3906,9 +3906,28 @@ tr:last-child td {
   gap: 14px;
 }
 
+.admin-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.admin-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(150px, auto) minmax(170px, auto);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.admin-toolbar .search {
+  min-height: 40px;
+}
+
 .admin-user-row {
   display: grid;
-  grid-template-columns: minmax(140px, .7fr) minmax(170px, 1fr) minmax(150px, .9fr) minmax(150px, .75fr) minmax(150px, .85fr) minmax(190px, auto);
+  grid-template-columns: minmax(130px, .65fr) minmax(180px, 1fr) minmax(150px, .9fr) minmax(145px, .7fr) minmax(145px, .75fr) minmax(230px, auto);
   gap: 10px;
   align-items: end;
   border: 1px solid var(--line);
@@ -3960,6 +3979,19 @@ tr:last-child td {
   display: grid;
   justify-items: end;
   gap: 8px;
+}
+
+.admin-user-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.admin-unsaved {
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .admin-user-access {
@@ -4111,12 +4143,29 @@ tr:last-child td {
   gap: 8px;
 }
 
+.admin-integrations {
+  display: grid;
+  gap: 14px;
+}
+
+.integration-overview-panel,
+.integration-section {
+  display: grid;
+  gap: 14px;
+}
+
 .integration-form {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
   display: grid;
   gap: 12px;
+}
+
+.integration-form.flat {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .integration-form p,
@@ -4150,6 +4199,65 @@ tr:last-child td {
 
 .integration-saved em {
   grid-column: 1 / -1;
+}
+
+.integration-token-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px 12px;
+}
+
+.integration-token-row div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.integration-token-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.integration-token-row span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.integration-system-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.integration-system-row {
+  display: grid;
+  gap: 5px;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.integration-system-row span,
+.integration-system-row em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.integration-system-row strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
 }
 
 .created-user-secret {
@@ -4404,6 +4512,8 @@ tr:last-child td {
   .summary-grid,
   .workspace-grid,
   .filters,
+  .admin-overview,
+  .admin-toolbar,
   .report-period-form,
   .report-template,
   .report-history-row,
@@ -4427,6 +4537,8 @@ tr:last-child td {
   .admin-user-row,
   .admin-event-row,
   .integration-card-grid,
+  .integration-system-grid,
+  .integration-token-row,
   .competitor-toolbar,
   .competitor-summary,
   .competitor-data-grid,

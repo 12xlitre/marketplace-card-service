@@ -9290,6 +9290,128 @@ function adminEventDetailsText(event) {
   return details.portalName || event?.targetId || "";
 }
 
+function userDraftFromAccount(user) {
+  return {
+    fullName: user.full_name || "",
+    role: user.role || "",
+    profile: userProfileKey(user),
+    userRole: user.user_role || "manager",
+    accessLevel: user.access_level || "overview",
+    isActive: user.isActive !== false,
+  };
+}
+
+function userDraftPayload(draft) {
+  const preset = applyRolePresetToUserPayload(draft.profile);
+  return {
+    fullName: draft.fullName,
+    role: draft.role,
+    userRole: preset.userRole,
+    accessLevel: preset.accessLevel,
+    isActive: draft.isActive,
+  };
+}
+
+function adminUserSearchText(user) {
+  return [
+    user.login,
+    user.full_name,
+    user.role,
+    userRoleLabels[user.user_role] || user.user_role,
+    accessLevelLabels[user.access_level] || user.access_level,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function AdminUserRow({ user, canManageUsers, saving, resetting, onSave, onResetPassword }) {
+  const [draft, setDraft] = useState(() => userDraftFromAccount(user));
+
+  useEffect(() => {
+    setDraft(userDraftFromAccount(user));
+  }, [user.login, user.full_name, user.role, user.user_role, user.access_level, user.isActive]);
+
+  const savedDraft = userDraftFromAccount(user);
+  const isDirty = JSON.stringify(userDraftPayload(draft)) !== JSON.stringify(userDraftPayload(savedDraft));
+  const disabled = !canManageUsers || saving;
+
+  function updateDraft(name, value) {
+    if (name === "profile") {
+      setDraft((current) => ({ ...current, profile: value }));
+      return;
+    }
+    setDraft((current) => ({ ...current, [name]: value }));
+  }
+
+  return (
+    <div className={`admin-user-row ${draft.isActive ? "" : "inactive"}`}>
+      <div className="admin-user-main">
+        <strong>{user.login}</strong>
+        <span>{draft.isActive ? "активен" : "отключен"}</span>
+      </div>
+      <label className="field-label compact">
+        ФИО
+        <input
+          value={draft.fullName}
+          disabled={disabled}
+          onChange={(event) => updateDraft("fullName", event.target.value)}
+        />
+      </label>
+      <label className="field-label compact">
+        Должность
+        <input
+          value={draft.role}
+          disabled={disabled}
+          onChange={(event) => updateDraft("role", event.target.value)}
+        />
+      </label>
+      <label className="field-label compact">
+        Профиль
+        <select
+          className="select"
+          value={draft.profile}
+          disabled={disabled}
+          onChange={(event) => updateDraft("profile", event.target.value)}
+        >
+          {Object.entries(rolePresets).map(([value, preset]) => <option value={value} key={value}>{preset.label}</option>)}
+        </select>
+      </label>
+      <div className="admin-user-access">
+        <span>{userRoleLabels[userDraftPayload(draft).userRole] || userDraftPayload(draft).userRole}</span>
+        <strong>{accessLevelLabels[userDraftPayload(draft).accessLevel] || userDraftPayload(draft).accessLevel}</strong>
+      </div>
+      <div className="admin-user-actions">
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={draft.isActive}
+            disabled={disabled}
+            onChange={(event) => updateDraft("isActive", event.target.checked)}
+          />
+          <span>{draft.isActive ? "Активен" : "Отключен"}</span>
+        </label>
+        <div className="admin-user-button-row">
+          <button
+            className="btn mini primary"
+            type="button"
+            disabled={disabled || !isDirty}
+            onClick={() => onSave(user, userDraftPayload(draft))}
+          >
+            {saving ? "Сохраняем" : "Сохранить"}
+          </button>
+          <button
+            className="btn mini"
+            type="button"
+            onClick={() => onResetPassword(user.login)}
+            disabled={!canManageUsers || resetting || !draft.isActive}
+          >
+            {resetting ? "Сбрасываем" : "Сброс пароля"}
+          </button>
+        </div>
+        {isDirty ? <span className="admin-unsaved">Есть изменения</span> : null}
+      </div>
+    </div>
+  );
+}
+
 function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
   const [adminTab, setAdminTab] = useState("users");
   const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
@@ -9309,6 +9431,9 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   const [passwordResetError, setPasswordResetError] = useState("");
   const [accessSaveStatus, setAccessSaveStatus] = useState("");
   const [accessSaveError, setAccessSaveError] = useState("");
+  const [userSearch, setUserSearch] = useState("");
+  const [userStatusFilter, setUserStatusFilter] = useState("active");
+  const [userProfileFilter, setUserProfileFilter] = useState("all");
 
   useEffect(() => {
     let active = true;
@@ -9544,6 +9669,19 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   const apiPortals = managedPortals.filter((portal) => portal.apiConnected || portal.mode === "api");
   const wbTokenIssues = apiPortals.filter((portal) => ["expired", "expiring"].includes(portal.tokenMeta?.status));
   const llmStatus = adminStatus?.llm || {};
+  const inactiveUsers = users.filter((user) => user.isActive === false);
+  const integrationWarnings = wbTokenIssues.length
+    + (mpstatsVerified ? 0 : 1)
+    + (llmStatus.configured ? 0 : 1)
+    + (adminStatus?.storage?.secretKeyConfigured ? 0 : 1);
+  const filteredUsers = users.filter((user) => {
+    const matchesSearch = !userSearch.trim() || adminUserSearchText(user).includes(userSearch.trim().toLowerCase());
+    const matchesStatus = userStatusFilter === "all"
+      || (userStatusFilter === "active" && user.isActive !== false)
+      || (userStatusFilter === "inactive" && user.isActive === false);
+    const matchesProfile = userProfileFilter === "all" || userProfileKey(user) === userProfileFilter;
+    return matchesSearch && matchesStatus && matchesProfile;
+  });
   const adminTabs = [
     { key: "users", label: "Пользователи" },
     { key: "access", label: "Доступы" },
@@ -9560,6 +9698,12 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
         </div>
       </header>
       <div className="content">
+        <div className="admin-overview">
+          <Metric label="Активных сотрудников" value={formatNumber(activeUsers.length)} hint={`${inactiveUsers.length} отключено`} />
+          <Metric label="Кабинетов" value={formatNumber(managedPortals.length)} hint="рабочие кабинеты селлеров" />
+          <Metric label="API кабинетов" value={formatNumber(apiPortals.length)} hint={wbTokenIssues.length ? "есть токены с риском" : "критичных предупреждений нет"} />
+          <Metric label="Интеграции" value={integrationWarnings ? formatNumber(integrationWarnings) : "OK"} hint={integrationWarnings ? "требуют внимания" : "готовы к работе"} />
+        </div>
         <div className="admin-tabs" role="tablist" aria-label="Разделы админки">
           {adminTabs.map((tab) => (
             <button
@@ -9577,72 +9721,50 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
         <div className="admin-panel-grid">
           {adminTab === "users" ? (
           <section className="panel">
-            <h2>Пользователи</h2>
+            <div className="panel-title-row">
+              <div>
+                <h2>Пользователи</h2>
+                <p>Создание аккаунтов, роли, отключение доступа и сброс пароля.</p>
+              </div>
+              <Tag tone={filteredUsers.length ? "blue" : "amber"}>{filteredUsers.length} из {users.length}</Tag>
+            </div>
+            <div className="admin-toolbar">
+              <div className="search">
+                <Search size={16} />
+                <input
+                  value={userSearch}
+                  onChange={(event) => setUserSearch(event.target.value)}
+                  placeholder="Поиск по логину, ФИО или роли"
+                />
+              </div>
+              <select className="select" value={userStatusFilter} onChange={(event) => setUserStatusFilter(event.target.value)}>
+                <option value="active">Активные</option>
+                <option value="all">Все</option>
+                <option value="inactive">Отключенные</option>
+              </select>
+              <select className="select" value={userProfileFilter} onChange={(event) => setUserProfileFilter(event.target.value)}>
+                <option value="all">Все профили</option>
+                {Object.entries(rolePresets).map(([value, preset]) => <option value={value} key={value}>{preset.label}</option>)}
+              </select>
+            </div>
             <div className="panel-list">
-              {users.map((user) => (
-                <div className={`admin-user-row ${user.isActive === false ? "inactive" : ""}`} key={user.login}>
-                  <div className="admin-user-main">
-                    <strong>{user.login}</strong>
-                    <span>{user.isActive === false ? "отключен" : "активен"}</span>
-                  </div>
-                  <label className="field-label compact">
-                    ФИО
-                    <input
-                      defaultValue={user.full_name}
-                      disabled={!canManageUsers || userSaveStatus === user.login}
-                      onBlur={(event) => {
-                        if (event.target.value !== user.full_name) saveExistingUser(user, { fullName: event.target.value });
-                      }}
-                    />
-                  </label>
-                  <label className="field-label compact">
-                    Должность
-                    <input
-                      defaultValue={user.role}
-                      disabled={!canManageUsers || userSaveStatus === user.login}
-                      onBlur={(event) => {
-                        if (event.target.value !== user.role) saveExistingUser(user, { role: event.target.value });
-                      }}
-                    />
-                  </label>
-                  <label className="field-label compact">
-                    Профиль
-                    <select
-                      className="select"
-                      value={userProfileKey(user)}
-                      disabled={!canManageUsers || userSaveStatus === user.login}
-                      onChange={(event) => saveExistingUser(user, applyRolePresetToUserPayload(event.target.value))}
-                    >
-                      {Object.entries(rolePresets).map(([value, preset]) => <option value={value} key={value}>{preset.label}</option>)}
-                    </select>
-                  </label>
-                  <div className="admin-user-access">
-                    <span>{userRoleLabels[user.user_role] || user.user_role}</span>
-                    <strong>{accessLevelLabels[user.access_level] || user.access_level}</strong>
-                  </div>
-                  <div className="admin-user-actions">
-                    <label className="switch-row">
-                      <input
-                        type="checkbox"
-                        checked={user.isActive !== false}
-                        disabled={!canManageUsers || userSaveStatus === user.login}
-                        onChange={(event) => saveExistingUser(user, { isActive: event.target.checked })}
-                      />
-                      <span>{user.isActive === false ? "Отключен" : "Активен"}</span>
-                    </label>
-                    {canManageUsers ? (
-                      <button
-                        className="btn mini"
-                        type="button"
-                        onClick={() => resetPassword(user.login)}
-                        disabled={passwordResetStatus === user.login || user.isActive === false}
-                      >
-                        {passwordResetStatus === user.login ? "Сбрасываем" : "Сбросить пароль"}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
+              {filteredUsers.map((user) => (
+                <AdminUserRow
+                  user={user}
+                  canManageUsers={canManageUsers}
+                  saving={userSaveStatus === user.login}
+                  resetting={passwordResetStatus === user.login}
+                  onSave={saveExistingUser}
+                  onResetPassword={resetPassword}
+                  key={user.login}
+                />
               ))}
+              {!filteredUsers.length ? (
+                <div className="empty-state">
+                  <strong>Сотрудники не найдены</strong>
+                  <span>Измените поиск или фильтры, чтобы увидеть список аккаунтов.</span>
+                </div>
+              ) : null}
             </div>
             {userSaveError ? <div className="form-error">{userSaveError}</div> : null}
             {passwordResetError ? <div className="form-error">{passwordResetError}</div> : null}
@@ -9809,89 +9931,150 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
           </section>
           ) : null}
           {adminTab === "integrations" ? (
-          <section className="panel">
-            <h2>Интеграции</h2>
-            <div className="integration-card-grid">
-              <div className="integration-card">
+          <section className="admin-integrations">
+            <div className="panel integration-overview-panel">
+              <div className="panel-title-row">
                 <div>
-                  <strong>Wildberries API</strong>
-                  <span>{apiPortals.length ? `${apiPortals.length} ${pluralRu(apiPortals.length, "кабинет", "кабинета", "кабинетов")}` : "нет API-кабинетов"}</span>
+                  <h2>Интеграции</h2>
+                  <p>WB API по кабинетам, MPStats, LLM и состояние backend-хранилища ключей.</p>
                 </div>
-                <Tag tone={wbTokenIssues.length ? "amber" : "blue"}>{wbTokenIssues.length ? "требует внимания" : "read-only"}</Tag>
+                <button className="btn" type="button" onClick={loadAdminStatus}><RefreshCw size={16} />Обновить статус</button>
               </div>
-              <div className="integration-card">
-                <div>
-                  <strong>MPStats</strong>
-                  <span>{mpstatsStatusLabel}</span>
+              <div className="integration-card-grid">
+                <div className="integration-card">
+                  <div>
+                    <strong>Wildberries API</strong>
+                    <span>{apiPortals.length ? `${apiPortals.length} ${pluralRu(apiPortals.length, "кабинет", "кабинета", "кабинетов")}` : "нет API-кабинетов"}</span>
+                  </div>
+                  <Tag tone={wbTokenIssues.length ? "amber" : "blue"}>{wbTokenIssues.length ? "требует внимания" : "read-only"}</Tag>
                 </div>
-                <Tag tone={mpstatsVerified ? "green" : (mpstatsConnected ? "amber" : "red")}>{mpstatsConnected ? "ключ сохранен" : "нет ключа"}</Tag>
-              </div>
-              <div className="integration-card">
-                <div>
-                  <strong>LLM</strong>
-                  <span>{llmStatus.source || "OpenAI-compatible"} · {llmStatus.model || "модель не указана"}</span>
+                <div className="integration-card">
+                  <div>
+                    <strong>MPStats</strong>
+                    <span>{mpstatsStatusLabel}</span>
+                  </div>
+                  <Tag tone={mpstatsVerified ? "green" : (mpstatsConnected ? "amber" : "red")}>{mpstatsConnected ? "ключ сохранен" : "нет ключа"}</Tag>
                 </div>
-                <Tag tone={llmStatus.configured ? "green" : "amber"}>{llmStatus.configured ? "настроен" : "не настроен"}</Tag>
-              </div>
-              <div className="integration-card">
-                <div>
-                  <strong>Хранилище ключей</strong>
-                  <span>{adminStatus?.storage?.secretKeyConfigured ? "AES-GCM ключ настроен" : "ключ шифрования не найден"}</span>
+                <div className="integration-card">
+                  <div>
+                    <strong>LLM</strong>
+                    <span>{llmStatus.source || "OpenAI-compatible"} · {llmStatus.model || "модель не указана"}</span>
+                  </div>
+                  <Tag tone={llmStatus.configured ? "green" : "amber"}>{llmStatus.configured ? "настроен" : "не настроен"}</Tag>
                 </div>
-                <Tag tone={adminStatus?.storage?.secretKeyConfigured ? "green" : "red"}>backend</Tag>
+                <div className="integration-card">
+                  <div>
+                    <strong>Хранилище ключей</strong>
+                    <span>{adminStatus?.storage?.secretKeyConfigured ? "AES-GCM ключ настроен" : "ключ шифрования не найден"}</span>
+                  </div>
+                  <Tag tone={adminStatus?.storage?.secretKeyConfigured ? "green" : "red"}>backend</Tag>
+                </div>
               </div>
             </div>
-            {apiPortals.length ? (
-              <div className="admin-wb-token-list">
-                {apiPortals.map((portal) => (
-                  <div className="list-row" key={portal.id}>
-                    <span>{portalDisplayName(portal)}</span>
-                    <strong>{tokenDaysLeftText(portal.tokenMeta) || "срок токена не указан"}</strong>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            <form className="integration-form" onSubmit={saveMpstatsKey}>
-              <div>
-                <strong>MPStats API</strong>
-                <p>Глобальный ключ для всех кабинетов и карточек сервиса. Ключ сохраняется только на backend и не показывается повторно.</p>
-              </div>
-              <label className="field-label">
-                API ключ
-                <input
-                  type="password"
-                  value={mpstatsKey}
-                  onChange={(event) => setMpstatsKey(event.target.value)}
-                  disabled={!canManage}
-                  autoComplete="off"
-                  placeholder={canManage
-                    ? (mpstatsConnected ? "Введите новый ключ, чтобы заменить сохраненный" : "Введите ключ MPStats")
-                    : "Недостаточно прав для изменения"}
-                />
-              </label>
-              {mpstatsConnected ? (
-                <div className="integration-saved">
-                  <span>Сохраненный ключ</span>
-                  <strong>••••••••••••</strong>
-                  <em>{mpstatsUpdatedAt ? `обновлен ${mpstatsUpdatedAt}` : "хранится на backend"}</em>
-                  {mpstatsLastCheckedAt ? <em>проверен {mpstatsLastCheckedAt}</em> : null}
+
+            <section className="panel integration-section">
+              <div className="panel-title-row">
+                <div>
+                  <h2>Wildberries API</h2>
+                  <p>Токены привязаны к кабинетам селлеров. Замена ключа выполняется внутри карточки кабинета.</p>
                 </div>
-              ) : null}
-              <div className="panel-actions">
-                <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
-                <button className="btn" type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection}>Проверить подключение</button>
+                <Tag tone={wbTokenIssues.length ? "amber" : "blue"}>{wbTokenIssues.length ? `${wbTokenIssues.length} риск` : "без критичных рисков"}</Tag>
               </div>
-              <div className="integration-status">
-                {mpstatsStatus === "saving" ? "Сохраняем..." : null}
-                {mpstatsStatus === "checking" ? "Проверяем соединение с MPStats..." : null}
-                {mpstatsStatus === "saved" ? (mpstatsVerified ? "Ключ сохранен и соединение проверено." : "Ключ сохранен. Поле очищено специально: сам ключ не показываем повторно.") : null}
-                {mpstatsStatus === "verified" ? "Соединение с MPStats работает." : null}
-                {mpstatsStatus === "auth_error" ? "MPStats отклонил ключ. Проверьте токен в аккаунте MPStats." : null}
-                {mpstatsStatus === "rate_limited" ? "MPStats ответил лимитом запросов. Ключ сохранен, проверку можно повторить позже." : null}
-                {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
-                {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? (mpstatsVerified ? "MPStats подключен и проверен." : "MPStats ключ сохранен, но соединение еще не проверено.") : "MPStats пока не настроен.") : null}
+              {apiPortals.length ? (
+                <div className="admin-wb-token-list">
+                  {apiPortals.map((portal) => (
+                    <div className="integration-token-row" key={portal.id}>
+                      <div>
+                        <strong>{portalDisplayName(portal)}</strong>
+                        <span>{portal.status} · {portal.isActive === false ? "архив" : "активен"}</span>
+                      </div>
+                      <Tag tone={["expired", "expiring"].includes(portal.tokenMeta?.status) ? "amber" : "green"}>
+                        {tokenDaysLeftText(portal.tokenMeta) || "срок не указан"}
+                      </Tag>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <strong>Нет API-кабинетов</strong>
+                  <span>Когда кабинет будет подключен через WB API, его токен появится здесь.</span>
+                </div>
+              )}
+            </section>
+
+            <section className="panel integration-section">
+              <div className="panel-title-row">
+                <div>
+                  <h2>MPStats API</h2>
+                  <p>Глобальный ключ для аудита, семантики, отчетов и загрузки карточек по ссылке.</p>
+                </div>
+                <Tag tone={mpstatsVerified ? "green" : (mpstatsConnected ? "amber" : "red")}>{mpstatsStatusLabel}</Tag>
               </div>
-            </form>
+              <form className="integration-form flat" onSubmit={saveMpstatsKey}>
+                <label className="field-label">
+                  API ключ
+                  <input
+                    type="password"
+                    value={mpstatsKey}
+                    onChange={(event) => setMpstatsKey(event.target.value)}
+                    disabled={!canManage}
+                    autoComplete="off"
+                    placeholder={canManage
+                      ? (mpstatsConnected ? "Введите новый ключ, чтобы заменить сохраненный" : "Введите ключ MPStats")
+                      : "Недостаточно прав для изменения"}
+                  />
+                </label>
+                {mpstatsConnected ? (
+                  <div className="integration-saved">
+                    <span>Сохраненный ключ</span>
+                    <strong>************</strong>
+                    <em>{mpstatsUpdatedAt ? `обновлен ${mpstatsUpdatedAt}` : "хранится на backend"}</em>
+                    {mpstatsLastCheckedAt ? <em>проверен {mpstatsLastCheckedAt}</em> : null}
+                  </div>
+                ) : null}
+                <div className="panel-actions">
+                  <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
+                  <button className="btn" type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection}><RefreshCw size={16} />Проверить</button>
+                </div>
+                <div className="integration-status">
+                  {mpstatsStatus === "saving" ? "Сохраняем..." : null}
+                  {mpstatsStatus === "checking" ? "Проверяем соединение с MPStats..." : null}
+                  {mpstatsStatus === "saved" ? (mpstatsVerified ? "Ключ сохранен и соединение проверено." : "Ключ сохранен. Поле очищено специально: сам ключ не показываем повторно.") : null}
+                  {mpstatsStatus === "verified" ? "Соединение с MPStats работает." : null}
+                  {mpstatsStatus === "auth_error" ? "MPStats отклонил ключ. Проверьте токен в аккаунте MPStats." : null}
+                  {mpstatsStatus === "rate_limited" ? "MPStats ответил лимитом запросов. Ключ сохранен, проверку можно повторить позже." : null}
+                  {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
+                  {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? (mpstatsVerified ? "MPStats подключен и проверен." : "MPStats ключ сохранен, но соединение еще не проверено.") : "MPStats пока не настроен.") : null}
+                </div>
+              </form>
+            </section>
+
+            <section className="panel integration-section">
+              <div className="panel-title-row">
+                <div>
+                  <h2>Backend и LLM</h2>
+                  <p>Сервисные настройки берутся из окружения сервера и меняются через deploy-конфигурацию.</p>
+                </div>
+                <Tag tone={llmStatus.configured && adminStatus?.storage?.secretKeyConfigured ? "green" : "amber"}>system</Tag>
+              </div>
+              <div className="integration-system-grid">
+                <div className="integration-system-row">
+                  <span>LLM provider</span>
+                  <strong>{llmStatus.source || "OpenAI-compatible"}</strong>
+                  <em>{llmStatus.configured ? "настроен" : "не настроен"}</em>
+                </div>
+                <div className="integration-system-row">
+                  <span>LLM model</span>
+                  <strong>{llmStatus.model || "модель не указана"}</strong>
+                  <em>{llmStatus.configured ? "готов к аудиту" : "аудит работает без LLM-доработки"}</em>
+                </div>
+                <div className="integration-system-row">
+                  <span>Secret storage</span>
+                  <strong>{adminStatus?.storage?.secretKeyConfigured ? "AES-GCM" : "нет ключа"}</strong>
+                  <em>{adminStatus?.storage?.secretKeyConfigured ? "секреты можно шифровать" : "нужен ключ окружения"}</em>
+                </div>
+              </div>
+            </section>
           </section>
           ) : null}
         </div>
