@@ -1759,12 +1759,13 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       raise ValueError("portal_not_found")
     if bool(row["api_connected"]):
       raise ValueError("portal_has_api")
+    existing_cards = wb_snapshot_cards_from_row(row)
     mpstats_store_import_update(
       job_id,
       status="running",
       phase="starting",
       message="Готовим расширенную загрузку",
-      loadedCount=int(row["card_count"] or 0),
+      loadedCount=len(existing_cards) or int(row["card_count"] or 0),
       totalEstimate=0,
     )
     snapshot = build_mpstats_storefront_snapshot_paged(
@@ -1773,6 +1774,7 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
       row["manual_source"] or "",
       limit=limit,
       job_id=job_id,
+      existing_cards=existing_cards,
     )
     bootstrap = snapshot.get("manualBootstrap") or {}
     if not snapshot.get("cards"):
@@ -2056,6 +2058,33 @@ def card_key_from_snapshot_card(card):
     or raw_fields.get("vendorCode")
     or raw_fields.get("nmUUID")
   )
+
+
+def raw_storefront_card_key(card):
+  if not isinstance(card, dict):
+    return ""
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  return draft_card_key(
+    card.get("nmID")
+    or card.get("nmId")
+    or card.get("id")
+    or card.get("vendorCode")
+    or raw_fields.get("nmID")
+    or raw_fields.get("nmId")
+    or raw_fields.get("id")
+    or raw_fields.get("vendorCode")
+  )
+
+
+def snapshot_card_keys(cards):
+  output = set()
+  if not isinstance(cards, list):
+    return output
+  for card in cards:
+    key = card_key_from_snapshot_card(card) or raw_storefront_card_key(card)
+    if key:
+      output.add(key)
+  return output
 
 
 def snapshot_card_lookup(snapshot_json):
@@ -3189,16 +3218,18 @@ def wb_public_catalog_raw_card(product, source="wb-public-seller"):
   }
 
 
-def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
+def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None, skip_keys=None, start_page=1):
   seller_id = parse_wb_seller_id(seller_id)
   if not seller_id:
     return []
   warnings = warnings if isinstance(warnings, list) else []
+  skip_keys = skip_keys if isinstance(skip_keys, set) else set(skip_keys or [])
   limit = max(1, min(int(limit or 100), 1000))
   rows = []
-  page = 1
-  max_pages = max(10, min(60, (limit // 100) + 6))
-  while len(rows) < limit and page <= max_pages:
+  page = max(1, int(start_page or 1))
+  page_budget = max(10, min(60, (limit // 100) + 8))
+  max_page = page + page_budget - 1
+  while len(rows) < limit and page <= max_page:
     params = urlencode({
       "appType": "1",
       "curr": "rub",
@@ -3237,7 +3268,9 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
       break
     for product in products:
       raw_card = wb_public_catalog_raw_card(product)
-      if raw_card:
+      key = raw_storefront_card_key(raw_card)
+      if raw_card and key not in skip_keys:
+        skip_keys.add(key)
         rows.append(raw_card)
         if len(rows) >= limit:
           break
@@ -6247,14 +6280,50 @@ def build_mpstats_storefront_snapshot_paged(
   limit=MPSTATS_STORE_FULL_IMPORT_MAX_CARDS,
   batch_size=MPSTATS_STORE_IMPORT_BATCH_SIZE,
   job_id="",
+  existing_cards=None,
 ):
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
   limit = max(1, min(int(limit or MPSTATS_STORE_FULL_IMPORT_MAX_CARDS), 5000))
   batch_size = max(20, min(int(batch_size or MPSTATS_STORE_IMPORT_BATCH_SIZE), 500))
+  target_limit = min(limit, WB_MAX_CARDS_PER_SYNC)
+  existing_cards = existing_cards if isinstance(existing_cards, list) else []
+  existing_keys = snapshot_card_keys(existing_cards)
+  existing_count = len(existing_keys)
+  remaining_needed = max(0, target_limit - existing_count)
   period = audit_period_default()
   warnings = []
+  if remaining_needed <= 0:
+    loaded_at = utc_now().isoformat()
+    return {
+      "cards": [],
+      "raw_count": 0,
+      "cursor": {},
+      "tokenMeta": {},
+      "stats": {
+        "cardCount": 0,
+        "workCount": 0,
+        "problemCount": 0,
+        "sampleLimit": target_limit,
+        "loadedAt": loaded_at,
+        "portalName": "",
+        "source": "mpstats",
+        "sourceLabel": "",
+      },
+      "manualBootstrap": {
+        "status": "loaded",
+        "cardCount": 0,
+        "source": {},
+        "period": period,
+        "warnings": [f"Лимит кабинета уже заполнен: {existing_count} карточек."],
+        "loadedAt": loaded_at,
+        "totalEstimate": existing_count,
+        "limit": target_limit,
+        "existingCount": existing_count,
+        "newCount": 0,
+      },
+    }
   nm_ids = mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=limit)
   seed_cards = []
   for nm_id in nm_ids[:min(limit, 20)]:
@@ -6272,7 +6341,9 @@ def build_mpstats_storefront_snapshot_paged(
 
   for candidate in candidates:
     candidate_rows = []
-    offset = 0
+    seen_candidate_keys = set()
+    offset = min(existing_count, max(0, limit - 1)) if existing_count else 0
+    first_page = True
     mpstats_store_import_update(
       job_id,
       phase="requesting",
@@ -6280,31 +6351,39 @@ def build_mpstats_storefront_snapshot_paged(
       message="Запрашиваем витрину MPStats",
       totalEstimate=0,
     )
-    while offset < limit:
+    while offset < limit and len(candidate_rows) < remaining_needed:
       page_limit = min(batch_size, limit - offset)
       try:
         page_rows, payload = fetch_mpstats_storefront_listing(token, candidate, period, page_limit, start_row=offset)
       except MpstatsApiError as exc:
         warnings.append(f"MPStats /wb/get/{candidate['kind']} {candidate['path']} [{offset}]: {exc.message}")
         break
-      if offset == 0:
+      if first_page:
+        first_page = False
         total_estimate = mpstats_payload_total_count(payload)
         if total_estimate > 0:
-          total_estimate = min(total_estimate, limit)
+          total_estimate = min(total_estimate, target_limit)
           mpstats_store_import_update(job_id, totalEstimate=total_estimate)
       if not page_rows:
         break
-      candidate_rows.extend(page_rows)
+      for page_row in page_rows:
+        key = raw_storefront_card_key(page_row)
+        if not key or key in existing_keys or key in seen_candidate_keys:
+          continue
+        seen_candidate_keys.add(key)
+        candidate_rows.append(page_row)
+        if len(candidate_rows) >= remaining_needed:
+          break
       offset += len(page_rows)
       mpstats_store_import_update(
         job_id,
-        loadedCount=len(candidate_rows),
+        loadedCount=existing_count + len(candidate_rows),
         phase="requesting",
-        message=f"MPStats вернул {len(candidate_rows)} карточек",
+        message=f"MPStats нашел новых карточек: {len(candidate_rows)}",
       )
       if len(page_rows) < page_limit:
         break
-      if total_estimate and len(candidate_rows) >= total_estimate:
+      if total_estimate and offset >= total_estimate:
         break
     if candidate_rows:
       raw_cards = candidate_rows
@@ -6312,13 +6391,14 @@ def build_mpstats_storefront_snapshot_paged(
       break
 
   if not raw_cards and seed_cards:
-    raw_cards = seed_cards[:limit]
+    raw_cards = [card for card in seed_cards if raw_storefront_card_key(card) not in existing_keys][:remaining_needed]
     selected_candidate = {"kind": "items", "path": ", ".join(nm_ids[:5]), "source": "nm-id"}
-    total_estimate = len(raw_cards)
+    total_estimate = existing_count + len(raw_cards)
 
   if not raw_cards:
     seller_ids = wb_public_seller_ids_from_manual_source(name, store_url, manual_source)
     for seller_id in seller_ids:
+      start_page = max(1, existing_count // 100 + 1)
       mpstats_store_import_update(
         job_id,
         phase="requesting",
@@ -6326,15 +6406,21 @@ def build_mpstats_storefront_snapshot_paged(
         message="Пробуем публичную витрину WB",
         totalEstimate=0,
       )
-      raw_cards = fetch_wb_public_seller_catalog(seller_id, limit=limit, warnings=warnings)
+      raw_cards = fetch_wb_public_seller_catalog(
+        seller_id,
+        limit=remaining_needed,
+        warnings=warnings,
+        skip_keys=existing_keys,
+        start_page=start_page,
+      )
       if raw_cards:
         selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
-        total_estimate = len(raw_cards)
+        total_estimate = existing_count + len(raw_cards)
         break
 
   deduped = []
   seen = set()
-  total_for_progress = total_estimate if total_estimate > 0 else min(len(raw_cards), limit) or limit
+  total_for_progress = total_estimate if total_estimate > 0 else min(existing_count + len(raw_cards), target_limit) or target_limit
   mpstats_store_import_update(
     job_id,
     phase="normalizing",
@@ -6342,13 +6428,13 @@ def build_mpstats_storefront_snapshot_paged(
     totalEstimate=total_for_progress,
   )
   for raw_card in raw_cards:
-    nm_id = parse_competitor_nm_id(raw_card.get("nmID"))
-    if not nm_id or nm_id in seen:
+    key = raw_storefront_card_key(raw_card)
+    if not key or key in seen or key in existing_keys:
       continue
-    seen.add(nm_id)
+    seen.add(key)
     deduped.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
-    mpstats_store_import_update(job_id, loadedCount=len(deduped))
-    if len(deduped) >= limit:
+    mpstats_store_import_update(job_id, loadedCount=existing_count + len(deduped))
+    if len(deduped) >= remaining_needed:
       break
 
   cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
@@ -6381,7 +6467,9 @@ def build_mpstats_storefront_snapshot_paged(
       "warnings": audit_public_warnings(warnings),
       "loadedAt": loaded_at,
       "totalEstimate": total_estimate,
-      "limit": limit,
+      "limit": target_limit,
+      "existingCount": existing_count,
+      "newCount": len(cards),
     },
   }
 
