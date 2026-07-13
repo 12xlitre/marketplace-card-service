@@ -7098,6 +7098,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
                   </label>
                 </div>
+                {semanticSaveStatus === "saving" || semanticSaveStatus === "saved" || semanticSaveStatus === "error" ? (
+                  <div className={`semantic-save-banner ${semanticSaveStatus}`}>
+                    <strong>{semanticSaveStatus === "saved" ? "История СЯ сохранена" : semanticSaveStatus === "saving" ? "Сохраняем историю СЯ" : "История СЯ не сохранилась"}</strong>
+                    <span>{semanticSaveStatus === "saved"
+                      ? "Теперь можно обновлять страницу: подборка должна остаться в старых подборках."
+                      : semanticSaveStatus === "saving"
+                        ? "Не обновляйте страницу, пока сохранение не завершится."
+                        : "Повторите подбор или попробуйте сохранить выбранные запросы еще раз."}</span>
+                  </div>
+                ) : null}
                 {semanticCoreReports.length ? (
                   <div className="semantic-history">
                     <span>Старые подборки</span>

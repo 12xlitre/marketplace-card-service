@@ -3640,6 +3640,37 @@ tr:last-child td {
   height: 40px;
 }
 
+.semantic-save-banner {
+  border: 1px solid #9fc5b4;
+  border-radius: 8px;
+  background: #eef8f2;
+  color: #1f5f48;
+  padding: 10px 12px;
+  display: grid;
+  gap: 3px;
+}
+
+.semantic-save-banner.saving {
+  border-color: #d8c27a;
+  background: #fff8df;
+  color: #6a5314;
+}
+
+.semantic-save-banner.error {
+  border-color: #e7b0a8;
+  background: #fff1ef;
+  color: #8a2b1c;
+}
+
+.semantic-save-banner strong {
+  font-size: 13px;
+}
+
+.semantic-save-banner span {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .semantic-history {
   display: grid;
   gap: 8px;
