@@ -8861,6 +8861,24 @@ function semanticMatchesExclusion(query, excludedWords) {
   });
 }
 
+function SemanticMetric({ active = false, label, value, hint, onClick }) {
+  return (
+    <button
+      className={`semantic-metric ${active ? "active" : ""}`}
+      type="button"
+      onClick={onClick}
+      title={hint}
+      aria-label={`${label}: ${value}. ${hint}`}
+    >
+      <span className="semantic-metric-label">
+        {label}
+        <HelpCircle size={13} aria-hidden="true" />
+      </span>
+      <strong>{value}</strong>
+    </button>
+  );
+}
+
 function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
@@ -8931,24 +8949,46 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
-          <button className={`semantic-metric ${metricFilter === "current" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("current")}>
-            <span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong>
-          </button>
-          <button className={`semantic-metric ${metricFilter === "ranked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("ranked")}>
-            <span>Действ. с позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong>
-          </button>
-          <button className={`semantic-metric ${metricFilter === "allRanked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("allRanked")}>
-            <span>Все позиции MPStats</span><strong>{formatNumber(filteredAllRankedItems.length)}</strong>
-          </button>
-          <button className={`semantic-metric ${metricFilter === "selected" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("selected")}>
-            <span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong>
-          </button>
-          <button className="semantic-metric" type="button" onClick={() => setMetricFilter("all")}>
-            <span>По фильтрам</span><strong>{formatNumber(filteredSourceItems.length)}</strong>
-          </button>
-          <button className="semantic-metric" type="button" onClick={() => setMetricFilter("all")}>
-            <span>Отчет MPStats</span><strong>{formatNumber(reportTotal)}</strong>
-          </button>
+          <SemanticMetric
+            active={metricFilter === "current"}
+            label="Действующие"
+            value={formatNumber(currentItems.length)}
+            hint="Запросы из SEO-отчета MPStats, все значимые слова которых уже есть в текущем названии или описании карточки."
+            onClick={() => toggleMetricFilter("current")}
+          />
+          <SemanticMetric
+            active={metricFilter === "ranked"}
+            label="Действ. с позициями"
+            value={formatNumber(rankedCurrentCount)}
+            hint="Часть действующих запросов, для которых MPStats дополнительно отдал позицию карточки: органическую, среднюю или рекламную."
+            onClick={() => toggleMetricFilter("ranked")}
+          />
+          <SemanticMetric
+            active={metricFilter === "allRanked"}
+            label="Все позиции MPStats"
+            value={formatNumber(filteredAllRankedItems.length)}
+            hint="Все запросы с позициями из отдельного отчета MPStats по карточке, независимо от того, есть эти слова в текущем контенте или нет."
+            onClick={() => toggleMetricFilter("allRanked")}
+          />
+          <SemanticMetric
+            active={metricFilter === "selected"}
+            label="Добавленные"
+            value={formatNumber(selectedItems.length)}
+            hint="Запросы, которые сотрудник уже добавил в рабочий набор для будущей оптимизации контента."
+            onClick={() => toggleMetricFilter("selected")}
+          />
+          <SemanticMetric
+            label="По фильтрам"
+            value={formatNumber(filteredSourceItems.length)}
+            hint="Сколько запросов осталось после выбранного предмета, поиска по строке и слов-исключений."
+            onClick={() => setMetricFilter("all")}
+          />
+          <SemanticMetric
+            label="Отчет MPStats"
+            value={formatNumber(reportTotal)}
+            hint="Общий размер SEO-отчета MPStats по стартовой фразе до фильтров и ручного отбора."
+            onClick={() => setMetricFilter("all")}
+          />
         </div>
       ) : null}
       <div className={`semantic-core-grid ${showWorkColumn ? "" : "single"}`}>

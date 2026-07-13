@@ -3768,6 +3768,19 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.semantic-metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.semantic-metric-label svg {
+  flex: none;
+  color: var(--blue);
+  opacity: .72;
+}
+
 .semantic-core-metrics strong {
   color: var(--ink);
   font-size: 18px;
