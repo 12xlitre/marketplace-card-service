@@ -5490,6 +5490,14 @@ def audit_contains_phrase(text, phrase):
   return sum(1 for token in phrase_tokens if token in text_tokens) >= max(1, min(len(phrase_tokens), 2))
 
 
+def audit_contains_semantic_query(text, query):
+  text_tokens = set(audit_tokens(text))
+  query_tokens = [token for token in audit_tokens(query) if len(token) > 3]
+  if not text_tokens or not query_tokens:
+    return False
+  return all(token in text_tokens for token in query_tokens)
+
+
 def audit_unique(values, limit=12):
   output = []
   seen = set()
@@ -6312,8 +6320,8 @@ def audit_build_semantic_core(card, keywords):
   current = []
   missing = []
   for item in keywords[:80]:
-    in_title = audit_contains_phrase(current_title, item.get("query"))
-    in_description = audit_contains_phrase(description, item.get("query"))
+    in_title = audit_contains_semantic_query(current_title, item.get("query"))
+    in_description = audit_contains_semantic_query(description, item.get("query"))
     if in_title or in_description:
       field = "title" if in_title else "description"
       if in_title and in_description:
@@ -6516,7 +6524,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
       **row,
       "priority": "high" if audit_int(row.get("wbCount"), 0) >= 1000 else "medium" if audit_int(row.get("wbCount"), 0) >= 100 else "low",
     }
-    if content and audit_contains_phrase(content, row.get("query")):
+    if content and audit_contains_semantic_query(content, row.get("query")):
       current.append({**target, "field": "title_description", "status": "current"})
     else:
       recommended.append({**target, "reason": "найдено MPStats в расширении запросов"})
