@@ -9184,10 +9184,10 @@ function CardRecoveryScreen({ loading, onBack }) {
 }
 
 const defaultNewUserForm = {
-  login: "svetlana.manager",
-  fullName: "Светлана Дементьева",
+  login: "",
+  fullName: "",
   profile: "account",
-  role: "Аккаунт-менеджер",
+  role: "",
   userRole: "manager",
   accessLevel: "overview",
 };
@@ -9544,6 +9544,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
       const payload = await onCreateUser(newUserForm);
       setNewUserResult(payload);
       setNewUserStatus("created");
+      setNewUserForm(defaultNewUserForm);
       loadAdminEvents();
     } catch (error) {
       setNewUserStatus("error");
@@ -9789,6 +9790,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                     onChange={(event) => updateNewUser("login", event.target.value)}
                     disabled={!canManageUsers}
                     autoComplete="off"
+                    placeholder="ivan.manager"
                     required
                   />
                 </label>
@@ -9799,6 +9801,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                     onChange={(event) => updateNewUser("fullName", event.target.value)}
                     disabled={!canManageUsers}
                     autoComplete="off"
+                    placeholder="Имя Фамилия"
                     required
                   />
                 </label>
@@ -9822,6 +9825,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                     onChange={(event) => updateNewUser("role", event.target.value)}
                     disabled={!canManageUsers}
                     autoComplete="off"
+                    placeholder="Например: Аккаунт-менеджер"
                     required
                   />
                 </label>
