@@ -447,6 +447,7 @@ def public_user(row):
     "role": row["role"],
     "user_role": row["user_role"],
     "access_level": row["access_level"],
+    "is_active": bool(row["is_active"]) if "is_active" in row.keys() else True,
   }
 
 
@@ -4065,15 +4066,14 @@ def list_visible_users(user):
     if user_can_manage_portals(user):
       return db.execute(
         """
-        SELECT login, full_name, role, user_role, access_level
+        SELECT login, full_name, role, user_role, access_level, is_active
         FROM users
-        WHERE is_active = 1
         ORDER BY id
         """
       ).fetchall()
     return db.execute(
       """
-      SELECT DISTINCT users.login, users.full_name, users.role, users.user_role, users.access_level
+      SELECT DISTINCT users.login, users.full_name, users.role, users.user_role, users.access_level, users.is_active
       FROM users
       LEFT JOIN portal_members AS own_members
         ON own_members.user_login = ?
@@ -4145,10 +4145,61 @@ def create_user_account(payload, current_user):
   init_db()
   with connect_db() as db:
     row = db.execute(
-      "SELECT login, full_name, role, user_role, access_level FROM users WHERE login = ?",
+      "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ?",
       (login,),
     ).fetchone()
   return public_user(row), password
+
+
+def update_user_account(payload, current_user):
+  if not user_can_manage_users(current_user):
+    raise PermissionError("forbidden")
+  login = normalize_new_user_login(payload.get("login"))
+  if not login:
+    raise ValueError("invalid_user")
+  full_name = str(payload.get("fullName") or payload.get("full_name") or "").strip()
+  role = str(payload.get("role") or "").strip()
+  user_role = str(payload.get("userRole") or payload.get("user_role") or "manager").strip()
+  access_level = str(payload.get("accessLevel") or payload.get("access_level") or "overview").strip()
+  is_active = bool(payload.get("isActive", payload.get("is_active", True)))
+  if user_role not in {"admin", "manager", "tech"}:
+    user_role = "manager"
+  if access_level not in {"all", "overview", "readonly_wb"}:
+    access_level = "overview"
+  if not full_name or not role:
+    raise ValueError("invalid_user")
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ?",
+      (login,),
+    ).fetchone()
+    if not row:
+      raise ValueError("user_not_found")
+    if row["user_role"] == "admin" and current_user["user_role"] != "admin":
+      raise PermissionError("forbidden")
+    if user_role == "admin" and current_user["user_role"] != "admin":
+      raise PermissionError("forbidden")
+    if login == current_user["login"] and (not is_active or user_role != current_user["user_role"]):
+      raise PermissionError("forbidden")
+    db.execute(
+      """
+      UPDATE users
+      SET full_name = ?,
+          role = ?,
+          user_role = ?,
+          access_level = ?,
+          is_active = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE login = ?
+      """,
+      (full_name, role, user_role, access_level, 1 if is_active else 0, login),
+    )
+    updated = db.execute(
+      "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ?",
+      (login,),
+    ).fetchone()
+  return public_user(updated)
 
 
 def reset_user_password(payload, current_user):
@@ -4160,7 +4211,7 @@ def reset_user_password(payload, current_user):
   init_db()
   with connect_db() as db:
     row = db.execute(
-      "SELECT login, full_name, role, user_role, access_level FROM users WHERE login = ? AND is_active = 1",
+      "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ? AND is_active = 1",
       (login,),
     ).fetchone()
     if not row:
@@ -9757,6 +9808,12 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       try:
         if payload.get("action") == "reset_password":
           created_user, password = reset_user_password(payload, user)
+          self.send_json(HTTPStatus.CREATED, {"user": created_user, "password": password})
+          return
+        if payload.get("action") == "update_user":
+          updated_user = update_user_account(payload, user)
+          self.send_json(HTTPStatus.OK, {"user": updated_user})
+          return
         else:
           created_user, password = create_user_account(payload, user)
       except PermissionError:

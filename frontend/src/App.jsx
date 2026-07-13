@@ -35,7 +35,7 @@ const hardcodedDirectoryFallback = [
 
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
-const appScreens = new Set(["cabinets", "seller", "card", "settings"]);
+const appScreens = new Set(["cabinets", "seller", "card", "settings", "admin"]);
 const topCompetitorLimit = 3;
 
 const projectRoleLabels = {
@@ -842,11 +842,13 @@ function normalizeUserList(rawUsers) {
       role: item.role,
       access_level: item.access_level,
       user_role: item.user_role || item.access_level || "manager",
+      isActive: item.is_active !== false && item.isActive !== false,
     }));
 }
 
 function defaultTeamFromUsers(displayUsers) {
-  const users = displayUsers.length ? displayUsers : hardcodedDirectoryFallback;
+  const activeUsers = displayUsers.filter((user) => user.isActive !== false);
+  const users = activeUsers.length ? activeUsers : (displayUsers.length ? displayUsers : hardcodedDirectoryFallback);
   const lead = findPreferredUser(users, ["kristina.manager", "kristina", "kristina.yanvareva"], "admin");
   const tech = findPreferredUser(users, ["anastasia.tech", "anastasia", "anastasia.rudneva"], "tech");
   const manager = findPreferredUser(users, ["svetlana.manager", "svetlana", "svetlana.dementyeva"], "manager") || lead;
@@ -3512,6 +3514,15 @@ export default function App() {
     });
   }
 
+  async function updateUserAccount(userPayload) {
+    const payload = await apiRequest("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ action: "update_user", ...userPayload }),
+    });
+    await refreshUsers();
+    return payload;
+  }
+
   async function logout() {
     try {
       await apiRequest("/api/logout", { method: "POST", body: JSON.stringify({}) });
@@ -3881,6 +3892,7 @@ export default function App() {
       <Rail
         user={currentUser}
         screen={screen}
+        canManage={canManagePortals}
         helpEnabled={helpEnabled}
         onHelpToggle={setHelpEnabled}
         onNavigate={setScreen}
@@ -3958,15 +3970,18 @@ export default function App() {
         ) : null}
 
         {screen === "audit" ? <PlaceholderScreen title="Аудит" copy="MPStats и полноценный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
-        {screen === "settings" ? (
+        {(screen === "admin" || screen === "settings") && canManagePortals ? (
           <SettingsScreen
             users={displayUsers}
+            portals={allPortals}
             canManage={canManagePortals}
             canManageUsers={canManageUsers}
             mpstatsIntegration={mpstatsIntegration}
             onMpstatsIntegrationChange={setMpstatsIntegration}
             onCreateUser={createUserAccount}
+            onUpdateUser={updateUserAccount}
             onResetPassword={resetUserPassword}
+            onUpdatePortalTeam={updatePortalTeam}
             helpEnabled={helpEnabled}
           />
         ) : null}
@@ -4055,12 +4070,12 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function Rail({ user, screen, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
+function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
     { key: "cabinets", label: "Кабинеты", Icon: LayoutDashboard },
     { key: "audit", label: "Аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
-    { key: "settings", label: "Настройки", Icon: Settings },
-  ];
+    canManage ? { key: "admin", label: "Админка", Icon: Settings } : null,
+  ].filter(Boolean);
   return (
     <aside className="rail">
       <div className="rail-brand">
@@ -4074,7 +4089,7 @@ function Rail({ user, screen, helpEnabled, onHelpToggle, onNavigate, onLogout })
         {nav.map(({ key, label, Icon, disabled, status }) => (
           <button
             key={key}
-            className={screen === key ? "active" : ""}
+            className={(screen === key || (key === "admin" && screen === "settings")) ? "active" : ""}
             type="button"
             disabled={disabled}
             onClick={() => {
@@ -9115,7 +9130,24 @@ const defaultNewUserForm = {
   accessLevel: "overview",
 };
 
-function SettingsScreen({ users, canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onResetPassword }) {
+const userRoleLabels = {
+  admin: "Администратор",
+  manager: "Менеджер",
+  tech: "Технический специалист",
+};
+
+const accessLevelLabels = {
+  all: "Полный доступ",
+  overview: "Проекты и обзор",
+  readonly_wb: "Карточки WB",
+};
+
+function activeDirectoryUsers(users) {
+  return users.filter((user) => user.isActive !== false);
+}
+
+function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
+  const [adminTab, setAdminTab] = useState("users");
   const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
@@ -9123,9 +9155,13 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
   const [newUserStatus, setNewUserStatus] = useState("idle");
   const [newUserResult, setNewUserResult] = useState(null);
   const [newUserError, setNewUserError] = useState("");
+  const [userSaveStatus, setUserSaveStatus] = useState("");
+  const [userSaveError, setUserSaveError] = useState("");
   const [passwordResetStatus, setPasswordResetStatus] = useState("");
   const [passwordResetResult, setPasswordResetResult] = useState(null);
   const [passwordResetError, setPasswordResetError] = useState("");
+  const [accessSaveStatus, setAccessSaveStatus] = useState("");
+  const [accessSaveError, setAccessSaveError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -9222,6 +9258,37 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
     setNewUserStatus("idle");
   }
 
+  async function saveExistingUser(user, patch) {
+    if (!canManageUsers || !onUpdateUser) {
+      return;
+    }
+    const payload = {
+      login: user.login,
+      fullName: user.full_name,
+      role: user.role,
+      userRole: user.user_role,
+      accessLevel: user.access_level,
+      isActive: user.isActive !== false,
+      ...patch,
+    };
+    setUserSaveStatus(user.login);
+    setUserSaveError("");
+    setPasswordResetError("");
+    try {
+      await onUpdateUser(payload);
+      setUserSaveStatus("");
+    } catch (error) {
+      setUserSaveStatus("");
+      if (error.message === "forbidden") {
+        setUserSaveError("Недостаточно прав для изменения этого сотрудника.");
+      } else if (error.message === "user_not_found") {
+        setUserSaveError("Сотрудник не найден.");
+      } else {
+        setUserSaveError("Не удалось сохранить изменения сотрудника.");
+      }
+    }
+  }
+
   async function resetPassword(login) {
     if (!canManageUsers || !onResetPassword) {
       return;
@@ -9245,6 +9312,25 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
     }
   }
 
+  async function updatePortalAccess(portal, roleKey, login) {
+    if (!canManage || !onUpdatePortalTeam || !portal || portal.isDemo) {
+      return;
+    }
+    const nextTeam = {
+      ...getPortalTeam(portal),
+      [roleKey]: login,
+    };
+    setAccessSaveStatus(`${portal.id}:${roleKey}`);
+    setAccessSaveError("");
+    try {
+      await onUpdatePortalTeam(portal, nextTeam);
+      setAccessSaveStatus("");
+    } catch {
+      setAccessSaveStatus("");
+      setAccessSaveError("Не удалось сохранить доступы по кабинету.");
+    }
+  }
+
   const mpstatsConnected = Boolean(mpstatsIntegration?.connected);
   const mpstatsVerified = mpstatsIntegration?.status === "verified";
   const mpstatsUpdatedAt = mpstatsIntegration?.updatedAt
@@ -9261,37 +9347,116 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
     error: "ошибка проверки",
     missing: "не подключен",
   }[mpstatsIntegration?.status] || (mpstatsConnected ? "ключ сохранен" : "не подключен");
+  const activeUsers = activeDirectoryUsers(users);
+  const managedPortals = portals.filter((portal) => !portal.isDemo);
+  const activeUserOptions = activeUsers.length ? activeUsers : users;
+  const adminTabs = [
+    { key: "users", label: "Пользователи" },
+    { key: "access", label: "Доступы" },
+    { key: "integrations", label: "Интеграции" },
+  ];
 
   return (
     <section className="screen active">
       <header className="topbar">
         <div className="title">
-          <h1>Настройки</h1>
-          <p>Пользователи, роли, источники данных и будущие интеграции.</p>
+          <h1>Админка</h1>
+          <p>Пользователи, доступы к кабинетам и сервисные интеграции.</p>
         </div>
       </header>
       <div className="content">
-        <div className="settings-grid">
+        <div className="admin-tabs" role="tablist" aria-label="Разделы админки">
+          {adminTabs.map((tab) => (
+            <button
+              className={adminTab === tab.key ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={adminTab === tab.key}
+              onClick={() => setAdminTab(tab.key)}
+              key={tab.key}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div className="admin-panel-grid">
+          {adminTab === "users" ? (
           <section className="panel">
             <h2>Пользователи</h2>
             <div className="panel-list">
               {users.map((user) => (
-                <div className="list-row user-list-row" key={user.login}>
-                  <span>{user.full_name}</span>
-                  <strong>{user.role}</strong>
-                  {canManageUsers ? (
-                    <button
-                      className="btn mini"
-                      type="button"
-                      onClick={() => resetPassword(user.login)}
-                      disabled={passwordResetStatus === user.login}
+                <div className={`admin-user-row ${user.isActive === false ? "inactive" : ""}`} key={user.login}>
+                  <div className="admin-user-main">
+                    <strong>{user.login}</strong>
+                    <span>{user.isActive === false ? "отключен" : "активен"}</span>
+                  </div>
+                  <label className="field-label compact">
+                    ФИО
+                    <input
+                      defaultValue={user.full_name}
+                      disabled={!canManageUsers || userSaveStatus === user.login}
+                      onBlur={(event) => {
+                        if (event.target.value !== user.full_name) saveExistingUser(user, { fullName: event.target.value });
+                      }}
+                    />
+                  </label>
+                  <label className="field-label compact">
+                    Должность
+                    <input
+                      defaultValue={user.role}
+                      disabled={!canManageUsers || userSaveStatus === user.login}
+                      onBlur={(event) => {
+                        if (event.target.value !== user.role) saveExistingUser(user, { role: event.target.value });
+                      }}
+                    />
+                  </label>
+                  <label className="field-label compact">
+                    Тип
+                    <select
+                      className="select"
+                      value={user.user_role}
+                      disabled={!canManageUsers || userSaveStatus === user.login}
+                      onChange={(event) => saveExistingUser(user, { userRole: event.target.value })}
                     >
-                      {passwordResetStatus === user.login ? "Сбрасываем" : "Сбросить пароль"}
-                    </button>
-                  ) : null}
+                      {Object.entries(userRoleLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                    </select>
+                  </label>
+                  <label className="field-label compact">
+                    Уровень
+                    <select
+                      className="select"
+                      value={user.access_level}
+                      disabled={!canManageUsers || userSaveStatus === user.login}
+                      onChange={(event) => saveExistingUser(user, { accessLevel: event.target.value })}
+                    >
+                      {Object.entries(accessLevelLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                    </select>
+                  </label>
+                  <div className="admin-user-actions">
+                    <label className="switch-row">
+                      <input
+                        type="checkbox"
+                        checked={user.isActive !== false}
+                        disabled={!canManageUsers || userSaveStatus === user.login}
+                        onChange={(event) => saveExistingUser(user, { isActive: event.target.checked })}
+                      />
+                      <span>{user.isActive === false ? "Отключен" : "Активен"}</span>
+                    </label>
+                    {canManageUsers ? (
+                      <button
+                        className="btn mini"
+                        type="button"
+                        onClick={() => resetPassword(user.login)}
+                        disabled={passwordResetStatus === user.login || user.isActive === false}
+                      >
+                        {passwordResetStatus === user.login ? "Сбрасываем" : "Сбросить пароль"}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ))}
             </div>
+            {userSaveError ? <div className="form-error">{userSaveError}</div> : null}
             {passwordResetError ? <div className="form-error">{passwordResetError}</div> : null}
             {passwordResetResult?.user ? (
               <div className="created-user-secret">
@@ -9382,6 +9547,64 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
               ) : null}
             </form>
           </section>
+          ) : null}
+          {adminTab === "access" ? (
+          <section className="panel admin-access-panel">
+            <div className="panel-title-row">
+              <div>
+                <h2>Доступы по кабинетам</h2>
+                <p>Назначайте команду проекта без перехода внутрь каждого кабинета.</p>
+              </div>
+              <Tag tone={managedPortals.length ? "blue" : "amber"}>{managedPortals.length ? `${managedPortals.length} кабинетов` : "нет кабинетов"}</Tag>
+            </div>
+            {accessSaveError ? <div className="form-error">{accessSaveError}</div> : null}
+            <div className="admin-access-table">
+              <div className="admin-access-head">
+                <span>Кабинет</span>
+                {Object.values(projectRoleLabels).map((label) => <span key={label}>{label}</span>)}
+              </div>
+              {managedPortals.map((portal) => {
+                const team = getPortalTeam(portal);
+                return (
+                  <div className={`admin-access-row ${portal.isActive === false ? "inactive" : ""}`} key={portal.id}>
+                    <div className="admin-access-portal">
+                      <strong>{portalDisplayName(portal)}</strong>
+                      <span>{portal.status} · {portal.isActive === false ? "архив" : "активен"}</span>
+                    </div>
+                    {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                      const roleUsers = activeUserOptions.filter((user) => userCanFillProjectRole(user, roleKey));
+                      const options = roleUsers.length ? roleUsers : activeUserOptions;
+                      const saveKey = `${portal.id}:${roleKey}`;
+                      return (
+                        <label className="field-label compact" key={roleKey}>
+                          {label}
+                          <select
+                            className="select"
+                            value={team[roleKey] || ""}
+                            disabled={!canManage || accessSaveStatus === saveKey}
+                            onChange={(event) => updatePortalAccess(portal, roleKey, event.target.value)}
+                          >
+                            <option value="">Не назначен</option>
+                            {options.map((user) => (
+                              <option value={user.login} key={user.login}>{user.full_name}</option>
+                            ))}
+                          </select>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+              {!managedPortals.length ? (
+                <div className="empty-state">
+                  <strong>Нет рабочих кабинетов</strong>
+                  <span>Когда появятся кабинеты селлеров, здесь будет матрица доступов.</span>
+                </div>
+              ) : null}
+            </div>
+          </section>
+          ) : null}
+          {adminTab === "integrations" ? (
           <section className="panel">
             <h2>Интеграции</h2>
             <div className="panel-list">
@@ -9431,6 +9654,7 @@ function SettingsScreen({ users, canManage = false, canManageUsers = false, mpst
               </div>
             </form>
           </section>
+          ) : null}
         </div>
       </div>
     </section>
