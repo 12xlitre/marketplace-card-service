@@ -8433,7 +8433,42 @@ def wb_report_iso(day):
   return day.isoformat()
 
 
-def wb_report_periods(weeks=None):
+def wb_report_parse_day(value):
+  text = str(value or "").strip()
+  if not text:
+    return None
+  try:
+    return dt.date.fromisoformat(text[:10])
+  except ValueError:
+    return None
+
+
+def wb_report_period_label(start_day, end_day):
+  if start_day == end_day:
+    return wb_report_date_label(end_day)
+  return f"{start_day.strftime('%d.%m.%y')}-{end_day.strftime('%d.%m.%y')}"
+
+
+def wb_report_range_label(start_day, end_day):
+  return f"{start_day.strftime('%d.%m.%Y')} - {end_day.strftime('%d.%m.%Y')}"
+
+
+def wb_report_periods(weeks=None, start=None, end=None):
+  start_day = wb_report_parse_day(start)
+  end_day = wb_report_parse_day(end)
+  if start_day or end_day:
+    if not start_day or not end_day or start_day > end_day:
+      raise ValueError("invalid_report_period")
+    if (end_day - start_day).days > 90:
+      raise ValueError("report_period_too_long")
+    return [{
+      "index": 0,
+      "label": wb_report_period_label(start_day, end_day),
+      "start": wb_report_iso(start_day),
+      "end": wb_report_iso(end_day),
+      "rangeLabel": wb_report_range_label(start_day, end_day),
+    }]
+
   try:
     weeks = int(weeks or WB_CLIENT_REPORT_WEEKS)
   except (TypeError, ValueError):
@@ -8449,20 +8484,22 @@ def wb_report_periods(weeks=None):
       "label": wb_report_date_label(period_end),
       "start": wb_report_iso(period_start),
       "end": wb_report_iso(period_end),
-      "rangeLabel": f"{period_start.strftime('%d.%m.%Y')} - {period_end.strftime('%d.%m.%Y')}",
+      "rangeLabel": wb_report_range_label(period_start, period_end),
     })
   return periods
 
 
 def wb_report_previous_period(period):
   period_start = dt.date.fromisoformat(period["start"])
+  period_end = dt.date.fromisoformat(period["end"])
+  period_days = max(1, (period_end - period_start).days + 1)
   past_end = period_start - dt.timedelta(days=1)
-  past_start = past_end - dt.timedelta(days=6)
+  past_start = past_end - dt.timedelta(days=period_days - 1)
   return {
-    "label": wb_report_date_label(past_end),
+    "label": wb_report_period_label(past_start, past_end),
     "start": wb_report_iso(past_start),
     "end": wb_report_iso(past_end),
-    "rangeLabel": f"{past_start.strftime('%d.%m.%Y')} - {past_end.strftime('%d.%m.%Y')}",
+    "rangeLabel": wb_report_range_label(past_start, past_end),
   }
 
 
@@ -8807,7 +8844,7 @@ def fetch_wb_report_promotions(token, periods, sources):
   return public_wb_value(promotions)
 
 
-def build_wb_client_report(portal_id, user, weeks=None):
+def build_wb_client_report(portal_id, user, weeks=None, start=None, end=None):
   row = get_portal_row(portal_id, user)
   if not row:
     raise ValueError("portal_not_found")
@@ -8816,7 +8853,7 @@ def build_wb_client_report(portal_id, user, weeks=None):
 
   cards = wb_snapshot_cards_from_row(row)
   nm_ids = wb_cards_nm_ids(cards)
-  periods = wb_report_periods(weeks)
+  periods = wb_report_periods(weeks, start=start, end=end)
   sources = [
     wb_report_source(
       "snapshot",
@@ -9207,8 +9244,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         weeks = int(query.get("weeks", [str(WB_CLIENT_REPORT_WEEKS)])[0])
       except ValueError:
         weeks = WB_CLIENT_REPORT_WEEKS
+      start = query.get("start", [""])[0] or query.get("d1", [""])[0] or query.get("from", [""])[0]
+      end = query.get("end", [""])[0] or query.get("d2", [""])[0] or query.get("to", [""])[0]
       try:
-        report = build_wb_client_report(portal_id_text, user, weeks=weeks)
+        report = build_wb_client_report(portal_id_text, user, weeks=weeks, start=start, end=end)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return

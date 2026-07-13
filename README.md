@@ -78,14 +78,23 @@ POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
 GET /api/wb/characteristics?portal_id=1&subject_id=123
 GET /api/mpstats/characteristics?portal_id=1&type=subject&value=123
+GET /api/portals/<portal_id>/wb-client-report?start=2026-07-01&end=2026-07-07
 POST /api/card-audit
+POST /api/card-content-reoptimize
+POST /api/card-competitors/suggest
 ```
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
 
 `GET /api/wb/cards` возвращает нормализованные карточки и sanitised `rawFields` для детального просмотра. Поля с признаками секретов (`token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`) вырезаются на backend.
 
-`POST /api/card-audit` запускает backend-аудит карточки по методике OptiCards/MP Audit: собирает WB snapshot, WB CDN, справочник характеристик WB, MPStats-характеристики, SEO/рыночные данные MPStats при наличии ключа и возвращает структурированный `auditResult` + draft-предложения для вкладки `Изменения`. Если часть внешних источников недоступна, маршрут возвращает частичный аудит с пользовательскими `riskNotes`, а не применяет write-операции в WB. Технические ошибки внешних API, например отсутствие `path` для MPStats-ниши, не выводятся в интерфейс напрямую.
+`POST /api/card-audit` запускает backend-аудит карточки по методике OptiCards/MP Audit: собирает WB snapshot, WB CDN, справочник характеристик WB, MPStats-характеристики, SEO/рыночные данные MPStats при наличии ключа и возвращает структурированный `auditResult` + draft-предложения для вкладки `Изменения`. Для MPStats-ниши backend берет `path` как числовой `subject.id` из `/analytics/v1/wb/items/{nmID}/full` или fallback `subjectID` карточки и передает его в query subject-ручек. Если часть внешних источников недоступна, маршрут возвращает частичный аудит с пользовательскими `riskNotes`, а не применяет write-операции в WB. Технические ошибки внешних API, например отсутствие `path` для MPStats-ниши, не выводятся в интерфейс напрямую.
+
+`POST /api/card-content-reoptimize` переписывает заголовок и описание через настроенный LLM/GigaChat по выбранным запросам вкладки `Семантическое ядро`. Маршрут требует доступ пользователя к `portalId`, не пишет в WB и возвращает только `draftContent` для сохранения во вкладке `Изменения`.
+
+`POST /api/card-competitors/suggest` собирает до 5 конкурентов для вкладки `ТОП конкурентов`: использует MPStats-нишу и тот же скоринг коммерческой схожести, что аудит, сохраняет список в `card_competitors` и возвращает сравнительные метрики. Маршрут проверяет доступ к `portalId` и не выполняет write-операции в WB.
+
+`GET /api/portals/<portal_id>/wb-client-report` собирает данные для клиентского XLSX-отчета по выбранному периоду `start/end` в формате `YYYY-MM-DD`. Старый параметр `weeks` остается совместимым fallback, но UI использует сценарий `выбрать отчет -> выбрать период -> сформировать` во вкладке `Отчеты` внутри кабинета селлера. Маршрут проверяет доступ к кабинету, берет WB-токен только из backend-хранилища и не выполняет write-операции в WB.
 
 При повторном подключении того же WB кабинета `POST /api/portals` отвечает `409`: `portal_already_connected` для активного кабинета или `portal_already_archived`, если кабинет уже есть в архиве. Проверка идет по digest токена и fingerprint набора `nmID`, сам WB ключ в ответ не попадает.
 

@@ -2526,6 +2526,86 @@ function clientReportPeriodLabel(date = new Date()) {
   return `${start.toLocaleDateString("ru-RU")} - ${end.toLocaleDateString("ru-RU")}`;
 }
 
+function dateInputValue(date = new Date()) {
+  const parsed = date instanceof Date ? date : new Date(date);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+}
+
+function defaultClientReportRange() {
+  const end = new Date();
+  end.setDate(end.getDate() - 1);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 6);
+  return {
+    start: dateInputValue(start),
+    end: dateInputValue(end),
+  };
+}
+
+function clientReportRangeLabel(start, end) {
+  const startDate = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return "период не выбран";
+  }
+  return `${startDate.toLocaleDateString("ru-RU")} - ${endDate.toLocaleDateString("ru-RU")}`;
+}
+
+function clientReportPeriodQuery(start, end) {
+  const params = new URLSearchParams();
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  return params.toString();
+}
+
+const sellerReportTemplates = [
+  {
+    id: "wb-client-xlsx",
+    title: "WB клиентский XLSX",
+    format: "XLSX",
+    description: "Контент, цены, остатки, заказы, продажи, реклама, акции и доступность источников.",
+  },
+];
+
+function sellerReportTemplate(reportId) {
+  return sellerReportTemplates.find((item) => item.id === reportId) || sellerReportTemplates[0];
+}
+
+function reportHistoryStorageKey(portalId) {
+  return `opticards-report-history:${portalId || "portal"}`;
+}
+
+function readReportHistory(portalId) {
+  try {
+    const items = JSON.parse(localStorage.getItem(reportHistoryStorageKey(portalId)) || "[]");
+    return Array.isArray(items) ? items.slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveReportHistory(portalId, history) {
+  try {
+    localStorage.setItem(reportHistoryStorageKey(portalId), JSON.stringify(history.slice(0, 20)));
+  } catch {
+    // Report generation should not fail because the browser rejected local history storage.
+  }
+}
+
+function reportHistoryStatusLabel(status) {
+  if (status === "done") return "сформирован";
+  if (status === "partial") return "частично";
+  if (status === "error") return "ошибка";
+  return "черновик";
+}
+
+function reportHistoryStatusTone(status) {
+  if (status === "done") return "green";
+  if (status === "partial") return "amber";
+  if (status === "error") return "blue";
+  return "amber";
+}
+
 function reportNumber(value, digits = null) {
   if (value === null || value === undefined || value === "") {
     return "";
@@ -2580,6 +2660,18 @@ function reportPeriodRange(period, fallbackDate = new Date()) {
     return period.rangeLabel;
   }
   return clientReportPeriodLabel(fallbackDate);
+}
+
+function reportPeriodDays(period) {
+  if (!period?.start || !period?.end) {
+    return 7;
+  }
+  const start = new Date(`${period.start}T00:00:00`);
+  const end = new Date(`${period.end}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return 7;
+  }
+  return Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
 }
 
 function reportCardKey(card) {
@@ -2701,15 +2793,16 @@ function clientReportAvailability(cards, portal, reportData = null) {
   const hasPrices = cards.some((card) => cardReportPrice(card) !== "");
   const hasStocks = cards.some((card) => cardReportStock(card) !== "");
   const hasContent = cards.some((card) => String(card?.description || "").trim() || rawCharacteristicItems(card).length);
+  const hasApi = Boolean(portal?.apiConnected);
   return [
-    ["Карточки WB", hasCards ? "есть" : "нет данных", portal.apiConnected ? "WB API" : "ручная витрина"],
+    ["Карточки WB", hasCards ? "есть" : "нет данных", hasApi ? "WB API" : "ручная витрина"],
     ["Контент карточек", hasContent ? "есть" : "частично", "название, описание, характеристики, фото"],
-    ["Цены и скидки", hasPrices ? "есть" : "нет данных", portal.apiConnected ? "WB Prices API" : "данные витрины"],
-    ["Остатки", hasStocks ? "есть" : "нет данных", portal.apiConnected ? "WB Marketplace/Analytics API" : "данные витрины"],
-    ["Воронка продаж", portal.apiConnected ? "частично" : "не подключено", portal.apiConnected ? "запрашивается из WB Analytics при скачивании отчета" : "нужен WB API"],
-    ["Локальность и доставка", portal.apiConnected ? "частично" : "не подключено", portal.apiConnected ? "запрашивается из WB Analytics при скачивании отчета" : "нужен WB API"],
-    ["Акции", portal.apiConnected ? "частично" : "не подключено", portal.apiConnected ? "запрашивается из календаря акций WB" : "нужен WB API"],
-    ["Реклама", portal.apiConnected ? "частично" : "не подключено", portal.apiConnected ? "запрашивается из WB Promotion; WB может ограничить частоту" : "нужен WB API"],
+    ["Цены и скидки", hasPrices ? "есть" : "нет данных", hasApi ? "WB Prices API" : "данные витрины"],
+    ["Остатки", hasStocks ? "есть" : "нет данных", hasApi ? "WB Marketplace/Analytics API" : "данные витрины"],
+    ["Воронка продаж", hasApi ? "частично" : "не подключено", hasApi ? "запрашивается из WB Analytics при скачивании отчета" : "нужен WB API"],
+    ["Локальность и доставка", hasApi ? "частично" : "не подключено", hasApi ? "запрашивается из WB Analytics при скачивании отчета" : "нужен WB API"],
+    ["Акции", hasApi ? "частично" : "не подключено", hasApi ? "запрашивается из календаря акций WB" : "нужен WB API"],
+    ["Реклама", hasApi ? "частично" : "не подключено", hasApi ? "запрашивается из WB Promotion; WB может ограничить частоту" : "нужен WB API"],
   ];
 }
 
@@ -2753,6 +2846,7 @@ function reportOrderSum(reportData, period, card) {
 }
 
 function reportWeeklyRows(reportData, portal, cards, period, periods) {
+  const periodDays = reportPeriodDays(period);
   return [
     ["Проверка на (дата):", period?.label || clientReportDateLabel(reportData?.generatedAt || new Date())],
     ["За период:", reportPeriodRange(period, reportData?.generatedAt || new Date())],
@@ -2772,8 +2866,8 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       "Остаток на складах, шт",
       "Дней до конца остатка",
       "Локальные заказы %",
-      "Кол-во заказов (неделя прошлая)",
-      "Кол-во заказов (неделя текущая)",
+      "Кол-во заказов (прошлый период)",
+      "Кол-во заказов (выбранный период)",
       "Динамика заказов",
       "Сумма заказов",
       "Среднее количество заказов в день, шт",
@@ -2791,7 +2885,7 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       const views = reportViewsForCard(reportData, period, card);
       const openCount = reportMetric(selected, ["openCount", "openCardCount", "clickCount"]);
       const ctr = views && openCount ? reportPercent((Number(openCount) / Number(views)) * 100) : reportPercent(reportMetric(selected, ["ctr", "ctrPercent"]));
-      const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / 7).toFixed(2)) : "");
+      const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / periodDays).toFixed(2)) : "");
       const stock = cardReportStock(card);
       const daysToStockEnd = stock && avgOrdersPerDay ? reportNumber(Number(stock) / Number(avgOrdersPerDay), 1) : "";
       return [
@@ -4041,7 +4135,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
-  const [reportStatus, setReportStatus] = useState("idle");
+  const [sellerTab, setSellerTab] = useState("work");
 
   useEffect(() => {
     if (!teamEditing) {
@@ -4106,28 +4200,6 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setApprovalWorkflowStatus("loaded");
   }
 
-  async function downloadClientReport() {
-    const datePart = new Date().toISOString().slice(0, 10);
-    setReportStatus("loading");
-    try {
-      const reportPayload = portal.apiConnected && !portal.isDemo
-        ? await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-client-report?weeks=8`)
-        : { report: null };
-      downloadXlsx(
-        `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
-        buildClientWbReportSheets(portal, cards, reportPayload.report || null),
-      );
-      setReportStatus("done");
-    } catch (error) {
-      downloadXlsx(
-        `${safeFilePart(displayName)}-wb-client-report-${datePart}.xlsx`,
-        buildClientWbReportSheets(portal, cards),
-      );
-      setReportStatus("error");
-      onNotice?.("WB не отдал часть данных отчета. Скачал файл по текущему снимку карточек; попробуйте повторить позже.");
-    }
-  }
-
   return (
     <section className="screen active">
       <header className="topbar">
@@ -4145,6 +4217,13 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       <div className="content">
         <div className="seller-layout">
           <div className="seller-main">
+            <div className="seller-tabs">
+              <button className={sellerTab === "work" ? "active" : ""} type="button" onClick={() => setSellerTab("work")}>Работа</button>
+              <button className={sellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
+            </div>
+
+            {sellerTab === "work" ? (
+              <>
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
@@ -4276,13 +4355,6 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               onOpenTask={openApprovalTask}
             />
 
-            <ReportsPanel
-              portal={portal}
-              cards={cards}
-              onDownloadClientReport={downloadClientReport}
-              reportStatus={reportStatus}
-            />
-
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
@@ -4299,6 +4371,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 onWorkflowChange={replaceApprovalWorkflow}
               />
             </section>
+              </>
+            ) : (
+              <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} />
+            )}
           </div>
         </div>
       </div>
@@ -4306,39 +4382,189 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   );
 }
 
-function ReportsPanel({ portal, cards, onDownloadClientReport, reportStatus = "idle" }) {
+function ReportsPanel({ portal, cards, onNotice }) {
+  const [period, setPeriod] = useState(defaultClientReportRange);
+  const [selectedReportId, setSelectedReportId] = useState(sellerReportTemplates[0].id);
+  const [history, setHistory] = useState(() => readReportHistory(portal?.id));
+  const [reportStatus, setReportStatus] = useState("idle");
+  const selectedReport = sellerReportTemplate(selectedReportId);
   const availability = clientReportAvailability(cards, portal);
   const availableCount = availability.filter((row) => row[1] === "есть").length;
   const partialCount = availability.filter((row) => row[1] === "частично").length;
   const unavailableCount = availability.filter((row) => row[1] === "не подключено" || row[1] === "нет данных").length;
   const isLoading = reportStatus === "loading";
+
+  useEffect(() => {
+    setHistory(readReportHistory(portal?.id));
+    setReportStatus("idle");
+  }, [portal?.id]);
+
+  function rememberReport(entry) {
+    const nextHistory = [entry, ...history].slice(0, 20);
+    setHistory(nextHistory);
+    saveReportHistory(portal?.id, nextHistory);
+  }
+
+  async function generateReport({ reportId = selectedReportId, reportPeriod = period } = {}) {
+    if (!portal) {
+      return;
+    }
+    if (!reportPeriod.start || !reportPeriod.end || reportPeriod.start > reportPeriod.end) {
+      onNotice?.("Выберите корректный период отчета.");
+      return;
+    }
+    const template = sellerReportTemplate(reportId);
+    const datePart = `${reportPeriod.start}_${reportPeriod.end}`;
+    const fileName = `${safeFilePart(portalDisplayName(portal))}-wb-client-report-${datePart}.xlsx`;
+    setReportStatus("loading");
+    try {
+      const query = clientReportPeriodQuery(reportPeriod.start, reportPeriod.end);
+      const reportPayload = portal.apiConnected && !portal.isDemo
+        ? await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-client-report?${query}`)
+        : { report: null };
+      downloadXlsx(
+        fileName,
+        buildClientWbReportSheets(portal, cards, reportPayload.report || null),
+      );
+      rememberReport({
+        id: `report-${Date.now()}`,
+        reportId,
+        title: template.title,
+        format: template.format,
+        period: reportPeriod,
+        fileName,
+        status: "done",
+        generatedAt: new Date().toISOString(),
+        source: portal.apiConnected && !portal.isDemo ? "WB API" : "снимок карточек",
+      });
+      setReportStatus("done");
+    } catch (error) {
+      downloadXlsx(
+        fileName,
+        buildClientWbReportSheets(portal, cards),
+      );
+      rememberReport({
+        id: `report-${Date.now()}`,
+        reportId,
+        title: template.title,
+        format: template.format,
+        period: reportPeriod,
+        fileName,
+        status: "partial",
+        generatedAt: new Date().toISOString(),
+        source: "снимок карточек",
+      });
+      setReportStatus("error");
+      onNotice?.("WB не отдал часть данных отчета. Скачал файл по текущему снимку карточек; попробуйте повторить позже.");
+    }
+  }
+
+  function repeatReport(item) {
+    const nextPeriod = item?.period || period;
+    setSelectedReportId(item?.reportId || sellerReportTemplates[0].id);
+    setPeriod(nextPeriod);
+    generateReport({ reportId: item?.reportId || sellerReportTemplates[0].id, reportPeriod: nextPeriod });
+  }
+
   return (
-    <section className="workspace-strip reports-strip">
-      <div className="strip-head">
-        <div>
-          <h2>Отчеты</h2>
-          <p>Клиентский XLSX по недельным периодам, текущему контенту, ценам, остаткам и доступным WB API-метрикам.</p>
-        </div>
-        <button className="btn primary" type="button" onClick={onDownloadClientReport} disabled={!cards.length || isLoading}>
-          <Download size={17} />{isLoading ? "Собираем отчет" : "Скачать отчет"}
-        </button>
-      </div>
-      <div className="summary-grid">
-        <Metric label="Карточек в отчете" value={formatNumber(cards.length)} hint={portal.apiConnected ? "источник: WB API" : "ручной источник"} />
-        <Metric label="Данные есть" value={formatNumber(availableCount)} hint="блоки заполняются автоматически" />
-        <Metric label="Частично" value={formatNumber(partialCount)} hint="нужна ручная проверка" />
-        <Metric label="Не подключено" value={formatNumber(unavailableCount)} hint="добавим отдельными отчетами" />
-      </div>
-      <div className="report-availability">
-        {availability.map(([label, status, source]) => (
-          <div className="report-availability-row" key={label}>
-            <span>{label}</span>
-            <Tag tone={status === "есть" ? "green" : status === "частично" ? "amber" : "blue"}>{status}</Tag>
-            <em>{source}</em>
+    <>
+      <section className="workspace-strip reports-strip">
+        <div className="strip-head">
+          <div>
+            <h2>Нужен отчет</h2>
+            <p>{portal ? `Кабинет: ${portalDisplayName(portal)} · выберите отчет и период.` : "Кабинет не выбран."}</p>
           </div>
-        ))}
+          <Tag tone={portal?.apiConnected ? "blue" : "amber"}>{portal?.apiConnected ? "WB API" : "снимок карточек"}</Tag>
+        </div>
+        <div className="report-builder">
+          <div className="report-template-list">
+            {sellerReportTemplates.map((template) => (
+              <button
+                className={`report-template ${selectedReportId === template.id ? "active" : ""}`}
+                key={template.id}
+                type="button"
+                onClick={() => setSelectedReportId(template.id)}
+              >
+                <span>{template.title}</span>
+                <em>{template.description}</em>
+                <Tag tone="blue">{template.format}</Tag>
+              </button>
+            ))}
+          </div>
+          <div className="report-period-form">
+            <label className="field-label">
+              С какого числа
+              <input type="date" value={period.start} onChange={(event) => setPeriod((current) => ({ ...current, start: event.target.value }))} />
+            </label>
+            <label className="field-label">
+              По какое число
+              <input type="date" value={period.end} onChange={(event) => setPeriod((current) => ({ ...current, end: event.target.value }))} />
+            </label>
+            <button className="btn primary" type="button" onClick={() => generateReport()} disabled={!portal || isLoading}>
+              <Download size={17} />{isLoading ? "Формируем" : "Сформировать"}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div className="report-catalog">
+        <article className="workspace-strip report-card">
+          <div className="strip-head">
+            <div>
+              <h2>{selectedReport.title}</h2>
+              <p>{selectedReport.description}</p>
+            </div>
+            <Tag tone="blue">первый отчет</Tag>
+          </div>
+          <div className="summary-grid">
+            <Metric label="Карточек" value={formatNumber(cards.length || portal?.cardCount || 0)} hint={portal?.apiConnected ? "источник: WB API" : "ручной источник"} />
+            <Metric label="Данные есть" value={formatNumber(availableCount)} hint="доступные блоки" />
+            <Metric label="Частично" value={formatNumber(partialCount)} hint="нужна проверка" />
+            <Metric label="Нет данных" value={formatNumber(unavailableCount)} hint="зависит от API" />
+          </div>
+          <div className="report-availability">
+            {availability.map(([label, status, source]) => (
+              <div className="report-availability-row" key={label}>
+                <span>{label}</span>
+                <Tag tone={status === "есть" ? "green" : status === "частично" ? "amber" : "blue"}>{status}</Tag>
+                <em>{source}</em>
+              </div>
+            ))}
+          </div>
+          <div className="report-card-actions">
+            <span>Период: {clientReportRangeLabel(period.start, period.end)}</span>
+            <span>Файл скачивается сразу после формирования.</span>
+          </div>
+        </article>
       </div>
-    </section>
+
+      <section className="workspace-strip report-history">
+        <div className="strip-head">
+          <div>
+            <h2>История отчетов</h2>
+            <p>Последние сформированные выгрузки по этому кабинету.</p>
+          </div>
+          <Tag tone={history.length ? "blue" : "amber"}>{history.length || "пусто"}</Tag>
+        </div>
+        {history.length ? (
+          <div className="report-history-list">
+            {history.map((item) => (
+              <div className="report-history-row" key={item.id}>
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{clientReportRangeLabel(item.period?.start, item.period?.end)} · {item.generatedAt ? new Date(item.generatedAt).toLocaleString("ru-RU") : "без даты"}</span>
+                  <em>{item.fileName}</em>
+                </div>
+                <Tag tone={reportHistoryStatusTone(item.status)}>{reportHistoryStatusLabel(item.status)}</Tag>
+                <button className="btn mini" type="button" onClick={() => repeatReport(item)} disabled={isLoading}>Сформировать снова</button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-text">После формирования отчета здесь появятся дата, период и имя файла.</p>
+        )}
+      </section>
+    </>
   );
 }
 
