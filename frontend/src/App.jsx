@@ -906,6 +906,28 @@ function getPortalTeam(portal) {
   };
 }
 
+function portalCreatedDateLabel(portal) {
+  const createdAt = portal?.createdAt || "";
+  if (!createdAt) {
+    return "";
+  }
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString("ru-RU");
+}
+
+function portalCreatorInfo(portal, findUser) {
+  const login = portal?.createdBy || "";
+  const user = login ? findUser?.(login) : null;
+  return {
+    login,
+    name: user?.full_name || login || "не указан",
+    date: portalCreatedDateLabel(portal),
+  };
+}
+
 function safeHttpsUrl(value) {
   try {
     const url = new URL(value);
@@ -4254,6 +4276,7 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
 function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onRestore }) {
   const inactive = portal.isActive === false;
   const displayName = portalDisplayName(portal);
+  const creator = portalCreatorInfo(portal, findUser);
   return (
     <article className={`workspace-card ${inactive ? "inactive" : ""}`}>
       <div className="card-head">
@@ -4269,6 +4292,10 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
       <div className="scope-row">
         <span>Охват</span>
         <strong>{portal.scope === "selected" ? "Выбранные карточки" : "Полный магазин"}</strong>
+      </div>
+      <div className="scope-row">
+        <span>Создал</span>
+        <strong>{creator.name}{creator.date ? ` · ${creator.date}` : ""}</strong>
       </div>
       <div className="card-stats">
         <MiniStat value={portal.cardCount} label="карточки" />
@@ -4297,6 +4324,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
 
 function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
+  const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
   const isManual = !isApi;
@@ -4430,7 +4458,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </>
             )}
           </div>
-          <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name}</p>
+          <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Кабинеты</button>
@@ -9236,6 +9264,7 @@ const adminEventLabels = {
   user_updated: "Изменен сотрудник",
   password_reset: "Сброшен пароль",
   portal_team_updated: "Изменены доступы",
+  portal_created: "Кабинет создан",
   portal_name_updated: "Переименован кабинет",
   portal_archived: "Кабинет отправлен в архив",
   portal_restored: "Кабинет восстановлен",
@@ -9277,6 +9306,9 @@ function adminEventDetailsText(event) {
   }
   if (event?.action === "portal_team_updated") {
     return details.portalName || event.targetId || "Кабинет";
+  }
+  if (event?.action === "portal_created") {
+    return [details.portalName || event.targetId || "Кабинет", details.mode === "api" ? "WB API" : "ручной режим"].filter(Boolean).join(" · ");
   }
   if (event?.action === "portal_name_updated") {
     return `${details.oldName || "Без названия"} -> ${details.newName || "Без названия"}`;

@@ -1029,7 +1029,13 @@ def create_portal(name, marketplace, scope, created_by, team, store_url="", manu
           """,
           (portal_id, user_login, project_role),
         )
-    return portal_id
+  record_admin_event({"login": created_by or ""}, "portal_created", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": name,
+    "marketplace": marketplace,
+    "scope": scope,
+    "mode": "manual",
+  })
+  return portal_id
 
 
 def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot):
@@ -1093,7 +1099,13 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
         token_meta.get("expiresAt", ""),
       ),
     )
-    return portal_id
+  record_admin_event({"login": created_by or ""}, "portal_created", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": portal_name,
+    "marketplace": marketplace,
+    "scope": scope,
+    "mode": "api",
+  })
+  return portal_id
 
 
 def find_portal_by_integration_token(provider, token):
@@ -1210,6 +1222,8 @@ def list_portals(user=None):
         portals.cards_snapshot_json,
         portals.store_url,
         portals.manual_source,
+        portals.created_by,
+        portals.created_at,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
@@ -1304,6 +1318,8 @@ def public_portal_from_row(row):
     "apiConnected": api_connected,
     "storeUrl": row["store_url"] or "",
     "manualSource": row["manual_source"] or "",
+    "createdBy": row["created_by"] or "",
+    "createdAt": row["created_at"] or "",
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
     "realCards": wb_snapshot_cards_from_row(row),
@@ -1356,6 +1372,8 @@ def get_portal_row(portal_id, user=None):
         portals.cards_snapshot_json,
         portals.store_url,
         portals.manual_source,
+        portals.created_by,
+        portals.created_at,
         portals.last_sync_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_issued_at END) AS wb_token_issued_at,
         MAX(CASE WHEN portal_integrations.provider = 'wb' THEN portal_integrations.token_expires_at END) AS wb_token_expires_at,
