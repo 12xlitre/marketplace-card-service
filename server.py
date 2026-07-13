@@ -83,6 +83,7 @@ CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_
 MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_MAX_CARDS", "100"))
 WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
 WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
+WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
@@ -8817,7 +8818,104 @@ def fetch_wb_report_ads(token, periods, sources):
   return result
 
 
-def fetch_wb_report_promotions(token, periods, sources):
+def wb_promotion_id(item):
+  if not isinstance(item, dict):
+    return None
+  return wb_int(item.get("id") or item.get("promotionID") or item.get("promotionId"))
+
+
+def wb_promotion_details_map(details_payload):
+  details = {}
+  data = details_payload.get("data") if isinstance(details_payload, dict) else details_payload
+  items = []
+  if isinstance(data, dict):
+    items = data.get("promotions") or data.get("details") or data.get("data") or []
+  elif isinstance(data, list):
+    items = data
+  elif isinstance(details_payload, list):
+    items = details_payload
+  for item in items or []:
+    if not isinstance(item, dict):
+      continue
+    promotion_id = wb_promotion_id(item)
+    if promotion_id is not None:
+      details[str(promotion_id)] = public_wb_value(item)
+  return details
+
+
+def fetch_wb_report_promotion_details(token, promotions, sources):
+  promotion_ids = [item for item in (wb_promotion_id(row) for row in promotions) if item is not None]
+  if not promotion_ids:
+    return {}
+  params = urlencode({"promotionIDs": promotion_ids[:100]}, doseq=True)
+  try:
+    payload = wb_get_json(token, f"/api/v1/calendar/promotions/details?{params}", locale=None, base_url=WB_PROMO_CALENDAR_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error("promo-details", "Детали акций", "WB Prices and Discounts", exc))
+    return {}
+  details = wb_promotion_details_map(payload)
+  sources.append(wb_report_source(
+    "promo-details",
+    "Детали акций",
+    "ok" if details else "empty",
+    "WB Prices and Discounts / calendar/promotions/details",
+    "Периоды, типы и условия ближайших акций WB.",
+    records=len(details),
+  ))
+  return details
+
+
+def wb_report_promotion_nomenclature_items(payload):
+  data = payload.get("data") if isinstance(payload, dict) else payload
+  if isinstance(data, dict):
+    return data.get("nomenclatures") or data.get("products") or data.get("items") or []
+  if isinstance(data, list):
+    return data
+  return []
+
+
+def fetch_wb_report_promotion_nomenclatures(token, promotion, details, nm_set, in_action, sources):
+  promotion_id = wb_promotion_id(promotion)
+  if promotion_id is None:
+    return []
+  detail = details.get(str(promotion_id), {}) if isinstance(details, dict) else {}
+  params = urlencode({
+    "promotionID": promotion_id,
+    "inAction": "true" if in_action else "false",
+    "limit": 1000,
+    "offset": 0,
+  })
+  try:
+    payload = wb_get_json(token, f"/api/v1/calendar/promotions/nomenclatures?{params}", locale=None, base_url=WB_PROMO_CALENDAR_API_BASE, attempts=1)
+  except WbApiError as exc:
+    sources.append(wb_report_source_error(
+      f"promo-nomenclatures-{promotion_id}-{'in' if in_action else 'out'}",
+      f"Товары акции {promotion_id}",
+      "WB Prices and Discounts",
+      exc,
+    ))
+    return []
+  rows = []
+  for item in wb_report_promotion_nomenclature_items(payload):
+    if not isinstance(item, dict):
+      continue
+    nm_id = wb_int(item.get("id") or item.get("nmID") or item.get("nmId"))
+    if nm_set and nm_id not in nm_set:
+      continue
+    rows.append(public_wb_value({
+      **item,
+      "id": nm_id if nm_id is not None else item.get("id"),
+      "inAction": bool(in_action),
+      "promotionId": promotion_id,
+      "promotionName": promotion.get("name") or detail.get("name") or "",
+      "promotionType": promotion.get("type") or detail.get("type") or "",
+      "promotionStart": promotion.get("startDateTime") or detail.get("startDateTime") or "",
+      "promotionEnd": promotion.get("endDateTime") or detail.get("endDateTime") or "",
+    }))
+  return rows
+
+
+def fetch_wb_report_promotions(token, periods, nm_ids, sources):
   start_day = dt.date.fromisoformat(periods[0]["end"]) if periods else utc_now().date()
   end_day = start_day + dt.timedelta(days=60)
   params = urlencode({
@@ -8831,7 +8929,7 @@ def fetch_wb_report_promotions(token, periods, sources):
     payload = wb_get_json(token, f"/api/v1/calendar/promotions?{params}", locale=None, base_url=WB_PROMO_CALENDAR_API_BASE, attempts=1)
   except WbApiError as exc:
     sources.append(wb_report_source_error("promo-calendar", "Календарь акций", "WB Prices and Discounts", exc))
-    return []
+    return {"list": [], "details": {}, "nomenclatures": []}
   promotions = ((payload.get("data") or {}).get("promotions") or []) if isinstance(payload, dict) else []
   sources.append(wb_report_source(
     "promo-calendar",
@@ -8841,7 +8939,37 @@ def fetch_wb_report_promotions(token, periods, sources):
     "Ближайшие доступные акции WB.",
     records=len(promotions),
   ))
-  return public_wb_value(promotions)
+  promotions = public_wb_value(promotions)
+  details = fetch_wb_report_promotion_details(token, promotions, sources)
+  max_promotions = max(0, min(WB_CLIENT_REPORT_PROMO_MAX, len(promotions)))
+  nm_set = set(wb_unique_ints(nm_ids))
+  nomenclatures = []
+  for promotion in promotions[:max_promotions]:
+    nomenclatures.extend(fetch_wb_report_promotion_nomenclatures(token, promotion, details, nm_set, True, sources))
+    nomenclatures.extend(fetch_wb_report_promotion_nomenclatures(token, promotion, details, nm_set, False, sources))
+  if len(promotions) > max_promotions:
+    sources.append(wb_report_source(
+      "promo-nomenclatures-limit",
+      "Товары в акциях",
+      "partial",
+      "WB Prices and Discounts / calendar/promotions/nomenclatures",
+      f"Проверены первые {max_promotions} из {len(promotions)} акций, чтобы не упереться в лимиты WB. Лимит меняется через WB_CLIENT_REPORT_PROMO_MAX.",
+      records=len(nomenclatures),
+    ))
+  else:
+    sources.append(wb_report_source(
+      "promo-nomenclatures",
+      "Товары в акциях",
+      "ok" if nomenclatures else "empty",
+      "WB Prices and Discounts / calendar/promotions/nomenclatures",
+      "Участие и доступность товаров в ближайших акциях WB.",
+      records=len(nomenclatures),
+    ))
+  return {
+    "list": promotions,
+    "details": details,
+    "nomenclatures": public_wb_value(nomenclatures),
+  }
 
 
 def build_wb_client_report(portal_id, user, weeks=None, start=None, end=None):
@@ -8878,7 +9006,7 @@ def build_wb_client_report(portal_id, user, weeks=None, start=None, end=None):
       "ordersByPeriod": {},
       "salesByPeriod": {},
       "ads": {"campaigns": [], "stats": []},
-      "promotions": [],
+      "promotions": {"list": [], "details": {}, "nomenclatures": []},
       "sources": sources,
     }
 
@@ -8886,7 +9014,7 @@ def build_wb_client_report(portal_id, user, weeks=None, start=None, end=None):
   orders = fetch_wb_report_orders(token, periods, nm_ids, sources)
   sales = fetch_wb_report_sales(token, periods, nm_ids, sources)
   ads = fetch_wb_report_ads(token, periods, sources)
-  promotions = fetch_wb_report_promotions(token, periods, sources)
+  promotions = fetch_wb_report_promotions(token, periods, nm_ids, sources)
 
   return {
     "generatedAt": utc_now().isoformat(),

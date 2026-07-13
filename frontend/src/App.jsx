@@ -2711,16 +2711,10 @@ function reportPreviousPeriod(periods, period) {
   return index >= 0 ? periods[index + 1] : null;
 }
 
-function reportViewsForCard(reportData, period, card) {
-  const analytics = reportAnalyticsEntry(reportData, period, card);
-  const selected = analytics.selected || {};
-  const direct = reportMetric(selected, ["viewCount", "views", "impressions", "showCount"]);
-  if (direct !== "") {
-    return direct;
-  }
+function reportAdMetricsForCard(reportData, period, card) {
   const nmKey = reportNmKey(card);
   const ads = reportData?.ads?.stats || [];
-  let views = 0;
+  const metrics = { views: 0, clicks: 0, carts: 0, orders: 0, spend: 0, orderSum: 0, present: false };
   for (const advert of ads) {
     for (const day of advert?.days || []) {
       const dayText = String(day?.date || "").slice(0, 10);
@@ -2730,13 +2724,20 @@ function reportViewsForCard(reportData, period, card) {
       for (const app of day?.apps || []) {
         for (const nm of app?.nms || []) {
           if (String(nm?.nmId || "") === nmKey) {
-            views += Number(nm.views || 0);
+            metrics.present = true;
+            metrics.views += Number(nm.views || 0);
+            metrics.clicks += Number(nm.clicks || 0);
+            metrics.carts += Number(nm.atbs || 0);
+            metrics.orders += Number(nm.orders || 0);
+            metrics.spend += Number(nm.sum || 0);
+            metrics.orderSum += Number(nm.sum_price || 0);
           }
         }
       }
     }
   }
-  return views || "";
+  metrics.ctr = metrics.views ? (metrics.clicks / metrics.views) * 100 : "";
+  return metrics;
 }
 
 function cardReportPrice(card) {
@@ -2812,9 +2813,6 @@ function reportComment(reportData, period, card) {
   if (!analytics.selected) {
     comments.push("воронка WB не получена за период");
   }
-  if (reportViewsForCard(reportData, period, card) === "") {
-    comments.push("показы не вернул sales funnel WB");
-  }
   if (!cardReportPrice(card)) {
     comments.push("нет текущей цены");
   }
@@ -2845,6 +2843,76 @@ function reportOrderSum(reportData, period, card) {
   return firstDefined(selected.orderSum, orders.ordersSum);
 }
 
+function reportPromotionItems(reportData) {
+  const promotions = reportData?.promotions;
+  if (Array.isArray(promotions)) {
+    return promotions;
+  }
+  return Array.isArray(promotions?.nomenclatures) ? promotions.nomenclatures : [];
+}
+
+function reportPromotionName(item) {
+  return item?.promotionName || item?.name || item?.promoName || item?.actionName || "";
+}
+
+function reportPromotionEntriesForCard(reportData, card, onlyInAction = false) {
+  const nmKey = reportNmKey(card);
+  if (!nmKey) {
+    return [];
+  }
+  return reportPromotionItems(reportData).filter((item) => {
+    const itemNm = String(item?.id || item?.nmID || item?.nmId || "").trim();
+    if (itemNm !== nmKey) {
+      return false;
+    }
+    return !onlyInAction || Boolean(item?.inAction);
+  });
+}
+
+function reportPromotionNamesForCard(reportData, card) {
+  const names = reportPromotionEntriesForCard(reportData, card, true)
+    .map(reportPromotionName)
+    .filter(Boolean);
+  return [...new Set(names)].join(", ");
+}
+
+function reportPromotionPriceForCard(reportData, card) {
+  const entry = reportPromotionEntriesForCard(reportData, card, true)
+    .find((item) => firstDefined(item?.planPrice, item?.price) !== "");
+  return entry ? reportPrice(firstDefined(entry?.planPrice, entry?.price)) : "";
+}
+
+function reportStockRows(reportData, cards, periods) {
+  const period = periods[0] || {};
+  const periodDays = reportPeriodDays(period);
+  const rows = [
+    ["Артикул продавца", "Артикул WB", "Товар", "Остаток на складах, шт", "Среднее заказов в день", "Дней до конца остатка"],
+    ...cards.map((card) => {
+      const selected = reportAnalyticsEntry(reportData, period, card).selected || {};
+      const orders = reportOrdersEntry(reportData, period, card);
+      const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / periodDays).toFixed(2)) : "");
+      const stock = cardReportStock(card);
+      const daysToStockEnd = stock && avgOrdersPerDay ? reportNumber(Number(stock) / Number(avgOrdersPerDay), 1) : "";
+      return [
+        card?.vendorCode || "",
+        reportNmKey(card),
+        card?.title || card?.subjectName || "",
+        reportNumber(stock),
+        reportNumber(avgOrdersPerDay, 2),
+        daysToStockEnd,
+      ];
+    }).sort((left, right) => {
+      const leftDays = left[5] === "" ? Number.POSITIVE_INFINITY : Number(left[5]);
+      const rightDays = right[5] === "" ? Number.POSITIVE_INFINITY : Number(right[5]);
+      return leftDays - rightDays;
+    }),
+  ];
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
 function reportWeeklyRows(reportData, portal, cards, period, periods) {
   const periodDays = reportPeriodDays(period);
   return [
@@ -2858,10 +2926,11 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       "Артикул",
       "Артикул WB",
       "Текущая цена",
-      "Показы",
-      "Перешли в карточку",
-      "CTR",
-      "Положили в корзину",
+      "Показы РК",
+      "Клики РК",
+      "CTR РК",
+      "Перешли в карточку WB",
+      "Положили в корзину WB",
       "Cреднее время доставки",
       "Остаток на складах, шт",
       "Дней до конца остатка",
@@ -2871,9 +2940,9 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       "Динамика заказов",
       "Сумма заказов",
       "Среднее количество заказов в день, шт",
-      "Выкупы",
-      "Отмены",
-      "Комментарий",
+      "Есть в РК",
+      "Акции",
+      "Цена в акции",
     ],
     ...cards.map((card) => {
       const analytics = reportAnalyticsEntry(reportData, period, card);
@@ -2882,9 +2951,8 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       const orders = reportOrdersEntry(reportData, period, card);
       const currentOrders = reportOrdersCurrent(reportData, period, card);
       const pastOrders = reportOrdersPast(reportData, periods, period, card);
-      const views = reportViewsForCard(reportData, period, card);
+      const adMetrics = reportAdMetricsForCard(reportData, period, card);
       const openCount = reportMetric(selected, ["openCount", "openCardCount", "clickCount"]);
-      const ctr = views && openCount ? reportPercent((Number(openCount) / Number(views)) * 100) : reportPercent(reportMetric(selected, ["ctr", "ctrPercent"]));
       const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / periodDays).toFixed(2)) : "");
       const stock = cardReportStock(card);
       const daysToStockEnd = stock && avgOrdersPerDay ? reportNumber(Number(stock) / Number(avgOrdersPerDay), 1) : "";
@@ -2892,11 +2960,12 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
         card?.subjectName || card?.title || "",
         cardReportColor(card),
         card?.vendorCode || "",
-        card?.nmID || "",
+        reportNmKey(card),
         reportPrice(cardReportPrice(card)),
-        reportNumber(views),
+        reportNumber(adMetrics.views),
+        reportNumber(adMetrics.clicks),
+        reportPercent(adMetrics.ctr),
         reportNumber(openCount),
-        ctr,
         reportNumber(firstDefined(selected.cartCount, selected.addToCartCount)),
         reportReadyTime(selected.timeToReady),
         reportNumber(stock),
@@ -2907,9 +2976,9 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
         firstDefined(reportPercent(comparison.orderCountDynamic), reportPercentDynamic(currentOrders, pastOrders)),
         reportPrice(reportOrderSum(reportData, period, card)),
         reportNumber(avgOrdersPerDay, 2),
-        reportNumber(selected.buyoutCount),
-        reportNumber(firstDefined(selected.cancelCount, orders.canceledCount)),
-        reportComment(reportData, period, card),
+        adMetrics.present ? "да" : "нет",
+        reportPromotionNamesForCard(reportData, card),
+        reportPromotionPriceForCard(reportData, card),
       ];
     }),
   ];
@@ -2985,27 +3054,57 @@ function reportAdRows(reportData) {
   return rows;
 }
 
-function reportPromotionRows(reportData) {
-  const rows = [["ID акции", "Название", "Тип", "Начало", "Окончание"]];
-  for (const item of reportData?.promotions || []) {
+function reportPromotionRows(reportData, cards) {
+  const cardByNm = new Map(cards.map((card) => [reportNmKey(card), card]));
+  const rows = [[
+    "Акция",
+    "Артикул поставщика",
+    "Артикул WB",
+    "Предмет",
+    "Наименование",
+    "Остаток WB, шт.",
+    "Остаток продавца WB, шт.",
+    "Текущая цена, ₽",
+    "Цена входа в акцию, ₽",
+    "Загружаемая скидка, %",
+    "Статус WB",
+    "Рекомендация",
+  ]];
+  for (const item of reportPromotionItems(reportData)) {
+    const nmKey = String(item?.id || item?.nmID || item?.nmId || "").trim();
+    const card = cardByNm.get(nmKey) || {};
+    const currentPrice = firstDefined(item?.price, cardReportPrice(card));
+    const planPrice = firstDefined(item?.planPrice, item?.actionPrice, item?.promoPrice);
+    const inAction = Boolean(item?.inAction);
+    const status = inAction
+      ? "Участвует: добавлен, цена равна или ниже плановой"
+      : "Не участвует: не добавлен или цена выше плановой";
+    const recommendation = inAction
+      ? "Оставить в акции и контролировать цену"
+      : (planPrice ? "Можно добавить по плановой цене WB" : "Проверить условия акции");
     rows.push([
-      item?.id || "",
-      item?.name || "",
-      item?.type || "",
-      item?.startDateTime || "",
-      item?.endDateTime || "",
+      reportPromotionName(item),
+      card?.vendorCode || item?.vendorCode || "",
+      nmKey,
+      card?.subjectName || item?.subjectName || item?.subject || "",
+      card?.title || item?.name || item?.title || "",
+      reportNumber(firstDefined(card?.wbStock, item?.wbStock, item?.stockWb)),
+      reportNumber(firstDefined(card?.sellerStock, item?.sellerStock, item?.stockSeller)),
+      reportPrice(currentPrice),
+      reportPrice(planPrice),
+      reportPercent(item?.discount || item?.planDiscount),
+      status,
+      recommendation,
     ]);
   }
   if (rows.length === 1) {
-    rows.push(["нет данных", "", "", "", ""]);
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", ""]);
   }
   return rows;
 }
 
 function buildClientWbReportSheets(portal, cards, reportData = null) {
   const generatedAt = reportData?.generatedAt ? new Date(reportData.generatedAt) : new Date();
-  const portalName = portalDisplayName(portal);
-  const sourceLabel = portal.apiConnected ? "WB API" : (portal.syncStatus === "mpstats-loaded" ? "MPStats / публичная витрина WB" : "ручной кабинет");
   const reportCards = Array.isArray(reportData?.cards) && reportData.cards.length ? reportData.cards : cards;
   const periods = Array.isArray(reportData?.periods) && reportData.periods.length
     ? reportData.periods
@@ -3013,63 +3112,13 @@ function buildClientWbReportSheets(portal, cards, reportData = null) {
   const weeklySheets = periods.map((period) => ({
     name: period.label || "Период",
     freezeRows: 5,
-    widths: [22, 16, 20, 18, 16, 14, 18, 10, 18, 20, 18, 18, 18, 22, 22, 18, 16, 24, 12, 12, 52],
+    widths: [22, 16, 20, 18, 16, 14, 14, 12, 22, 22, 20, 18, 18, 18, 24, 26, 18, 16, 26, 12, 48, 18],
     rows: reportWeeklyRows(reportData || {}, portal, reportCards, period, periods),
   }));
-  const contentRows = [
-    ["Артикул", "Артикул WB", "Название", "Предмет", "Бренд", "Описание, знаков", "Характеристик", "Фото", "Замечания"],
-    ...reportCards.map((card) => [
-      card?.vendorCode || "",
-      card?.nmID || "",
-      card?.title || "",
-      card?.subjectName || "",
-      card?.brand || "",
-      String(card?.description || "").length,
-      cardReportCharacteristicsCount(card),
-      cardReportPhotoCount(card),
-      cardReportIssueText(card),
-    ]),
-  ];
-  const commerceRows = [
-    ["Артикул", "Артикул WB", "Цена до скидки", "Цена со скидкой", "Скидка", "Остаток всего", "Остаток WB", "Остаток продавца", "Баркод"],
-    ...reportCards.map((card) => [
-      card?.vendorCode || "",
-      card?.nmID || "",
-      firstDefined(card?.price, card?.rawFields?.price),
-      firstDefined(card?.discountedPrice, card?.rawFields?.discountedPrice),
-      firstDefined(card?.discount, card?.rawFields?.discount),
-      cardReportStock(card),
-      firstDefined(card?.wbStock, card?.rawFields?.wbStock),
-      firstDefined(card?.sellerStock, card?.rawFields?.sellerStock),
-      firstSku(card),
-    ]),
-  ];
-  const availabilityRows = [
-    ["Блок отчета", "Статус", "Источник / комментарий"],
-    ...clientReportAvailability(reportCards, portal, reportData),
-  ];
-  const summaryRows = [
-    ["Параметр", "Значение"],
-    ["Кабинет", portalName],
-    ["Маркетплейс", portal.marketplace || "Wildberries"],
-    ["Источник", sourceLabel],
-    ["Дата формирования", generatedAt.toLocaleString("ru-RU")],
-    ["Периодов в отчете", periods.length],
-    ["Карточек в отчете", reportCards.length],
-    ["С замечаниями", reportCards.filter((card) => cardProblemReasons(card).length).length],
-    ["Вкладки с периодами", periods.map((period) => period.label).join(", ")],
-  ];
   return [
-    { name: "Свод", freezeRows: 1, widths: [28, 72], rows: summaryRows },
+    { name: "Остатки", freezeRows: 1, widths: [22, 18, 56, 22, 24, 22], rows: reportStockRows(reportData || {}, reportCards, periods) },
+    { name: "Акции", freezeRows: 1, widths: [42, 22, 18, 24, 52, 18, 22, 18, 22, 22, 48, 42], rows: reportPromotionRows(reportData || {}, reportCards) },
     ...weeklySheets,
-    { name: "Контент", freezeRows: 1, widths: [20, 18, 52, 28, 18, 18, 16, 12, 42], rows: contentRows },
-    { name: "Характеристики", freezeRows: 1, widths: [20, 18, 48, 28, 72], rows: reportCharacteristicRows(reportCards) },
-    { name: "Цены и остатки", freezeRows: 1, widths: [20, 18, 16, 16, 12, 16, 16, 18, 24], rows: commerceRows },
-    { name: "Заказы WB", freezeRows: 1, widths: [24, 20, 18, 52, 16, 16, 16, 16], rows: reportPeriodMetricRows(reportData || {}, reportCards, periods, { "Заказы": "ordersCount", "Сумма заказов": "ordersSum", "Отмены": "canceledCount", "Сумма отмен": "canceledSum" }, "ordersByPeriod") },
-    { name: "Продажи WB", freezeRows: 1, widths: [24, 20, 18, 52, 16, 16, 16, 16, 16], rows: reportPeriodMetricRows(reportData || {}, reportCards, periods, { "Продажи": "salesCount", "Сумма продаж": "salesSum", "Возвраты": "returnsCount", "Сумма возвратов": "returnsSum", "К перечислению": "forPay" }, "salesByPeriod") },
-    { name: "Реклама", freezeRows: 1, widths: [14, 14, 18, 42, 12, 12, 12, 12, 12, 12, 14, 16, 12, 12], rows: reportAdRows(reportData || {}) },
-    { name: "Акции", freezeRows: 1, widths: [16, 52, 18, 24, 24], rows: reportPromotionRows(reportData || {}) },
-    { name: "Доступность данных", freezeRows: 1, widths: [32, 18, 96], rows: availabilityRows },
   ];
 }
 
