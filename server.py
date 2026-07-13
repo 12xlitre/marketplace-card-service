@@ -3353,7 +3353,7 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None, skip_key
   if not seller_id:
     return []
   warnings = warnings if isinstance(warnings, list) else []
-  skip_keys = skip_keys if isinstance(skip_keys, set) else set(skip_keys or [])
+  skip_keys = set(skip_keys or [])
   limit = max(1, min(int(limit or 100), 1000))
   rows = []
   page = max(1, int(start_page or 1))
