@@ -1798,7 +1798,8 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
         )
         return
       raise ValueError(warnings[0] if warnings else "mpstats_cards_empty")
-    snapshot = merge_snapshot_with_existing_cards(row, snapshot)
+    if not bootstrap.get("replaceExisting"):
+      snapshot = merge_snapshot_with_existing_cards(row, snapshot)
     bootstrap = snapshot.get("manualBootstrap") or {}
     status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
     update_portal_manual_snapshot(portal_id, snapshot, status=status)
@@ -2085,6 +2086,26 @@ def snapshot_card_keys(cards):
     if key:
       output.add(key)
   return output
+
+
+def snapshot_cards_match_wb_seller(cards, seller_ids):
+  seller_ids = {parse_wb_seller_id(seller_id) for seller_id in seller_ids}
+  seller_ids = {seller_id for seller_id in seller_ids if seller_id}
+  if not seller_ids or not isinstance(cards, list) or not cards:
+    return True
+  checked = 0
+  matched = 0
+  for card in cards:
+    if not isinstance(card, dict):
+      continue
+    raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+    mpstats = raw_fields.get("mpstats") if isinstance(raw_fields.get("mpstats"), dict) else {}
+    source = audit_str(mpstats.get("source") or "")
+    supplier_id = parse_wb_seller_id(mpstats.get("supplierId") or raw_fields.get("supplierId") or raw_fields.get("supplier_id"))
+    checked += 1
+    if source == "wb-public-seller" and supplier_id in seller_ids:
+      matched += 1
+  return checked > 0 and matched / checked >= 0.8
 
 
 def snapshot_card_lookup(snapshot_json):
@@ -6188,12 +6209,88 @@ def public_mpstats_store_import_job(job):
 
 
 def build_mpstats_storefront_snapshot(name, store_url, manual_source, limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS):
-  token = get_service_integration_secret(MPSTATS_PROVIDER)
-  if not token:
-    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
   limit = max(1, min(int(limit or MPSTATS_STORE_BOOTSTRAP_MAX_CARDS), 500))
   period = audit_period_default()
   warnings = []
+  seller_ids = wb_public_seller_ids_from_manual_source(name, store_url, manual_source)
+  if seller_ids:
+    selected_candidate = None
+    raw_cards = []
+    for seller_id in seller_ids:
+      raw_cards = fetch_wb_public_seller_catalog(seller_id, limit=limit, warnings=warnings)
+      if raw_cards:
+        selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
+        break
+    if not raw_cards:
+      loaded_at = utc_now().isoformat()
+      return {
+        "cards": [],
+        "raw_count": 0,
+        "cursor": {},
+        "tokenMeta": {},
+        "stats": {
+          "cardCount": 0,
+          "workCount": 0,
+          "problemCount": 0,
+          "sampleLimit": limit,
+          "loadedAt": loaded_at,
+          "portalName": "",
+          "source": "wb-public-seller",
+          "sourceLabel": f"seller: {seller_ids[0]}",
+        },
+        "manualBootstrap": {
+          "status": "empty",
+          "cardCount": 0,
+          "source": {"kind": "seller", "path": seller_ids[0], "source": "wb-public-seller"},
+          "period": period,
+          "warnings": audit_public_warnings(warnings),
+          "loadedAt": loaded_at,
+          "strictSellerSource": True,
+        },
+      }
+
+    deduped = []
+    seen = set()
+    for raw_card in raw_cards:
+      key = raw_storefront_card_key(raw_card)
+      if not key or key in seen:
+        continue
+      seen.add(key)
+      deduped.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
+      if len(deduped) >= limit:
+        break
+    cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
+    portal_name = derive_wb_portal_name(cards)
+    loaded_at = utc_now().isoformat()
+    return {
+      "cards": cards,
+      "raw_count": len(cards),
+      "cursor": {},
+      "tokenMeta": {},
+      "stats": {
+        "cardCount": len(cards),
+        "workCount": 0,
+        "problemCount": sum(1 for card in cards if int(card.get("issueCount") or 0) > 0),
+        "sampleLimit": limit,
+        "loadedAt": loaded_at,
+        "portalName": portal_name,
+        "source": "wb-public-seller",
+        "sourceLabel": f"seller: {selected_candidate.get('path')}",
+      },
+      "manualBootstrap": {
+        "status": "loaded" if cards else "empty",
+        "cardCount": len(cards),
+        "source": selected_candidate or {},
+        "period": period,
+        "warnings": audit_public_warnings(warnings),
+        "loadedAt": loaded_at,
+        "strictSellerSource": True,
+      },
+    }
+
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
   nm_ids = mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=limit)
   seed_cards = []
   for nm_id in nm_ids[:min(limit, 20)]:
@@ -6282,13 +6379,14 @@ def build_mpstats_storefront_snapshot_paged(
   job_id="",
   existing_cards=None,
 ):
-  token = get_service_integration_secret(MPSTATS_PROVIDER)
-  if not token:
-    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
   limit = max(1, min(int(limit or MPSTATS_STORE_FULL_IMPORT_MAX_CARDS), 5000))
   batch_size = max(20, min(int(batch_size or MPSTATS_STORE_IMPORT_BATCH_SIZE), 500))
   target_limit = min(limit, WB_MAX_CARDS_PER_SYNC)
   existing_cards = existing_cards if isinstance(existing_cards, list) else []
+  seller_ids = wb_public_seller_ids_from_manual_source(name, store_url, manual_source)
+  replace_existing = bool(seller_ids) and not snapshot_cards_match_wb_seller(existing_cards, seller_ids)
+  if replace_existing:
+    existing_cards = []
   existing_keys = snapshot_card_keys(existing_cards)
   existing_count = len(existing_keys)
   remaining_needed = max(0, target_limit - existing_count)
@@ -6322,8 +6420,87 @@ def build_mpstats_storefront_snapshot_paged(
         "limit": target_limit,
         "existingCount": existing_count,
         "newCount": 0,
+        "strictSellerSource": bool(seller_ids),
       },
     }
+
+  if seller_ids:
+    selected_candidate = None
+    raw_cards = []
+    for seller_id in seller_ids:
+      start_page = max(1, existing_count // 100 + 1)
+      mpstats_store_import_update(
+        job_id,
+        phase="requesting",
+        sourceLabel=f"seller: {seller_id}",
+        message="Пробуем публичную витрину WB",
+        totalEstimate=0,
+      )
+      raw_cards = fetch_wb_public_seller_catalog(
+        seller_id,
+        limit=remaining_needed,
+        warnings=warnings,
+        skip_keys=existing_keys,
+        start_page=start_page,
+      )
+      if raw_cards:
+        selected_candidate = {"kind": "seller", "path": seller_id, "source": "wb-public-seller"}
+        break
+    total_estimate = existing_count + len(raw_cards)
+    deduped = []
+    seen = set()
+    mpstats_store_import_update(
+      job_id,
+      phase="normalizing",
+      message="Обогащаем карточки данными WB",
+      totalEstimate=total_estimate or target_limit,
+    )
+    for raw_card in raw_cards:
+      key = raw_storefront_card_key(raw_card)
+      if not key or key in seen or key in existing_keys:
+        continue
+      seen.add(key)
+      deduped.append(enrich_storefront_raw_card_with_wb_public_details(raw_card, warnings))
+      mpstats_store_import_update(job_id, loadedCount=existing_count + len(deduped))
+      if len(deduped) >= remaining_needed:
+        break
+    cards = [mpstats_normalized_bootstrap_card(card) for card in deduped]
+    portal_name = derive_wb_portal_name(cards)
+    loaded_at = utc_now().isoformat()
+    return {
+      "cards": cards,
+      "raw_count": len(cards),
+      "cursor": {},
+      "tokenMeta": {},
+      "stats": {
+        "cardCount": len(cards),
+        "workCount": 0,
+        "problemCount": sum(1 for card in cards if int(card.get("issueCount") or 0) > 0),
+        "sampleLimit": target_limit,
+        "loadedAt": loaded_at,
+        "portalName": portal_name,
+        "source": "wb-public-seller",
+        "sourceLabel": f"seller: {selected_candidate.get('path')}" if selected_candidate else f"seller: {seller_ids[0]}",
+      },
+      "manualBootstrap": {
+        "status": "loaded" if cards else "empty",
+        "cardCount": len(cards),
+        "source": selected_candidate or {"kind": "seller", "path": seller_ids[0], "source": "wb-public-seller"},
+        "period": period,
+        "warnings": audit_public_warnings(warnings),
+        "loadedAt": loaded_at,
+        "totalEstimate": total_estimate,
+        "limit": target_limit,
+        "existingCount": existing_count,
+        "newCount": len(cards),
+        "strictSellerSource": True,
+        "replaceExisting": replace_existing,
+      },
+    }
+
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
   nm_ids = mpstats_nm_ids_from_manual_source(name, store_url, manual_source, limit=limit)
   seed_cards = []
   for nm_id in nm_ids[:min(limit, 20)]:
