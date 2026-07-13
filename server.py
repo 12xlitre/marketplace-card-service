@@ -1745,6 +1745,37 @@ def normalize_card_draft_payload(payload):
   }
 
 
+def card_draft_semantic_items(payload, key):
+  if not isinstance(payload, dict):
+    return []
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  items = meta.get(key)
+  return items if isinstance(items, list) else []
+
+
+def merge_card_draft_semantics(next_payload, previous_payload):
+  if not isinstance(next_payload, dict) or not isinstance(previous_payload, dict):
+    return next_payload
+  previous_reports = card_draft_semantic_items(previous_payload, "semanticCoreReports")
+  previous_selected = card_draft_semantic_items(previous_payload, "semanticCoreSelected")
+  if not previous_reports and not previous_selected:
+    return next_payload
+  next_reports = card_draft_semantic_items(next_payload, "semanticCoreReports")
+  next_selected = card_draft_semantic_items(next_payload, "semanticCoreSelected")
+  if next_reports or next_selected:
+    return next_payload
+  next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
+  merged_meta = {
+    **next_meta,
+    "semanticCoreReports": previous_reports,
+    "semanticCoreSelected": previous_selected,
+  }
+  return {
+    **next_payload,
+    "meta": merged_meta,
+  }
+
+
 def sanitize_audit_summary(summary):
   if not isinstance(summary, dict):
     return summary
@@ -2516,7 +2547,6 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
   normalized_payload = normalize_card_draft_payload(payload)
-  payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
   with connect_db() as db:
     previous = db.execute(
       """
@@ -2533,6 +2563,8 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
       except (TypeError, json.JSONDecodeError):
         previous_payload = normalize_card_draft_payload({})
     previous_payload = normalize_card_draft_payload(previous_payload)
+    normalized_payload = merge_card_draft_semantics(normalized_payload, previous_payload)
+    payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
     if restricted_approval_changes(normalized_payload, previous_payload) and not user_can_review_portal_approval(user, numeric_portal_id):
       raise PermissionError("approval_forbidden")
     db.execute(
