@@ -328,6 +328,21 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS report_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        report_id TEXT NOT NULL DEFAULT '',
+        report_title TEXT NOT NULL DEFAULT '',
+        report_format TEXT NOT NULL DEFAULT 'XLSX',
+        period_start TEXT NOT NULL DEFAULT '',
+        period_end TEXT NOT NULL DEFAULT '',
+        file_name TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'done',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS mpstats_characteristics_cache (
         cache_key TEXT PRIMARY KEY,
         report_type TEXT NOT NULL,
@@ -395,6 +410,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_admin_events_portal
       ON admin_events(portal_id, created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_report_history_portal
+      ON report_history(portal_id, created_at)
       """
     )
     db.execute(
@@ -558,6 +579,132 @@ def list_admin_events(user, limit=80):
       (limit,),
     ).fetchall()
   return [public_admin_event(row) for row in rows]
+
+
+def clean_report_text(value, limit=180):
+  return str(value or "").strip()[:limit]
+
+
+def clean_report_date(value):
+  text = str(value or "").strip()
+  if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+    try:
+      dt.date.fromisoformat(text)
+      return text
+    except ValueError:
+      return ""
+  return ""
+
+
+def public_report_history(row):
+  return {
+    "id": str(row["id"]),
+    "portalId": str(row["portal_id"]),
+    "reportId": row["report_id"] or "",
+    "title": row["report_title"] or "",
+    "format": row["report_format"] or "XLSX",
+    "period": {
+      "start": row["period_start"] or "",
+      "end": row["period_end"] or "",
+    },
+    "fileName": row["file_name"] or "",
+    "source": row["source"] or "",
+    "status": row["status"] or "done",
+    "generatedBy": row["created_by"] or "",
+    "generatedAt": row["created_at"] or "",
+  }
+
+
+def list_report_history(portal_id, user, limit=20):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  limit = max(1, min(int(limit or 20), 100))
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    rows = db.execute(
+      """
+      SELECT id, portal_id, report_id, report_title, report_format, period_start, period_end,
+             file_name, source, status, created_by, created_at
+      FROM report_history
+      WHERE portal_id = ?
+      ORDER BY id DESC
+      LIMIT ?
+      """,
+      (numeric_portal_id, limit),
+    ).fetchall()
+  return [public_report_history(row) for row in rows]
+
+
+def create_report_history(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  period = payload.get("period") if isinstance(payload.get("period"), dict) else {}
+  start = clean_report_date(period.get("start") or payload.get("start"))
+  end = clean_report_date(period.get("end") or payload.get("end"))
+  if not start or not end or start > end:
+    raise ValueError("invalid_report_period")
+  report_id = clean_report_text(payload.get("reportId") or payload.get("report_id") or "wb-client-xlsx", 80)
+  title = clean_report_text(payload.get("title") or "WB клиентский XLSX", 180)
+  report_format = clean_report_text(payload.get("format") or "XLSX", 20)
+  file_name = clean_report_text(payload.get("fileName") or payload.get("file_name") or "", 220)
+  source = clean_report_text(payload.get("source") or "", 80)
+  status = clean_report_text(payload.get("status") or "done", 20)
+  if status not in {"done", "partial", "error"}:
+    status = "done"
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    cursor = db.execute(
+      """
+      INSERT INTO report_history (
+        portal_id, report_id, report_title, report_format, period_start, period_end,
+        file_name, source, status, created_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      (
+        numeric_portal_id,
+        report_id,
+        title,
+        report_format,
+        start,
+        end,
+        file_name,
+        source,
+        status,
+        user["login"],
+      ),
+    )
+    row = db.execute(
+      """
+      SELECT id, portal_id, report_id, report_title, report_format, period_start, period_end,
+             file_name, source, status, created_by, created_at
+      FROM report_history
+      WHERE id = ?
+      """,
+      (cursor.lastrowid,),
+    ).fetchone()
+  record_admin_event(user, "report_generated", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "portalName": portal["name"] if portal else "",
+    "reportTitle": title,
+    "period": f"{start} - {end}",
+    "status": status,
+  })
+  return public_report_history(row)
 
 
 def admin_system_status(user):
@@ -9714,6 +9861,29 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, {"report": report})
       return
 
+    if path.startswith("/api/portals/") and path.endswith("/report-history"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/report-history")].strip("/")
+      query = parse_qs(parsed.query)
+      try:
+        limit = int(query.get("limit", ["20"])[0])
+      except ValueError:
+        limit = 20
+      try:
+        history = list_report_history(portal_id_text, user, limit=limit)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, {"history": history})
+      return
+
     if path == "/api/wb/cards":
       user = self.require_user()
       if not user:
@@ -10002,6 +10172,25 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_payload = public_portal_from_row(row)
       portal_payload["manualBootstrap"] = bootstrap
       self.send_json(HTTPStatus.CREATED, {"portal": portal_payload})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/report-history"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/report-history")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        item = create_report_history(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_report_history"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.CREATED, {"item": item})
       return
 
     if path == "/api/users":

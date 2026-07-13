@@ -2597,6 +2597,21 @@ function saveReportHistory(portalId, history) {
   }
 }
 
+function normalizeReportHistory(items) {
+  return (Array.isArray(items) ? items : []).map((item) => ({
+    ...item,
+    id: item.id || `report-${item.generatedAt || Date.now()}`,
+    reportId: item.reportId || item.report_id || "wb-client-xlsx",
+    title: item.title || item.reportTitle || "WB клиентский XLSX",
+    format: item.format || "XLSX",
+    period: item.period || { start: item.start || "", end: item.end || "" },
+    fileName: item.fileName || item.file_name || "",
+    status: item.status || "done",
+    generatedAt: item.generatedAt || item.createdAt || "",
+    source: item.source || "",
+  })).slice(0, 20);
+}
+
 function reportHistoryStatusLabel(status) {
   if (status === "done") return "сформирован";
   if (status === "partial") return "частично";
@@ -4607,7 +4622,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   const [period, setPeriod] = useState(defaultClientReportRange);
   const [selectedReportId, setSelectedReportId] = useState(sellerReportTemplates[0].id);
-  const [history, setHistory] = useState(() => readReportHistory(portal?.id));
+  const [history, setHistory] = useState([]);
+  const [historyStatus, setHistoryStatus] = useState("idle");
   const [reportStatus, setReportStatus] = useState("idle");
   const selectedReport = sellerReportTemplate(selectedReportId);
   const availability = clientReportAvailability(cards, portal);
@@ -4617,14 +4633,53 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   const isLoading = reportStatus === "loading";
 
   useEffect(() => {
-    setHistory(readReportHistory(portal?.id));
     setReportStatus("idle");
+    loadReportHistory();
   }, [portal?.id]);
 
-  function rememberReport(entry) {
+  async function loadReportHistory() {
+    if (!portal) {
+      setHistory([]);
+      return;
+    }
+    if (portal.isDemo) {
+      setHistory(readReportHistory(portal.id));
+      setHistoryStatus("local");
+      return;
+    }
+    setHistoryStatus("loading");
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/report-history?limit=20`);
+      setHistory(normalizeReportHistory(payload.history || []));
+      setHistoryStatus("loaded");
+    } catch {
+      setHistory(readReportHistory(portal.id));
+      setHistoryStatus("error");
+    }
+  }
+
+  async function rememberReport(entry) {
     const nextHistory = [entry, ...history].slice(0, 20);
     setHistory(nextHistory);
-    saveReportHistory(portal?.id, nextHistory);
+    if (portal?.isDemo) {
+      saveReportHistory(portal?.id, nextHistory);
+      return entry;
+    }
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/report-history`, {
+        method: "POST",
+        body: JSON.stringify(entry),
+      });
+      const savedItem = normalizeReportHistory([payload.item])[0];
+      if (savedItem) {
+        setHistory((current) => [savedItem, ...current.filter((item) => item.id !== entry.id)].slice(0, 20));
+        return savedItem;
+      }
+    } catch {
+      saveReportHistory(portal?.id, nextHistory);
+      onNotice?.("Отчет скачан, но backend-история временно недоступна. Запись оставлена локально.");
+    }
+    return entry;
   }
 
   async function generateReport({ reportId = selectedReportId, reportPeriod = period } = {}) {
@@ -4648,7 +4703,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
         fileName,
         buildClientWbReportSheets(portal, cards, reportPayload.report || null),
       );
-      rememberReport({
+      await rememberReport({
         id: `report-${Date.now()}`,
         reportId,
         title: template.title,
@@ -4665,7 +4720,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
         fileName,
         buildClientWbReportSheets(portal, cards),
       );
-      rememberReport({
+      await rememberReport({
         id: `report-${Date.now()}`,
         reportId,
         title: template.title,
@@ -4778,10 +4833,16 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
             <h2>История отчетов</h2>
             <p>Последние сформированные выгрузки по этому кабинету.</p>
           </div>
-          <Tag tone={history.length ? "blue" : "amber"}>{history.length || "пусто"}</Tag>
+          <Tag tone={historyStatus === "error" ? "amber" : history.length ? "blue" : "amber"}>
+            {historyStatus === "loading"
+              ? "загрузка"
+              : historyStatus === "error"
+                ? "локально"
+                : history.length || "пусто"}
+          </Tag>
         </div>
         <HelpHint enabled={helpEnabled} title="Зачем нужна история">
-          История хранится внутри этого кабинета в браузере сотрудника. По кнопке Сформировать снова можно повторить выгрузку с тем же периодом.
+          История хранится внутри этого кабинета и доступна сотрудникам с доступом к нему. По кнопке Скачать снова можно повторить выгрузку с тем же периодом.
         </HelpHint>
         {history.length ? (
           <div className="report-history-list">
@@ -4793,7 +4854,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
                   <em>{item.fileName}</em>
                 </div>
                 <Tag tone={reportHistoryStatusTone(item.status)}>{reportHistoryStatusLabel(item.status)}</Tag>
-                <button className="btn mini" type="button" onClick={() => repeatReport(item)} disabled={isLoading}>Сформировать снова</button>
+                <button className="btn mini" type="button" onClick={() => repeatReport(item)} disabled={isLoading}>Скачать снова</button>
               </div>
             ))}
           </div>
