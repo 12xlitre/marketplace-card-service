@@ -1712,6 +1712,46 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   return updated_row, bootstrap
 
 
+def merge_snapshot_with_existing_cards(row, snapshot):
+  if not row or not isinstance(snapshot, dict):
+    return snapshot
+  existing_cards = wb_snapshot_cards_from_row(row)
+  new_cards = snapshot.get("cards") if isinstance(snapshot.get("cards"), list) else []
+  if not existing_cards:
+    return snapshot
+  merged = []
+  seen = set()
+
+  def add_card(card):
+    if not isinstance(card, dict):
+      return
+    key = card_key_from_snapshot_card(card) or str(card.get("nmID") or card.get("vendorCode") or "")
+    if not key or key in seen:
+      return
+    seen.add(key)
+    merged.append(card)
+
+  for card in new_cards:
+    add_card(card)
+  for card in existing_cards:
+    add_card(card)
+  if len(merged) <= len(new_cards):
+    return snapshot
+  next_snapshot = {**snapshot, "cards": merged, "raw_count": len(merged)}
+  stats = {**(snapshot.get("stats") or {})}
+  stats["cardCount"] = len(merged)
+  stats["problemCount"] = sum(1 for card in merged if int(card.get("issueCount") or 0) > 0)
+  next_snapshot["stats"] = stats
+  bootstrap = {**(snapshot.get("manualBootstrap") or {})}
+  bootstrap["cardCount"] = len(merged)
+  if new_cards and len(merged) > len(new_cards):
+    warnings = list(bootstrap.get("warnings") or [])
+    warnings.append(f"Сохранены ранее загруженные карточки: {len(existing_cards)}.")
+    bootstrap["warnings"] = audit_public_warnings(warnings)
+  next_snapshot["manualBootstrap"] = bootstrap
+  return next_snapshot
+
+
 def mpstats_store_import_worker(job_id, portal_id, user, limit):
   try:
     row = get_portal_row(portal_id, user)
@@ -1737,18 +1777,42 @@ def mpstats_store_import_worker(job_id, portal_id, user, limit):
     bootstrap = snapshot.get("manualBootstrap") or {}
     if not snapshot.get("cards"):
       warnings = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
+      existing_count = int(row["card_count"] or 0)
+      if existing_count > 0:
+        updated_row = get_portal_row(portal_id, user)
+        portal_payload = public_portal_from_row(updated_row) if updated_row else None
+        warning = warnings[0] if warnings else "MPStats не вернул новые карточки"
+        mpstats_store_import_update(
+          job_id,
+          status="paused",
+          phase="paused",
+          message=f"Остановлено лимитом источника. В кабинете сохранено {existing_count} карточек.",
+          loadedCount=existing_count,
+          totalEstimate=0,
+          error=warning,
+          finishedAt=utc_now().isoformat(),
+          portal=portal_payload,
+          bootstrap=bootstrap,
+        )
+        return
       raise ValueError(warnings[0] if warnings else "mpstats_cards_empty")
+    snapshot = merge_snapshot_with_existing_cards(row, snapshot)
+    bootstrap = snapshot.get("manualBootstrap") or {}
     status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
     update_portal_manual_snapshot(portal_id, snapshot, status=status)
     updated_row = get_portal_row(portal_id, user)
     portal_payload = public_portal_from_row(updated_row) if updated_row else None
+    warning_texts = bootstrap.get("warnings") if isinstance(bootstrap.get("warnings"), list) else []
+    source_limited = any("HTTP 429" in str(warning) for warning in warning_texts)
+    loaded_count = len(snapshot.get("cards") or [])
     mpstats_store_import_update(
       job_id,
-      status="done",
-      phase="done",
-      message=f"Загружено {len(snapshot.get('cards') or [])} карточек",
-      loadedCount=len(snapshot.get("cards") or []),
-      totalEstimate=len(snapshot.get("cards") or []),
+      status="paused" if source_limited else "done",
+      phase="paused" if source_limited else "done",
+      message=f"Остановлено лимитом источника. В кабинете сохранено {loaded_count} карточек." if source_limited else f"Загружено {loaded_count} карточек",
+      loadedCount=loaded_count,
+      totalEstimate=0 if source_limited else loaded_count,
+      error=warning_texts[0] if source_limited and warning_texts else None,
       finishedAt=utc_now().isoformat(),
       portal=portal_payload,
       bootstrap=bootstrap,
@@ -3130,10 +3194,11 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
   if not seller_id:
     return []
   warnings = warnings if isinstance(warnings, list) else []
-  limit = max(1, min(int(limit or 100), 500))
+  limit = max(1, min(int(limit or 100), 1000))
   rows = []
   page = 1
-  while len(rows) < limit and page <= 10:
+  max_pages = max(10, min(60, (limit // 100) + 6))
+  while len(rows) < limit and page <= max_pages:
     params = urlencode({
       "appType": "1",
       "curr": "rub",
@@ -3145,19 +3210,24 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
       "supplier": seller_id,
     })
     url = f"https://catalog.wb.ru/sellers/v4/catalog?{params}"
-    try:
-      request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 OptiCards/0.1 seller-bootstrap"})
-      with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-      retry_after = parse_retry_after(exc.headers.get("Retry-After"))
-      if exc.code == 429 and retry_after is not None and retry_after <= 3:
-        time.sleep(retry_after)
-        continue
-      warnings.append(f"WB seller catalog {seller_id}: HTTP {exc.code}")
-      break
-    except (urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
-      warnings.append(f"WB seller catalog {seller_id}: {type(exc).__name__}")
+    payload = None
+    for attempt in range(3):
+      try:
+        request = urlrequest.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 OptiCards/0.1 seller-bootstrap"})
+        with urlrequest.urlopen(request, timeout=WB_CONNECT_TIMEOUT + WB_READ_TIMEOUT) as response:
+          payload = json.loads(response.read().decode("utf-8"))
+        break
+      except urlerror.HTTPError as exc:
+        retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+        if exc.code == 429 and attempt < 2:
+          time.sleep(min(retry_after if retry_after is not None else 3 * (attempt + 1), 20))
+          continue
+        warnings.append(f"WB seller catalog {seller_id}: HTTP {exc.code}")
+        return rows
+      except (urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        warnings.append(f"WB seller catalog {seller_id}: {type(exc).__name__}")
+        return rows
+    if payload is None:
       break
     data = payload.get("data") if isinstance(payload, dict) else {}
     products = payload.get("products") if isinstance(payload, dict) else []
@@ -3172,6 +3242,8 @@ def fetch_wb_public_seller_catalog(seller_id, limit=100, warnings=None):
         if len(rows) >= limit:
           break
     page += 1
+    if len(rows) < limit:
+      time.sleep(0.35)
   return rows
 
 

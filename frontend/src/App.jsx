@@ -4565,6 +4565,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
         if (payload.job?.status === "error") {
           onNotice?.(payload.job.error ? `Загрузка карточек прервалась: ${payload.job.error}` : "Загрузка карточек прервалась. Можно повторить.");
         }
+        if (payload.job?.status === "paused") {
+          onNotice?.(payload.job.message || "Загрузка остановлена лимитом источника. Можно повторить позже.");
+        }
       } catch {
         if (active) {
           setImportJob((current) => current ? { ...current, status: "error", message: "Не удалось получить прогресс загрузки" } : current);
@@ -4690,7 +4693,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const importProgressText = importTotal > 0
     ? `${formatNumber(importLoaded)} из ${formatNumber(importTotal)}`
     : `найдено ${formatNumber(importLoaded)}${importLimit ? ` · лимит до ${formatNumber(importLimit)}` : ""}`;
-  const importMessage = importJob?.status === "error" && importJob?.error
+  const importMessage = ["error", "paused"].includes(importJob?.status) && importJob?.error
     ? `${importJob.message || "Загрузка карточек прервалась"}: ${importJob.error}`
     : importJob?.message || (importRunning ? "MPStats добирает карточки пачками." : "");
 
@@ -4853,7 +4856,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               {importJob ? (
                 <div className={`store-import-progress ${importJob.status || "idle"}`}>
                   <div className="store-import-progress-head">
-                    <strong>{importJob.status === "done" ? "Загрузка завершена" : importJob.status === "error" ? "Загрузка прервалась" : "Загружаем карточки"}</strong>
+                    <strong>{importJob.status === "done" ? "Загрузка завершена" : importJob.status === "paused" ? "Загрузка остановлена" : importJob.status === "error" ? "Загрузка прервалась" : "Загружаем карточки"}</strong>
                     <span>{importProgressText}</span>
                   </div>
                   <div className={`store-import-bar ${importTotal ? "" : "indeterminate"}`}>

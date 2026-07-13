@@ -1515,6 +1515,11 @@ tr.selected-row td {
   background: #fff4ef;
 }
 
+.store-import-progress.paused {
+  border-color: #e7c46c;
+  background: #fffaf0;
+}
+
 .store-import-progress-head {
   display: flex;
   justify-content: space-between;
