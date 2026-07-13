@@ -1625,6 +1625,12 @@ tr.selected-row td {
   font-size: 14px;
 }
 
+.approval-task-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .approval-task-main span,
 .approval-task-meta,
 .approval-events-head span,
@@ -4474,6 +4480,41 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.work-package-modal {
+  width: min(620px, 100%);
+}
+
+.work-type-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.work-type-option {
+  min-height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.work-type-option.active {
+  border-color: #c8d6ff;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.work-type-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
 .form-two {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4631,6 +4672,7 @@ tr:last-child td {
   .report-history-row,
   .cards-work-summary,
   .card-filters,
+  .work-type-picker,
   .project-team-list.compact,
   .team-editor.compact,
   .security-inline-list,

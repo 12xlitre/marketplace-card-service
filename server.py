@@ -1874,6 +1874,8 @@ def public_approval_task(row, snapshot_lookup):
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  work_types = normalize_work_types(batch.get("workTypes"))
   card = snapshot_lookup.get(row["card_key"], {})
   return {
     "portalId": str(row["portal_id"]),
@@ -1889,6 +1891,14 @@ def public_approval_task(row, snapshot_lookup):
     "reviewedBy": str(approval.get("reviewedBy") or ""),
     "reviewedAt": str(approval.get("reviewedAt") or ""),
     "returnReason": str(approval.get("returnReason") or ""),
+    "batchId": str(batch.get("id") or ""),
+    "batchKind": str(batch.get("kind") or ""),
+    "batchCreatedBy": str(batch.get("createdBy") or ""),
+    "batchCreatedAt": str(batch.get("createdAt") or ""),
+    "batchCardsCount": int(batch.get("cardsCount") or 0),
+    "workTypes": work_types,
+    "workTypeLabels": work_type_labels(work_types),
+    "workComment": str(batch.get("comment") or "")[:700],
     "updatedAt": row["updated_at"] or "",
   }
 
@@ -1987,7 +1997,13 @@ def save_portal_workset(portal_id, raw_cards, user):
   return list_portal_workset(numeric_portal_id, user)
 
 
-def workset_batch_draft_payload(card, user, batch_id, existing_payload=None):
+def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, batch_options=None):
+  batch_options = batch_options if isinstance(batch_options, dict) else {}
+  work_types = normalize_work_types(batch_options.get("workTypes"))
+  comment = str(batch_options.get("comment") or "").strip()[:700]
+  assignee_login = str(batch_options.get("assigneeLogin") or "").strip()[:120]
+  created_at = batch_options.get("createdAt") or utc_now().isoformat()
+  cards_count = int(batch_options.get("cardsCount") or 0)
   payload = normalize_card_draft_payload(existing_payload or {})
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
@@ -1996,7 +2012,7 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None):
       **approval,
       "status": "draft",
       "submittedBy": approval.get("submittedBy") or "",
-      "assigneeLogin": approval.get("assigneeLogin") or "",
+      "assigneeLogin": approval.get("assigneeLogin") or assignee_login,
     }
   payload["meta"] = {
     **meta,
@@ -2011,22 +2027,39 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None):
       "id": batch_id,
       "kind": "mass_work_package",
       "createdBy": user["login"],
-      "createdAt": utc_now().isoformat(),
+      "createdAt": created_at,
+      "cardsCount": cards_count,
+      "workTypes": work_types,
+      "workTypeLabels": work_type_labels(work_types),
+      "comment": comment,
     },
   }
   return payload
 
 
-def create_workset_tasks(portal_id, raw_cards, user):
+def create_workset_tasks(portal_id, raw_cards, user, options=None):
   try:
     numeric_portal_id = int(portal_id)
   except (TypeError, ValueError) as exc:
     raise ValueError("invalid_portal_id") from exc
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
+  options = options if isinstance(options, dict) else {}
+  work_types = normalize_work_types(options.get("workTypes"))
+  comment = str(options.get("comment") or "").strip()[:700]
+  team = portal_team_roles(numeric_portal_id)
+  assignee_login = str(options.get("assigneeLogin") or team.get("tech") or "").strip()[:120]
   workset = save_portal_workset(numeric_portal_id, raw_cards, user)
   cards = workset["cards"]
   batch_id = f"batch-{int(time.time())}-{secrets.token_hex(4)}"
+  batch_created_at = utc_now().isoformat()
+  batch_options = {
+    "workTypes": work_types,
+    "comment": comment,
+    "assigneeLogin": assignee_login,
+    "createdAt": batch_created_at,
+    "cardsCount": len(cards),
+  }
   created = 0
   kept = 0
   init_db()
@@ -2042,7 +2075,7 @@ def create_workset_tasks(portal_id, raw_cards, user):
           previous_payload = json.loads(previous["payload_json"])
         except (TypeError, json.JSONDecodeError):
           previous_payload = None
-      payload = workset_batch_draft_payload(card, user, batch_id, previous_payload)
+      payload = workset_batch_draft_payload(card, user, batch_id, previous_payload, batch_options)
       payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
       cursor = db.execute(
         """
@@ -2077,6 +2110,10 @@ def create_workset_tasks(portal_id, raw_cards, user):
   return {
     "portalId": str(numeric_portal_id),
     "batchId": batch_id,
+    "workTypes": work_types,
+    "workTypeLabels": work_type_labels(work_types),
+    "comment": comment,
+    "assigneeLogin": assignee_login,
     "cardsCount": len(cards),
     "tasksCreated": created,
     "tasksUpdated": kept,
@@ -2261,6 +2298,34 @@ APPROVAL_SECTION_LABELS = {
   "prices": "Цены",
   "stocks": "Остатки",
 }
+
+
+WORK_TYPE_LABELS = {
+  "content": "Контент",
+  "prices": "Цены",
+  "stocks": "Остатки",
+}
+
+
+def normalize_work_types(value):
+  if isinstance(value, str):
+    raw_items = re.split(r"[\s,;]+", value)
+  elif isinstance(value, (list, tuple, set)):
+    raw_items = list(value)
+  else:
+    raw_items = []
+  output = []
+  seen = set()
+  for item in raw_items:
+    key = str(item or "").strip().lower()
+    if key in WORK_TYPE_LABELS and key not in seen:
+      seen.add(key)
+      output.append(key)
+  return output or ["content"]
+
+
+def work_type_labels(work_types):
+  return [WORK_TYPE_LABELS.get(item, item) for item in normalize_work_types(work_types)]
 
 
 def approval_sections_from_payload(payload):
@@ -10671,7 +10736,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       payload = self.read_json() or {}
       try:
-        result = create_workset_tasks(payload.get("portalId"), payload.get("cards"), user)
+        result = create_workset_tasks(payload.get("portalId"), payload.get("cards"), user, {
+          "workTypes": payload.get("workTypes"),
+          "comment": payload.get("comment"),
+          "assigneeLogin": payload.get("assigneeLogin"),
+        })
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return

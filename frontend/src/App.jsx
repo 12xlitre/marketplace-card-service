@@ -783,6 +783,29 @@ function approvalStatusTone(status) {
   return "blue";
 }
 
+const workTypeOptions = [
+  { key: "content", label: "Контент" },
+  { key: "prices", label: "Цены" },
+  { key: "stocks", label: "Остатки" },
+];
+
+function normalizeWorkTypes(value) {
+  const allowed = new Set(workTypeOptions.map((item) => item.key));
+  const output = [];
+  (Array.isArray(value) ? value : []).forEach((item) => {
+    const key = String(item || "").trim();
+    if (allowed.has(key) && !output.includes(key)) {
+      output.push(key);
+    }
+  });
+  return output.length ? output : ["content"];
+}
+
+function workTypeLabels(value) {
+  const labelByKey = Object.fromEntries(workTypeOptions.map((item) => [item.key, item.label]));
+  return normalizeWorkTypes(value).map((key) => labelByKey[key] || key);
+}
+
 function defaultApprovalWorkflow() {
   return {
     tasks: [],
@@ -1029,8 +1052,9 @@ function cardCompleteness(card) {
 
 function cardWorkStateForTask(card, selectedSet, task) {
   if (task) {
+    const labels = workTypeLabels(task.workTypes);
     return {
-      label: approvalStatusLabel(task.status),
+      label: labels.length ? labels.join(", ") : approvalStatusLabel(task.status),
       tone: approvalStatusTone(task.status),
     };
   }
@@ -5039,6 +5063,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
+  const [workPackageOpen, setWorkPackageOpen] = useState(false);
+  const [workPackageForm, setWorkPackageForm] = useState({ workTypes: ["content"], comment: "" });
   const [worksetLoaded, setWorksetLoaded] = useState(Boolean(portal?.isDemo));
   const [worksetStatus, setWorksetStatus] = useState("idle");
   const [batchStatus, setBatchStatus] = useState("idle");
@@ -5046,6 +5072,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
 
   useEffect(() => {
     setSelectedKeys(readCardWorkset(storageKey));
+    setWorkPackageOpen(false);
+    setWorkPackageForm({ workTypes: ["content"], comment: "" });
     setWorksetLoaded(Boolean(portal?.isDemo));
     setWorksetStatus("idle");
     setBatchStatus("idle");
@@ -5212,10 +5240,11 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
     setWorkFilter(work);
   }
 
-  async function createWorkPackage() {
+  async function createWorkPackage(options = workPackageForm) {
     if (!selectedCards.length || portal?.isDemo) {
       return;
     }
+    const workTypes = normalizeWorkTypes(options.workTypes);
     setBatchStatus("saving");
     try {
       const payload = await apiRequest("/api/card-workset/create-tasks", {
@@ -5223,6 +5252,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
         body: JSON.stringify({
           portalId: portal.id,
           cards: selectedCards.map(cardWorksetPayload),
+          workTypes,
+          comment: String(options.comment || "").trim(),
         }),
       });
       if (payload.workflow && onWorkflowChange) {
@@ -5232,6 +5263,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
       if (keys.length) {
         setSelectedKeys(keys);
       }
+      setWorkPackageOpen(false);
       setBatchStatus("created");
     } catch {
       setBatchStatus("error");
@@ -5326,7 +5358,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
             {batchStatus === "error" ? " · не удалось взять в работу" : ""}
           </span>
           <div className="toolbar">
-            <button className="btn primary" type="button" onClick={createWorkPackage} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"}>
+            <button className="btn primary" type="button" onClick={() => setWorkPackageOpen(true)} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"}>
               <Plus size={16} />{batchStatus === "saving" ? "Берем в работу" : "Взять в работу"}
             </button>
             <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
@@ -5337,6 +5369,17 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
           </div>
         </div>
       </div>
+
+      {workPackageOpen ? (
+        <WorkPackageModal
+          selectedCount={selectedCards.length}
+          value={workPackageForm}
+          loading={batchStatus === "saving"}
+          onChange={setWorkPackageForm}
+          onClose={() => setWorkPackageOpen(false)}
+          onSubmit={(nextValue) => createWorkPackage(nextValue)}
+        />
+      ) : null}
 
       {visibleCards.length ? (
         <div className="table-wrap cards-table-wrap">
@@ -5403,9 +5446,63 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   );
 }
 
+function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, onSubmit }) {
+  const workTypes = normalizeWorkTypes(value.workTypes);
+  const comment = value.comment || "";
+  const toggleType = (key) => {
+    if (workTypes.length === 1 && workTypes.includes(key)) {
+      return;
+    }
+    const nextTypes = workTypes.includes(key)
+      ? workTypes.filter((item) => item !== key)
+      : [...workTypes, key];
+    onChange({ ...value, workTypes: nextTypes });
+  };
+  const updateComment = (event) => {
+    onChange({ ...value, comment: event.target.value });
+  };
+  const submit = (event) => {
+    event.preventDefault();
+    onSubmit({ workTypes, comment });
+  };
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="modal work-package-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <h2>Взять карточки в работу</h2>
+            <p>{formatNumber(selectedCount)} {pluralRu(selectedCount, "карточка", "карточки", "карточек")} попадет в задачу техническому специалисту.</p>
+          </div>
+          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+        </div>
+        <div className="modal-body">
+          <div className="work-type-picker">
+            {workTypeOptions.map((option) => (
+              <label className={`work-type-option ${workTypes.includes(option.key) ? "active" : ""}`} key={option.key}>
+                <input type="checkbox" checked={workTypes.includes(option.key)} onChange={() => toggleType(option.key)} />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          <label className="field-label">
+            Комментарий
+            <textarea value={comment} onChange={updateComment} placeholder="Например: проверить заголовки и описание перед согласованием." />
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className="btn primary" type="submit" disabled={loading || !workTypes.length}>
+            {loading ? "Создаем задачу" : "Создать задачу"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }) {
   const tasks = workflow.tasks || [];
-  const activeTasks = tasks.filter((task) => ["submitted", "changes_requested"].includes(task.status));
+  const activeTasks = tasks.filter((task) => ["draft", "submitted", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
   const cardKeys = new Set(cards.map(cardDraftKey));
@@ -5414,7 +5511,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
       <div className="strip-head">
         <div>
           <h2>Задачи и согласование</h2>
-          <p>Очередь карточек для аккаунт-менеджера и история решений по кабинету.</p>
+          <p>Очередь карточек для технического специалиста, согласование и история решений по кабинету.</p>
         </div>
         <Tag tone={activeTasks.length ? "amber" : "green"}>
           {status === "loading" ? "загрузка" : `${activeTasks.length} ${pluralRu(activeTasks.length, "задача", "задачи", "задач")}`}
@@ -5430,6 +5527,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
           const canOpen = cardKeys.has(task.cardKey);
           const assignee = findUser(task.assigneeLogin);
           const author = findUser(task.submittedBy);
+          const labels = Array.isArray(task.workTypeLabels) && task.workTypeLabels.length ? task.workTypeLabels : workTypeLabels(task.workTypes);
           return (
             <article className="approval-task-card" key={`${task.cardKey}-${task.status}`}>
               <div className="approval-task-main">
@@ -5439,15 +5537,20 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
                 </div>
                 <Tag tone={approvalStatusTone(task.status)}>{approvalStatusLabel(task.status)}</Tag>
               </div>
+              <div className="approval-task-tags">
+                {labels.map((label) => <Tag tone="blue" key={label}>{label}</Tag>)}
+                {task.batchCardsCount ? <Tag tone="amber">{formatNumber(task.batchCardsCount)} в пачке</Tag> : null}
+              </div>
               <div className="approval-task-meta">
                 <span>Автор: {author?.full_name || task.submittedBy || "не указан"}</span>
-                <span>Согласует: {assignee?.full_name || task.assigneeLogin || "аккаунт-менеджер"}</span>
+                <span>Исполнитель: {assignee?.full_name || task.assigneeLogin || "техспециалист не задан"}</span>
                 <span>{task.submittedAt ? new Date(task.submittedAt).toLocaleString("ru-RU") : "без даты"}</span>
               </div>
+              {task.workComment ? <p className="approval-task-reason">{task.workComment}</p> : null}
               {task.returnReason ? <p className="approval-task-reason">{task.returnReason}</p> : null}
               <div className="approval-task-actions">
                 <button className="btn primary" type="button" onClick={() => onOpenTask(task)} disabled={!canOpen}>
-                  <Eye size={17} />Открыть изменения
+                  <Eye size={17} />{task.status === "draft" ? "Открыть карточку" : "Открыть изменения"}
                 </button>
               </div>
             </article>
