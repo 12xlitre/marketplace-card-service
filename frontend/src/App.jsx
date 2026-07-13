@@ -5270,6 +5270,66 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
     || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
   const auditPreparedChangesCount = changedDraftCharacteristicsCount + (auditContentChanged ? 1 : 0);
+  const priceBaseDraft = priceDraftFromCard(card);
+  const priceChangeCount = [
+    normalizedCharacteristicOption(draftPrices.price) !== normalizedCharacteristicOption(priceBaseDraft.price),
+    normalizedCharacteristicOption(draftPrices.discount) !== normalizedCharacteristicOption(priceBaseDraft.discount),
+    draftPrices.recommendationSource === "manual"
+      && normalizedCharacteristicOption(draftPrices.recommendation) !== normalizedCharacteristicOption(buildPriceRecommendation(card, draftPrices)),
+  ].filter(Boolean).length;
+  const stockChangeCount = draftStockRows.filter((row) => (
+    normalizedCharacteristicOption(row.amount) !== normalizedCharacteristicOption(row.currentAmount)
+  )).length;
+  const changesReadinessSections = [
+    {
+      key: "content",
+      label: "Контент",
+      Icon: FileText,
+      approval: approvalSections.content,
+      changesCount: auditPreparedChangesCount,
+      detail: [
+        auditContentChanged ? "текст" : "",
+        changedDraftCharacteristicsCount ? `${changedDraftCharacteristicsCount} ${pluralRu(changedDraftCharacteristicsCount, "характеристика", "характеристики", "характеристик")}` : "",
+      ].filter(Boolean).join(" · ") || "нет правок",
+      downloadLabel: "Скачать контент",
+    },
+    {
+      key: "prices",
+      label: "Цены",
+      Icon: Tags,
+      approval: approvalSections.prices,
+      changesCount: priceChangeCount,
+      detail: priceChangeCount ? `${priceChangeCount} ${pluralRu(priceChangeCount, "правка", "правки", "правок")}` : "нет правок",
+      downloadLabel: "Скачать цены",
+    },
+    {
+      key: "stocks",
+      label: "Остатки",
+      Icon: Warehouse,
+      approval: approvalSections.stocks,
+      changesCount: stockChangeCount,
+      detail: stockChangeCount ? `${stockChangeCount} ${pluralRu(stockChangeCount, "размер", "размера", "размеров")}` : "нет правок",
+      downloadLabel: "Скачать остатки",
+    },
+  ];
+  const approvalCounts = changesReadinessSections.reduce((acc, section) => {
+    const status = section.approval.status;
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const approvedOrExportedCount = (approvalCounts.approved || 0) + (approvalCounts.exported || 0);
+  const readyForApprovalCount = changesReadinessSections.filter((section) => (
+    ["draft", "changes_requested"].includes(section.approval.status) && section.changesCount > 0
+  )).length;
+  const changesReadinessCopy = approvalCounts.submitted
+    ? `${approvalCounts.submitted} ${pluralRu(approvalCounts.submitted, "блок", "блока", "блоков")} на согласовании у аккаунт-менеджера.`
+    : approvalCounts.changes_requested
+      ? `${approvalCounts.changes_requested} ${pluralRu(approvalCounts.changes_requested, "блок", "блока", "блоков")} вернули на доработку.`
+      : approvedOrExportedCount
+        ? `${approvedOrExportedCount} ${pluralRu(approvedOrExportedCount, "блок", "блока", "блоков")} принято, можно выгружать.`
+        : readyForApprovalCount
+          ? `${readyForApprovalCount} ${pluralRu(readyForApprovalCount, "блок готов", "блока готовы", "блоков готовы")} к отправке на согласование.`
+          : "Подготовьте черновик, затем отправьте нужный блок на согласование.";
   const auditStatusText = auditRunning ? "Идет аудит" : auditDone ? "Аудит готов" : auditStale ? "Аудит устарел" : "Аудит не запускался";
   const auditStatusTone = auditRunning ? "blue" : auditDone ? "green" : auditStale ? "amber" : "amber";
   const auditNextStep = auditRunning
@@ -7000,7 +7060,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 </div>
                 <div className="strip-head">
                   <div>
-                    <h2>Текущее / черновик</h2>
+                    <h2>Изменения и согласование</h2>
                     <p>{auditDone
                       ? "Рекомендации аудита помечены, но любые поля можно править вручную."
                       : auditStale
@@ -7020,6 +7080,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <Tag tone={mpstatsHintsTone} title={mpstatsHintsTitle}>{mpstatsHintsLabel}</Tag>
                   </div>
                 </div>
+                <ChangesReadinessPanel
+                  sections={changesReadinessSections}
+                  activeSection={activeApprovalSection}
+                  summary={changesReadinessCopy}
+                  onSelect={setChangesTab}
+                  onDownload={downloadDraftTable}
+                />
                 <div className="changes-tabs" aria-label="Тип изменений">
                   <button className={changesTab === "content" ? "active" : ""} type="button" onClick={() => setChangesTab("content")}>
                     <span className="changes-tab-title"><FileText size={17} />Контент</span>
@@ -7919,6 +7986,72 @@ function RawFieldValue({ value }) {
     return <CharacteristicsList items={value} />;
   }
   return <pre className="json-value">{JSON.stringify(value, null, 2)}</pre>;
+}
+
+function changesReadinessActionLabel(section) {
+  if (section.approval.status === "approved" || section.approval.status === "exported") {
+    return section.downloadLabel;
+  }
+  if (section.approval.status === "submitted") {
+    return "Открыть";
+  }
+  if (section.approval.status === "changes_requested") {
+    return "Доработать";
+  }
+  return section.changesCount ? "Открыть и отправить" : "Открыть";
+}
+
+function changesReadinessStatusText(section) {
+  if (section.approval.status === "approved" || section.approval.status === "exported") {
+    return "принято, можно выгружать";
+  }
+  if (section.approval.status === "submitted") {
+    return "ждет решения аккаунт-менеджера";
+  }
+  if (section.approval.status === "changes_requested") {
+    return "нужно доработать";
+  }
+  return section.changesCount ? "готово к согласованию" : "в работе";
+}
+
+function ChangesReadinessPanel({ sections, activeSection, summary, onSelect, onDownload }) {
+  return (
+    <div className="changes-readiness">
+      <div className="changes-readiness-head">
+        <div>
+          <span>Что готово к согласованию</span>
+          <strong>{summary}</strong>
+        </div>
+      </div>
+      <div className="changes-readiness-grid">
+        {sections.map((section) => {
+          const Icon = section.Icon;
+          const accepted = section.approval.status === "approved" || section.approval.status === "exported";
+          return (
+            <article className={`changes-readiness-card ${activeSection === section.key ? "active" : ""}`} key={section.key}>
+              <div className="changes-readiness-title">
+                <Icon size={18} />
+                <strong>{section.label}</strong>
+                <Tag tone={approvalStatusTone(section.approval.status)}>{approvalStatusLabel(section.approval.status)}</Tag>
+              </div>
+              <p>{changesReadinessStatusText(section)}</p>
+              <span>{section.detail}</span>
+              <div className="changes-readiness-actions">
+                <button
+                  className={accepted ? "btn primary mini" : "btn mini"}
+                  type="button"
+                  onClick={() => accepted ? onDownload(section.key) : onSelect(section.key)}
+                >
+                  {accepted ? <Download size={14} /> : null}{changesReadinessActionLabel(section)}
+                </button>
+                {!accepted && section.changesCount > 0 ? <em>{section.changesCount} {pluralRu(section.changesCount, "правка", "правки", "правок")}</em> : null}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function ApprovalPanel({
