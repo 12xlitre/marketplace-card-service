@@ -2322,11 +2322,13 @@ function semanticMergeKeywordRankings(core, payload) {
     ...(Array.isArray(payload.semanticCore?.recommended) ? payload.semanticCore.recommended : []),
   ];
   const rankingByKey = new Map();
+  const rankedKeywords = [];
   rankingRows.forEach((item) => {
     const key = semanticQueryKey(item);
     const fields = semanticRankFields(item, payload.period || null);
     if (key && Object.keys(fields).length) {
       rankingByKey.set(key, fields);
+      rankedKeywords.push({ ...item, ...fields });
     }
   });
   if (!rankingByKey.size) return core;
@@ -2340,6 +2342,7 @@ function semanticMergeKeywordRankings(core, payload) {
     recommended: mergeItems(core.recommended),
     missing: mergeItems(core.missing),
     allKeywords: mergeItems(core.allKeywords),
+    rankedKeywords,
     rankingSource: payload.source || "mpstats",
     rankingPeriod: payload.period || core.rankingPeriod,
   };
@@ -2407,8 +2410,16 @@ function compactSemanticCore(core) {
     return output;
   };
   const recommendedSource = Array.isArray(core.recommended) && core.recommended.length ? core.recommended : core.missing;
+  const rankedSource = Array.isArray(core.rankedKeywords) && core.rankedKeywords.length
+    ? core.rankedKeywords
+    : [
+      ...(Array.isArray(core.allKeywords) ? core.allKeywords : []),
+      ...(Array.isArray(core.current) ? core.current : []),
+      ...(Array.isArray(recommendedSource) ? recommendedSource : []),
+    ].filter(semanticHasKeywordRank);
   const compactCurrent = compactItems(core.current, 800, { prioritizeRanked: true });
   const compactRecommended = compactItems(recommendedSource, 1200);
+  const compactRankedKeywords = compactItems(rankedSource, 800, { prioritizeRanked: true });
   return {
     source: core.source || "mpstats-expanding",
     seedQuery: core.seedQuery || "",
@@ -2417,6 +2428,7 @@ function compactSemanticCore(core) {
     recommended: compactRecommended,
     missing: [],
     allKeywords: [],
+    rankedKeywords: compactRankedKeywords,
     subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, 200),
     totalKeywords: Number(core.totalKeywords || 0),
     coveragePercent: core.coveragePercent ?? null,
@@ -8854,14 +8866,11 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
   const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
   const allKeywords = Array.isArray(semanticCore?.allKeywords) ? semanticCore.allKeywords : [];
+  const rankedKeywords = Array.isArray(semanticCore?.rankedKeywords) ? semanticCore.rankedKeywords : [];
   const selectedItems = current.filter((item) => item.status === "selected");
   const currentItems = current.filter((item) => item.status !== "selected");
   const rankedCurrentItems = currentItems.filter(semanticHasKeywordRank);
   const rankedCurrentCount = rankedCurrentItems.length;
-  const currentRankValues = currentItems
-    .flatMap((item) => [semanticRankValue(item.orgPos), semanticRankValue(item.avgPos), semanticRankValue(item.adPos)])
-    .filter(Boolean);
-  const bestCurrentRank = currentRankValues.length ? Math.min(...currentRankValues) : "";
   const workItems = recommended.length ? recommended : missing;
   const coverage = semanticCore?.coveragePercent;
   const selectedLimit = compact ? 4 : standalone ? 500 : 8;
@@ -8874,9 +8883,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = allKeywords.length ? allKeywords : workItems;
+  const allRankedItems = rankedKeywords.length ? rankedKeywords : sourceItems.filter(semanticHasKeywordRank);
   const reportTotal = semanticCore?.totalKeywords || sourceItems.length || current.length + missing.length;
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
+    .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredAllRankedItems = allRankedItems
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredWorkItems = filteredSourceItems
@@ -8892,12 +8905,16 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
-  const displayedCurrentItems = metricFilter === "ranked"
+  const displayedCurrentItems = metricFilter === "allRanked"
+    ? filteredAllRankedItems
+    : metricFilter === "ranked"
     ? rankedCurrentItems
     : metricFilter === "current" || metricFilter === "all"
       ? currentItems
       : [];
-  const leftListTitle = metricFilter === "ranked"
+  const leftListTitle = metricFilter === "allRanked"
+    ? "Все запросы с позициями MPStats"
+    : metricFilter === "ranked"
     ? "Действующие с позициями"
     : metricFilter === "current"
       ? "Действующие ключи"
@@ -8918,10 +8935,10 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             <span>Действующие</span><strong>{formatNumber(currentItems.length)}</strong>
           </button>
           <button className={`semantic-metric ${metricFilter === "ranked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("ranked")}>
-            <span>С позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong>
+            <span>Действ. с позициями</span><strong>{formatNumber(rankedCurrentCount)}</strong>
           </button>
-          <button className={`semantic-metric ${metricFilter === "ranked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("ranked")}>
-            <span>Лучшая позиция</span><strong>{bestCurrentRank ? `#${formatNumber(bestCurrentRank)}` : "—"}</strong>
+          <button className={`semantic-metric ${metricFilter === "allRanked" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("allRanked")}>
+            <span>Все позиции MPStats</span><strong>{formatNumber(filteredAllRankedItems.length)}</strong>
           </button>
           <button className={`semantic-metric ${metricFilter === "selected" ? "active" : ""}`} type="button" onClick={() => toggleMetricFilter("selected")}>
             <span>Добавленные</span><strong>{formatNumber(selectedItems.length)}</strong>
@@ -8957,7 +8974,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                  <em>{semanticKeywordMeta(item) || (metricFilter === "allRanked" ? "позиция MPStats" : "найдено в текущем контенте")}</em>
                   {standalone ? (
                     <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
                       {semanticKeywordRankLabel(item)}
@@ -8966,8 +8983,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} действующих. Полный список попадет в Excel.</p> : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
+            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} {metricFilter === "allRanked" ? "запросов с позициями" : "действующих"}. Полный список попадет в Excel.</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "allRanked" ? "Запросов MPStats с позициями нет." : metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
