@@ -3962,6 +3962,26 @@ tr:last-child td {
   gap: 8px;
 }
 
+.admin-user-access {
+  display: grid;
+  gap: 4px;
+  align-self: center;
+  min-width: 0;
+}
+
+.admin-user-access span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.admin-user-access strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
 .switch-row {
   display: inline-flex;
   align-items: center;
@@ -4009,6 +4029,86 @@ tr:last-child td {
   border-radius: 8px;
   background: var(--surface-soft);
   padding: 10px;
+}
+
+.admin-events-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-event-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, auto) minmax(150px, auto);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px 12px;
+}
+
+.admin-event-row div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.admin-event-row strong,
+.admin-event-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-event-row strong {
+  font-size: 13px;
+}
+
+.admin-event-row span,
+.admin-event-row em,
+.admin-event-row time {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.integration-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.integration-card {
+  display: grid;
+  gap: 10px;
+  align-content: space-between;
+  min-height: 112px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.integration-card div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.integration-card strong {
+  font-size: 13px;
+}
+
+.integration-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.admin-wb-token-list {
+  display: grid;
+  gap: 8px;
 }
 
 .integration-form {
@@ -4325,6 +4425,8 @@ tr:last-child td {
   .semantic-history-row,
   .settings-grid,
   .admin-user-row,
+  .admin-event-row,
+  .integration-card-grid,
   .competitor-toolbar,
   .competitor-summary,
   .competitor-data-grid,

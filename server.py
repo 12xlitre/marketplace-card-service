@@ -317,6 +317,17 @@ def init_db():
         last_checked_at TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS admin_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_login TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL,
+        target_type TEXT NOT NULL DEFAULT '',
+        target_id TEXT NOT NULL DEFAULT '',
+        portal_id INTEGER,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS mpstats_characteristics_cache (
         cache_key TEXT PRIMARY KEY,
         report_type TEXT NOT NULL,
@@ -372,6 +383,18 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_drafts_portal_card
       ON card_drafts(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_admin_events_created_at
+      ON admin_events(created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_admin_events_portal
+      ON admin_events(portal_id, created_at)
       """
     )
     db.execute(
@@ -448,6 +471,119 @@ def public_user(row):
     "user_role": row["user_role"],
     "access_level": row["access_level"],
     "is_active": bool(row["is_active"]) if "is_active" in row.keys() else True,
+  }
+
+
+def admin_event_details(details):
+  if not isinstance(details, dict):
+    return {}
+  blocked_keys = {"password", "apiKey", "api_key", "token", "secret", "token_ciphertext", "token_nonce"}
+  output = {}
+  for key, value in details.items():
+    if key in blocked_keys:
+      continue
+    if isinstance(value, (str, int, float, bool)) or value is None:
+      output[key] = str(value)[:240] if isinstance(value, str) else value
+    elif isinstance(value, (list, tuple)):
+      output[key] = [str(item)[:160] if not isinstance(item, (int, float, bool)) else item for item in value[:12]]
+    elif isinstance(value, dict):
+      output[key] = {
+        str(inner_key)[:80]: (str(inner_value)[:160] if not isinstance(inner_value, (int, float, bool)) else inner_value)
+        for inner_key, inner_value in list(value.items())[:20]
+        if inner_key not in blocked_keys
+      }
+  return output
+
+
+def record_admin_event(actor, action, target_type="", target_id="", portal_id=None, details=None):
+  actor_login = actor["login"] if isinstance(actor, sqlite3.Row) else (actor or {}).get("login", "")
+  clean_action = str(action or "").strip()[:80]
+  if not clean_action:
+    return
+  try:
+    numeric_portal_id = int(portal_id) if portal_id not in (None, "") else None
+  except (TypeError, ValueError):
+    numeric_portal_id = None
+  try:
+    init_db()
+    with connect_db() as db:
+      db.execute(
+        """
+        INSERT INTO admin_events (actor_login, action, target_type, target_id, portal_id, details_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+          str(actor_login or "")[:120],
+          clean_action,
+          str(target_type or "")[:80],
+          str(target_id or "")[:160],
+          numeric_portal_id,
+          json.dumps(admin_event_details(details), ensure_ascii=False, separators=(",", ":")),
+        ),
+      )
+  except Exception as exc:
+    print(f"Admin event record failed: {type(exc).__name__}: {exc}")
+
+
+def public_admin_event(row):
+  try:
+    details = json.loads(row["details_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    details = {}
+  return {
+    "id": row["id"],
+    "actorLogin": row["actor_login"] or "",
+    "action": row["action"] or "",
+    "targetType": row["target_type"] or "",
+    "targetId": row["target_id"] or "",
+    "portalId": str(row["portal_id"]) if row["portal_id"] is not None else "",
+    "details": details if isinstance(details, dict) else {},
+    "createdAt": row["created_at"] or "",
+  }
+
+
+def list_admin_events(user, limit=80):
+  if not user_can_manage_portals(user):
+    raise PermissionError("forbidden")
+  limit = max(1, min(int(limit or 80), 200))
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT id, actor_login, action, target_type, target_id, portal_id, details_json, created_at
+      FROM admin_events
+      ORDER BY id DESC
+      LIMIT ?
+      """,
+      (limit,),
+    ).fetchall()
+  return [public_admin_event(row) for row in rows]
+
+
+def admin_system_status(user):
+  if not user_can_manage_portals(user):
+    raise PermissionError("forbidden")
+  provider = OPTICARDS_LLM_PROVIDER or "openai"
+  if provider == "gigachat":
+    configured = bool(GIGACHAT_AUTH_KEY)
+    model = GIGACHAT_MODEL
+    source = "GigaChat"
+  else:
+    configured = bool(OPTICARDS_LLM_API_KEY)
+    model = OPTICARDS_LLM_MODEL
+    source = provider or "OpenAI-compatible"
+  return {
+    "llm": {
+      "provider": provider,
+      "source": source,
+      "model": model,
+      "configured": configured,
+      "status": "configured" if configured else "missing",
+    },
+    "storage": {
+      "secretKeyConfigured": bool(os.environ.get(SECRET_KEY_ENV, "").strip()),
+      "database": DB_PATH.name,
+    },
   }
 
 
@@ -1109,12 +1245,20 @@ def get_portal_row(portal_id, user=None):
     ).fetchone()
 
 
-def update_portal_team(portal_id, team):
+def update_portal_team(portal_id, team, actor=None):
   init_db()
+  previous_team = {}
   with connect_db() as db:
-    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (portal_id,)).fetchone()
     if not portal:
       return None
+    previous_team = {
+      row["project_role"]: row["user_login"]
+      for row in db.execute(
+        "SELECT project_role, user_login FROM portal_members WHERE portal_id = ?",
+        (portal_id,),
+      ).fetchall()
+    }
     db.execute("DELETE FROM portal_members WHERE portal_id = ?", (portal_id,))
     for project_role, user_login in team.items():
       if user_login:
@@ -1129,20 +1273,27 @@ def update_portal_team(portal_id, team):
       "UPDATE portals SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
       (portal_id,),
     )
+  record_admin_event(actor, "portal_team_updated", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": portal["name"] if portal else "",
+    "previousTeam": previous_team,
+    "nextTeam": team,
+  })
   return get_portal_row(portal_id)
 
 
-def update_portal_name(portal_id, name):
+def update_portal_name(portal_id, name, actor=None):
   clean_name = wb_clean_portal_name(name)
   if not clean_name:
     raise ValueError("portal_name_required")
   if len(str(name or "").strip()) > 120:
     raise ValueError("portal_name_too_long")
   init_db()
+  old_name = ""
   with connect_db() as db:
-    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (portal_id,)).fetchone()
     if not portal:
       return None
+    old_name = portal["name"] or ""
     db.execute(
       """
       UPDATE portals
@@ -1151,15 +1302,21 @@ def update_portal_name(portal_id, name):
       """,
       (clean_name, portal_id),
     )
+  record_admin_event(actor, "portal_name_updated", "portal", portal_id, portal_id=portal_id, details={
+    "oldName": old_name,
+    "newName": clean_name,
+  })
   return get_portal_row(portal_id)
 
 
-def set_portal_active(portal_id, is_active):
+def set_portal_active(portal_id, is_active, actor=None):
   init_db()
+  portal_name = ""
   with connect_db() as db:
-    portal = db.execute("SELECT id FROM portals WHERE id = ?", (portal_id,)).fetchone()
+    portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (portal_id,)).fetchone()
     if not portal:
       return None
+    portal_name = portal["name"] or ""
     db.execute(
       """
       UPDATE portals
@@ -1168,6 +1325,9 @@ def set_portal_active(portal_id, is_active):
       """,
       (1 if is_active else 0, portal_id),
     )
+  record_admin_event(actor, "portal_restored" if is_active else "portal_archived", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": portal_name,
+  })
   return get_portal_row(portal_id)
 
 
@@ -4148,6 +4308,12 @@ def create_user_account(payload, current_user):
       "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ?",
       (login,),
     ).fetchone()
+  record_admin_event(current_user, "user_created", "user", login, details={
+    "fullName": full_name,
+    "role": role,
+    "userRole": user_role,
+    "accessLevel": access_level,
+  })
   return public_user(row), password
 
 
@@ -4199,6 +4365,13 @@ def update_user_account(payload, current_user):
       "SELECT login, full_name, role, user_role, access_level, is_active FROM users WHERE login = ?",
       (login,),
     ).fetchone()
+  record_admin_event(current_user, "user_updated", "user", login, details={
+    "fullName": full_name,
+    "role": role,
+    "userRole": user_role,
+    "accessLevel": access_level,
+    "isActive": is_active,
+  })
   return public_user(updated)
 
 
@@ -4227,6 +4400,7 @@ def reset_user_password(payload, current_user):
       """,
       (hash_password(password), login),
     )
+  record_admin_event(current_user, "password_reset", "user", login)
   return public_user(row), password
 
 
@@ -9285,6 +9459,31 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, {"users": [public_user(row) for row in rows]})
       return
 
+    if path == "/api/admin-events":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      try:
+        limit = int(query.get("limit", ["80"])[0])
+      except ValueError:
+        limit = 80
+      try:
+        self.send_json(HTTPStatus.OK, {"events": list_admin_events(user, limit=limit)})
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      return
+
+    if path == "/api/admin-status":
+      user = self.require_user()
+      if not user:
+        return
+      try:
+        self.send_json(HTTPStatus.OK, admin_system_status(user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      return
+
     if path == "/api/portals":
       user = self.require_user()
       if not user:
@@ -9683,6 +9882,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return
+      record_admin_event(user, "wb_token_replaced", "portal", portal_id, portal_id=portal_id, details={
+        "portalName": row["name"] if row else "",
+        "cardCount": (snapshot.get("stats") or {}).get("cardCount", 0),
+        "tokenExpiresAt": (snapshot.get("tokenMeta") or {}).get("expiresAt", ""),
+      })
       self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
       return
 
@@ -9845,6 +10049,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       try:
         save_service_integration(MPSTATS_PROVIDER, api_key, user)
         result = check_mpstats_connection()
+        record_admin_event(user, "service_integration_saved", "integration", MPSTATS_PROVIDER, details={
+          "provider": MPSTATS_PROVIDER,
+          "status": result.get("status") or "",
+        })
       except RuntimeError:
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
@@ -10283,7 +10491,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
 
-      row = set_portal_active(portal_id, action == "restore")
+      row = set_portal_active(portal_id, action == "restore", actor=user)
       if not row:
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
         return
@@ -10306,7 +10514,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       payload = self.read_json() or {}
       team = clean_portal_team(payload.get("teamRoles"))
       try:
-        row = update_portal_team(portal_id, team)
+        row = update_portal_team(portal_id, team, actor=user)
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
@@ -10331,7 +10539,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       payload = self.read_json() or {}
       try:
-        row = update_portal_name(portal_id, payload.get("name"))
+        row = update_portal_name(portal_id, payload.get("name"), actor=user)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_name"})
         return

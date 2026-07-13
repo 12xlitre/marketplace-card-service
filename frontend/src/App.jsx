@@ -9125,9 +9125,37 @@ function CardRecoveryScreen({ loading, onBack }) {
 const defaultNewUserForm = {
   login: "svetlana.manager",
   fullName: "Светлана Дементьева",
+  profile: "account",
   role: "Аккаунт-менеджер",
   userRole: "manager",
   accessLevel: "overview",
+};
+
+const rolePresets = {
+  admin: {
+    label: "Администратор",
+    role: "Администратор",
+    userRole: "admin",
+    accessLevel: "all",
+  },
+  lead: {
+    label: "Руководитель",
+    role: "Руководитель отдела",
+    userRole: "manager",
+    accessLevel: "all",
+  },
+  account: {
+    label: "Аккаунт-менеджер",
+    role: "Аккаунт-менеджер",
+    userRole: "manager",
+    accessLevel: "overview",
+  },
+  tech: {
+    label: "Техспец",
+    role: "Технический специалист",
+    userRole: "tech",
+    accessLevel: "readonly_wb",
+  },
 };
 
 const userRoleLabels = {
@@ -9142,13 +9170,71 @@ const accessLevelLabels = {
   readonly_wb: "Карточки WB",
 };
 
+const adminEventLabels = {
+  user_created: "Создан сотрудник",
+  user_updated: "Изменен сотрудник",
+  password_reset: "Сброшен пароль",
+  portal_team_updated: "Изменены доступы",
+  portal_name_updated: "Переименован кабинет",
+  portal_archived: "Кабинет отправлен в архив",
+  portal_restored: "Кабинет восстановлен",
+  wb_token_replaced: "Заменен WB API ключ",
+  service_integration_saved: "Сохранена интеграция",
+};
+
 function activeDirectoryUsers(users) {
   return users.filter((user) => user.isActive !== false);
+}
+
+function userProfileKey(user) {
+  if (user.user_role === "admin") return "admin";
+  if (user.user_role === "tech") return "tech";
+  if (user.access_level === "all") return "lead";
+  return "account";
+}
+
+function applyRolePresetToUserPayload(profileKey) {
+  const preset = rolePresets[profileKey] || rolePresets.account;
+  return {
+    profile: profileKey,
+    role: preset.role,
+    userRole: preset.userRole,
+    accessLevel: preset.accessLevel,
+  };
+}
+
+function adminEventTitle(event) {
+  return adminEventLabels[event?.action] || event?.action || "Событие";
+}
+
+function adminEventDetailsText(event) {
+  const details = event?.details || {};
+  if (event?.action === "user_updated" || event?.action === "user_created") {
+    const profile = userRoleLabels[details.userRole] || details.userRole || "";
+    const access = accessLevelLabels[details.accessLevel] || details.accessLevel || "";
+    return [details.fullName, details.role, profile, access].filter(Boolean).join(" · ");
+  }
+  if (event?.action === "portal_team_updated") {
+    return details.portalName || event.targetId || "Кабинет";
+  }
+  if (event?.action === "portal_name_updated") {
+    return `${details.oldName || "Без названия"} -> ${details.newName || "Без названия"}`;
+  }
+  if (event?.action === "wb_token_replaced") {
+    return [details.portalName, details.tokenExpiresAt ? `до ${details.tokenExpiresAt}` : ""].filter(Boolean).join(" · ");
+  }
+  if (event?.action === "service_integration_saved") {
+    return [details.provider, details.status].filter(Boolean).join(" · ");
+  }
+  return details.portalName || event?.targetId || "";
 }
 
 function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
   const [adminTab, setAdminTab] = useState("users");
   const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
+  const [adminEvents, setAdminEvents] = useState([]);
+  const [adminEventsStatus, setAdminEventsStatus] = useState("idle");
+  const [adminStatus, setAdminStatus] = useState(null);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
   const [newUserForm, setNewUserForm] = useState(defaultNewUserForm);
@@ -9185,6 +9271,38 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
     setMpstatsIntegration(initialMpstatsIntegration);
   }, [initialMpstatsIntegration]);
 
+  useEffect(() => {
+    loadAdminEvents();
+    loadAdminStatus();
+  }, []);
+
+  async function loadAdminEvents() {
+    if (!canManage) {
+      return;
+    }
+    setAdminEventsStatus("loading");
+    try {
+      const payload = await apiRequest("/api/admin-events?limit=80");
+      setAdminEvents(payload.events || []);
+      setAdminEventsStatus("loaded");
+    } catch {
+      setAdminEvents([]);
+      setAdminEventsStatus("error");
+    }
+  }
+
+  async function loadAdminStatus() {
+    if (!canManage) {
+      return;
+    }
+    try {
+      const payload = await apiRequest("/api/admin-status");
+      setAdminStatus(payload);
+    } catch {
+      setAdminStatus(null);
+    }
+  }
+
   async function saveMpstatsKey(event) {
     event.preventDefault();
     if (!canManage || !mpstatsKey.trim()) {
@@ -9202,6 +9320,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
       }
       setMpstatsKey("");
       setMpstatsStatus(payload.ok ? "saved" : payload.status || "error");
+      loadAdminEvents();
     } catch {
       setMpstatsStatus("error");
     }
@@ -9239,6 +9358,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
       const payload = await onCreateUser(newUserForm);
       setNewUserResult(payload);
       setNewUserStatus("created");
+      loadAdminEvents();
     } catch (error) {
       setNewUserStatus("error");
       if (error.message === "forbidden") {
@@ -9252,6 +9372,13 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   }
 
   function updateNewUser(name, value) {
+    if (name === "profile") {
+      setNewUserForm((current) => ({ ...current, ...applyRolePresetToUserPayload(value) }));
+      setNewUserResult(null);
+      setNewUserError("");
+      setNewUserStatus("idle");
+      return;
+    }
     setNewUserForm((current) => ({ ...current, [name]: value }));
     setNewUserResult(null);
     setNewUserError("");
@@ -9277,6 +9404,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
     try {
       await onUpdateUser(payload);
       setUserSaveStatus("");
+      loadAdminEvents();
     } catch (error) {
       setUserSaveStatus("");
       if (error.message === "forbidden") {
@@ -9300,6 +9428,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
       const payload = await onResetPassword(login);
       setPasswordResetResult(payload);
       setPasswordResetStatus("");
+      loadAdminEvents();
     } catch (error) {
       setPasswordResetStatus("");
       if (error.message === "forbidden") {
@@ -9325,6 +9454,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
     try {
       await onUpdatePortalTeam(portal, nextTeam);
       setAccessSaveStatus("");
+      loadAdminEvents();
     } catch {
       setAccessSaveStatus("");
       setAccessSaveError("Не удалось сохранить доступы по кабинету.");
@@ -9350,9 +9480,13 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   const activeUsers = activeDirectoryUsers(users);
   const managedPortals = portals.filter((portal) => !portal.isDemo);
   const activeUserOptions = activeUsers.length ? activeUsers : users;
+  const apiPortals = managedPortals.filter((portal) => portal.apiConnected || portal.mode === "api");
+  const wbTokenIssues = apiPortals.filter((portal) => ["expired", "expiring"].includes(portal.tokenMeta?.status));
+  const llmStatus = adminStatus?.llm || {};
   const adminTabs = [
     { key: "users", label: "Пользователи" },
     { key: "access", label: "Доступы" },
+    { key: "events", label: "Журнал" },
     { key: "integrations", label: "Интеграции" },
   ];
 
@@ -9411,27 +9545,20 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                     />
                   </label>
                   <label className="field-label compact">
-                    Тип
+                    Профиль
                     <select
                       className="select"
-                      value={user.user_role}
+                      value={userProfileKey(user)}
                       disabled={!canManageUsers || userSaveStatus === user.login}
-                      onChange={(event) => saveExistingUser(user, { userRole: event.target.value })}
+                      onChange={(event) => saveExistingUser(user, applyRolePresetToUserPayload(event.target.value))}
                     >
-                      {Object.entries(userRoleLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                      {Object.entries(rolePresets).map(([value, preset]) => <option value={value} key={value}>{preset.label}</option>)}
                     </select>
                   </label>
-                  <label className="field-label compact">
-                    Уровень
-                    <select
-                      className="select"
-                      value={user.access_level}
-                      disabled={!canManageUsers || userSaveStatus === user.login}
-                      onChange={(event) => saveExistingUser(user, { accessLevel: event.target.value })}
-                    >
-                      {Object.entries(accessLevelLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-                    </select>
-                  </label>
+                  <div className="admin-user-access">
+                    <span>{userRoleLabels[user.user_role] || user.user_role}</span>
+                    <strong>{accessLevelLabels[user.access_level] || user.access_level}</strong>
+                  </div>
                   <div className="admin-user-actions">
                     <label className="switch-row">
                       <input
@@ -9493,42 +9620,27 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                   />
                 </label>
               </div>
-              <label className="field-label">
-                Роль
-                <input
-                  value={newUserForm.role}
-                  onChange={(event) => updateNewUser("role", event.target.value)}
-                  disabled={!canManageUsers}
-                  autoComplete="off"
-                  required
-                />
-              </label>
               <div className="form-two">
                 <label className="field-label">
-                  Тип доступа
+                  Профиль
                   <select
                     className="select"
-                    value={newUserForm.userRole}
-                    onChange={(event) => updateNewUser("userRole", event.target.value)}
+                    value={newUserForm.profile}
+                    onChange={(event) => updateNewUser("profile", event.target.value)}
                     disabled={!canManageUsers}
                   >
-                    <option value="manager">Менеджер</option>
-                    <option value="tech">Технический специалист</option>
-                    <option value="admin">Администратор</option>
+                    {Object.entries(rolePresets).map(([value, preset]) => <option value={value} key={value}>{preset.label}</option>)}
                   </select>
                 </label>
                 <label className="field-label">
-                  Уровень
-                  <select
-                    className="select"
-                    value={newUserForm.accessLevel}
-                    onChange={(event) => updateNewUser("accessLevel", event.target.value)}
+                  Должность
+                  <input
+                    value={newUserForm.role}
+                    onChange={(event) => updateNewUser("role", event.target.value)}
                     disabled={!canManageUsers}
-                  >
-                    <option value="overview">Проекты и обзор</option>
-                    <option value="readonly_wb">Карточки WB</option>
-                    <option value="all">Полный доступ</option>
-                  </select>
+                    autoComplete="off"
+                    required
+                  />
                 </label>
               </div>
               <div className="panel-actions">
@@ -9604,14 +9716,80 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
             </div>
           </section>
           ) : null}
+          {adminTab === "events" ? (
+          <section className="panel">
+            <div className="panel-title-row">
+              <div>
+                <h2>Журнал действий</h2>
+                <p>Последние изменения пользователей, доступов и интеграций.</p>
+              </div>
+              <button className="btn" type="button" onClick={loadAdminEvents} disabled={adminEventsStatus === "loading"}>
+                <RefreshCw size={16} />{adminEventsStatus === "loading" ? "Обновляем" : "Обновить"}
+              </button>
+            </div>
+            <div className="admin-events-list">
+              {adminEvents.map((event) => (
+                <div className="admin-event-row" key={event.id}>
+                  <div>
+                    <strong>{adminEventTitle(event)}</strong>
+                    <span>{adminEventDetailsText(event) || event.targetId || "Без деталей"}</span>
+                  </div>
+                  <em>{event.actorLogin || "система"}</em>
+                  <time>{event.createdAt ? new Date(event.createdAt).toLocaleString("ru-RU") : ""}</time>
+                </div>
+              ))}
+              {!adminEvents.length ? (
+                <div className="empty-state">
+                  <strong>{adminEventsStatus === "loading" ? "Загружаем журнал" : "Журнал пока пуст"}</strong>
+                  <span>Новые изменения пользователей, доступов и интеграций появятся здесь.</span>
+                </div>
+              ) : null}
+            </div>
+          </section>
+          ) : null}
           {adminTab === "integrations" ? (
           <section className="panel">
             <h2>Интеграции</h2>
-            <div className="panel-list">
-              <div className="list-row"><span>Wildberries</span><strong>read-only API</strong></div>
-              <div className="list-row"><span>MPStats</span><strong>{mpstatsStatusLabel}</strong></div>
-              <div className="list-row"><span>Токены</span><strong>AES-GCM в SQLite</strong></div>
+            <div className="integration-card-grid">
+              <div className="integration-card">
+                <div>
+                  <strong>Wildberries API</strong>
+                  <span>{apiPortals.length ? `${apiPortals.length} ${pluralRu(apiPortals.length, "кабинет", "кабинета", "кабинетов")}` : "нет API-кабинетов"}</span>
+                </div>
+                <Tag tone={wbTokenIssues.length ? "amber" : "blue"}>{wbTokenIssues.length ? "требует внимания" : "read-only"}</Tag>
+              </div>
+              <div className="integration-card">
+                <div>
+                  <strong>MPStats</strong>
+                  <span>{mpstatsStatusLabel}</span>
+                </div>
+                <Tag tone={mpstatsVerified ? "green" : (mpstatsConnected ? "amber" : "red")}>{mpstatsConnected ? "ключ сохранен" : "нет ключа"}</Tag>
+              </div>
+              <div className="integration-card">
+                <div>
+                  <strong>LLM</strong>
+                  <span>{llmStatus.source || "OpenAI-compatible"} · {llmStatus.model || "модель не указана"}</span>
+                </div>
+                <Tag tone={llmStatus.configured ? "green" : "amber"}>{llmStatus.configured ? "настроен" : "не настроен"}</Tag>
+              </div>
+              <div className="integration-card">
+                <div>
+                  <strong>Хранилище ключей</strong>
+                  <span>{adminStatus?.storage?.secretKeyConfigured ? "AES-GCM ключ настроен" : "ключ шифрования не найден"}</span>
+                </div>
+                <Tag tone={adminStatus?.storage?.secretKeyConfigured ? "green" : "red"}>backend</Tag>
+              </div>
             </div>
+            {apiPortals.length ? (
+              <div className="admin-wb-token-list">
+                {apiPortals.map((portal) => (
+                  <div className="list-row" key={portal.id}>
+                    <span>{portalDisplayName(portal)}</span>
+                    <strong>{tokenDaysLeftText(portal.tokenMeta) || "срок токена не указан"}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <form className="integration-form" onSubmit={saveMpstatsKey}>
               <div>
                 <strong>MPStats API</strong>
