@@ -995,16 +995,9 @@ function wbPublicImageUrl(nmID, size = "c246x328") {
 
 function bestPhotoUrl(card) {
   const rawFields = rawFieldsForCard(card);
-  const rawMpstats = rawFields.mpstats || {};
-  const cardMpstats = card?.mpstats || {};
-  const isPublicSeller = rawMpstats.source === "wb-public-seller" || cardMpstats.source === "wb-public-seller";
-  if (isPublicSeller) {
-    const publicUrl = safeHttpsUrl(wbPublicImageUrl(card?.nmID || rawFields.nmID, "c246x328"));
-    if (publicUrl) {
-      return publicUrl;
-    }
-  }
-  const photos = Array.isArray(card?.photos) ? card.photos : [];
+  const photos = Array.isArray(card?.photos) && card.photos.length
+    ? card.photos
+    : (Array.isArray(rawFields.photos) ? rawFields.photos : []);
   const preferredKeys = ["big", "c516x688", "c246x328", "square", "tm"];
   for (const photo of photos) {
     if (!photo || typeof photo !== "object") {
@@ -1021,7 +1014,17 @@ function bestPhotoUrl(card) {
       return safeHttpsUrl(fallback);
     }
   }
-  return safeHttpsUrl(card?.photoUrl);
+  const storedUrl = safeHttpsUrl(card?.photoUrl || rawFields.photoUrl);
+  if (storedUrl) {
+    return storedUrl;
+  }
+  const rawMpstats = rawFields.mpstats || {};
+  const cardMpstats = card?.mpstats || {};
+  const isPublicSeller = rawMpstats.source === "wb-public-seller" || cardMpstats.source === "wb-public-seller";
+  if (isPublicSeller) {
+    return safeHttpsUrl(wbPublicImageUrl(card?.nmID || rawFields.nmID, "c246x328"));
+  }
+  return "";
 }
 
 function wbCardUrl(card) {
