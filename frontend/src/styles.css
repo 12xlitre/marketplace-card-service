@@ -3969,6 +3969,12 @@ tr:last-child td {
   color: #6a5314;
 }
 
+.semantic-save-banner.unsaved {
+  border-color: #d8c27a;
+  background: #fff8df;
+  color: #6a5314;
+}
+
 .semantic-save-banner.error {
   border-color: #e7b0a8;
   background: #fff1ef;

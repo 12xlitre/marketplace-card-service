@@ -6692,6 +6692,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
   const [semanticContentStatus, setSemanticContentStatus] = useState("");
   const [semanticContentError, setSemanticContentError] = useState("");
+  const [semanticDraftDirty, setSemanticDraftDirty] = useState(false);
+  const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
@@ -6837,6 +6839,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const semanticFinalHasRows = Boolean(activeSemanticContentRows.length || activeSemanticPositionRows.length || activeSemanticNewRows.length);
   const semanticFinalMatchesCurrent = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && semanticStoredFinalSignature === semanticCurrentFinalSignature);
   const semanticFinalConflict = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && !semanticFinalMatchesCurrent);
+  const semanticCurrentChoiceSaved = Boolean(semanticDraftSaved && !semanticDraftDirty && semanticSaveStatus !== "error");
+  const semanticSaveCurrentDisabled = !semanticDraftDirty || semanticSaveStatus === "saving";
+  const semanticSaveCurrentTitle = semanticDraftDirty
+    ? "Сохранить текущий подбор, выбранные ключи и источники MPStats в карточке без добавления в итоговую выгрузку."
+    : semanticCurrentChoiceSaved
+      ? "Текущий выбор уже сохранен в карточке."
+      : "Сначала подберите запросы или измените выбор ключей.";
   const semanticStoredFinalLabel = semanticStoredFinal
     ? [
       semanticStoredFinal.seedQuery || "без стартового запроса",
@@ -6889,8 +6898,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     return null;
   })();
-  const semanticFinalAddDisabled = !currentSemanticFinalExport || !semanticFinalHasRows || semanticFinalStatus === "saving" || semanticFinalMatchesCurrent || semanticFinalConflict;
-  const semanticFinalAddTitle = semanticFinalMatchesCurrent
+  const semanticFinalAddDisabled = !semanticCurrentChoiceSaved || !currentSemanticFinalExport || !semanticFinalHasRows || semanticFinalStatus === "saving" || semanticFinalMatchesCurrent || semanticFinalConflict;
+  const semanticFinalAddTitle = !semanticCurrentChoiceSaved
+    ? "Сначала нажмите Сохранить текущий выбор."
+    : semanticFinalMatchesCurrent
     ? "Текущая версия уже добавлена в итоговое СЯ кабинета."
     : semanticFinalConflict
       ? "По карточке уже есть другая итоговая версия. Используйте замену в предупреждении ниже."
@@ -6899,7 +6910,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
   const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
   const semanticContentRunning = semanticContentStatus === "loading";
-  const canReoptimizeContent = Boolean(activeSemanticNewRows.length && !approvalReadOnly && !semanticContentRunning);
+  const canReoptimizeContent = Boolean(activeSemanticNewRows.length && semanticCurrentChoiceSaved && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
   const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
     || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
@@ -7003,6 +7014,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticSaveStatus("");
     setSemanticContentStatus("");
     setSemanticContentError("");
+    setSemanticDraftDirty(false);
+    setSemanticDraftSaved(false);
     setSemanticRankStatus("idle");
     setCardCharacteristicsOpen(false);
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
@@ -7033,6 +7046,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticRankStatus("idle");
     setSemanticContentStatus("");
     setSemanticContentError("");
+    setSemanticDraftDirty(false);
+    setSemanticDraftSaved(false);
     setSemanticCoreSelected([]);
     setSemanticCoreReports([]);
     setSemanticCoreFinal(null);
@@ -7056,6 +7071,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreSelected(normalized.semanticCoreSelected);
       setSemanticCoreReports(normalized.semanticCoreReports);
       setSemanticCoreFinal(normalized.semanticCoreFinal);
+      setSemanticDraftDirty(false);
+      setSemanticDraftSaved(Boolean(normalized.semanticCoreReports.length || normalized.semanticCoreSelected.length || normalized.semanticCoreFinal));
       setSemanticFinalStatus("");
       if (normalized.semanticCoreReports.length) {
         const latestReport = semanticPreferredReport(normalized.semanticCoreReports);
@@ -7375,6 +7392,53 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     loadSemanticCurrentPositions({ forceRefresh: false });
   }, [activeTab, semanticCore, semanticRankStatus, portal?.id, card?.nmID]);
 
+  useEffect(() => {
+    if (!semanticDraftDirty) {
+      return undefined;
+    }
+    const handleBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [semanticDraftDirty]);
+
+  function confirmLeaveUnsavedSemantic() {
+    if (!semanticDraftDirty) {
+      return true;
+    }
+    return window.confirm("Текущий выбор СЯ не сохранен в карточке. Уйти без сохранения?");
+  }
+
+  function switchDetailTab(nextTab) {
+    if (nextTab === activeTab) {
+      return;
+    }
+    if (activeTab === "semantic" && nextTab !== "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    setActiveTab(nextTab);
+  }
+
+  function handleBackToCards() {
+    if (activeTab === "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    onBack();
+  }
+
+  function handleSemanticSeedKeyDown(event) {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    if (semanticCoreStatus === "loading" || !semanticSeedQuery.trim()) {
+      return;
+    }
+    loadSemanticCore({ forceRefresh: hasSemanticExpansion });
+  }
+
   async function loadSemanticCore({ forceRefresh = false } = {}) {
     if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
       setSemanticCoreStatus("missing-card");
@@ -7416,28 +7480,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         const nextReports = normalizeSemanticReports([nextReport, ...semanticCoreReports.filter((report) => report.id !== nextReport.id)]);
         setSemanticCoreReports(nextReports);
         setSemanticActiveReportId(nextReport.id);
-        const structuredDraft = buildStructuredCardDraft({
-          auditStatus,
-          auditHistory,
-          approval,
-          approvalSections,
-          title: draftTitle,
-          description: draftDescription,
-          titleSource: draftTitleSource,
-          descriptionSource: draftDescriptionSource,
-          titleReason: draftTitleReason,
-          descriptionReason: draftDescriptionReason,
-          characteristics: draftCharacteristics,
-          prices: draftPrices,
-          stocks: draftStocks,
-          semanticCoreSelected,
-          semanticCoreReports: nextReports,
-          semanticCoreFinal,
-          card,
-        });
-        setSemanticSaveStatus("saving");
-        const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-        setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
+        setSemanticDraftDirty(true);
+        setSemanticDraftSaved(false);
+        setSemanticSaveStatus("unsaved");
       }
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
@@ -7456,7 +7501,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
-  async function persistSemanticSelection(nextSelection) {
+  function stageSemanticSelection(nextSelection) {
     const normalizedSelection = normalizeSemanticSelection(nextSelection);
     let reportSource = semanticCoreReports;
     let fallbackReport = null;
@@ -7475,7 +7520,25 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     if (!semanticActiveReportId && fallbackReport?.id) {
       setSemanticActiveReportId(fallbackReport.id);
     }
-    setSemanticSaveStatus("saving");
+    setSemanticDraftDirty(true);
+    setSemanticDraftSaved(false);
+    setSemanticSaveStatus("unsaved");
+  }
+
+  async function saveSemanticCurrentSelection() {
+    const normalizedSelection = normalizeSemanticSelection(semanticCoreSelected);
+    let reportSource = semanticCoreReports;
+    let fallbackReport = null;
+    const shouldCreateFallbackReport = activeSemanticCore
+      && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
+    if (shouldCreateFallbackReport) {
+      fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
+        seedQuery: semanticSeedQuery.trim(),
+        subjectFilter: semanticSubjectFilter,
+      });
+      reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
+    }
+    const nextReports = semanticReportsWithSelection(reportSource, normalizedSelection);
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       auditHistory,
@@ -7495,10 +7558,22 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       semanticCoreFinal,
       card,
     });
+    setSemanticCoreSelected(normalizedSelection);
+    setSemanticCoreReports(nextReports);
+    if (!semanticActiveReportId && fallbackReport?.id) {
+      setSemanticActiveReportId(fallbackReport.id);
+    }
+    setSemanticSaveStatus("saving");
     try {
       const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-      setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
+      if (!semanticPersistSucceeded(persistStatus)) {
+        throw new Error("semantic_save_failed");
+      }
+      setSemanticDraftDirty(false);
+      setSemanticDraftSaved(Boolean(nextReports.length || normalizedSelection.length || semanticCoreFinal));
+      setSemanticSaveStatus("saved");
     } catch {
+      setSemanticDraftDirty(true);
       setSemanticSaveStatus("error");
     }
   }
@@ -7517,7 +7592,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       return;
     }
     setSemanticCoreError("");
-    persistSemanticSelection([...semanticCoreSelected, item]);
+    stageSemanticSelection([...semanticCoreSelected, item]);
   }
 
   function semanticAutoSelectCandidateRows() {
@@ -7576,44 +7651,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       return;
     }
     setSemanticCoreError(`Автоматически добавлено ${chosen.length} запросов: высоко-, средне- и низкочастотные без дублей.`);
-    persistSemanticSelection([...semanticCoreSelected, ...chosen]);
+    stageSemanticSelection([...semanticCoreSelected, ...chosen]);
   }
 
   function removeSemanticKeyword(item) {
     const key = semanticQueryKey(item);
     if (!key) return;
-    persistSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
+    stageSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
   }
 
-  async function persistSemanticReports(nextReports) {
+  function stageSemanticReports(nextReports) {
     const normalizedReports = normalizeSemanticReports(nextReports);
     setSemanticCoreReports(normalizedReports);
-    setSemanticSaveStatus("saving");
-    const structuredDraft = buildStructuredCardDraft({
-      auditStatus,
-      auditHistory,
-      approval,
-      approvalSections,
-      title: draftTitle,
-      description: draftDescription,
-      titleSource: draftTitleSource,
-      descriptionSource: draftDescriptionSource,
-      titleReason: draftTitleReason,
-      descriptionReason: draftDescriptionReason,
-      characteristics: draftCharacteristics,
-      prices: draftPrices,
-      stocks: draftStocks,
-      semanticCoreSelected,
-      semanticCoreReports: normalizedReports,
-      semanticCoreFinal,
-      card,
-    });
-    try {
-      const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-      setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
-    } catch {
-      setSemanticSaveStatus("error");
-    }
+    setSemanticDraftDirty(true);
+    setSemanticDraftSaved(false);
+    setSemanticSaveStatus("unsaved");
   }
 
   function removeSemanticReport(report) {
@@ -7636,7 +7688,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         setSemanticRankStatus("idle");
       }
     }
-    persistSemanticReports(nextReports);
+    stageSemanticReports(nextReports);
   }
 
   async function reoptimizeContentFromSemanticCore() {
@@ -8435,6 +8487,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreSelected([]);
       setSemanticCoreReports([]);
       setSemanticCoreFinal(null);
+      setSemanticDraftDirty(false);
+      setSemanticDraftSaved(false);
       setSemanticFinalStatus("");
       setSemanticActiveReportId("");
       setSemanticCore(null);
@@ -8501,6 +8555,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       if (!semanticPersistSucceeded(persistStatus)) {
         throw new Error("semantic_final_save_failed");
       }
+      setSemanticDraftDirty(false);
+      setSemanticDraftSaved(true);
       setSemanticFinalStatus(replacing ? "replaced" : "saved");
       return true;
     } catch {
@@ -8552,7 +8608,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           <p>{textOrDash(card?.title)} · WB {textOrDash(card?.nmID)} · артикул {textOrDash(card?.vendorCode)}</p>
         </div>
         <div className="toolbar">
-          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Карточки</button>
+          <button className="btn ghost" type="button" onClick={handleBackToCards}><ArrowLeft size={17} />Карточки</button>
           <a className="btn" href={wbCardUrl(card)} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть WB</a>
           <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
         </div>
@@ -8607,11 +8663,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
           <div className="detail-main">
             <nav className="detail-tabs" aria-label="Разделы карточки">
-              <button className={activeTab === "semantic" ? "active" : ""} type="button" onClick={() => setActiveTab("semantic")}>Семантическое ядро</button>
-              <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => setActiveTab("card")}>Карточка</button>
-              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Аудит</button>
-              <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
-              <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => setActiveTab("competitors")}>ТОП конкурентов</button>
+              <button className={activeTab === "semantic" ? "active" : ""} type="button" onClick={() => switchDetailTab("semantic")}>Семантическое ядро</button>
+              <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => switchDetailTab("card")}>Карточка</button>
+              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => switchDetailTab("audit")}>Аудит</button>
+              <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => switchDetailTab("changes")}>Изменения</button>
+              <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => switchDetailTab("competitors")}>ТОП конкурентов</button>
             </nav>
             <HelpHint enabled={helpEnabled} title="Как работать с карточкой">
               Сначала можно собрать Семантическое ядро, затем запустить Аудит. После аудита проверьте вкладку Изменения и отправьте готовые правки на согласование.
@@ -8631,7 +8687,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="semantic-query-bar">
                   <label className="field-label">
                     <span>Стартовый запрос</span>
-                    <input value={semanticSeedQuery} onChange={(event) => setSemanticSeedQuery(event.target.value)} placeholder="пижама женская" />
+                    <input value={semanticSeedQuery} onChange={(event) => setSemanticSeedQuery(event.target.value)} onKeyDown={handleSemanticSeedKeyDown} placeholder="пижама женская" />
                   </label>
                   <label className="field-label">
                     <span>Приоритетный предмет</span>
@@ -8651,14 +8707,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
                   </label>
                 </div>
-                {semanticSaveStatus === "saving" || semanticSaveStatus === "saved" || semanticSaveStatus === "error" ? (
+                {semanticSaveStatus === "unsaved" || semanticSaveStatus === "saving" || semanticSaveStatus === "saved" || semanticSaveStatus === "error" ? (
                   <div className={`semantic-save-banner ${semanticSaveStatus}`}>
-                    <strong>{semanticSaveStatus === "saved" ? "СЯ сохранено" : semanticSaveStatus === "saving" ? "Сохраняем СЯ" : "СЯ не сохранилось"}</strong>
+                    <strong>{semanticSaveStatus === "saved" ? "СЯ сохранено" : semanticSaveStatus === "saving" ? "Сохраняем СЯ" : semanticSaveStatus === "unsaved" ? "СЯ не сохранено" : "СЯ не сохранилось"}</strong>
                     <span>{semanticSaveStatus === "saved"
-                      ? "Итоговый набор и источники MPStats сохранены в карточке."
+                      ? "Текущий выбор и источники MPStats сохранены в карточке."
                       : semanticSaveStatus === "saving"
                         ? "Не обновляйте страницу, пока сохранение не завершится."
-                        : "Повторите подбор или добавление ключа еще раз."}</span>
+                        : semanticSaveStatus === "unsaved"
+                          ? "Нажмите Сохранить текущий выбор, чтобы закрепить подборку в карточке без добавления в итоговое СЯ."
+                          : "Повторите сохранение текущего выбора еще раз."}</span>
                   </div>
                 ) : null}
                 {semanticCoreReports.length ? (
@@ -8700,8 +8758,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем ранжирующиеся запросы и позиции карточки...</span> : null}
                     {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул ранжирующиеся запросы карточки.</span> : null}
                   {semanticRankStatus === "error" ? <span className="status-note">Подборка доступна, но позиции карточки сейчас не загрузились.</span> : null}
-                  {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем итоговое СЯ...</span> : null}
-                  {semanticSaveStatus === "saved" ? <span className="status-note">Итоговое СЯ сохранено в карточке.</span> : null}
+                  {semanticSaveStatus === "unsaved" ? <span className="status-note">Текущий выбор СЯ пока не сохранен в карточке.</span> : null}
+                  {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем текущий выбор СЯ...</span> : null}
+                  {semanticSaveStatus === "saved" ? <span className="status-note">Текущий выбор СЯ сохранен в карточке.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок и описание...</span> : null}
                   {semanticContentStatus === "done" ? <span className="status-note">Черновик контента переоптимизирован по выбранному СЯ.</span> : null}
@@ -8728,12 +8787,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     type="button"
                     onClick={reoptimizeContentFromSemanticCore}
                     disabled={!canReoptimizeContent}
-                    title={activeSemanticNewRows.length ? "Переписать заголовок и описание с учетом новых запросов" : "Сначала добавьте новые запросы с частотностью"}
+                    title={activeSemanticNewRows.length ? (semanticCurrentChoiceSaved ? "Переписать заголовок и описание с учетом новых запросов" : "Сначала нажмите Сохранить текущий выбор.") : "Сначала добавьте новые запросы с частотностью"}
                   >
                     <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
                   <button className="btn" type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID}>
                     <RefreshCw size={17} />{semanticRankStatus === "loading" ? "Обновляем позиции" : "Обновить позиции"}
+                  </button>
+                  <button className="btn" type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} title={semanticSaveCurrentTitle}>
+                    <Save size={17} />{semanticSaveStatus === "saving" ? "Сохраняем выбор" : "Сохранить текущий выбор"}
                   </button>
                   <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: hasSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
                     <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : hasSemanticExpansion ? "Собрать еще" : "Подобрать запросы"}
@@ -8756,7 +8818,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
                   </div>
                   <div className="semantic-final-actions">
-                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
+                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!semanticCurrentChoiceSaved || (!activeSemanticPositionRows.length && !activeSemanticNewRows.length)} title={semanticCurrentChoiceSaved ? "Скачать сохраненный текущий выбор СЯ по карточке." : "Сначала нажмите Сохранить текущий выбор."}>
                       <Download size={17} />Скачать файл карточки
                     </button>
                     <button className="btn primary" type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} title={semanticFinalAddTitle}>
@@ -8769,7 +8831,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <strong>{semanticFinalBanner.title}</strong>
                     <span>{semanticFinalBanner.copy}</span>
                     {semanticFinalBanner.action === "replace" ? (
-                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving"}>
+                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving" || !semanticCurrentChoiceSaved} title={semanticCurrentChoiceSaved ? "Заменить сохраненную итоговую версию текущей." : "Сначала нажмите Сохранить текущий выбор."}>
                         <CheckSquare size={14} />Заменить старую новой
                       </button>
                     ) : null}
