@@ -2966,6 +2966,19 @@ tr:last-child td {
   flex-wrap: wrap;
 }
 
+.semantic-help-icon {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--blue);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+}
+
 .status-note {
   color: var(--muted);
   font-size: 13px;

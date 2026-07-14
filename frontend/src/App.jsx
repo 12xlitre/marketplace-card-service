@@ -8305,10 +8305,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     type="button"
                     onClick={autoSelectSemanticKeywords}
                     disabled={!activeSemanticCore || semanticSaveStatus === "saving"}
-                    title="Автоматически добавить высоко-, средне- и низкочастотные запросы из текущей подборки"
+                    title="Сначала подберите запросы через MPStats. После этого кнопка сразу добавит часть подходящих новых запросов в блок к добавлению."
                   >
                     <WandSparkles size={17} />Автодобавить запросы
                   </button>
+                  <span
+                    className="semantic-help-icon"
+                    title="Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats. Затем Автодобавить запросы сразу перенесет подходящие ключи в Добавленные в работу, с сохранением в карточке."
+                    aria-label="Как работает автодобавление запросов"
+                  >
+                    <HelpCircle size={15} />
+                  </span>
                   <button
                     className="btn"
                     type="button"
@@ -9923,10 +9930,14 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = semanticCandidateSourceRows(semanticCore);
   const coverage = semanticCore?.coveragePercent;
-  const selectedLimit = compact ? 4 : standalone ? 500 : 8;
-  const currentLimit = compact ? 4 : standalone ? 120 : 8;
-  const workLimit = compact ? 4 : standalone ? 250 : 8;
-  const workPageSize = standalone ? 250 : workLimit;
+  const selectedLimit = compact ? 4 : standalone ? 100 : 8;
+  const currentLimit = compact ? 4 : standalone ? 100 : 8;
+  const workLimit = compact ? 4 : standalone ? 100 : 8;
+  const selectedPageSize = standalone ? 100 : selectedLimit;
+  const currentPageSize = standalone ? 100 : currentLimit;
+  const workPageSize = standalone ? 100 : workLimit;
+  const [visibleSelectedLimit, setVisibleSelectedLimit] = useState(selectedLimit);
+  const [visibleCurrentLimit, setVisibleCurrentLimit] = useState(currentLimit);
   const [visibleWorkLimit, setVisibleWorkLimit] = useState(workLimit);
   const [metricFilter, setMetricFilter] = useState("all");
   const searchText = String(search || "").trim().toLowerCase();
@@ -9951,12 +9962,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
     });
   useEffect(() => {
+    setVisibleSelectedLimit(selectedLimit);
+    setVisibleCurrentLimit(currentLimit);
     setVisibleWorkLimit(workLimit);
-  }, [workLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
+  }, [selectedLimit, currentLimit, workLimit, subjectFilter, searchText, excludeWords, metricFilter, semanticCore?.seedQuery, reportTotal]);
   useEffect(() => {
     setMetricFilter("all");
   }, [semanticCore?.seedQuery, reportTotal]);
-  const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
   const toggleMetricFilter = (filter) => {
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
@@ -9968,6 +9980,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       : metricFilter === "all"
         ? [...filteredPositionItems, ...filteredContentOnlyItems]
         : [];
+  const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
+  const visibleSelectedCount = Math.min(visibleSelectedLimit, displayedSelectedItems.length);
+  const visibleCurrentCount = Math.min(visibleCurrentLimit, displayedCurrentItems.length);
   const leftListTitle = metricFilter === "positions"
     ? "Ранжирующиеся запросы"
     : metricFilter === "content"
@@ -10024,7 +10039,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
         <div>
           <span>{leftListTitle}</span>
           <div className="semantic-keyword-list">
-            {displayedSelectedItems.length ? displayedSelectedItems.slice(0, selectedLimit).map((item) => (
+            {displayedSelectedItems.length ? displayedSelectedItems.slice(0, visibleSelectedLimit).map((item) => (
               <div className="semantic-keyword selected" key={`selected-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -10038,8 +10053,22 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             )) : null}
-            {displayedSelectedItems.length > selectedLimit ? <p>Показано {formatNumber(selectedLimit)} из {formatNumber(displayedSelectedItems.length)} выбранных. Полный список попадет в Excel.</p> : null}
-            {displayedCurrentItems.length ? displayedCurrentItems.slice(0, currentLimit).map((item) => (
+            {displayedSelectedItems.length > visibleSelectedLimit ? (
+              <div className="semantic-list-footer">
+                <p>Показано {formatNumber(visibleSelectedCount)} из {formatNumber(displayedSelectedItems.length)} добавленных.</p>
+                {standalone ? (
+                  <div>
+                    <button className="btn mini" type="button" onClick={() => setVisibleSelectedLimit((value) => Math.min(value + selectedPageSize, displayedSelectedItems.length))}>
+                      Открыть следующие {formatNumber(Math.min(selectedPageSize, displayedSelectedItems.length - visibleSelectedCount))}
+                    </button>
+                    <button className="btn mini" type="button" onClick={() => setVisibleSelectedLimit(displayedSelectedItems.length)}>
+                      Показать все
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {displayedCurrentItems.length ? displayedCurrentItems.slice(0, visibleCurrentLimit).map((item) => (
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
@@ -10052,7 +10081,21 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} ключей. Полный список попадет в Excel.</p> : null}
+            {displayedCurrentItems.length > visibleCurrentLimit ? (
+              <div className="semantic-list-footer">
+                <p>Показано {formatNumber(visibleCurrentCount)} из {formatNumber(displayedCurrentItems.length)} ключей.</p>
+                {standalone ? (
+                  <div>
+                    <button className="btn mini" type="button" onClick={() => setVisibleCurrentLimit((value) => Math.min(value + currentPageSize, displayedCurrentItems.length))}>
+                      Открыть следующие {formatNumber(Math.min(currentPageSize, displayedCurrentItems.length - visibleCurrentCount))}
+                    </button>
+                    <button className="btn mini" type="button" onClick={() => setVisibleCurrentLimit(displayedCurrentItems.length)}>
+                      Показать все
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "content" ? "Действующих ключей в карточке пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
           </div>
         </div>
