@@ -7810,6 +7810,19 @@ def mpstats_expanding_seed_queries(card, query):
   return seeds[:6]
 
 
+def mpstats_expanding_query_relevant(card, query, seed_queries):
+  content = audit_normalized(" ".join([
+    " ".join(seed_queries or []),
+    card.get("title") or "",
+    card.get("description") or "",
+    card.get("subjectName") or card.get("subject") or "",
+  ]))
+  normalized_query = audit_normalized(query)
+  if "очк" in content:
+    return "очк" in normalized_query
+  return True
+
+
 def normalize_mpstats_expanding_query(item):
   if not isinstance(item, dict):
     return None
@@ -7904,6 +7917,8 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   for item in payload.get("words") if isinstance(payload.get("words"), list) else []:
     normalized = normalize_mpstats_expanding_query(item)
     if not normalized:
+      continue
+    if not mpstats_expanding_query_relevant(card, normalized["query"], seed_queries):
       continue
     key = normalized["query"].lower()
     if key in seen:
