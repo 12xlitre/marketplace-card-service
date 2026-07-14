@@ -2344,6 +2344,11 @@ function semanticRankExportValue(value) {
   return number === "" ? "" : number;
 }
 
+function semanticCountExportValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : "";
+}
+
 function semanticHasKeywordRank(item) {
   return Boolean(semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos));
 }
@@ -7340,7 +7345,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore, suffix = "semantic-core" } = {}) {
-    const selectedRowsNormalized = normalizeSemanticSelection(selectedRows);
+    const coreRowsByKey = new Map([
+      ...(Array.isArray(core?.current) ? core.current : []),
+      ...(Array.isArray(core?.recommended) ? core.recommended : []),
+      ...(Array.isArray(core?.missing) ? core.missing : []),
+      ...(Array.isArray(core?.allKeywords) ? core.allKeywords : []),
+      ...(Array.isArray(core?.rankedKeywords) ? core.rankedKeywords : []),
+    ].map((item) => [semanticQueryKey(item), item]).filter(([key]) => key));
+    const selectedRowsNormalized = normalizeSemanticSelection(selectedRows).map((item) => {
+      const source = coreRowsByKey.get(semanticQueryKey(item));
+      return source ? { ...source, ...item } : item;
+    });
     const currentRows = (Array.isArray(core?.current) ? core.current : [])
       .filter((item) => item?.status !== "selected")
       .filter((item) => semanticQueryKey(item));
@@ -7348,16 +7363,39 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
       name: "СЯ в работу",
       freezeRows: 1,
-      widths: [44, 16, 16, 16, 16, 44],
+      widths: [44, 16, 16, 16, 16, 16, 44, 16, 16, 16, 16, 16, 28, 34],
       rows: [
-        ["Действующие до подбора", "Органика", "Средняя", "Реклама", "Найдено товаров", "Добавленные в работу"],
+        [
+          "Действующие до подбора",
+          "Действ. частота WB",
+          "Органика",
+          "Средняя",
+          "Реклама",
+          "Найдено товаров",
+          "Добавленный ключ",
+          "Добавл. частота WB",
+          "Органика",
+          "Средняя",
+          "Реклама",
+          "Найдено товаров",
+          "Предмет",
+          "Кластер",
+        ],
         ...Array.from({ length: rowCount }, (_, index) => [
           currentRows[index]?.query || "",
+          semanticCountExportValue(currentRows[index]?.wbCount),
           semanticRankExportValue(currentRows[index]?.orgPos),
           semanticRankExportValue(currentRows[index]?.avgPos),
           semanticRankExportValue(currentRows[index]?.adPos),
-          Number(currentRows[index]?.totalFound || 0) || "",
+          semanticCountExportValue(currentRows[index]?.totalFound),
           selectedRowsNormalized[index]?.query || "",
+          semanticCountExportValue(selectedRowsNormalized[index]?.wbCount),
+          semanticRankExportValue(selectedRowsNormalized[index]?.orgPos),
+          semanticRankExportValue(selectedRowsNormalized[index]?.avgPos),
+          semanticRankExportValue(selectedRowsNormalized[index]?.adPos),
+          semanticCountExportValue(selectedRowsNormalized[index]?.totalFound),
+          selectedRowsNormalized[index]?.prioritySubject || "",
+          selectedRowsNormalized[index]?.cluster || "",
         ]),
       ],
     }]);
