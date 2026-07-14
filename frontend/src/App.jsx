@@ -686,7 +686,14 @@ function normalizePortal(portal) {
       approvalPendingCount: Number(portal.draftSummary?.approvalPendingCount || 0),
       approvalReturnedCount: Number(portal.draftSummary?.approvalReturnedCount || 0),
       approvalApprovedCount: Number(portal.draftSummary?.approvalApprovedCount || 0),
+      taskTotalCount: Number(portal.draftSummary?.taskTotalCount || 0),
+      taskActiveCount: Number(portal.draftSummary?.taskActiveCount || 0),
+      taskDraftCount: Number(portal.draftSummary?.taskDraftCount || 0),
+      taskPendingCount: Number(portal.draftSummary?.taskPendingCount || 0),
+      taskReturnedCount: Number(portal.draftSummary?.taskReturnedCount || 0),
+      taskApprovedCount: Number(portal.draftSummary?.taskApprovedCount || 0),
       lastDraftAt: portal.draftSummary?.lastDraftAt || "",
+      lastTaskAt: portal.draftSummary?.lastTaskAt || "",
     },
   };
 }
@@ -698,8 +705,24 @@ function emptyDraftSummary() {
     approvalPendingCount: 0,
     approvalReturnedCount: 0,
     approvalApprovedCount: 0,
+    taskTotalCount: 0,
+    taskActiveCount: 0,
+    taskDraftCount: 0,
+    taskPendingCount: 0,
+    taskReturnedCount: 0,
+    taskApprovedCount: 0,
     lastDraftAt: "",
+    lastTaskAt: "",
   };
+}
+
+function portalActiveTaskCount(portal) {
+  const summary = portal?.draftSummary || {};
+  const explicitCount = Number(summary.taskActiveCount);
+  if (Number.isFinite(explicitCount) && explicitCount > 0) {
+    return explicitCount;
+  }
+  return Number(summary.approvalPendingCount || 0) + Number(summary.approvalReturnedCount || 0);
 }
 
 function defaultApprovalState() {
@@ -4124,7 +4147,14 @@ export default function App() {
         approvalPendingCount: Number(backendSummary.approvalPendingCount || 0),
         approvalReturnedCount: Number(backendSummary.approvalReturnedCount || 0),
         approvalApprovedCount: Number(backendSummary.approvalApprovedCount || 0),
+        taskTotalCount: Number(backendSummary.taskTotalCount || 0),
+        taskActiveCount: Number(backendSummary.taskActiveCount || 0),
+        taskDraftCount: Number(backendSummary.taskDraftCount || 0),
+        taskPendingCount: Number(backendSummary.taskPendingCount || 0),
+        taskReturnedCount: Number(backendSummary.taskReturnedCount || 0),
+        taskApprovedCount: Number(backendSummary.taskApprovedCount || 0),
         lastDraftAt: localSummary.lastActivityAt || backendSummary.lastDraftAt || "",
+        lastTaskAt: backendSummary.lastTaskAt || "",
       },
     };
   }
@@ -5103,7 +5133,7 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
     .filter((portal) => !portal.apiConnected)
     .reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
   const cardsCount = activePortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
-  const approvalTasksCount = activePortals.reduce((sum, portal) => sum + Number(portal.draftSummary?.approvalPendingCount || 0), 0);
+  const activeTasksCount = activePortals.reduce((sum, portal) => sum + portalActiveTaskCount(portal), 0);
   return (
     <section className="screen active">
       <header className="topbar">
@@ -5144,9 +5174,9 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
             hint={apiCount ? "данные обновляются по WB API" : "нет подключенных API"}
           />
           <Metric
-            label="На согласовании"
-            value={formatNumber(approvalTasksCount)}
-            hint={approvalTasksCount ? "ожидают решения" : "нет активных задач"}
+            label="Активные задачи"
+            value={formatNumber(activeTasksCount)}
+            hint={activeTasksCount ? "в работе по карточкам" : "нет активных задач"}
           />
         </div>
 
@@ -5226,7 +5256,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
       <div className="card-stats">
         <MiniStat value={portal.cardCount} label="карточки" />
         <MiniStat value={portal.problemCount} label="к проверке" />
-        <MiniStat value={portal.draftSummary?.approvalPendingCount || 0} label="задачи" />
+        <MiniStat value={portalActiveTaskCount(portal)} label="задачи" />
       </div>
       <TeamSummary portal={portal} findUser={findUser} fallbackOwner={owner} />
       <div className="card-actions">

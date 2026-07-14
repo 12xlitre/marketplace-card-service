@@ -1505,7 +1505,84 @@ def wb_token_meta_for_portal_row(row):
   return wb_token_meta_from_dates(issued_at, expires_at)
 
 
-def public_portal_from_row(row):
+def empty_portal_work_task_summary():
+  return {
+    "taskTotalCount": 0,
+    "taskActiveCount": 0,
+    "taskDraftCount": 0,
+    "taskPendingCount": 0,
+    "taskReturnedCount": 0,
+    "taskApprovedCount": 0,
+    "lastTaskAt": "",
+  }
+
+
+def portal_work_task_summaries(portal_ids):
+  normalized_ids = []
+  seen = set()
+  for portal_id in portal_ids:
+    try:
+      numeric_id = int(portal_id)
+    except (TypeError, ValueError):
+      continue
+    if numeric_id in seen:
+      continue
+    seen.add(numeric_id)
+    normalized_ids.append(numeric_id)
+  summaries = {portal_id: empty_portal_work_task_summary() for portal_id in normalized_ids}
+  if not normalized_ids:
+    return summaries
+  placeholders = ",".join("?" for _ in normalized_ids)
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      f"""
+      SELECT portal_id, payload_json, updated_at
+      FROM card_drafts
+      WHERE portal_id IN ({placeholders})
+      """,
+      normalized_ids,
+    ).fetchall()
+  for row in rows:
+    portal_id = int(row["portal_id"])
+    summary = summaries.setdefault(portal_id, empty_portal_work_task_summary())
+    try:
+      payload = json.loads(row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+      continue
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if not active_task_work_types(meta):
+      continue
+    approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+    status = str(approval.get("status") or "draft").strip() or "draft"
+    if status not in {"draft", "submitted", "changes_requested", "approved"}:
+      continue
+    summary["taskTotalCount"] += 1
+    if status == "draft":
+      summary["taskDraftCount"] += 1
+    elif status == "submitted":
+      summary["taskPendingCount"] += 1
+    elif status == "changes_requested":
+      summary["taskReturnedCount"] += 1
+    elif status == "approved":
+      summary["taskApprovedCount"] += 1
+    if status in {"draft", "submitted", "changes_requested"}:
+      summary["taskActiveCount"] += 1
+    updated_at = row["updated_at"] or ""
+    if updated_at and updated_at > summary["lastTaskAt"]:
+      summary["lastTaskAt"] = updated_at
+  return summaries
+
+
+def portal_work_task_summary(portal_id):
+  try:
+    numeric_id = int(portal_id)
+  except (TypeError, ValueError):
+    return empty_portal_work_task_summary()
+  return portal_work_task_summaries([numeric_id]).get(numeric_id, empty_portal_work_task_summary())
+
+
+def public_portal_from_row(row, task_summary=None):
   team = parse_portal_members(row["members"])
   integrations = row["integrations"] or ""
   has_wb_integration = "wb:" in integrations
@@ -1515,6 +1592,7 @@ def public_portal_from_row(row):
   if mode == "manual" and status in ("", "draft"):
     status = "Ручной режим"
   manual_sync_status = "mpstats-loaded" if mode == "manual" and int(row["card_count"] or 0) > 0 else "manual"
+  task_summary = task_summary if isinstance(task_summary, dict) else portal_work_task_summary(row["id"])
   return {
     "id": str(row["id"]),
     "name": row["name"],
@@ -1544,7 +1622,14 @@ def public_portal_from_row(row):
       "approvalPendingCount": int(row["approval_pending_count"] or 0),
       "approvalReturnedCount": int(row["approval_returned_count"] or 0),
       "approvalApprovedCount": int(row["approval_approved_count"] or 0),
+      "taskTotalCount": int(task_summary.get("taskTotalCount") or 0),
+      "taskActiveCount": int(task_summary.get("taskActiveCount") or 0),
+      "taskDraftCount": int(task_summary.get("taskDraftCount") or 0),
+      "taskPendingCount": int(task_summary.get("taskPendingCount") or 0),
+      "taskReturnedCount": int(task_summary.get("taskReturnedCount") or 0),
+      "taskApprovedCount": int(task_summary.get("taskApprovedCount") or 0),
       "lastDraftAt": row["last_draft_at"] or "",
+      "lastTaskAt": task_summary.get("lastTaskAt") or "",
     },
     "isDemo": False,
   }
@@ -11066,9 +11151,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       user = self.require_user()
       if not user:
         return
+      rows = list_portals(user)
+      task_summaries = portal_work_task_summaries([row["id"] for row in rows])
       self.send_json(
         HTTPStatus.OK,
-        {"portals": [public_portal_from_row(row) for row in list_portals(user)]},
+        {"portals": [public_portal_from_row(row, task_summaries.get(int(row["id"]))) for row in rows]},
       )
       return
 
