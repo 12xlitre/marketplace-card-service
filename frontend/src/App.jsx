@@ -2138,8 +2138,8 @@ function cardExportSheetName(card, draft, usedNames) {
   return safeSheetName(cardExportArticle(card, draft), `WB ${card?.nmID || draft?.nmID || "card"}`, usedNames);
 }
 
-function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows) {
-  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length);
+function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, appendRows = 0) {
+  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length) + appendRows;
   return [
     [
       "Ключи в карточке (действующие)",
@@ -2153,9 +2153,9 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows) {
       currentRows[index]?.query || "",
       rankingRows[index]?.query || "",
       semanticRankExportValue(rankingRows[index]?.position),
-      selectedRows[index]?.query || "",
-      semanticFrequencyValue(selectedRows[index]),
-      selectedRows[index]?.query ? { value: "Да", style: 2 } : "",
+      selectedRows[index]?.query || { value: "", style: 2 },
+      selectedRows[index]?.query ? semanticFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
+      selectedRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
     ]),
   ];
 }
@@ -2167,36 +2167,41 @@ function buildSemanticCoreExportSheet(name, core, selectedRows) {
   if (!currentRows.length && !rankingRows.length && !selectedRowsNormalized.length) {
     return null;
   }
-  const agreementEndRow = Math.max(selectedRowsNormalized.length + 1, 2);
+  const tableRowCount = Math.max(currentRows.length, rankingRows.length, selectedRowsNormalized.length) + semanticManualAppendRows;
+  const agreementEndRow = Math.max(tableRowCount + 1, 2);
   return {
     name,
     freezeRows: 1,
     widths: [48, 48, 22, 48, 32, 18],
-    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized),
+    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized, semanticManualAppendRows),
     protected: true,
-    dataValidations: selectedRowsNormalized.length ? [{
+    dataValidations: tableRowCount ? [{
       type: "list",
       range: `F2:F${agreementEndRow}`,
       formula1: '"Да,Нет"',
-      allowBlank: false,
+      allowBlank: true,
     }] : [],
   };
 }
 
-function buildSemanticCoreInstructionSheet(card) {
+function buildSemanticCoreInstructionSheet(card = null) {
+  const hasCard = Boolean(card?.nmID || card?.vendorCode || card?.title);
+  const target = hasCard
+    ? `карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}`
+    : "по выбранным карточкам кабинета";
   return {
     name: "Инструкция",
     widths: [34, 100],
     rows: [
       ["Раздел", "Описание"],
-      ["Файл", `Семантическое ядро карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}. Файл нужен для согласования новых ключей перед обновлением контента.`],
+      ["Файл", `Семантическое ядро ${target}. Файл нужен для согласования новых ключей перед обновлением контента.`],
       ["Ключи в карточке (действующие)", "Ключи, которые уже заложены в текущий заголовок или описание карточки. По ним карточка может не иметь позиции."],
       ["Ранжируемые ключи", "Запросы из MPStats, по которым карточка уже ранжируется."],
       ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
       ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
       ["Частота запроса ключа к добавлению", "Частотность WB по запросу из MPStats."],
       ["Согласование", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
-      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбце Согласование."],
+      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбце Согласование. Дополнительные ключи можно дописать в пустые строки столбцов Ключ к добавлению, Частота и Согласование."],
     ],
   };
 }
@@ -2219,13 +2224,14 @@ function buildPortalSemanticCoreSheets(cards, drafts) {
   const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
   const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
   const usedNames = new Set();
-  return (Array.isArray(drafts) ? drafts : [])
+  const cardSheets = (Array.isArray(drafts) ? drafts : [])
     .map((draft) => {
       const card = cardsByKey.get(draft.cardKey) || cardsByNm.get(String(draft.nmID || "")) || cardsByVendor.get(String(draft.vendorCode || "")) || {};
       const { core, selected } = semanticExportCoreFromDraft(draft, card);
       return buildSemanticCoreExportSheet(cardExportSheetName(card, draft, usedNames), core, selected);
     })
     .filter(Boolean);
+  return cardSheets.length ? [buildSemanticCoreInstructionSheet(), ...cardSheets] : [];
 }
 
 function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCharacteristics) {
@@ -2645,6 +2651,7 @@ const semanticCurrentRowsLimit = 600;
 const semanticRecommendedRowsLimit = 900;
 const semanticRankedRowsLimit = 600;
 const semanticSubjectOptionsLimit = 120;
+const semanticManualAppendRows = 100;
 
 function semanticRankValue(value) {
   const number = Number(value);
@@ -9957,12 +9964,16 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
   const displayedCurrentItems = metricFilter === "positions"
     ? filteredPositionItems
-    : metricFilter === "all"
-      ? [...filteredContentItems, ...filteredRankingOnlyItems]
-      : [];
+    : metricFilter === "content"
+      ? filteredContentItems
+      : metricFilter === "all"
+        ? [...filteredContentItems, ...filteredRankingOnlyItems]
+        : [];
   const leftListTitle = metricFilter === "positions"
     ? "Ранжирующиеся запросы"
-    : metricFilter === "selected"
+    : metricFilter === "content"
+      ? "Ключи в карточке (действующие)"
+      : metricFilter === "selected"
         ? "Добавленные в работу"
         : "Ключи в карточке и ранжирующиеся запросы";
   const showWorkColumn = metricFilter === "all";
@@ -9983,10 +9994,11 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             onClick={() => toggleMetricFilter("positions")}
           />
           <SemanticMetric
+            active={metricFilter === "content"}
             label="Ключи в карточке"
             value={formatNumber(contentItems.length)}
             hint="Действующие ключи, которые уже заложены в заголовок или описание карточки. По ним может не быть позиции."
-            onClick={() => setMetricFilter("all")}
+            onClick={() => toggleMetricFilter("content")}
           />
           <SemanticMetric
             active={metricFilter === "selected"}
@@ -10042,7 +10054,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               </div>
             )) : null}
             {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} ключей. Полный список попадет в Excel.</p> : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "content" ? "Действующих ключей в карточке пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
