@@ -3512,7 +3512,7 @@ def clean_work_period_status(value):
 
 def clean_work_period_task_status(value):
   status = str(value or "").strip().lower()
-  return status if status in {"planned", "done", "returned"} else "planned"
+  return status if status in {"planned", "done", "returned", "excluded"} else "planned"
 
 
 def clean_work_period_note(value, limit=1200):
@@ -3535,6 +3535,20 @@ def clean_work_period_history(items):
       "reason": clean_work_period_note(item.get("reason"), 1000),
     })
   return output[-50:]
+
+
+def clean_work_period_links(items, limit=200):
+  output = []
+  seen = set()
+  raw_items = items if isinstance(items, list) else []
+  for item in raw_items:
+    value = str(item or "").strip()[:120]
+    if value and value not in seen:
+      seen.add(value)
+      output.append(value)
+    if len(output) >= limit:
+      break
+  return output
 
 
 def normalize_work_period_tasks(value):
@@ -3561,6 +3575,11 @@ def normalize_work_period_tasks(value):
       "returnReason": clean_work_period_note(raw_task.get("returnReason")),
       "returnedAt": str(raw_task.get("returnedAt") or "")[:80],
       "returnedBy": str(raw_task.get("returnedBy") or "")[:120],
+      "exclusionReason": clean_work_period_note(raw_task.get("exclusionReason")),
+      "excludedAt": str(raw_task.get("excludedAt") or "")[:80],
+      "excludedBy": str(raw_task.get("excludedBy") or "")[:120],
+      "linkedTaskIds": clean_work_period_links(raw_task.get("linkedTaskIds")),
+      "linkedBatchIds": clean_work_period_links(raw_task.get("linkedBatchIds")),
       "history": clean_work_period_history(raw_task.get("history")),
     })
   if not tasks:
@@ -3570,14 +3589,17 @@ def normalize_work_period_tasks(value):
 
 def work_period_task_summary(tasks):
   clean_tasks = normalize_work_period_tasks(tasks)
-  total = len(clean_tasks)
-  done = len([task for task in clean_tasks if task["status"] == "done"])
-  returned = len([task for task in clean_tasks if task["status"] == "returned"])
+  active_tasks = [task for task in clean_tasks if task["status"] != "excluded"]
+  total = len(active_tasks)
+  done = len([task for task in active_tasks if task["status"] == "done"])
+  returned = len([task for task in active_tasks if task["status"] == "returned"])
+  excluded = len([task for task in clean_tasks if task["status"] == "excluded"])
   planned = max(0, total - done - returned)
   return {
     "total": total,
     "done": done,
     "returned": returned,
+    "excluded": excluded,
     "planned": planned,
     "progress": round(done / total * 100) if total else 0,
   }
@@ -3587,6 +3609,7 @@ def work_period_report_payload(period, tasks, user):
   clean_tasks = normalize_work_period_tasks(tasks)
   completed = []
   not_completed = []
+  excluded = []
   for task in clean_tasks:
     payload = {
       "key": task["key"],
@@ -3598,8 +3621,17 @@ def work_period_report_payload(period, tasks, user):
       "returnReason": task.get("returnReason") or "",
       "returnedAt": task.get("returnedAt") or "",
       "returnedBy": task.get("returnedBy") or "",
+      "exclusionReason": task.get("exclusionReason") or "",
+      "excludedAt": task.get("excludedAt") or "",
+      "excludedBy": task.get("excludedBy") or "",
+      "linkedTaskIds": clean_work_period_links(task.get("linkedTaskIds")),
+      "linkedBatchIds": clean_work_period_links(task.get("linkedBatchIds")),
     }
-    if task["status"] == "done":
+    if task["status"] == "excluded":
+      if not payload["exclusionReason"]:
+        payload["exclusionReason"] = "исключено при корректировке плана"
+      excluded.append(payload)
+    elif task["status"] == "done":
       completed.append(payload)
     else:
       if not payload["returnReason"] and payload["comment"]:
@@ -3617,6 +3649,7 @@ def work_period_report_payload(period, tasks, user):
     "summary": work_period_task_summary(clean_tasks),
     "completed": completed,
     "notCompleted": not_completed,
+    "excluded": excluded,
   }
 
 
@@ -3662,6 +3695,14 @@ def validate_work_period_dates(start, end):
   if (end_day - start_day).days > 370:
     raise ValueError("work_period_too_long")
   return start, end
+
+
+def work_period_is_closed(end):
+  end = clean_report_date(end)
+  if not end:
+    return False
+  end_day = dt.date.fromisoformat(end)
+  return utc_now().date() >= end_day
 
 
 def list_portal_work_periods(portal_id, user):
@@ -3778,7 +3819,62 @@ def update_portal_work_period(portal_id, payload, user):
       if payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"):
         incoming_keys = normalize_work_period_task_keys(payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"))
         task_by_key = {task["key"]: task for task in tasks}
-        tasks = [task_by_key.get(key) or normalize_work_period_tasks([key])[0] for key in incoming_keys]
+        next_tasks = []
+        for key in incoming_keys:
+          task = task_by_key.get(key)
+          if task:
+            if task["status"] == "excluded":
+              history = clean_work_period_history(task.get("history"))
+              history.append({
+                "action": "restored",
+                "at": now,
+                "by": user["login"],
+                "comment": "",
+                "reason": "",
+              })
+              task = {
+                **task,
+                "status": "planned",
+                "exclusionReason": "",
+                "excludedAt": "",
+                "excludedBy": "",
+                "history": clean_work_period_history(history),
+              }
+            next_tasks.append(task)
+          else:
+            task = normalize_work_period_tasks([key])[0]
+            task["history"] = clean_work_period_history([{
+              "action": "added",
+              "at": now,
+              "by": user["login"],
+              "comment": "",
+              "reason": "",
+            }])
+            next_tasks.append(task)
+        exclusion_reason = clean_work_period_note(payload.get("exclusionReason")) or "исключено при корректировке плана"
+        for task in tasks:
+          if task["key"] in incoming_keys:
+            continue
+          history = clean_work_period_history(task.get("history"))
+          history.append({
+            "action": "excluded",
+            "at": now,
+            "by": user["login"],
+            "comment": "",
+            "reason": exclusion_reason,
+          })
+          next_tasks.append({
+            **task,
+            "status": "excluded",
+            "exclusionReason": exclusion_reason,
+            "excludedAt": now,
+            "excludedBy": user["login"],
+            "history": clean_work_period_history(history),
+          })
+        tasks = next_tasks
+        report = {}
+        if status == "reported":
+          status = "active"
     elif action in {"complete_task", "return_task"}:
       task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
       if task_key not in WORK_PERIOD_TASK_LABELS:
@@ -3791,6 +3887,8 @@ def update_portal_work_period(portal_id, payload, user):
         if task["key"] != task_key:
           next_tasks.append(task)
           continue
+        if task["status"] == "excluded":
+          raise ValueError("work_period_task_excluded")
         changed = True
         history = clean_work_period_history(task.get("history"))
         if action == "complete_task":
@@ -3838,6 +3936,8 @@ def update_portal_work_period(portal_id, payload, user):
       if status == "reported":
         status = "active"
     elif action == "generate_report":
+      if not work_period_is_closed(end):
+        raise ValueError("work_period_not_finished")
       report = work_period_report_payload({"start": start, "end": end}, tasks, user)
       status = "reported"
     else:

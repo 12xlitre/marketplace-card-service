@@ -900,6 +900,12 @@ a {
   background: #fff6f4;
 }
 
+.work-period-task.excluded {
+  border-style: dashed;
+  border-color: #d7dce5;
+  background: #f7f8fb;
+}
+
 .work-period-task-main,
 .work-period-task-actions {
   display: grid;
@@ -968,6 +974,15 @@ a {
 .work-period-report ul {
   margin: 0;
   padding-left: 18px;
+}
+
+.work-period-card .card-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.work-period-card .card-actions .status-note {
+  flex-basis: 100%;
 }
 
 .filters {

@@ -906,7 +906,7 @@ function normalizeWorkPeriodTaskKeys(value) {
 
 function normalizeWorkPeriodTask(task) {
   const option = workPeriodTaskOptions.find((item) => item.key === task?.key) || workPeriodTaskOptions[0];
-  const status = ["planned", "done", "returned"].includes(task?.status) ? task.status : "planned";
+  const status = ["planned", "done", "returned", "excluded"].includes(task?.status) ? task.status : "planned";
   return {
     key: option.key,
     label: task?.label || option.label,
@@ -917,6 +917,11 @@ function normalizeWorkPeriodTask(task) {
     returnReason: task?.returnReason || "",
     returnedAt: task?.returnedAt || "",
     returnedBy: task?.returnedBy || "",
+    exclusionReason: task?.exclusionReason || "",
+    excludedAt: task?.excludedAt || "",
+    excludedBy: task?.excludedBy || "",
+    linkedTaskIds: Array.isArray(task?.linkedTaskIds) ? task.linkedTaskIds.map(String).filter(Boolean) : [],
+    linkedBatchIds: Array.isArray(task?.linkedBatchIds) ? task.linkedBatchIds.map(String).filter(Boolean) : [],
     history: Array.isArray(task?.history) ? task.history : [],
   };
 }
@@ -926,10 +931,12 @@ function normalizeWorkPeriod(period) {
     .map(normalizeWorkPeriodTask)
     .filter((task, index, items) => items.findIndex((item) => item.key === task.key) === index);
   const cleanTasks = tasks.length ? tasks : workPeriodTaskOptions.map((item) => normalizeWorkPeriodTask(item));
+  const activeTasks = cleanTasks.filter((task) => task.status !== "excluded");
   const summary = period?.summary || {};
-  const done = Number(summary.done ?? cleanTasks.filter((task) => task.status === "done").length);
-  const returned = Number(summary.returned ?? cleanTasks.filter((task) => task.status === "returned").length);
-  const total = Number(summary.total || cleanTasks.length);
+  const done = Number(summary.done ?? activeTasks.filter((task) => task.status === "done").length);
+  const returned = Number(summary.returned ?? activeTasks.filter((task) => task.status === "returned").length);
+  const excluded = Number(summary.excluded ?? cleanTasks.filter((task) => task.status === "excluded").length);
+  const total = Number(summary.total ?? activeTasks.length);
   return {
     id: String(period?.id || ""),
     portalId: String(period?.portalId || ""),
@@ -944,6 +951,7 @@ function normalizeWorkPeriod(period) {
       total,
       done,
       returned,
+      excluded,
       planned: Number(summary.planned ?? Math.max(0, total - done - returned)),
       progress: Number(summary.progress ?? (total ? Math.round((done / total) * 100) : 0)),
     },
@@ -971,15 +979,27 @@ function defaultWorkPeriodForm() {
   };
 }
 
+function workPeriodFormFromPeriod(period) {
+  const normalized = normalizeWorkPeriod(period);
+  return {
+    title: normalized.title,
+    start: normalized.period.start,
+    end: normalized.period.end,
+    taskKeys: normalized.tasks.filter((task) => task.status !== "excluded").map((task) => task.key),
+  };
+}
+
 function workPeriodTaskStatusLabel(status) {
   if (status === "done") return "выполнено";
   if (status === "returned") return "возврат";
+  if (status === "excluded") return "исключено";
   return "в плане";
 }
 
 function workPeriodTaskStatusTone(status) {
   if (status === "done") return "green";
   if (status === "returned") return "red";
+  if (status === "excluded") return "amber";
   return "blue";
 }
 
@@ -991,8 +1011,100 @@ function workPeriodStatus(period) {
 }
 
 function workPeriodTaskDate(task) {
-  const value = task.status === "done" ? task.completedAt : task.status === "returned" ? task.returnedAt : "";
+  const value = task.status === "done" ? task.completedAt : task.status === "returned" ? task.returnedAt : task.status === "excluded" ? task.excludedAt : "";
   return value ? new Date(value).toLocaleString("ru-RU") : "";
+}
+
+function workPeriodIsClosed(period, currentDate = new Date()) {
+  const end = period?.period?.end || period?.end || "";
+  if (!end) return false;
+  const endDate = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(endDate.getTime())) return false;
+  const today = new Date(currentDate);
+  today.setHours(0, 0, 0, 0);
+  return today.getTime() >= endDate.getTime();
+}
+
+function workPeriodLinkedLabel(task) {
+  const taskCount = task.linkedTaskIds?.length || 0;
+  const batchCount = task.linkedBatchIds?.length || 0;
+  if (!taskCount && !batchCount) return "не привязано";
+  return [`${taskCount} задач`, `${batchCount} пачек`].filter((item) => !item.startsWith("0 ")).join(", ");
+}
+
+function workPeriodEndDateLabel(period) {
+  const end = period?.period?.end || period?.end || "";
+  return end ? clientReportDateLabel(`${end}T00:00:00`) : "окончания периода";
+}
+
+function workPeriodTaskExportReason(task) {
+  if (task.status === "returned") return task.returnReason || "возвращено без причины";
+  if (task.status === "excluded") return task.exclusionReason || "исключено при корректировке плана";
+  if (task.status === "planned") return "не выполнено к моменту выгрузки";
+  return "";
+}
+
+function workPeriodTaskExportDate(task) {
+  if (task.status === "done") return task.completedAt ? new Date(task.completedAt).toLocaleString("ru-RU") : "";
+  if (task.status === "returned") return task.returnedAt ? new Date(task.returnedAt).toLocaleString("ru-RU") : "";
+  if (task.status === "excluded") return task.excludedAt ? new Date(task.excludedAt).toLocaleString("ru-RU") : "";
+  return "";
+}
+
+function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
+  const normalized = normalizeWorkPeriod(period);
+  const generatedAt = new Date();
+  const activeTasks = normalized.tasks.filter((task) => task.status !== "excluded");
+  const rows = [
+    [mode === "final" ? "Итоговый отчет по плану работ" : "План работ по кабинету", ""],
+    ["Кабинет", portalDisplayName(portal)],
+    ["Период", clientReportRangeLabel(normalized.period.start, normalized.period.end)],
+    ["Название", normalized.title || "Рабочий период"],
+    ["Дата выгрузки", generatedAt.toLocaleString("ru-RU")],
+    ["Всего в плане", normalized.summary.total],
+    ["Выполнено", normalized.summary.done],
+    ["Возвраты", normalized.summary.returned],
+    ["Исключено из плана", normalized.summary.excluded || 0],
+    [],
+    ["Пункт плана", "Статус", "Дата действия", "Комментарий", "Причина / пояснение", "Связанные задачи"],
+    ...normalized.tasks.map((task) => [
+      task.label,
+      workPeriodTaskStatusLabel(task.status),
+      workPeriodTaskExportDate(task),
+      task.comment || "",
+      workPeriodTaskExportReason(task),
+      workPeriodLinkedLabel(task),
+    ]),
+  ];
+  const sheets = [{
+    name: mode === "final" ? "Итоговый отчет" : "План работ",
+    freezeRows: 11,
+    widths: [28, 22, 24, 52, 52, 28],
+    rows,
+  }];
+  if (mode === "final") {
+    sheets.push({
+      name: "Сводка",
+      freezeRows: 1,
+      widths: [32, 18, 64],
+      rows: [
+        ["Показатель", "Значение", "Комментарий"],
+        ["Работ в плане", activeTasks.length, "Исключенные при корректировке пункты не входят в активный план."],
+        ["Выполнено", normalized.summary.done, "Пункты со статусом выполнено."],
+        ["Не выполнено", Math.max(0, normalized.summary.total - normalized.summary.done), "Плановые и возвращенные пункты на момент выгрузки."],
+        ["Возвраты", normalized.summary.returned, "Пункты, возвращенные с причиной."],
+        ["Исключено", normalized.summary.excluded || 0, "Пункты, убранные из плана в процессе периода."],
+      ],
+    });
+  }
+  return sheets;
+}
+
+function workPeriodExportFileName(portal, period, mode = "plan") {
+  const normalized = normalizeWorkPeriod(period);
+  const type = mode === "final" ? "итоговый-отчет" : "план-работ";
+  const periodPart = `${normalized.period.start || "start"}-${normalized.period.end || "end"}`;
+  return `${type}-${safeFilePart(portalDisplayName(portal))}-${safeFilePart(normalized.title || periodPart)}-${exportDatePart()}.xlsx`;
 }
 
 function buildTaskGroupsByType(tasks) {
@@ -6169,6 +6281,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
   const [status, setStatus] = useState("idle");
   const [actionStatus, setActionStatus] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingPeriod, setEditingPeriod] = useState(null);
   const [form, setForm] = useState(defaultWorkPeriodForm);
   const [taskDrafts, setTaskDrafts] = useState({});
   const canUseBackend = Boolean(portal?.id && !portal?.isDemo);
@@ -6176,10 +6289,11 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
   const reportedCount = periods.filter((period) => period.status === "reported").length;
 
   useEffect(() => {
-    setForm(defaultWorkPeriodForm());
-    setTaskDrafts({});
-    loadPeriods();
-  }, [portal?.id]);
+	    setForm(defaultWorkPeriodForm());
+	    setEditingPeriod(null);
+	    setTaskDrafts({});
+	    loadPeriods();
+	  }, [portal?.id]);
 
   async function loadPeriods() {
     if (!canUseBackend) {
@@ -6251,8 +6365,45 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     }
   }
 
-  async function runPeriodAction(period, body, successText, errorText) {
+  async function updatePeriodPlan(period, nextForm) {
     if (!canUseBackend || actionStatus) return;
+    if (!nextForm.start || !nextForm.end || nextForm.start > nextForm.end) {
+      onNotice?.("Выберите корректный период работ.");
+      return;
+    }
+    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys);
+    if (!taskKeys.length) {
+      onNotice?.("Оставьте хотя бы один активный пункт плана.");
+      return;
+    }
+    setActionStatus(`update:${period.id}`);
+    try {
+      const payload = await apiRequest("/api/portal-work-periods", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          periodId: period.id,
+          action: "update",
+          title: nextForm.title,
+          period: { start: nextForm.start, end: nextForm.end },
+          taskKeys,
+        }),
+      });
+      if (payload.period) {
+        upsertPeriod(payload.period);
+      }
+      setEditingPeriod(null);
+      setForm(defaultWorkPeriodForm());
+      onNotice?.("План периода обновлен.");
+    } catch {
+      onNotice?.("Не удалось обновить план периода.");
+    } finally {
+      setActionStatus("");
+    }
+  }
+
+  async function runPeriodAction(period, body, successText, errorText) {
+    if (!canUseBackend || actionStatus) return null;
     const actionKey = `${period.id}:${body.action}:${body.taskKey || ""}`;
     setActionStatus(actionKey);
     try {
@@ -6268,8 +6419,15 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
         upsertPeriod(payload.period);
       }
       onNotice?.(successText);
+      return payload.period ? normalizeWorkPeriod(payload.period) : null;
     } catch (error) {
-      onNotice?.(error.message === "work_period_return_reason_required" ? "Укажите причину возврата." : errorText);
+      const message = error.message === "work_period_return_reason_required"
+        ? "Укажите причину возврата."
+        : error.message === "work_period_not_finished"
+          ? "Итоговый отчет откроется после окончания отчетного периода."
+          : errorText;
+      onNotice?.(message);
+      return null;
     } finally {
       setActionStatus("");
     }
@@ -6297,8 +6455,42 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     }, "Пункт периода возвращен с причиной.", "Не удалось вернуть пункт периода.");
   }
 
-  function generatePeriodReport(period) {
-    runPeriodAction(period, { action: "generate_report" }, "Итоговый отчет периода сформирован.", "Не удалось сформировать отчет периода.");
+	  function openCreatePeriod() {
+	    setEditingPeriod(null);
+	    setForm(defaultWorkPeriodForm());
+	    setCreateOpen(true);
+	  }
+
+	  function openEditPeriod(period) {
+	    setCreateOpen(false);
+	    setEditingPeriod(period);
+	    setForm(workPeriodFormFromPeriod(period));
+	  }
+
+  function closePeriodModal() {
+    setCreateOpen(false);
+    setEditingPeriod(null);
+    setForm(defaultWorkPeriodForm());
+  }
+
+  function downloadWorkPeriodPlan(period) {
+    downloadXlsx(
+      workPeriodExportFileName(portal, period, "plan"),
+      buildWorkPeriodWorkbookSheets(portal, period, "plan"),
+    );
+  }
+
+  async function downloadFinalWorkPeriodReport(period) {
+    if (!workPeriodIsClosed(period)) {
+      onNotice?.(`Итоговый отчет откроется после ${workPeriodEndDateLabel(period)}.`);
+      return;
+    }
+    const reportedPeriod = await runPeriodAction(period, { action: "generate_report" }, "Итоговый отчет скачан.", "Не удалось подготовить итоговый отчет.");
+    if (!reportedPeriod) return;
+    downloadXlsx(
+      workPeriodExportFileName(portal, reportedPeriod, "final"),
+      buildWorkPeriodWorkbookSheets(portal, reportedPeriod, "final"),
+    );
   }
 
   async function deletePeriod(period) {
@@ -6331,7 +6523,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
             <Tag tone={status === "error" ? "amber" : activeCount ? "blue" : "green"}>
               {status === "loading" ? "загрузка" : `${activeCount} в работе`}
             </Tag>
-            <button className="btn primary" type="button" onClick={() => setCreateOpen(true)} disabled={!canUseBackend || actionStatus === "creating"}>
+            <button className="btn primary" type="button" onClick={openCreatePeriod} disabled={!canUseBackend || actionStatus === "creating"}>
               <Plus size={17} />Создать период
             </button>
           </div>
@@ -6363,6 +6555,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       <div className="work-period-grid">
         {periods.map((period) => {
           const statusInfo = workPeriodStatus(period);
+          const periodClosed = workPeriodIsClosed(period);
           const report = period.report || {};
           const reportSummary = report.summary || period.summary;
           return (
@@ -6381,38 +6574,44 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
               <div className="work-period-task-list">
                 {period.tasks.map((task) => {
                   const actionBusy = actionStatus.includes(`${period.id}:`) && actionStatus.includes(task.key);
-                  const actor = findUser(task.status === "done" ? task.completedBy : task.returnedBy);
+                  const actor = findUser(task.status === "done" ? task.completedBy : task.status === "excluded" ? task.excludedBy : task.returnedBy);
                   const taskDate = workPeriodTaskDate(task);
                   return (
                     <div className={`work-period-task ${task.status}`} key={task.key}>
                       <div className="work-period-task-main">
                         <div>
                           <strong>{task.label}</strong>
-                          <span>{taskDate ? `${taskDate} · ${actor?.full_name || task.completedBy || task.returnedBy || "пользователь"}` : "ожидает выполнения"}</span>
+                          <span>{taskDate ? `${taskDate} · ${actor?.full_name || task.completedBy || task.returnedBy || task.excludedBy || "пользователь"}` : "ожидает выполнения"}</span>
                         </div>
                         <Tag tone={workPeriodTaskStatusTone(task.status)}>{workPeriodTaskStatusLabel(task.status)}</Tag>
                       </div>
                       {task.comment ? <p className="work-period-note">{task.comment}</p> : null}
                       {task.returnReason ? <p className="work-period-note return">Причина возврата: {task.returnReason}</p> : null}
-                      <textarea
-                        value={taskDraftValue(period, task, "comment")}
-                        onChange={(event) => updateTaskDraft(period, task, "comment", event.target.value)}
-                        placeholder={task.comment || "Комментарий к выполнению"}
-                        rows={2}
-                      />
-                      <div className="work-period-task-actions">
-                        <button className={loadingButtonClass("btn mini", actionBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)}>
-                          <CheckSquare size={14} />Выполнено
-                        </button>
-                        <input
-                          value={taskDraftValue(period, task, "reason")}
-                          onChange={(event) => updateTaskDraft(period, task, "reason", event.target.value)}
-                          placeholder="Причина возврата"
-                        />
-                        <button className="btn mini danger" type="button" onClick={() => returnTask(period, task)} disabled={Boolean(actionStatus)}>
-                          <RotateCcw size={14} />Вернуть
-                        </button>
-                      </div>
+                      {task.exclusionReason ? <p className="work-period-note return">Исключено из плана: {task.exclusionReason}</p> : null}
+                      <p className="work-period-note">Задачи кабинета: {workPeriodLinkedLabel(task)}</p>
+                      {task.status !== "excluded" ? (
+                        <>
+                          <textarea
+                            value={taskDraftValue(period, task, "comment")}
+                            onChange={(event) => updateTaskDraft(period, task, "comment", event.target.value)}
+                            placeholder={task.comment || "Комментарий к выполнению"}
+                            rows={2}
+                          />
+                          <div className="work-period-task-actions">
+                            <button className={loadingButtonClass("btn mini", actionBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)}>
+                              <CheckSquare size={14} />Выполнено
+                            </button>
+                            <input
+                              value={taskDraftValue(period, task, "reason")}
+                              onChange={(event) => updateTaskDraft(period, task, "reason", event.target.value)}
+                              placeholder="Причина возврата"
+                            />
+                            <button className="btn mini danger" type="button" onClick={() => returnTask(period, task)} disabled={Boolean(actionStatus)}>
+                              <RotateCcw size={14} />Вернуть
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -6431,9 +6630,22 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                 </div>
               ) : null}
               <div className="card-actions">
-                <button className={loadingButtonClass("btn primary", actionStatus === `${period.id}:generate_report:`)} type="button" onClick={() => generatePeriodReport(period)} disabled={Boolean(actionStatus)}>
-                  <FileText size={16} />Сформировать отчет
+                <button className="btn" type="button" onClick={() => openEditPeriod(period)} disabled={Boolean(actionStatus)}>
+                  <Pencil size={16} />Редактировать план
                 </button>
+                <button className="btn" type="button" onClick={() => downloadWorkPeriodPlan(period)} disabled={Boolean(actionStatus)}>
+                  <Download size={16} />Скачать план работ
+                </button>
+                <button
+                  className={loadingButtonClass("btn primary", actionStatus === `${period.id}:generate_report:`)}
+                  type="button"
+                  onClick={() => downloadFinalWorkPeriodReport(period)}
+                  disabled={Boolean(actionStatus) || !periodClosed}
+                  title={periodClosed ? "Скачать итоговый отчет за период" : `Откроется после ${workPeriodEndDateLabel(period)}`}
+                >
+                  <FileText size={16} />Скачать итоговый отчет
+                </button>
+                {!periodClosed ? <span className="status-note">Итоговый отчет откроется после окончания периода.</span> : null}
                 {canManage ? (
                   <button className="btn danger" type="button" onClick={() => deletePeriod(period)} disabled={Boolean(actionStatus)}>
                     <Trash2 size={16} />Удалить
@@ -6448,28 +6660,30 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
             <div className="seller-logo">+</div>
             <h2>Создать период</h2>
             <p>Задайте даты и выберите план работ отдела по этому кабинету.</p>
-            <button className="btn primary" type="button" onClick={() => setCreateOpen(true)} disabled={actionStatus === "creating"}>
+            <button className="btn primary" type="button" onClick={openCreatePeriod} disabled={actionStatus === "creating"}>
               <Plus size={17} />Создать
             </button>
           </article>
         ) : null}
       </div>
 
-      {createOpen ? (
+      {createOpen || editingPeriod ? (
         <WorkPeriodModal
           value={form}
-          loading={actionStatus === "creating"}
+          mode={editingPeriod ? "edit" : "create"}
+          loading={actionStatus === "creating" || actionStatus === `update:${editingPeriod?.id}`}
           onChange={setForm}
-          onClose={() => setCreateOpen(false)}
-          onSubmit={createPeriod}
+          onClose={closePeriodModal}
+          onSubmit={(nextForm) => (editingPeriod ? updatePeriodPlan(editingPeriod, nextForm) : createPeriod(nextForm))}
         />
       ) : null}
     </>
   );
 }
 
-function WorkPeriodModal({ value, loading, onChange, onClose, onSubmit }) {
+function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, onSubmit }) {
   const taskKeys = normalizeWorkPeriodTaskKeys(value.taskKeys);
+  const isEdit = mode === "edit";
   function toggleTask(key) {
     const nextKeys = taskKeys.includes(key)
       ? taskKeys.filter((item) => item !== key)
@@ -6485,8 +6699,8 @@ function WorkPeriodModal({ value, loading, onChange, onClose, onSubmit }) {
       <form className="modal work-period-modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
-            <h2>Создать отчетный период</h2>
-            <p>Период может начинаться с любой даты, не обязательно с первого числа месяца.</p>
+            <h2>{isEdit ? "Редактировать план периода" : "Создать отчетный период"}</h2>
+            <p>{isEdit ? "Можно менять даты и набор активных пунктов плана, пока период идет." : "Период может начинаться с любой даты, не обязательно с первого числа месяца."}</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
@@ -6517,7 +6731,7 @@ function WorkPeriodModal({ value, loading, onChange, onClose, onSubmit }) {
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
           <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !taskKeys.length} aria-busy={loading || undefined}>
-            {loading ? "Создаем" : "Создать период"}
+            {loading ? (isEdit ? "Сохраняем" : "Создаем") : (isEdit ? "Сохранить план" : "Создать период")}
           </button>
         </div>
       </form>
