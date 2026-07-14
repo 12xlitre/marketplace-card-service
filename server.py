@@ -2037,7 +2037,7 @@ def merge_snapshot_with_existing_cards(row, snapshot):
   def add_card(card):
     if not isinstance(card, dict):
       return
-    key = card_key_from_snapshot_card(card) or str(card.get("nmID") or card.get("vendorCode") or "")
+    key = card_key_from_snapshot_card(card) or raw_storefront_card_key(card)
     if not key or key in seen:
       return
     seen.add(key)
@@ -2429,11 +2429,25 @@ def card_key_from_snapshot_card(card):
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
   return draft_card_key(
     card.get("nmID")
-    or card.get("vendorCode")
-    or card.get("nmUUID")
+    or card.get("nmId")
+    or card.get("nm_id")
     or raw_fields.get("nmID")
+    or raw_fields.get("nmId")
+    or raw_fields.get("nm_id")
+    or card.get("id")
+    or raw_fields.get("id")
+    or card.get("vendorCode")
+    or card.get("vendor_code")
+    or card.get("supplierArticle")
     or raw_fields.get("vendorCode")
+    or raw_fields.get("vendor_code")
+    or raw_fields.get("supplierArticle")
+    or card.get("nmUUID")
+    or card.get("nmUuid")
+    or card.get("nm_uuid")
     or raw_fields.get("nmUUID")
+    or raw_fields.get("nmUuid")
+    or raw_fields.get("nm_uuid")
   )
 
 
@@ -2555,13 +2569,20 @@ def normalize_workset_card(value):
   card_key = draft_card_key(
     value.get("cardKey")
     or value.get("nmID")
+    or value.get("nmId")
+    or value.get("nm_id")
+    or value.get("id")
     or value.get("vendorCode")
+    or value.get("vendor_code")
+    or value.get("supplierArticle")
     or value.get("nmUUID")
+    or value.get("nmUuid")
+    or value.get("nm_uuid")
   )
   return {
     "cardKey": card_key,
-    "nmID": str(value.get("nmID") or "")[:80],
-    "vendorCode": str(value.get("vendorCode") or "")[:120],
+    "nmID": str(value.get("nmID") or value.get("nmId") or value.get("nm_id") or value.get("id") or "")[:80],
+    "vendorCode": str(value.get("vendorCode") or value.get("vendor_code") or value.get("supplierArticle") or "")[:120],
     "title": str(value.get("title") or "")[:500],
     "subjectName": str(value.get("subjectName") or "")[:240],
   }

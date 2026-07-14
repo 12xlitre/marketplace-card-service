@@ -1158,9 +1158,9 @@ function cardWorkStateForTask(card, selectedSet, task) {
 
 function cardTaskLookupKeys(card) {
   return [
-    cardStableKey(card),
-    card?.nmID ? `nm:${card.nmID}` : "",
-    card?.vendorCode ? `vendor:${card.vendorCode}` : "",
+    ...cardDraftKeyCandidates(card),
+    cardNmIdValue(card) ? `nm:${cardNmIdValue(card)}` : "",
+    cardVendorCodeValue(card) ? `vendor:${cardVendorCodeValue(card)}` : "",
   ].filter(Boolean).map(String);
 }
 
@@ -2215,7 +2215,7 @@ function semanticExportCoreFromDraft(draft, card) {
 }
 
 function buildPortalSemanticCoreSheets(cards, drafts) {
-  const cardsByKey = new Map(cards.map((card) => [cardDraftKey(card), card]));
+  const cardsByKey = cardsByDraftKey(cards);
   const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
   const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
   const usedNames = new Set();
@@ -2295,7 +2295,7 @@ function buildPortalContentSheet(card, draft, usedNames) {
 }
 
 function buildPortalContentSheets(cards, drafts) {
-  const cardsByKey = new Map(cards.map((card) => [cardDraftKey(card), card]));
+  const cardsByKey = cardsByDraftKey(cards);
   const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
   const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
   const usedNames = new Set();
@@ -2307,8 +2307,84 @@ function buildPortalContentSheets(cards, drafts) {
     .filter(Boolean);
 }
 
+function normalizeDraftKeyValue(value) {
+  const text = String(value ?? "").trim();
+  return text && text !== "undefined" && text !== "null" ? text : "";
+}
+
+function uniqueDraftKeyValues(values) {
+  const seen = new Set();
+  const output = [];
+  values.forEach((value) => {
+    const text = normalizeDraftKeyValue(value);
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    output.push(text);
+  });
+  return output;
+}
+
+function cardNmIdValue(card) {
+  const rawFields = rawFieldsForCard(card);
+  return uniqueDraftKeyValues([
+    card?.nmID,
+    card?.nmId,
+    card?.nm_id,
+    rawFields.nmID,
+    rawFields.nmId,
+    rawFields.nm_id,
+    card?.id,
+    rawFields.id,
+  ])[0] || "";
+}
+
+function cardVendorCodeValue(card) {
+  const rawFields = rawFieldsForCard(card);
+  return uniqueDraftKeyValues([
+    card?.vendorCode,
+    card?.vendor_code,
+    card?.supplierArticle,
+    rawFields.vendorCode,
+    rawFields.vendor_code,
+    rawFields.supplierArticle,
+  ])[0] || "";
+}
+
+function cardDraftKeyCandidates(card) {
+  const rawFields = rawFieldsForCard(card);
+  return uniqueDraftKeyValues([
+    cardNmIdValue(card),
+    cardVendorCodeValue(card),
+    card?.nmUUID,
+    card?.nmUuid,
+    card?.nm_uuid,
+    rawFields.nmUUID,
+    rawFields.nmUuid,
+    rawFields.nm_uuid,
+    card?.cardKey,
+    rawFields.cardKey,
+  ]);
+}
+
 function cardDraftKey(card) {
-  return String(card?.nmID || card?.vendorCode || card?.nmUUID || "card").trim();
+  return cardDraftKeyCandidates(card)[0] || "card";
+}
+
+function cardMatchesDraftKey(card, key) {
+  const normalizedKey = normalizeDraftKeyValue(key);
+  return Boolean(normalizedKey && cardDraftKeyCandidates(card).includes(normalizedKey));
+}
+
+function cardsByDraftKey(cards) {
+  const output = new Map();
+  (Array.isArray(cards) ? cards : []).forEach((card) => {
+    cardDraftKeyCandidates(card).forEach((key) => {
+      if (!output.has(key)) {
+        output.set(key, card);
+      }
+    });
+  });
+  return output;
 }
 
 const MPSTATS_NICHE_PATH_WARNING = "Рыночный контекст MPStats по нише не загрузился: не удалось определить путь категории. Конкуренты, ценовые зоны и выводы по нише рассчитаны только по доступным данным карточки.";
@@ -2453,8 +2529,8 @@ function buildStructuredCardDraft({
       auditResult: sanitizeAuditResult(auditResult),
       evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
       card: {
-        nmID: card?.nmID || "",
-        vendorCode: card?.vendorCode || "",
+        nmID: cardNmIdValue(card),
+        vendorCode: cardVendorCodeValue(card),
         subjectID: card?.subjectID || card?.rawFields?.subjectID || "",
         subjectName: card?.subjectName || "",
       },
@@ -3901,8 +3977,8 @@ export default function App() {
     if (!cards.length) {
       return;
     }
-    const nextCard = cards.find((card) => cardDraftKey(card) === selectedCardKey) || cards[0];
-    if (!selectedCard || cardDraftKey(selectedCard) !== cardDraftKey(nextCard)) {
+    const nextCard = cards.find((card) => cardMatchesDraftKey(card, selectedCardKey)) || cards[0];
+    if (!selectedCard || !cardMatchesDraftKey(selectedCard, cardDraftKey(nextCard))) {
       setSelectedCard(nextCard);
     }
   }, [screen, currentPortal, selectedCardKey, selectedCard]);
@@ -4568,7 +4644,7 @@ export default function App() {
   }
 
   const currentPortalCards = cardsForPortal(currentPortal);
-  const selectedCardFromPortal = currentPortalCards.find((card) => cardDraftKey(card) === selectedCardKey) || null;
+  const selectedCardFromPortal = currentPortalCards.find((card) => cardMatchesDraftKey(card, selectedCardKey)) || null;
   const currentPortalKey = String(currentPortal?.id || "");
   const cardScreenLoading = Boolean(
     screen === "card"
@@ -4660,7 +4736,7 @@ export default function App() {
 
         {screen === "card" && selectedCardFromPortal ? (
           <CardDetailScreen
-            key={selectedCardFromPortal?.nmID || selectedCardFromPortal?.vendorCode || selectedCardFromPortal?.title}
+            key={cardDraftKey(selectedCardFromPortal)}
             card={selectedCardFromPortal}
             portal={currentPortal}
             currentUser={currentUser}
@@ -6394,9 +6470,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const auditRunning = auditStatus === "loading";
   const auditStale = auditStatus === "stale";
   const draftTitleLength = draftTitle.length;
-  const draftCardKey = cardDraftKey(card);
+  const draftCardKeys = cardDraftKeyCandidates(card);
+  const draftCardKey = draftCardKeys[0] || cardDraftKey(card);
+  const draftCardKeySignature = draftCardKeys.join("|");
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
+  const draftStorageKeys = uniqueDraftKeyValues([draftCardKey, ...draftCardKeys])
+    .map((key) => `opticards-draft:${portal?.id || "portal"}:${key}`);
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
+  const semanticPersistSucceeded = (status) => (
+    backendDraftEnabled ? status === "backend" : ["backend", "local"].includes(status)
+  );
   const competitorsEnabled = backendDraftEnabled;
   const exportFileBase = safeFilePart(`${card?.vendorCode || card?.nmID || "card"}-${card?.subjectName || "wb"}`);
   const mpstatsMatches = countMpstatsMatches(characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
@@ -6638,21 +6721,38 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
     };
-    try {
-      const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
-      if (saved) {
+    let localDraftApplied = false;
+    for (const storageKey of draftStorageKeys) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
+        if (!saved) {
+          continue;
+        }
         applyDraft(saved);
-      } else {
-        setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
+        localDraftApplied = true;
+        if (storageKey !== draftStorageKey) {
+          try {
+            localStorage.setItem(draftStorageKey, JSON.stringify(saved));
+          } catch {
+            // The original local copy is still usable.
+          }
+        }
+        break;
+      } catch {
+        localStorage.removeItem(storageKey);
       }
-    } catch {
-      localStorage.removeItem(draftStorageKey);
+    }
+    if (!localDraftApplied) {
       setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
     }
     if (backendDraftEnabled && draftCardKey) {
-      apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`)
-        .then((payload) => {
-          if (!active || !payload.draft) return;
+      (async () => {
+        for (const candidateKey of uniqueDraftKeyValues([draftCardKey, ...draftCardKeys])) {
+          const payload = await apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(candidateKey)}`);
+          if (!active) return;
+          if (!payload.draft) {
+            continue;
+          }
           applyDraft(payload.draft);
           try {
             localStorage.setItem(draftStorageKey, JSON.stringify(payload.draft));
@@ -6660,17 +6760,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
             // Backend remains the source of truth; local cache sync is best effort.
           }
           setDraftSaveStatus("backend");
-        })
-        .catch(() => {
-          if (active) {
-            setDraftSaveStatus("local-fallback");
-          }
-        });
+          return;
+        }
+      })().catch(() => {
+        if (active) {
+          setDraftSaveStatus("local-fallback");
+        }
+      });
     }
     return () => {
       active = false;
     };
-  }, [draftStorageKey, draftCardKey, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
+  }, [draftStorageKey, draftCardKey, draftCardKeySignature, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
 
   useEffect(() => {
     let active = true;
@@ -6980,7 +7081,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         });
         setSemanticSaveStatus("saving");
         const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-        setSemanticSaveStatus(["backend", "local", "local-fallback"].includes(persistStatus) ? "saved" : "error");
+        setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
       }
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
@@ -7039,7 +7140,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     });
     try {
       const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-      setSemanticSaveStatus(["backend", "local", "local-fallback"].includes(persistStatus) ? "saved" : "error");
+      setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
     } catch {
       setSemanticSaveStatus("error");
     }
@@ -7143,8 +7244,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       card,
     });
     try {
-      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-      setSemanticSaveStatus("saved");
+      const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      setSemanticSaveStatus(semanticPersistSucceeded(persistStatus) ? "saved" : "error");
     } catch {
       setSemanticSaveStatus("error");
     }
@@ -7771,8 +7872,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           body: JSON.stringify({
             portalId: portal.id,
             cardKey: draftCardKey,
-            nmID: card?.nmID || "",
-            vendorCode: card?.vendorCode || "",
+            nmID: cardNmIdValue(card),
+            vendorCode: cardVendorCodeValue(card),
             draft: structuredDraft,
           }),
         });
@@ -7783,11 +7884,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         } catch {
           // Backend save succeeded; local cache sync is best effort.
         }
-        if (onDraftActivity) {
-          onDraftActivity({ audit: auditDone, draft: true });
-        }
-        if (onDraftSaved) {
-          await onDraftSaved(response.draft);
+        try {
+          if (onDraftActivity) {
+            onDraftActivity({ audit: auditDone, draft: true });
+          }
+          if (onDraftSaved) {
+            await onDraftSaved(response.draft);
+          }
+        } catch {
+          // The draft is already saved; parent refresh is a secondary UI sync.
         }
         return "backend";
       } catch {
@@ -7937,11 +8042,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     setDraftSaveStatus("resetting");
     try {
-      localStorage.removeItem(draftStorageKey);
+      draftStorageKeys.forEach((storageKey) => localStorage.removeItem(storageKey));
       if (backendDraftEnabled) {
-        await apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`, {
-          method: "DELETE",
-        });
+        for (const candidateKey of uniqueDraftKeyValues([draftCardKey, ...draftCardKeys])) {
+          await apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(candidateKey)}`, {
+            method: "DELETE",
+          });
+        }
       }
       setAuditStatus("idle");
       setAuditHistory([]);
