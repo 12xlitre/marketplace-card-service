@@ -3764,6 +3764,40 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.semantic-final-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.semantic-final-bar div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.semantic-final-bar span {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.semantic-final-bar strong {
+  font-size: 18px;
+}
+
+.semantic-final-bar em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+}
+
 .semantic-history {
   display: grid;
   gap: 8px;
@@ -4786,6 +4820,7 @@ tr:last-child td {
   .semantic-core-grid,
   .semantic-core-metrics,
   .semantic-query-bar,
+  .semantic-final-bar,
   .semantic-history-row,
   .settings-grid,
   .admin-user-row,

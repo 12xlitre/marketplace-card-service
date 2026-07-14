@@ -7404,7 +7404,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   function openSemanticReport(report) {
     if (!report?.semanticCore) return;
     setSemanticCore(report.semanticCore);
-    setSemanticCoreSelected(normalizeSemanticSelection(report.selected));
     setSemanticActiveReportId(report.id);
     setSemanticSeedQuery(report.seedQuery || report.semanticCore.seedQuery || defaultSemanticSeedQuery(card));
     setSemanticSubjectFilter(report.subjectFilter || "");
@@ -7477,7 +7476,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <p>Отдельный SEO-запрос MPStats: расширение запросов по стартовой фразе без запуска аудита.</p>
                   </div>
                   <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
-                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : activeSemanticCore ? `${activeSemanticCore.selectedCount || 0} выбрано` : "нет данных"}
+                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : semanticCoreSelected.length ? `${semanticCoreSelected.length} в финале` : activeSemanticCore ? "источник открыт" : "нет данных"}
                   </Tag>
                 </div>
                 <div className="semantic-query-bar">
@@ -7505,27 +7504,35 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 </div>
                 {semanticSaveStatus === "saving" || semanticSaveStatus === "saved" || semanticSaveStatus === "error" ? (
                   <div className={`semantic-save-banner ${semanticSaveStatus}`}>
-                    <strong>{semanticSaveStatus === "saved" ? "История СЯ сохранена" : semanticSaveStatus === "saving" ? "Сохраняем историю СЯ" : "История СЯ не сохранилась"}</strong>
+                    <strong>{semanticSaveStatus === "saved" ? "СЯ сохранено" : semanticSaveStatus === "saving" ? "Сохраняем СЯ" : "СЯ не сохранилось"}</strong>
                     <span>{semanticSaveStatus === "saved"
-                      ? "Теперь можно обновлять страницу: подборка должна остаться в старых подборках."
+                      ? "Итоговый набор и источники MPStats сохранены в карточке."
                       : semanticSaveStatus === "saving"
                         ? "Не обновляйте страницу, пока сохранение не завершится."
-                        : "Повторите подбор или попробуйте сохранить выбранные запросы еще раз."}</span>
+                        : "Повторите подбор или добавление ключа еще раз."}</span>
                   </div>
                 ) : null}
+                <div className="semantic-final-bar">
+                  <div>
+                    <span>Итоговое СЯ</span>
+                    <strong>{formatNumber(semanticCoreSelected.length)} {pluralRu(semanticCoreSelected.length, "ключ", "ключа", "ключей")}</strong>
+                    <em>{semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "источник", "источника", "источников")} MPStats` : "источников MPStats пока нет"}</em>
+                  </div>
+                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore}>
+                    <Download size={17} />Скачать итоговый файл
+                  </button>
+                </div>
                 {semanticCoreReports.length ? (
                   <div className="semantic-history">
-                    <span>Старые подборки</span>
+                    <span>Источники MPStats</span>
                     {semanticCoreReports.map((report) => (
                       <div className={`semantic-history-row ${report.id === semanticActiveReportId ? "active" : ""}`} key={report.id}>
                         <div>
                           <strong>{report.seedQuery || "Без запроса"}</strong>
-                          <em>{report.createdAt ? new Date(report.createdAt).toLocaleString("ru-RU") : "без даты"} · {formatNumber(report.semanticCore?.totalKeywords || 0)} запросов · {formatNumber(report.selected?.length || 0)} выбрано</em>
+                          <em>{report.createdAt ? new Date(report.createdAt).toLocaleString("ru-RU") : "без даты"} · {formatNumber(report.semanticCore?.totalKeywords || 0)} запросов</em>
                         </div>
+                        {report.id === semanticActiveReportId ? <Tag tone="green">открыт</Tag> : null}
                         <button className="btn mini" type="button" onClick={() => openSemanticReport(report)}>Открыть</button>
-                        <button className="btn mini" type="button" onClick={() => downloadSemanticCoreSelection({ selectedRows: report.selected, core: report.semanticCore, suffix: `semantic-core-${String(report.createdAt || "").slice(0, 10)}` })} disabled={!report.selected?.length && !report.semanticCore?.current?.length}>
-                          <Download size={14} />Скачать
-                        </button>
                       </div>
                     ))}
                   </div>
@@ -7551,16 +7558,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем позиции действующих ключей...</span> : null}
                   {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул позиции по действующим ключам.</span> : null}
                   {semanticRankStatus === "error" ? <span className="status-note">СЯ собрано, но позиции ключей сейчас не загрузились.</span> : null}
-                  {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем выбранное СЯ...</span> : null}
-                  {semanticSaveStatus === "saved" ? <span className="status-note">СЯ сохранено в истории карточки.</span> : null}
+                  {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем итоговое СЯ...</span> : null}
+                  {semanticSaveStatus === "saved" ? <span className="status-note">Итоговое СЯ сохранено в карточке.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
                   {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок и описание...</span> : null}
                   {semanticContentStatus === "done" ? <span className="status-note">Черновик контента переоптимизирован по выбранному СЯ.</span> : null}
                   {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
-                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore}>
-                    <Download size={17} />Скачать выбранное
-                  </button>
                   <button
                     className="btn"
                     type="button"
@@ -7571,7 +7575,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
                   <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
-                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : activeSemanticCore ? "Обновить подбор" : "Подобрать запросы"}
+                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : activeSemanticCore ? "Собрать еще" : "Подобрать запросы"}
                   </button>
                 </div>
               </section>
