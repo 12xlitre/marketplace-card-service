@@ -2909,6 +2909,30 @@ def get_card_draft(portal_id, card_key, user):
   return public_card_draft(row) if row else None
 
 
+def list_portal_card_drafts(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ?
+      ORDER BY updated_at DESC, card_key
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {
+    "portalId": str(numeric_portal_id),
+    "drafts": [public_card_draft(row) for row in rows],
+  }
+
+
 def delete_card_draft(portal_id, card_key, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -11040,6 +11064,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       draft = get_card_draft(portal_id, card_key, user)
       self.send_json(HTTPStatus.OK, {"draft": draft})
+      return
+
+    if path == "/api/portal-card-drafts":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, list_portal_card_drafts(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
     if path == "/api/card-competitors":

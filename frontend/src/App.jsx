@@ -143,6 +143,28 @@ function safeFilePart(value) {
     .slice(0, 60) || "card";
 }
 
+function exportDatePart() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function safeSheetName(value, fallback = "Лист", usedNames = new Set()) {
+  const base = String(value || fallback)
+    .trim()
+    .replace(/[\\/?*\[\]:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 31)
+    .trim() || fallback;
+  let name = base;
+  let index = 2;
+  while (usedNames.has(name.toLowerCase())) {
+    const suffix = ` ${index}`;
+    name = `${base.slice(0, Math.max(1, 31 - suffix.length)).trim()}${suffix}`;
+    index += 1;
+  }
+  usedNames.add(name.toLowerCase());
+  return name;
+}
+
 function readSavedAppView() {
   try {
     const saved = JSON.parse(localStorage.getItem(appViewStorageKey) || "null");
@@ -2093,6 +2115,160 @@ function buildContentExportSheets(card, draftTitle, draftDescription, draftChara
       ],
     },
   ];
+}
+
+function cardExportArticle(card, draft = null) {
+  return String(
+    card?.vendorCode
+    || draft?.vendorCode
+    || card?.nmID
+    || draft?.nmID
+    || card?.cardKey
+    || draft?.cardKey
+    || "card"
+  ).trim();
+}
+
+function cardExportSheetName(card, draft, usedNames) {
+  return safeSheetName(cardExportArticle(card, draft), `WB ${card?.nmID || draft?.nmID || "card"}`, usedNames);
+}
+
+function semanticCoreExportSheetRows(currentRows, selectedRows) {
+  const rowCount = Math.max(currentRows.length, selectedRows.length);
+  return [
+    [
+      "Действующий запрос",
+      "Позиция карточки",
+      "Запрос к добавлению",
+      "Частотность",
+    ],
+    ...Array.from({ length: rowCount }, (_, index) => [
+      currentRows[index]?.query || "",
+      semanticRankExportValue(currentRows[index]?.position),
+      selectedRows[index]?.query || "",
+      semanticFrequencyValue(selectedRows[index]),
+    ]),
+  ];
+}
+
+function buildSemanticCoreExportSheet(name, core, selectedRows) {
+  const currentRows = semanticCurrentPositionRows(core);
+  const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
+  if (!currentRows.length && !selectedRowsNormalized.length) {
+    return null;
+  }
+  return {
+    name,
+    freezeRows: 1,
+    widths: [48, 18, 48, 18],
+    rows: semanticCoreExportSheetRows(currentRows, selectedRowsNormalized),
+  };
+}
+
+function semanticExportCoreFromDraft(draft, card) {
+  const normalized = contentFromStoredDraft(draft, card);
+  const reports = normalizeSemanticReports(normalized.semanticCoreReports);
+  const selected = normalizeSemanticSelection(
+    normalized.semanticCoreSelected.length
+      ? normalized.semanticCoreSelected
+      : reports.flatMap((report) => report.selected || [])
+  );
+  const sourceCore = reports.find((report) => report.semanticCore)?.semanticCore || null;
+  const core = semanticCoreWithSelection(sourceCore, selected);
+  return { core, selected };
+}
+
+function buildPortalSemanticCoreSheets(cards, drafts) {
+  const cardsByKey = new Map(cards.map((card) => [cardDraftKey(card), card]));
+  const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
+  const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
+  const usedNames = new Set();
+  return (Array.isArray(drafts) ? drafts : [])
+    .map((draft) => {
+      const card = cardsByKey.get(draft.cardKey) || cardsByNm.get(String(draft.nmID || "")) || cardsByVendor.get(String(draft.vendorCode || "")) || {};
+      const { core, selected } = semanticExportCoreFromDraft(draft, card);
+      return buildSemanticCoreExportSheet(cardExportSheetName(card, draft, usedNames), core, selected);
+    })
+    .filter(Boolean);
+}
+
+function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCharacteristics) {
+  const characteristics = draftCharacteristicsList(draftCharacteristics);
+  return [
+    {
+      name: "Заголовок",
+      freezeRows: 1,
+      widths: [24, 18, 64],
+      rows: [
+        ["Артикул продавца", "Номенклатура WB", "Итоговый заголовок"],
+        [card?.vendorCode || "", card?.nmID || "", draftTitle || ""],
+      ],
+    },
+    {
+      name: "Описание",
+      freezeRows: 1,
+      widths: [24, 18, 96],
+      rows: [
+        ["Артикул продавца", "Номенклатура WB", "Итоговое описание"],
+        [card?.vendorCode || "", card?.nmID || "", draftDescription || ""],
+      ],
+    },
+    {
+      name: "Характеристики",
+      freezeRows: 1,
+      widths: [24, 18, 34, 14, 56],
+      rows: [
+        ["Артикул продавца", "Номенклатура WB", "Характеристика", "charcID", "Значение"],
+        ...characteristics.map((item) => [
+          card?.vendorCode || "",
+          card?.nmID || "",
+          item.name,
+          item.charcID,
+          characteristicExportText(item.value),
+        ]),
+      ],
+    },
+  ];
+}
+
+function buildPortalContentSheet(card, draft, usedNames) {
+  const normalized = contentFromStoredDraft(draft, card);
+  const contentApproval = normalizeApprovalState(normalized.approvalSections.content);
+  if (!["approved", "exported"].includes(contentApproval.status)) {
+    return null;
+  }
+  const characteristics = draftCharacteristicsList(normalized.characteristics);
+  const characteristicHeaders = characteristics.map((item) => item.name);
+  const characteristicValues = characteristics.map((item) => characteristicExportText(item.value));
+  return {
+    name: cardExportSheetName(card, draft, usedNames),
+    freezeRows: 1,
+    widths: [24, 18, 28, 64, 96, ...characteristicHeaders.map(() => 28)],
+    rows: [
+      ["Артикул продавца", "Номенклатура WB", "Предмет", "Заголовок", "Описание", ...characteristicHeaders],
+      [
+        card?.vendorCode || draft?.vendorCode || "",
+        card?.nmID || draft?.nmID || "",
+        card?.subjectName || "",
+        normalized.title || "",
+        normalized.description || "",
+        ...characteristicValues,
+      ],
+    ],
+  };
+}
+
+function buildPortalContentSheets(cards, drafts) {
+  const cardsByKey = new Map(cards.map((card) => [cardDraftKey(card), card]));
+  const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
+  const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
+  const usedNames = new Set();
+  return (Array.isArray(drafts) ? drafts : [])
+    .map((draft) => {
+      const card = cardsByKey.get(draft.cardKey) || cardsByNm.get(String(draft.nmID || "")) || cardsByVendor.get(String(draft.vendorCode || "")) || {};
+      return buildPortalContentSheet(card, draft, usedNames);
+    })
+    .filter(Boolean);
 }
 
 function cardDraftKey(card) {
@@ -4774,6 +4950,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
   const [importJob, setImportJob] = useState(null);
+  const [cabinetExportStatus, setCabinetExportStatus] = useState("");
 
   useEffect(() => {
     if (!teamEditing) {
@@ -4930,6 +5107,50 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   function replaceApprovalWorkflow(workflow) {
     setApprovalWorkflow(normalizeApprovalWorkflow(workflow));
     setApprovalWorkflowStatus("loaded");
+  }
+
+  async function loadPortalDraftsForExport() {
+    if (!portal?.id || portal.isDemo) {
+      return [];
+    }
+    const payload = await apiRequest(`/api/portal-card-drafts?portal_id=${encodeURIComponent(portal.id)}`);
+    return Array.isArray(payload.drafts) ? payload.drafts : [];
+  }
+
+  async function downloadPortalSemanticCore() {
+    setCabinetExportStatus("semantic-loading");
+    try {
+      const drafts = await loadPortalDraftsForExport();
+      const sheets = buildPortalSemanticCoreSheets(cards, drafts);
+      if (!sheets.length) {
+        setCabinetExportStatus("semantic-empty");
+        onNotice?.("В кабинете пока нет карточек с сохраненным итоговым СЯ.");
+        return;
+      }
+      downloadXlsx(`семантическое ядро - ${safeFilePart(displayName)} - ${exportDatePart()}.xlsx`, sheets);
+      setCabinetExportStatus("semantic-done");
+    } catch {
+      setCabinetExportStatus("semantic-error");
+      onNotice?.("Не удалось скачать итоговое СЯ по кабинету.");
+    }
+  }
+
+  async function downloadPortalFinalContent() {
+    setCabinetExportStatus("content-loading");
+    try {
+      const drafts = await loadPortalDraftsForExport();
+      const sheets = buildPortalContentSheets(cards, drafts);
+      if (!sheets.length) {
+        setCabinetExportStatus("content-empty");
+        onNotice?.("В кабинете пока нет принятых карточек по контенту.");
+        return;
+      }
+      downloadXlsx(`итоговый контент - ${safeFilePart(displayName)} - ${exportDatePart()}.xlsx`, sheets);
+      setCabinetExportStatus("content-done");
+    } catch {
+      setCabinetExportStatus("content-error");
+      onNotice?.("Не удалось скачать итоговый контент по кабинету.");
+    }
   }
 
   const importRunning = ["queued", "running"].includes(importJob?.status);
@@ -5148,6 +5369,28 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               findUser={findUser}
               onOpenTask={openApprovalTask}
             />
+
+            <section className="workspace-strip">
+              <div className="strip-head">
+                <div>
+                  <h2>Итоговые выгрузки</h2>
+                  <p>Файлы по кабинету собираются только из сохраненных результатов карточек.</p>
+                </div>
+                <Tag tone={cabinetExportStatus.endsWith("loading") ? "blue" : "green"}>
+                  {cabinetExportStatus.endsWith("loading") ? "готовим файл" : "XLSX"}
+                </Tag>
+              </div>
+              <div className="panel-actions">
+                <button className="btn" type="button" onClick={downloadPortalSemanticCore} disabled={portal.isDemo || cabinetExportStatus === "semantic-loading"}>
+                  <Download size={16} />{cabinetExportStatus === "semantic-loading" ? "Собираем СЯ" : "Скачать итоговое СЯ по кабинету"}
+                </button>
+                <button className="btn" type="button" onClick={downloadPortalFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"}>
+                  <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
+                </button>
+              </div>
+              {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового СЯ по карточкам пока нет.</p> : null}
+              {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого контента по карточкам пока нет.</p> : null}
+            </section>
 
             <section className="workspace-strip">
               <div className="strip-head">
@@ -6124,6 +6367,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
+  const canDownloadFinalContent = ["approved", "exported"].includes(normalizeApprovalState(approvalSections.content).status);
   const latestAuditEntry = auditHistory.find((item) => item?.summary || item?.competitorSelection) || {};
   const latestAuditSummary = latestAuditEntry.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
@@ -6732,6 +6976,58 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
     setSemanticCoreError("");
     persistSemanticSelection([...semanticCoreSelected, item]);
+  }
+
+  function autoSelectSemanticKeywords() {
+    if (!activeSemanticCore) {
+      setSemanticCoreError("Сначала соберите подборку MPStats по стартовому запросу.");
+      return;
+    }
+    const existingKeys = new Set(activeSemanticPositionRows.map(semanticQueryKey));
+    const selectedKeys = new Set(semanticCoreSelected.map(semanticQueryKey));
+    const searchText = semanticSearch.trim().toLowerCase();
+    const excludedWords = semanticFilterWords(semanticExcludeWords);
+    const candidates = semanticCandidateSourceRows(activeSemanticCore)
+      .filter((item) => !semanticSubjectFilter || item.prioritySubject === semanticSubjectFilter)
+      .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
+      .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText))
+      .filter((item) => {
+        const key = semanticQueryKey(item);
+        return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+      })
+      .sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+    const chosen = [];
+    const chosenKeys = new Set();
+    const addGroup = (items, limit) => {
+      items.forEach((item) => {
+        const key = semanticQueryKey(item);
+        if (!key || chosenKeys.has(key) || chosen.length >= 36) return;
+        if (chosen.filter((row) => items.includes(row)).length >= limit) return;
+        chosenKeys.add(key);
+        chosen.push(item);
+      });
+    };
+    const high = candidates.filter((item) => Number(semanticFrequencyValue(item) || 0) >= 1000);
+    const medium = candidates.filter((item) => {
+      const freq = Number(semanticFrequencyValue(item) || 0);
+      return freq >= 300 && freq < 1000;
+    });
+    const narrow = candidates.filter((item) => Number(semanticFrequencyValue(item) || 0) < 300);
+    addGroup(high, 12);
+    addGroup(medium, 12);
+    addGroup(narrow, 12);
+    candidates.forEach((item) => {
+      const key = semanticQueryKey(item);
+      if (chosen.length >= 36 || !key || chosenKeys.has(key)) return;
+      chosenKeys.add(key);
+      chosen.push(item);
+    });
+    if (!chosen.length) {
+      setSemanticCoreError("В текущей подборке нет новых запросов с частотностью для автодобавления.");
+      return;
+    }
+    setSemanticCoreError(`Автоматически добавлено ${chosen.length} запросов: высоко-, средне- и низкочастотные без дублей.`);
+    persistSemanticSelection([...semanticCoreSelected, ...chosen]);
   }
 
   function removeSemanticKeyword(item) {
@@ -7592,7 +7888,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
   function downloadDraftTable(type) {
     if (type === "content") {
-      downloadXlsx(`${exportFileBase}-content-wb.xlsx`, buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics));
+      downloadXlsx(`итоговый контент - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCharacteristics));
       return;
     }
     if (type === "prices") {
@@ -7602,29 +7898,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
-  function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore, suffix = "semantic-core" } = {}) {
-    const currentRows = semanticCurrentPositionRows(core);
-    const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
-    const rowCount = Math.max(currentRows.length, selectedRowsNormalized.length);
-    downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
-      name: "СЯ в работу",
-      freezeRows: 1,
-      widths: [48, 18, 48, 18],
-      rows: [
-        [
-          "Действующий запрос",
-          "Позиция карточки",
-          "Запрос к добавлению",
-          "Частотность",
-        ],
-        ...Array.from({ length: rowCount }, (_, index) => [
-          currentRows[index]?.query || "",
-          semanticRankExportValue(currentRows[index]?.position),
-          selectedRowsNormalized[index]?.query || "",
-          semanticFrequencyValue(selectedRowsNormalized[index]),
-        ]),
-      ],
-    }]);
+  function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore } = {}) {
+    const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows);
+    if (!sheet) return;
+    downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [sheet]);
   }
 
   function openSemanticReport(report) {
@@ -7799,6 +8076,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   {semanticContentStatus === "done" ? <span className="status-note">Черновик контента переоптимизирован по выбранному СЯ.</span> : null}
                   {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={autoSelectSemanticKeywords}
+                    disabled={!activeSemanticCore || semanticSaveStatus === "saving"}
+                    title="Автоматически добавить высоко-, средне- и низкочастотные запросы из текущей подборки"
+                  >
+                    <WandSparkles size={17} />Автодобавить запросы
+                  </button>
                   <button
                     className="btn"
                     type="button"
@@ -8256,7 +8542,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 </div>
                 <div className="tab-actions">
-                  <button className="btn" type="button" onClick={() => downloadDraftTable("content")}><Download size={17} />Скачать контент</button>
+                  <button className="btn" type="button" onClick={() => downloadDraftTable("content")} disabled={!canDownloadFinalContent} title={canDownloadFinalContent ? "Скачать итоговый контент карточки" : "Сначала согласуйте секцию Контент"}>
+                    <Download size={17} />Скачать итоговый контент
+                  </button>
                 </div>
                 </>
                 ) : null}
