@@ -659,6 +659,18 @@ a {
   color: white;
 }
 
+.seller-tabs button.soon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.65;
+}
+
+.seller-tabs button.soon span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .report-availability {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1788,6 +1800,95 @@ tr.selected-row td {
 .approval-task-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.task-section-list {
+  display: grid;
+  gap: 14px;
+}
+
+.task-type-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.task-type-head,
+.task-batch-main,
+.task-card-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-type-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.task-type-head span,
+.task-batch-main span,
+.task-card-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-batch-list {
+  display: grid;
+  gap: 10px;
+}
+
+.task-batch-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.task-batch-main strong,
+.task-card-row strong {
+  overflow-wrap: anywhere;
+}
+
+.task-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.task-card-details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.task-card-details summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.task-card-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.task-card-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+}
+
+.empty-state.compact {
+  min-height: 74px;
+  padding: 12px;
 }
 
 .card-snapshot-main {
@@ -4694,7 +4795,7 @@ tr:last-child td {
 
 .work-type-picker {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -4891,6 +4992,9 @@ tr:last-child td {
   .approval-analytics-grid,
   .approval-events-head,
   .approval-event-row,
+  .task-type-head,
+  .task-batch-main,
+  .task-card-row,
   .semantic-core-grid,
   .semantic-core-metrics,
   .semantic-query-bar,

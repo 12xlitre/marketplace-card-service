@@ -834,6 +834,73 @@ function workTypeLabels(value) {
   return normalizeWorkTypes(value).map((key) => labelByKey[key] || key);
 }
 
+const taskSectionOptions = [
+  { key: "semantic", label: "Семантика" },
+  { key: "content", label: "Контент" },
+  { key: "prices", label: "Цены" },
+  { key: "stocks", label: "Остатки" },
+];
+
+function taskWorkTypes(task) {
+  return Array.isArray(task?.workTypes) && task.workTypes.length ? normalizeWorkTypes(task.workTypes) : [];
+}
+
+function taskSectionLabel(type) {
+  return taskSectionOptions.find((item) => item.key === type)?.label || workTypeLabels([type])[0] || "Задача";
+}
+
+function taskBatchGroupTitle(group) {
+  if (group.batchTitle) return group.batchTitle;
+  const count = group.tasks.length;
+  const comment = String(group.comment || "").trim();
+  if (comment) {
+    return `${taskSectionLabel(group.type)}: ${comment}`;
+  }
+  return `${taskSectionLabel(group.type)}: ${formatNumber(count)} ${pluralRu(count, "карточка", "карточки", "карточек")}`;
+}
+
+function taskGroupStatus(tasks) {
+  const statuses = (tasks || []).map((task) => task.status);
+  if (statuses.includes("submitted")) return "submitted";
+  if (statuses.includes("changes_requested")) return "changes_requested";
+  if (statuses.includes("approved")) return "approved";
+  return "draft";
+}
+
+function buildTaskGroupsByType(tasks) {
+  const groupsByType = Object.fromEntries(taskSectionOptions.map((section) => [section.key, []]));
+  const groupMap = new Map();
+  (tasks || []).forEach((task) => {
+    taskWorkTypes(task).forEach((type) => {
+      if (!groupsByType[type]) {
+        groupsByType[type] = [];
+      }
+      const groupKey = `${type}:${task.batchId || task.cardKey || `${task.nmID || ""}-${task.vendorCode || ""}`}`;
+      let group = groupMap.get(groupKey);
+      if (!group) {
+        group = {
+          key: groupKey,
+          type,
+          batchId: task.batchId || "",
+          batchTitle: task.batchTitle || "",
+          comment: task.workComment || "",
+          createdBy: task.batchCreatedBy || task.submittedBy || "",
+          createdAt: task.batchCreatedAt || task.submittedAt || "",
+          assigneeLogin: task.assigneeLogin || "",
+          tasks: [],
+        };
+        groupMap.set(groupKey, group);
+        groupsByType[type].push(group);
+      }
+      group.tasks.push(task);
+    });
+  });
+  Object.values(groupsByType).forEach((groups) => {
+    groups.sort((left, right) => Date.parse(right.createdAt || "") - Date.parse(left.createdAt || ""));
+  });
+  return groupsByType;
+}
+
 function defaultApprovalWorkflow() {
   return {
     tasks: [],
@@ -5181,7 +5248,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
-  const [sellerTab, setSellerTab] = useState("work");
+  const [sellerTab, setSellerTab] = useState("cabinet");
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
@@ -5435,7 +5502,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Кабинеты</button>
           <button className="btn" type="button" onClick={() => onOpenModal("api")}><Upload size={17} />{apiConnectButtonText(portal)}</button>
-          <button className="btn primary" type="button" disabled title="Черновики и задачи включим после настройки хранения"><Plus size={17} />Создать задачу</button>
+          <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
         </div>
       </header>
 
@@ -5443,14 +5510,16 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
         <div className="seller-layout">
           <div className="seller-main">
             <div className="seller-tabs">
-              <button className={sellerTab === "work" ? "active" : ""} type="button" onClick={() => setSellerTab("work")}>Работа</button>
+              <button className={sellerTab === "cabinet" ? "active" : ""} type="button" onClick={() => setSellerTab("cabinet")}>Кабинет</button>
+              <button className={sellerTab === "tasks" ? "active" : ""} type="button" onClick={() => setSellerTab("tasks")}>Задачи</button>
               <button className={sellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
+              <button className="soon" type="button" disabled>Отчетный период <span>скоро</span></button>
             </div>
             <HelpHint enabled={helpEnabled} title="Где что находится">
-              Вкладка Работа нужна для карточек, аудита и согласования. Вкладка Отчеты нужна, когда сотруднику нужно выбрать период и скачать готовую XLSX-выгрузку по этому кабинету.
+              Кабинет хранит общую информацию и список карточек. Задачи показывают пачки работ по СЯ, контенту, ценам и остаткам. Отчеты нужны для XLSX-выгрузок по кабинету.
             </HelpHint>
 
-            {sellerTab === "work" ? (
+            {sellerTab === "cabinet" ? (
               <>
             <section className="workspace-strip">
               <div className="strip-head">
@@ -5598,14 +5667,6 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </div>
             </section>
 
-            <ApprovalWorkflowPanel
-              workflow={approvalWorkflow}
-              status={approvalWorkflowStatus}
-              cards={cards}
-              findUser={findUser}
-              onOpenTask={openApprovalTask}
-            />
-
             <section className="workspace-strip">
               <div className="strip-head">
                 <div>
@@ -5648,9 +5709,19 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               />
             </section>
               </>
-            ) : (
+            ) : null}
+            {sellerTab === "tasks" ? (
+              <ApprovalWorkflowPanel
+                workflow={approvalWorkflow}
+                status={approvalWorkflowStatus}
+                cards={cards}
+                findUser={findUser}
+                onOpenTask={openApprovalTask}
+              />
+            ) : null}
+            {sellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
-            )}
+            ) : null}
           </div>
         </div>
       </div>
@@ -5914,7 +5985,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
   const [workPackageOpen, setWorkPackageOpen] = useState(false);
-  const [workPackageForm, setWorkPackageForm] = useState({ workTypes: ["content"], comment: "" });
+  const [workPackageForm, setWorkPackageForm] = useState({ workTypes: ["content"], title: "", comment: "" });
   const [worksetLoaded, setWorksetLoaded] = useState(Boolean(portal?.isDemo));
   const [worksetStatus, setWorksetStatus] = useState("idle");
   const [batchStatus, setBatchStatus] = useState("idle");
@@ -5923,7 +5994,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   useEffect(() => {
     setSelectedKeys(readCardWorkset(storageKey));
     setWorkPackageOpen(false);
-    setWorkPackageForm({ workTypes: ["content"], comment: "" });
+    setWorkPackageForm({ workTypes: ["content"], title: "", comment: "" });
     setWorksetLoaded(Boolean(portal?.isDemo));
     setWorksetStatus("idle");
     setBatchStatus("idle");
@@ -6129,6 +6200,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
           portalId: portal.id,
           cards: selectedCards.map(cardWorksetPayload),
           workTypes,
+          title: String(options.title || "").trim(),
           comment: String(options.comment || "").trim(),
         }),
       });
@@ -6140,6 +6212,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
         setSelectedKeys(keys);
       }
       setWorkPackageOpen(false);
+      setWorkPackageForm({ workTypes: ["content"], title: "", comment: "" });
       setBatchStatus("created");
     } catch {
       setBatchStatus("error");
@@ -6340,6 +6413,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
 
 function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, onSubmit }) {
   const workTypes = normalizeWorkTypes(value.workTypes);
+  const title = value.title || "";
   const comment = value.comment || "";
   const toggleType = (key) => {
     if (workTypes.length === 1 && workTypes.includes(key)) {
@@ -6353,9 +6427,12 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   const updateComment = (event) => {
     onChange({ ...value, comment: event.target.value });
   };
+  const updateTitle = (event) => {
+    onChange({ ...value, title: event.target.value });
+  };
   const submit = (event) => {
     event.preventDefault();
-    onSubmit({ workTypes, comment });
+    onSubmit({ workTypes, title, comment });
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -6376,6 +6453,10 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
               </label>
             ))}
           </div>
+          <label className="field-label">
+            Название задачи
+            <input value={title} onChange={updateTitle} placeholder="Например: СЯ Оптимист, 40 артикулов" maxLength={180} />
+          </label>
           <label className="field-label">
             Комментарий
             <textarea value={comment} onChange={updateComment} placeholder="Например: собрать СЯ по списку артикулов или проверить заголовки перед согласованием." />
@@ -6398,15 +6479,17 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
   const cardKeys = new Set(cards.map(cardDraftKey));
+  const groupsByType = buildTaskGroupsByType(activeTasks);
+  const totalGroups = Object.values(groupsByType).reduce((sum, groups) => sum + groups.length, 0);
   return (
     <section className="workspace-strip approval-workflow-strip">
       <div className="strip-head">
         <div>
           <h2>Задачи</h2>
-          <p>Очередь карточек для технического специалиста. СЯ закрывается добавлением в итоговое СЯ, контент, цены и остатки идут через согласование.</p>
+          <p>Задачи сгруппированы по пачкам карточек. СЯ закрывается добавлением в итоговое СЯ, контент, цены и остатки идут через согласование.</p>
         </div>
         <Tag tone={activeTasks.length ? "amber" : "green"}>
-          {status === "loading" ? "загрузка" : `${activeTasks.length} ${pluralRu(activeTasks.length, "задача", "задачи", "задач")}`}
+          {status === "loading" ? "загрузка" : `${totalGroups} ${pluralRu(totalGroups, "задача", "задачи", "задач")}`}
         </Tag>
       </div>
 
@@ -6414,58 +6497,99 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
         <div className="empty-state"><span>Не удалось загрузить задачи согласования</span></div>
       ) : null}
 
-      <div className="approval-task-list">
-        {activeTasks.length ? activeTasks.map((task) => {
-          const canOpen = cardKeys.has(task.cardKey);
-          const assignee = findUser(task.assigneeLogin);
-          const taskAuthorLogin = task.batchCreatedBy || task.submittedBy;
-          const author = findUser(taskAuthorLogin);
-          const taskCreatedAt = task.batchCreatedAt || task.submittedAt;
-          const labels = Array.isArray(task.workTypeLabels) && task.workTypeLabels.length ? task.workTypeLabels : workTypeLabels(task.workTypes);
-          const semanticOnlyTask = normalizeWorkTypes(task.workTypes).length === 1 && normalizeWorkTypes(task.workTypes)[0] === "semantic";
-          return (
-            <article className="approval-task-card" key={`${task.cardKey}-${task.status}`}>
-              <div className="approval-task-main">
-                <div>
-                  <strong>{task.title}</strong>
-                  <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
-                </div>
-                <Tag tone={approvalStatusTone(task.status)}>{approvalStatusLabel(task.status)}</Tag>
-              </div>
-              <div className="approval-task-tags">
-                {labels.map((label) => <Tag tone="blue" key={label}>{label}</Tag>)}
-                {task.batchCardsCount ? <Tag tone="amber">{formatNumber(task.batchCardsCount)} в пачке</Tag> : null}
-              </div>
-              <div className="approval-task-meta">
-                <span>Поставил: {author?.full_name || taskAuthorLogin || "не указан"}</span>
-                <span>Исполнитель: {assignee?.full_name || task.assigneeLogin || "техспециалист не задан"}</span>
-                <span>{taskCreatedAt ? new Date(taskCreatedAt).toLocaleString("ru-RU") : "без даты"}</span>
-              </div>
-              {task.workComment ? <p className="approval-task-reason">{task.workComment}</p> : null}
-              {task.returnReason ? <p className="approval-task-reason">{task.returnReason}</p> : null}
-              <div className="approval-task-actions">
-                <button className="btn primary" type="button" onClick={() => onOpenTask(task)} disabled={!canOpen}>
-                  <Eye size={17} />{semanticOnlyTask ? "Открыть СЯ" : task.status === "draft" ? "Открыть карточку" : "Открыть изменения"}
-                </button>
-              </div>
-            </article>
-          );
-        }) : (
-          <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
-        )}
+      <div className="approval-analytics-grid">
+        {taskSectionOptions.map((section) => {
+          const groups = groupsByType[section.key] || [];
+          const cardsCount = groups.reduce((sum, group) => sum + group.tasks.length, 0);
+          return <Metric label={section.label} value={`${formatNumber(groups.length)} / ${formatNumber(cardsCount)}`} key={section.key} />;
+        })}
       </div>
 
-      <div className="approval-analytics-grid">
-        <Metric label="Ждет решения" value={formatNumber(analytics.pendingCount || 0)} />
-        <Metric label="На доработке" value={formatNumber(analytics.returnedCount || 0)} />
-        <Metric label="Принято" value={formatNumber(analytics.approvedCount || 0)} />
-        <Metric label="Среднее согласование" value={durationShort(analytics.avgApprovalMinutes)} />
-      </div>
+      {activeTasks.length ? (
+        <div className="task-section-list">
+          {taskSectionOptions.map((section) => {
+            const groups = groupsByType[section.key] || [];
+            return (
+              <section className="task-type-section" key={section.key}>
+                <div className="task-type-head">
+                  <div>
+                    <h3>{section.label}</h3>
+                    <span>{groups.length ? `${groups.length} ${pluralRu(groups.length, "пачка", "пачки", "пачек")} в работе` : "нет активных задач"}</span>
+                  </div>
+                  <Tag tone={groups.length ? "blue" : "green"}>{formatNumber(groups.reduce((sum, group) => sum + group.tasks.length, 0))} карточек</Tag>
+                </div>
+                {groups.length ? (
+                  <div className="task-batch-list">
+                    {groups.map((group) => {
+                      const firstTask = group.tasks[0] || {};
+                      const statusValue = taskGroupStatus(group.tasks);
+                      const originalCount = Number(firstTask.batchCardsCount || group.tasks.length || 0);
+                      const remainingCount = group.tasks.length;
+                      const assignee = findUser(group.assigneeLogin);
+                      const author = findUser(group.createdBy);
+                      const openableTask = group.tasks.find((task) => cardKeys.has(task.cardKey)) || firstTask;
+                      const canOpen = Boolean(openableTask?.cardKey && cardKeys.has(openableTask.cardKey));
+                      const cardsLabel = originalCount && originalCount !== remainingCount
+                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
+                        : formatNumber(remainingCount);
+                      return (
+                        <article className="task-batch-card" key={group.key}>
+                          <div className="task-batch-main">
+                            <div>
+                              <strong>{taskBatchGroupTitle(group)}</strong>
+                              <span>{cardsLabel} {pluralRu(remainingCount, "карточка", "карточки", "карточек")} · {taskSectionLabel(section.key)}</span>
+                            </div>
+                            <Tag tone={approvalStatusTone(statusValue)}>{approvalStatusLabel(statusValue)}</Tag>
+                          </div>
+                          <div className="approval-task-meta">
+                            <span>Поставил: {author?.full_name || group.createdBy || "не указан"}</span>
+                            <span>Исполнитель: {assignee?.full_name || group.assigneeLogin || "техспециалист не задан"}</span>
+                            <span>{group.createdAt ? new Date(group.createdAt).toLocaleString("ru-RU") : "без даты"}</span>
+                          </div>
+                          {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
+                          <div className="task-batch-actions">
+                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask)} disabled={!canOpen}>
+                              <Eye size={17} />Открыть первую
+                            </button>
+                          </div>
+                          <details className="task-card-details">
+                            <summary>Карточки в задаче</summary>
+                            <div className="task-card-list">
+                              {group.tasks.map((task) => {
+                                const rowCanOpen = cardKeys.has(task.cardKey);
+                                return (
+                                  <div className="task-card-row" key={`${group.key}-${task.cardKey}`}>
+                                    <div>
+                                      <strong>{task.title}</strong>
+                                      <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
+                                    </div>
+                                    <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen}>
+                                      Открыть
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-state compact"><span>Активных задач в разделе нет.</span></div>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      ) : (
+          <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
+      )}
 
       <div className="approval-events">
         <div className="approval-events-head">
           <strong>История решений</strong>
-          <span>{recentEvents.length ? `${recentEvents.length} последних событий` : "пока пусто"}</span>
+          <span>{recentEvents.length ? `${recentEvents.length} последних событий · среднее согласование ${durationShort(analytics.avgApprovalMinutes)}` : "пока пусто"}</span>
         </div>
         {recentEvents.length ? recentEvents.slice(0, 8).map((event) => {
           const actor = findUser(event.actorLogin);

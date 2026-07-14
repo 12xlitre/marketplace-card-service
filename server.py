@@ -2550,6 +2550,17 @@ def semantic_core_final_exists(meta):
   return isinstance(semantic_core, dict) and bool(semantic_core)
 
 
+def work_package_title(work_types, cards_count=0, comment=""):
+  labels = work_type_labels(work_types)
+  prefix = " + ".join(labels) if labels else "Задача"
+  count = int(cards_count or 0)
+  suffix = f"{count} карточек" if count else "карточки"
+  clean_comment = str(comment or "").strip()
+  if clean_comment:
+    return f"{prefix}: {clean_comment}"[:180]
+  return f"{prefix}: {suffix}"[:180]
+
+
 def active_task_work_types(meta):
   meta = meta if isinstance(meta, dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
@@ -2569,6 +2580,7 @@ def public_approval_task(row, snapshot_lookup):
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
   work_types = active_task_work_types(meta)
+  batch_title = str(batch.get("title") or work_package_title(work_types, batch.get("cardsCount"), batch.get("comment")) or "")[:180]
   card = snapshot_lookup.get(row["card_key"], {})
   return {
     "portalId": str(row["portal_id"]),
@@ -2588,6 +2600,7 @@ def public_approval_task(row, snapshot_lookup):
     "batchKind": str(batch.get("kind") or ""),
     "batchCreatedBy": str(batch.get("createdBy") or ""),
     "batchCreatedAt": str(batch.get("createdAt") or ""),
+    "batchTitle": batch_title,
     "batchCardsCount": int(batch.get("cardsCount") or 0),
     "workTypes": work_types,
     "workTypeLabels": [WORK_TYPE_LABELS.get(item, item) for item in work_types],
@@ -2701,9 +2714,12 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
   batch_options = batch_options if isinstance(batch_options, dict) else {}
   work_types = normalize_work_types(batch_options.get("workTypes"))
   comment = str(batch_options.get("comment") or "").strip()[:700]
+  title = str(batch_options.get("title") or "").strip()[:180]
   assignee_login = str(batch_options.get("assigneeLogin") or "").strip()[:120]
   created_at = batch_options.get("createdAt") or utc_now().isoformat()
   cards_count = int(batch_options.get("cardsCount") or 0)
+  if not title:
+    title = work_package_title(work_types, cards_count, comment)
   payload = normalize_card_draft_payload(existing_payload or {})
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
@@ -2742,6 +2758,7 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
       "kind": "mass_work_package",
       "createdBy": user["login"],
       "createdAt": created_at,
+      "title": title,
       "assigneeLogin": assignee_login,
       "cardsCount": cards_count,
       "workTypes": work_types,
@@ -2762,6 +2779,7 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   options = options if isinstance(options, dict) else {}
   work_types = normalize_work_types(options.get("workTypes"))
   comment = str(options.get("comment") or "").strip()[:700]
+  title = str(options.get("title") or "").strip()[:180]
   team = portal_team_roles(numeric_portal_id)
   assignee_login = str(options.get("assigneeLogin") or team.get("tech") or "").strip()[:120]
   workset = save_portal_workset(numeric_portal_id, raw_cards, user)
@@ -2771,6 +2789,7 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   batch_options = {
     "workTypes": work_types,
     "comment": comment,
+    "title": title,
     "assigneeLogin": assignee_login,
     "createdAt": batch_created_at,
     "cardsCount": len(cards),
@@ -12093,6 +12112,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       try:
         result = create_workset_tasks(payload.get("portalId"), payload.get("cards"), user, {
           "workTypes": payload.get("workTypes"),
+          "title": payload.get("title"),
           "comment": payload.get("comment"),
           "assigneeLogin": payload.get("assigneeLogin"),
         })
