@@ -9018,6 +9018,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
                   </label>
                 </div>
+                <div className="semantic-collection-actions">
+                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "saving")} type="button" onClick={() => { setSemanticCollectionSaveOpen(true); setSemanticCollectionError(""); }} disabled={!canSaveSemanticCollection} aria-busy={semanticCollectionActionStatus === "saving" || undefined} title={activeSemanticNewRows.length ? "Сохранить выбранные ключи как архивную подборку для аналогичных карточек." : "Сначала добавьте ключи к добавлению."}>
+                    <Archive size={17} />{semanticCollectionActionStatus === "saving" ? "Сохраняем подборку" : "Сохранить подборку"}
+                  </button>
+                  <button className={loadingButtonClass("btn", semanticCollectionsStatus === "loading")} type="button" onClick={toggleSemanticCollectionArchive} disabled={!backendDraftEnabled || semanticCollectionsStatus === "loading"} aria-busy={semanticCollectionsStatus === "loading" || undefined}>
+                    <Archive size={17} />{semanticCollectionArchiveOpen ? "Скрыть архив" : "Архив подборок"}
+                  </button>
+                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "updating")} type="button" onClick={appendCurrentSelectionToSemanticCollection} disabled={!canAppendSemanticCollection} aria-busy={semanticCollectionActionStatus === "updating" || undefined} title={semanticAppliedCollection ? `Добавить новые ключи текущей карточки в подборку "${semanticAppliedCollection.name}". Старые ключи не удаляются.` : "Сначала примените или сохраните подборку."}>
+                    <Plus size={17} />{semanticCollectionActionStatus === "updating" ? "Пополняем" : "Пополнить подборку"}
+                  </button>
+                </div>
                 {semanticSaveStatus === "unsaved" || semanticSaveStatus === "saving" || semanticSaveStatus === "saved" || semanticSaveStatus === "error" ? (
                   <div className={`semantic-save-banner ${semanticSaveStatus}`}>
                     <strong>{semanticSaveStatus === "saved" ? "СЯ сохранено" : semanticSaveStatus === "saving" ? "Сохраняем СЯ" : semanticSaveStatus === "unsaved" ? "СЯ не сохранено" : "СЯ не сохранилось"}</strong>
@@ -9192,15 +9203,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </button>
                   <button className={loadingButtonClass("btn", semanticSaveStatus === "saving")} type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} aria-busy={semanticSaveStatus === "saving" || undefined} title={semanticSaveCurrentTitle}>
                     <Save size={17} />{semanticSaveStatus === "saving" ? "Сохраняем выбор" : "Сохранить текущий выбор"}
-                  </button>
-                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "saving")} type="button" onClick={() => { setSemanticCollectionSaveOpen(true); setSemanticCollectionError(""); }} disabled={!canSaveSemanticCollection} aria-busy={semanticCollectionActionStatus === "saving" || undefined} title={activeSemanticNewRows.length ? "Сохранить выбранные ключи как архивную подборку для аналогичных карточек." : "Сначала добавьте ключи к добавлению."}>
-                    <Archive size={17} />{semanticCollectionActionStatus === "saving" ? "Сохраняем подборку" : "Сохранить подборку"}
-                  </button>
-                  <button className={loadingButtonClass("btn", semanticCollectionsStatus === "loading")} type="button" onClick={toggleSemanticCollectionArchive} disabled={!backendDraftEnabled || semanticCollectionsStatus === "loading"} aria-busy={semanticCollectionsStatus === "loading" || undefined}>
-                    <Archive size={17} />{semanticCollectionArchiveOpen ? "Скрыть архив" : "Архив подборок"}
-                  </button>
-                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "updating")} type="button" onClick={appendCurrentSelectionToSemanticCollection} disabled={!canAppendSemanticCollection} aria-busy={semanticCollectionActionStatus === "updating" || undefined} title={semanticAppliedCollection ? `Добавить новые ключи текущей карточки в подборку "${semanticAppliedCollection.name}". Старые ключи не удаляются.` : "Сначала примените или сохраните подборку."}>
-                    <Plus size={17} />{semanticCollectionActionStatus === "updating" ? "Пополняем" : "Пополнить подборку"}
                   </button>
                   <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={() => loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
                     <Search size={17} />{semanticRunButtonLabel}

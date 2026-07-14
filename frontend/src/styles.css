@@ -3981,6 +3981,18 @@ tr:last-child td {
   height: 40px;
 }
 
+.semantic-collection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 2px 0 4px;
+}
+
+.semantic-collection-actions .btn {
+  min-width: 178px;
+}
+
 .semantic-save-banner {
   border: 1px solid #9fc5b4;
   border-radius: 8px;
