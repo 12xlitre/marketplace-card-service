@@ -2825,7 +2825,7 @@ function semanticQueryKey(value) {
 }
 
 const semanticSelectionLimit = 2000;
-const semanticReportHistoryLimit = 2;
+const semanticReportHistoryLimit = 3;
 const semanticCurrentRowsLimit = 600;
 const semanticRecommendedRowsLimit = 1200;
 const semanticAllKeywordRowsLimit = 5000;
@@ -6732,6 +6732,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
   const [semanticSearch, setSemanticSearch] = useState("");
   const [semanticExcludeWords, setSemanticExcludeWords] = useState("");
+  const [semanticCollections, setSemanticCollections] = useState([]);
+  const [semanticCollectionsStatus, setSemanticCollectionsStatus] = useState("idle");
+  const [semanticCollectionActionStatus, setSemanticCollectionActionStatus] = useState("");
+  const [semanticCollectionError, setSemanticCollectionError] = useState("");
+  const [semanticCollectionSaveOpen, setSemanticCollectionSaveOpen] = useState(false);
+  const [semanticCollectionName, setSemanticCollectionName] = useState("");
+  const [semanticCollectionArchiveOpen, setSemanticCollectionArchiveOpen] = useState(false);
+  const [semanticCollectionSearch, setSemanticCollectionSearch] = useState("");
+  const [semanticAppliedCollectionId, setSemanticAppliedCollectionId] = useState("");
+  const [semanticEditingCollectionId, setSemanticEditingCollectionId] = useState("");
+  const [semanticEditingCollectionName, setSemanticEditingCollectionName] = useState("");
+  const [semanticEditingKeywords, setSemanticEditingKeywords] = useState([]);
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
@@ -6851,6 +6863,40 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const activeSemanticReport = semanticCoreReports.find((report) => report.id === semanticActiveReportId) || null;
+  const activeSemanticSeedQuery = String(activeSemanticReport?.seedQuery || activeSemanticCore?.seedQuery || "").trim();
+  const semanticInputSeedQuery = semanticSeedQuery.trim();
+  const semanticSeedQueryChanged = Boolean(
+    semanticInputSeedQuery
+    && activeSemanticSeedQuery
+    && semanticQueryKey(semanticInputSeedQuery) !== semanticQueryKey(activeSemanticSeedQuery),
+  );
+  const semanticSeedForActiveCore = semanticSeedQueryChanged
+    ? activeSemanticSeedQuery
+    : semanticInputSeedQuery || activeSemanticSeedQuery;
+  const hasSemanticExpansion = Boolean(activeSemanticCore?.source === "mpstats-expanding" || activeSemanticCore?.seedQuery);
+  const shouldRefreshSemanticExpansion = Boolean(hasSemanticExpansion && !semanticSeedQueryChanged);
+  const semanticRunButtonLabel = semanticCoreStatus === "loading"
+    ? "Подбираем запросы"
+    : semanticCoreStatus === "pending"
+      ? "Повторить подбор"
+      : semanticSeedQueryChanged
+        ? "Подобрать по новому запросу"
+        : hasSemanticExpansion
+          ? "Собрать еще"
+          : "Подобрать запросы";
+  const semanticAppliedCollection = semanticCollections.find((collection) => String(collection.id) === String(semanticAppliedCollectionId)) || null;
+  const semanticCollectionBusy = ["saving", "updating", "deleting", "loading"].includes(semanticCollectionActionStatus);
+  const canSaveSemanticCollection = Boolean(backendDraftEnabled && activeSemanticNewRows.length && !semanticCollectionBusy);
+  const canAppendSemanticCollection = Boolean(backendDraftEnabled && semanticAppliedCollection && activeSemanticNewRows.length && !semanticCollectionBusy);
+  const semanticCollectionSearchText = semanticCollectionSearch.trim().toLowerCase();
+  const filteredSemanticCollections = semanticCollections.filter((collection) => {
+    if (!semanticCollectionSearchText) return true;
+    const keywordText = (Array.isArray(collection.keywords) ? collection.keywords : [])
+      .map((item) => item?.query || "")
+      .join(" ");
+    return `${collection.name || ""} ${keywordText}`.toLowerCase().includes(semanticCollectionSearchText);
+  });
   const autoSemanticCandidateRows = semanticAutoSelectCandidateRows();
   const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving");
   const autoSemanticTitle = activeSemanticCore
@@ -6860,7 +6906,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     : "Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats.";
   const currentSemanticFinalExport = semanticFinalExportFromCore(activeSemanticCore, semanticCoreSelected, {
     reportId: semanticActiveReportId,
-    seedQuery: semanticSeedQuery.trim(),
+    seedQuery: semanticSeedForActiveCore,
     subjectFilter: semanticSubjectFilter,
   });
   const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
@@ -6936,7 +6982,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     : semanticFinalConflict
       ? "По карточке уже есть другая итоговая версия. Используйте замену в предупреждении ниже."
       : "Добавить текущую версию СЯ этой карточки в кабинетную выгрузку.";
-  const hasSemanticExpansion = Boolean(activeSemanticCore?.seedQuery || activeSemanticCore?.source === "mpstats-expanding");
   const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
   const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
   const semanticContentRunning = semanticContentStatus === "loading";
@@ -7047,6 +7092,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticDraftDirty(false);
     setSemanticDraftSaved(false);
     setSemanticRankStatus("idle");
+    setSemanticCollectionActionStatus("");
+    setSemanticCollectionError("");
+    setSemanticCollectionSaveOpen(false);
+    setSemanticCollectionName("");
+    setSemanticCollectionArchiveOpen(false);
+    setSemanticAppliedCollectionId("");
+    setSemanticEditingCollectionId("");
+    setSemanticEditingCollectionName("");
+    setSemanticEditingKeywords([]);
     setCardCharacteristicsOpen(false);
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
@@ -7083,6 +7137,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticCoreFinal(null);
     setSemanticFinalStatus("");
     setSemanticActiveReportId("");
+    setSemanticCollections([]);
+    setSemanticCollectionsStatus("idle");
+    setSemanticCollectionActionStatus("");
+    setSemanticCollectionError("");
+    setSemanticCollectionSaveOpen(false);
+    setSemanticCollectionName("");
+    setSemanticCollectionArchiveOpen(false);
+    setSemanticCollectionSearch("");
+    setSemanticAppliedCollectionId("");
+    setSemanticEditingCollectionId("");
+    setSemanticEditingCollectionName("");
+    setSemanticEditingKeywords([]);
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
@@ -7333,7 +7399,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       report.id === targetId || (!semanticActiveReportId && index === 0)
         ? {
           ...report,
-          seedQuery: semanticSeedQuery.trim() || report.seedQuery,
+          seedQuery: semanticSeedForActiveCore || report.seedQuery,
           subjectFilter: semanticSubjectFilter,
           search: semanticSearch,
           excludeWords: semanticExcludeWords,
@@ -7466,11 +7532,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     if (semanticCoreStatus === "loading" || !semanticSeedQuery.trim()) {
       return;
     }
-    loadSemanticCore({ forceRefresh: hasSemanticExpansion });
+    loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion });
   }
 
-  async function loadSemanticCore({ forceRefresh = false } = {}) {
-    if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
+  async function loadSemanticCore({ forceRefresh = false, query = semanticSeedQuery } = {}) {
+    const requestedSeedQuery = String(query || "").trim();
+    if (!portal?.id || !card?.nmID || !requestedSeedQuery) {
       setSemanticCoreStatus("missing-card");
       setSemanticCoreError("");
       setSemanticRankStatus("idle");
@@ -7486,7 +7553,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         body: JSON.stringify({
           portalId: portal.id,
           card,
-          query: semanticSeedQuery.trim(),
+          query: requestedSeedQuery,
           refresh: forceRefresh,
         }),
       });
@@ -7494,8 +7561,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCore(nextSemanticCore);
       const nextSubjectFilter = "";
       setSemanticSubjectFilter(nextSubjectFilter);
+      const requestedSeedKey = semanticQueryKey(requestedSeedQuery);
+      const existingReportForSeed = semanticCoreReports.find((report) => (
+        requestedSeedKey && semanticQueryKey(report.seedQuery) === requestedSeedKey
+      ));
       const nextReport = semanticReportFromCore(nextSemanticCore, semanticCoreSelected, {
-        seedQuery: semanticSeedQuery.trim(),
+        id: existingReportForSeed?.id,
+        seedQuery: requestedSeedQuery,
         subjectFilter: nextSubjectFilter,
       });
       if (nextReport) {
@@ -7531,7 +7603,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
     if (shouldCreateFallbackReport) {
       fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
-        seedQuery: semanticSeedQuery.trim(),
+        seedQuery: semanticSeedForActiveCore,
         subjectFilter: semanticSubjectFilter,
       });
       reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
@@ -7555,7 +7627,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
     if (shouldCreateFallbackReport) {
       fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
-        seedQuery: semanticSeedQuery.trim(),
+        seedQuery: semanticSeedForActiveCore,
         subjectFilter: semanticSubjectFilter,
       });
       reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
@@ -7597,6 +7669,226 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     } catch {
       setSemanticDraftDirty(true);
       setSemanticSaveStatus("error");
+    }
+  }
+
+  function upsertSemanticCollection(collection) {
+    if (!collection?.id) return;
+    setSemanticCollections((current) => {
+      const next = [collection, ...current.filter((item) => String(item.id) !== String(collection.id))];
+      return next.sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
+    });
+  }
+
+  async function loadSemanticCollections() {
+    if (!backendDraftEnabled || !portal?.id) {
+      setSemanticCollectionsStatus("unavailable");
+      return [];
+    }
+    setSemanticCollectionsStatus("loading");
+    setSemanticCollectionError("");
+    try {
+      const payload = await apiRequest(`/api/semantic-core-collections?portal_id=${encodeURIComponent(portal.id)}`);
+      const collections = Array.isArray(payload.collections) ? payload.collections : [];
+      setSemanticCollections(collections);
+      setSemanticCollectionsStatus(collections.length ? "loaded" : "empty");
+      return collections;
+    } catch {
+      setSemanticCollectionsStatus("error");
+      setSemanticCollectionError("Архив подборок не загрузился.");
+      return [];
+    }
+  }
+
+  function toggleSemanticCollectionArchive() {
+    const nextOpen = !semanticCollectionArchiveOpen;
+    setSemanticCollectionArchiveOpen(nextOpen);
+    setSemanticCollectionError("");
+    if (nextOpen && ["idle", "error"].includes(semanticCollectionsStatus)) {
+      loadSemanticCollections();
+    }
+  }
+
+  async function saveSemanticCollection() {
+    const name = semanticCollectionName.trim();
+    if (!name) {
+      setSemanticCollectionError("Введите название подборки.");
+      return;
+    }
+    if (!activeSemanticNewRows.length) {
+      setSemanticCollectionError("В текущем СЯ нет выбранных ключей к добавлению.");
+      return;
+    }
+    setSemanticCollectionActionStatus("saving");
+    setSemanticCollectionError("");
+    try {
+      const payload = await apiRequest("/api/semantic-core-collections", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          name,
+          keywords: activeSemanticNewRows,
+          meta: {
+            seedQuery: semanticSeedForActiveCore,
+            sourceCard: {
+              cardKey: draftCardKey,
+              nmID: cardNmIdValue(card),
+              vendorCode: cardVendorCodeValue(card),
+              title: card?.title || "",
+              subjectName: card?.subjectName || "",
+            },
+          },
+        }),
+      });
+      if (payload.collection) {
+        upsertSemanticCollection(payload.collection);
+        setSemanticAppliedCollectionId(payload.collection.id);
+      }
+      setSemanticCollectionSaveOpen(false);
+      setSemanticCollectionName("");
+      setSemanticCollectionActionStatus("saved");
+    } catch (error) {
+      setSemanticCollectionActionStatus("error");
+      setSemanticCollectionError(error.message === "semantic_collection_name_exists"
+        ? "Подборка с таким названием уже есть."
+        : "Подборка не сохранилась.");
+    }
+  }
+
+  function applySemanticCollection(collection) {
+    const collectionKeywords = normalizeSemanticSelection(collection?.keywords);
+    if (!collectionKeywords.length) {
+      setSemanticCollectionError("В этой подборке нет ключей.");
+      return;
+    }
+    const existingKeys = semanticExistingQueryKeys(activeSemanticCore);
+    const selectedKeys = new Set(semanticCoreSelected.map(semanticQueryKey));
+    const additions = collectionKeywords.filter((item) => {
+      const key = semanticQueryKey(item);
+      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+    });
+    if (!additions.length) {
+      setSemanticCollectionError("Все ключи этой подборки уже есть в карточке, ранжировании или выбранных.");
+      setSemanticAppliedCollectionId(collection.id);
+      return;
+    }
+    stageSemanticSelection([...semanticCoreSelected, ...additions]);
+    setSemanticAppliedCollectionId(collection.id);
+    setSemanticCollectionActionStatus("applied");
+    setSemanticCollectionError("");
+  }
+
+  async function appendCurrentSelectionToSemanticCollection() {
+    if (!semanticAppliedCollection) {
+      setSemanticCollectionError("Сначала примените или сохраните подборку.");
+      return;
+    }
+    if (!activeSemanticNewRows.length) {
+      setSemanticCollectionError("В текущей карточке нет ключей к добавлению.");
+      return;
+    }
+    setSemanticCollectionActionStatus("updating");
+    setSemanticCollectionError("");
+    try {
+      const payload = await apiRequest("/api/semantic-core-collections", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          collectionId: semanticAppliedCollection.id,
+          name: semanticAppliedCollection.name,
+          keywords: activeSemanticNewRows,
+          mode: "append",
+          meta: {
+            lastAppendCard: {
+              cardKey: draftCardKey,
+              nmID: cardNmIdValue(card),
+              vendorCode: cardVendorCodeValue(card),
+              title: card?.title || "",
+            },
+          },
+        }),
+      });
+      if (payload.collection) {
+        upsertSemanticCollection(payload.collection);
+      }
+      setSemanticCollectionActionStatus("updated");
+    } catch {
+      setSemanticCollectionActionStatus("error");
+      setSemanticCollectionError("Подборка не пополнилась.");
+    }
+  }
+
+  function openSemanticCollectionEditor(collection) {
+    setSemanticEditingCollectionId(collection.id);
+    setSemanticEditingCollectionName(collection.name || "");
+    setSemanticEditingKeywords(normalizeSemanticSelection(collection.keywords));
+    setSemanticCollectionError("");
+  }
+
+  function removeSemanticEditingKeyword(item) {
+    const key = semanticQueryKey(item);
+    if (!key) return;
+    setSemanticEditingKeywords((current) => current.filter((keyword) => semanticQueryKey(keyword) !== key));
+  }
+
+  async function saveSemanticCollectionEdits() {
+    const collection = semanticCollections.find((item) => String(item.id) === String(semanticEditingCollectionId));
+    const name = semanticEditingCollectionName.trim();
+    if (!collection || !name) {
+      setSemanticCollectionError("Введите название подборки.");
+      return;
+    }
+    setSemanticCollectionActionStatus("updating");
+    setSemanticCollectionError("");
+    try {
+      const payload = await apiRequest("/api/semantic-core-collections", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          collectionId: collection.id,
+          name,
+          keywords: semanticEditingKeywords,
+          mode: "replace",
+        }),
+      });
+      if (payload.collection) {
+        upsertSemanticCollection(payload.collection);
+      }
+      setSemanticEditingCollectionId("");
+      setSemanticEditingCollectionName("");
+      setSemanticEditingKeywords([]);
+      setSemanticCollectionActionStatus("updated");
+    } catch (error) {
+      setSemanticCollectionActionStatus("error");
+      setSemanticCollectionError(error.message === "semantic_collection_name_exists"
+        ? "Подборка с таким названием уже есть."
+        : "Изменения подборки не сохранились.");
+    }
+  }
+
+  async function deleteSemanticCollection(collection) {
+    if (!collection?.id) return;
+    const confirmed = window.confirm(`Удалить подборку "${collection.name}" из архива?`);
+    if (!confirmed) return;
+    setSemanticCollectionActionStatus("deleting");
+    setSemanticCollectionError("");
+    try {
+      await apiRequest(`/api/semantic-core-collections?portal_id=${encodeURIComponent(portal.id)}&collection_id=${encodeURIComponent(collection.id)}`, {
+        method: "DELETE",
+      });
+      setSemanticCollections((current) => current.filter((item) => String(item.id) !== String(collection.id)));
+      if (String(semanticAppliedCollectionId) === String(collection.id)) {
+        setSemanticAppliedCollectionId("");
+      }
+      if (String(semanticEditingCollectionId) === String(collection.id)) {
+        setSemanticEditingCollectionId("");
+        setSemanticEditingCollectionName("");
+        setSemanticEditingKeywords([]);
+      }
+      setSemanticCollectionActionStatus("deleted");
+    } catch {
+      setSemanticCollectionActionStatus("error");
+      setSemanticCollectionError("Подборка не удалилась.");
     }
   }
 
@@ -8738,6 +9030,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                           : "Повторите сохранение текущего выбора еще раз."}</span>
                   </div>
                 ) : null}
+                {semanticCollectionSaveOpen ? (
+                  <div className="semantic-collection-form">
+                    <label className="field-label">
+                      <span>Название подборки</span>
+                      <input value={semanticCollectionName} onChange={(event) => setSemanticCollectionName(event.target.value)} placeholder="очки женские" />
+                    </label>
+                    <button className={loadingButtonClass("btn primary", semanticCollectionActionStatus === "saving")} type="button" onClick={saveSemanticCollection} disabled={semanticCollectionActionStatus === "saving" || !semanticCollectionName.trim()} aria-busy={semanticCollectionActionStatus === "saving" || undefined}>
+                      <Save size={16} />{semanticCollectionActionStatus === "saving" ? "Сохраняем" : "Сохранить подборку"}
+                    </button>
+                    <button className="btn ghost" type="button" onClick={() => { setSemanticCollectionSaveOpen(false); setSemanticCollectionError(""); }} disabled={semanticCollectionActionStatus === "saving"}>
+                      <X size={16} />Отмена
+                    </button>
+                  </div>
+                ) : null}
                 {semanticCoreReports.length ? (
                   <div className="semantic-history">
                     <span>Источники MPStats</span>
@@ -8754,6 +9060,71 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         </button>
                       </div>
                     ))}
+                  </div>
+                ) : null}
+                {semanticCollectionArchiveOpen ? (
+                  <div className="semantic-archive">
+                    <div className="semantic-archive-head">
+                      <span>Архив подборок</span>
+                      <div>
+                        <input value={semanticCollectionSearch} onChange={(event) => setSemanticCollectionSearch(event.target.value)} placeholder="найти подборку" />
+                        <button className={loadingButtonClass("btn mini", semanticCollectionsStatus === "loading")} type="button" onClick={loadSemanticCollections} disabled={semanticCollectionsStatus === "loading"} aria-busy={semanticCollectionsStatus === "loading" || undefined}>
+                          <RefreshCw size={14} />Обновить
+                        </button>
+                      </div>
+                    </div>
+                    {semanticCollectionsStatus === "loading" ? <span className="status-note">Загружаем архив подборок...</span> : null}
+                    {semanticCollectionsStatus === "empty" ? <span className="status-note">Архив подборок пока пуст.</span> : null}
+                    {semanticCollectionsStatus === "error" ? <span className="status-note">Архив подборок сейчас не загрузился.</span> : null}
+                    {filteredSemanticCollections.map((collection) => (
+                      <div className={`semantic-collection-row ${String(collection.id) === String(semanticAppliedCollectionId) ? "active" : ""}`} key={collection.id}>
+                        <div className="semantic-collection-summary">
+                          <div>
+                            <strong>{collection.name}</strong>
+                            <em>{formatNumber(collection.keywordCount || 0)} {pluralRu(collection.keywordCount || 0, "ключ", "ключа", "ключей")} · {collection.updatedAt ? new Date(collection.updatedAt).toLocaleString("ru-RU") : "без даты"}</em>
+                          </div>
+                          {String(collection.id) === String(semanticAppliedCollectionId) ? <Tag tone="green">применена</Tag> : null}
+                          <button className="btn mini" type="button" onClick={() => applySemanticCollection(collection)}>
+                            <Plus size={14} />Применить
+                          </button>
+                          <button className="btn mini" type="button" onClick={() => openSemanticCollectionEditor(collection)}>
+                            <Pencil size={14} />Редактировать
+                          </button>
+                          <button className="btn mini danger" type="button" onClick={() => deleteSemanticCollection(collection)} disabled={semanticCollectionActionStatus === "deleting"}>
+                            <Trash2 size={14} />Удалить
+                          </button>
+                        </div>
+                        {String(semanticEditingCollectionId) === String(collection.id) ? (
+                          <div className="semantic-collection-editor">
+                            <label className="field-label">
+                              <span>Название</span>
+                              <input value={semanticEditingCollectionName} onChange={(event) => setSemanticEditingCollectionName(event.target.value)} />
+                            </label>
+                            <div className="semantic-collection-keywords">
+                              {semanticEditingKeywords.map((item) => (
+                                <div className="semantic-collection-keyword" key={semanticQueryKey(item)}>
+                                  <span>{item.query}</span>
+                                  <em>{semanticKeywordMeta(item) || "ключ подборки"}</em>
+                                  <button className="btn mini" type="button" onClick={() => removeSemanticEditingKeyword(item)}>
+                                    <X size={14} />Убрать
+                                  </button>
+                                </div>
+                              ))}
+                              {!semanticEditingKeywords.length ? <p>Ключей в подборке нет.</p> : null}
+                            </div>
+                            <div className="semantic-collection-editor-actions">
+                              <button className={loadingButtonClass("btn primary", semanticCollectionActionStatus === "updating")} type="button" onClick={saveSemanticCollectionEdits} disabled={semanticCollectionActionStatus === "updating" || !semanticEditingCollectionName.trim()} aria-busy={semanticCollectionActionStatus === "updating" || undefined}>
+                                <Save size={16} />{semanticCollectionActionStatus === "updating" ? "Сохраняем" : "Сохранить изменения"}
+                              </button>
+                              <button className="btn ghost" type="button" onClick={() => { setSemanticEditingCollectionId(""); setSemanticEditingCollectionName(""); setSemanticEditingKeywords([]); }} disabled={semanticCollectionActionStatus === "updating"}>
+                                <X size={16} />Закрыть
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                    {semanticCollectionsStatus === "loaded" && !filteredSemanticCollections.length ? <span className="status-note">Поиск не нашел подборки.</span> : null}
                   </div>
                 ) : null}
                 {activeSemanticCore ? (
@@ -8774,6 +9145,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 )}
                 <div className="tab-actions">
                     {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
+                    {semanticCollectionError ? <span className="status-note">{semanticCollectionError}</span> : null}
+                    {semanticCollectionActionStatus === "saved" ? <span className="status-note">Подборка сохранена в архив.</span> : null}
+                    {semanticCollectionActionStatus === "applied" ? <span className="status-note">Подборка применена к текущей карточке.</span> : null}
+                    {semanticCollectionActionStatus === "updated" ? <span className="status-note">Подборка обновлена.</span> : null}
+                    {semanticCollectionActionStatus === "deleted" ? <span className="status-note">Подборка удалена из архива.</span> : null}
                     {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем ранжирующиеся запросы и позиции карточки...</span> : null}
                     {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул ранжирующиеся запросы карточки.</span> : null}
                   {semanticRankStatus === "error" ? <span className="status-note">Подборка доступна, но позиции карточки сейчас не загрузились.</span> : null}
@@ -8817,8 +9193,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <button className={loadingButtonClass("btn", semanticSaveStatus === "saving")} type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} aria-busy={semanticSaveStatus === "saving" || undefined} title={semanticSaveCurrentTitle}>
                     <Save size={17} />{semanticSaveStatus === "saving" ? "Сохраняем выбор" : "Сохранить текущий выбор"}
                   </button>
-                  <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={() => loadSemanticCore({ forceRefresh: hasSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
-                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : hasSemanticExpansion ? "Собрать еще" : "Подобрать запросы"}
+                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "saving")} type="button" onClick={() => { setSemanticCollectionSaveOpen(true); setSemanticCollectionError(""); }} disabled={!canSaveSemanticCollection} aria-busy={semanticCollectionActionStatus === "saving" || undefined} title={activeSemanticNewRows.length ? "Сохранить выбранные ключи как архивную подборку для аналогичных карточек." : "Сначала добавьте ключи к добавлению."}>
+                    <Archive size={17} />{semanticCollectionActionStatus === "saving" ? "Сохраняем подборку" : "Сохранить подборку"}
+                  </button>
+                  <button className={loadingButtonClass("btn", semanticCollectionsStatus === "loading")} type="button" onClick={toggleSemanticCollectionArchive} disabled={!backendDraftEnabled || semanticCollectionsStatus === "loading"} aria-busy={semanticCollectionsStatus === "loading" || undefined}>
+                    <Archive size={17} />{semanticCollectionArchiveOpen ? "Скрыть архив" : "Архив подборок"}
+                  </button>
+                  <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "updating")} type="button" onClick={appendCurrentSelectionToSemanticCollection} disabled={!canAppendSemanticCollection} aria-busy={semanticCollectionActionStatus === "updating" || undefined} title={semanticAppliedCollection ? `Добавить новые ключи текущей карточки в подборку "${semanticAppliedCollection.name}". Старые ключи не удаляются.` : "Сначала примените или сохраните подборку."}>
+                    <Plus size={17} />{semanticCollectionActionStatus === "updating" ? "Пополняем" : "Пополнить подборку"}
+                  </button>
+                  <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={() => loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
+                    <Search size={17} />{semanticRunButtonLabel}
                   </button>
                 </div>
                 <div className="semantic-final-bar">

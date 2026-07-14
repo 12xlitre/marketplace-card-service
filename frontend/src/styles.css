@@ -4121,6 +4121,125 @@ tr:last-child td {
   font-size: 12px;
 }
 
+.semantic-collection-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.semantic-archive {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.semantic-archive-head,
+.semantic-collection-summary,
+.semantic-collection-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.semantic-archive-head {
+  justify-content: space-between;
+}
+
+.semantic-archive-head > span {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.semantic-archive-head > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.semantic-archive-head input {
+  width: min(260px, 100%);
+  height: 34px;
+}
+
+.semantic-collection-row {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+
+.semantic-collection-row.active {
+  border-color: #9fc5b4;
+  background: #eef8f2;
+}
+
+.semantic-collection-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+}
+
+.semantic-collection-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.semantic-collection-summary strong,
+.semantic-collection-summary em {
+  overflow-wrap: anywhere;
+}
+
+.semantic-collection-summary em,
+.semantic-collection-keyword em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.semantic-collection-editor {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.semantic-collection-keywords {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.semantic-collection-keyword {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.5fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--surface);
+}
+
+.semantic-collection-keyword span,
+.semantic-collection-keyword em {
+  overflow-wrap: anywhere;
+}
+
 .semantic-core-panel.compact {
   margin-bottom: 14px;
 }
@@ -5103,6 +5222,9 @@ tr:last-child td {
   .semantic-query-bar,
   .semantic-final-bar,
   .semantic-history-row,
+  .semantic-collection-form,
+  .semantic-collection-summary,
+  .semantic-collection-keyword,
   .settings-grid,
   .admin-user-row,
   .admin-event-row,

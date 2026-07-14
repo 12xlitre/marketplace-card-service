@@ -345,6 +345,19 @@ def init_db():
         UNIQUE (portal_id, card_key)
       );
 
+      CREATE TABLE IF NOT EXISTS semantic_core_collections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        keywords_json TEXT NOT NULL DEFAULT '[]',
+        meta_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, name)
+      );
+
       CREATE TABLE IF NOT EXISTS card_approval_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
@@ -509,6 +522,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_card_drafts_portal_card
       ON card_drafts(portal_id, card_key)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_semantic_core_collections_portal_updated
+      ON semantic_core_collections(portal_id, updated_at)
       """
     )
     db.execute(
@@ -2522,6 +2541,267 @@ def public_card_draft(row):
     "createdAt": row["created_at"] or "",
     "updatedAt": row["updated_at"] or "",
   }
+
+
+def semantic_collection_name(value):
+  return audit_str(value or "", 120)
+
+
+def semantic_collection_keyword_key(value):
+  query = value if isinstance(value, str) else (value.get("query") if isinstance(value, dict) else "")
+  return audit_normalized(query)
+
+
+def semantic_collection_number(value):
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return ""
+  if not number or number <= 0:
+    return ""
+  return int(number) if number.is_integer() else number
+
+
+def normalize_semantic_collection_keywords(items, limit=2000):
+  output = []
+  seen = set()
+  text_fields = (
+    "cluster",
+    "prioritySubject",
+    "prioritySubjectId",
+    "frequency365",
+    "source",
+    "priority",
+    "reason",
+  )
+  numeric_fields = (
+    "wbCount",
+    "ozonCount",
+    "results",
+    "totalFound",
+    "uniqueDays",
+    "orgPos",
+    "adPos",
+    "avgPos",
+    "position",
+  )
+  for item in items if isinstance(items, list) else []:
+    query = audit_str(item if isinstance(item, str) else (item.get("query") if isinstance(item, dict) else ""), 250)
+    key = audit_normalized(query)
+    if not query or not key or key in seen:
+      continue
+    seen.add(key)
+    normalized = {
+      "query": query,
+      "status": "selected",
+      "field": "work",
+    }
+    if isinstance(item, dict):
+      for field in text_fields:
+        value = audit_str(item.get(field), 250)
+        if value:
+          normalized[field] = value
+      for field in numeric_fields:
+        value = semantic_collection_number(item.get(field))
+        if value:
+          normalized[field] = value
+    output.append(normalized)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def merge_semantic_collection_keywords(existing, incoming):
+  output = normalize_semantic_collection_keywords(existing)
+  seen = {semantic_collection_keyword_key(item) for item in output}
+  for item in normalize_semantic_collection_keywords(incoming):
+    key = semantic_collection_keyword_key(item)
+    if key and key not in seen:
+      seen.add(key)
+      output.append(item)
+  return output[:2000]
+
+
+def public_semantic_core_collection(row):
+  if not row:
+    return None
+  try:
+    keywords = json.loads(row["keywords_json"] or "[]")
+  except (TypeError, json.JSONDecodeError):
+    keywords = []
+  try:
+    meta = json.loads(row["meta_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    meta = {}
+  keywords = normalize_semantic_collection_keywords(keywords)
+  return {
+    "id": row["id"],
+    "portalId": str(row["portal_id"]),
+    "name": row["name"] or "",
+    "keywords": keywords,
+    "keywordCount": len(keywords),
+    "meta": meta if isinstance(meta, dict) else {},
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def list_semantic_core_collections(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM semantic_core_collections
+      WHERE portal_id = ?
+      ORDER BY updated_at DESC, name
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {
+    "portalId": str(numeric_portal_id),
+    "collections": [public_semantic_core_collection(row) for row in rows],
+  }
+
+
+def save_semantic_core_collection(portal_id, name, keywords, user, collection_id=None, mode="append", meta=None):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  clean_name = semantic_collection_name(name)
+  replace_mode = str(mode or "").strip().lower() == "replace"
+  incoming_keywords = normalize_semantic_collection_keywords(keywords)
+  if not clean_name:
+    raise ValueError("semantic_collection_name_required")
+  if not incoming_keywords and not replace_mode:
+    raise ValueError("semantic_collection_keywords_required")
+  meta_payload = meta if isinstance(meta, dict) else {}
+  init_db()
+  with connect_db() as db:
+    existing = None
+    if collection_id:
+      existing = db.execute(
+        """
+        SELECT *
+        FROM semantic_core_collections
+        WHERE portal_id = ? AND id = ?
+        """,
+        (numeric_portal_id, collection_id),
+      ).fetchone()
+      if not existing:
+        raise ValueError("semantic_collection_not_found")
+    else:
+      existing = db.execute(
+        """
+        SELECT *
+        FROM semantic_core_collections
+        WHERE portal_id = ? AND name = ?
+        """,
+        (numeric_portal_id, clean_name),
+      ).fetchone()
+
+    if existing:
+      try:
+        existing_keywords = json.loads(existing["keywords_json"] or "[]")
+      except (TypeError, json.JSONDecodeError):
+        existing_keywords = []
+      next_keywords = incoming_keywords if replace_mode else merge_semantic_collection_keywords(existing_keywords, incoming_keywords)
+      try:
+        existing_meta = json.loads(existing["meta_json"] or "{}")
+      except (TypeError, json.JSONDecodeError):
+        existing_meta = {}
+      next_meta = {
+        **(existing_meta if isinstance(existing_meta, dict) else {}),
+        **meta_payload,
+      }
+      try:
+        db.execute(
+          """
+          UPDATE semantic_core_collections
+          SET name = ?,
+              keywords_json = ?,
+              meta_json = ?,
+              updated_by = ?,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE portal_id = ? AND id = ?
+          """,
+          (
+            clean_name,
+            json.dumps(next_keywords, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(next_meta, ensure_ascii=False, separators=(",", ":")),
+            user["login"],
+            numeric_portal_id,
+            existing["id"],
+          ),
+        )
+      except sqlite3.IntegrityError as exc:
+        raise ValueError("semantic_collection_name_exists") from exc
+      collection_id = existing["id"]
+    else:
+      try:
+        cursor = db.execute(
+          """
+          INSERT INTO semantic_core_collections (
+            portal_id, name, keywords_json, meta_json, created_by, updated_by
+          )
+          VALUES (?, ?, ?, ?, ?, ?)
+          """,
+          (
+            numeric_portal_id,
+            clean_name,
+            json.dumps(incoming_keywords, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(meta_payload, ensure_ascii=False, separators=(",", ":")),
+            user["login"],
+            user["login"],
+          ),
+        )
+      except sqlite3.IntegrityError as exc:
+        raise ValueError("semantic_collection_name_exists") from exc
+      collection_id = cursor.lastrowid
+
+    row = db.execute(
+      """
+      SELECT *
+      FROM semantic_core_collections
+      WHERE portal_id = ? AND id = ?
+      """,
+      (numeric_portal_id, collection_id),
+    ).fetchone()
+  return public_semantic_core_collection(row)
+
+
+def delete_semantic_core_collection(portal_id, collection_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  try:
+    numeric_collection_id = int(collection_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_semantic_collection_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    cursor = db.execute(
+      """
+      DELETE FROM semantic_core_collections
+      WHERE portal_id = ? AND id = ?
+      """,
+      (numeric_portal_id, numeric_collection_id),
+    )
+  return cursor.rowcount > 0
 
 
 def card_key_from_snapshot_card(card):
@@ -7776,6 +8056,7 @@ def mpstats_expanding_seed_queries(card, query):
   primary = mpstats_expanding_seed_query(card, query)
   if not primary:
     return []
+  manual_query = audit_str(query or "")
   seeds = []
   seen = set()
   mpstats_expanding_add_seed(seeds, seen, primary)
@@ -7797,6 +8078,10 @@ def mpstats_expanding_seed_queries(card, query):
   content = audit_normalized(" ".join(str(part or "") for part in content_parts))
   primary_is_sunglasses = "солнцезащит" in content or "солнечн" in content
   base = "солнцезащитные очки" if primary_is_sunglasses else "очки"
+  card_is_glasses = "очк" in audit_normalized(" ".join(str(part or "") for part in content_parts[1:]))
+  primary_normalized = audit_normalized(primary)
+  if manual_query and card_is_glasses and "очк" not in primary_normalized:
+    mpstats_expanding_add_seed(seeds, seen, f"{base} {primary}")
   if re.search(r"\bкошк|\bкошач|cat\s*eye", content):
     mpstats_expanding_add_seed(seeds, seen, "очки кошачий глаз")
     if primary_is_sunglasses:
@@ -11344,6 +11629,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
+    if path == "/api/semantic-core-collections":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, list_semantic_core_collections(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
+      return
+
     if path == "/api/card-competitors":
       user = self.require_user()
       if not user:
@@ -11645,6 +11947,27 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
+        return
+      self.send_json(HTTPStatus.OK, {"deleted": deleted})
+      return
+
+    if path == "/api/semantic-core-collections":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      collection_id = query.get("collection_id", [""])[0] or query.get("id", [""])[0]
+      if not portal_id or not collection_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_semantic_collection_request"})
+        return
+      try:
+        deleted = delete_semantic_core_collection(portal_id, collection_id, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_semantic_collection"})
         return
       self.send_json(HTTPStatus.OK, {"deleted": deleted})
       return
@@ -12130,6 +12453,30 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
         return
       self.send_json(HTTPStatus.OK, {"draft": draft})
+      return
+
+    if path == "/api/semantic-core-collections":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json(MAX_DRAFT_JSON_BYTES) or {}
+      try:
+        collection = save_semantic_core_collection(
+          payload.get("portalId") or payload.get("portal_id"),
+          payload.get("name"),
+          payload.get("keywords"),
+          user,
+          collection_id=payload.get("collectionId") or payload.get("collection_id") or payload.get("id"),
+          mode=payload.get("mode") or "append",
+          meta=payload.get("meta") if isinstance(payload.get("meta"), dict) else {},
+        )
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_semantic_collection"})
+        return
+      self.send_json(HTTPStatus.OK, {"collection": collection})
       return
 
     if path == "/api/card-competitors":
