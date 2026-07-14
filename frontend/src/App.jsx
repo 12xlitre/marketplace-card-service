@@ -4057,6 +4057,10 @@ function Tag({ children, tone = "amber", title = "" }) {
   return <span className={`tag ${tone}`} title={title}>{children}</span>;
 }
 
+function loadingButtonClass(className, loading) {
+  return `${className}${loading ? " loading" : ""}`;
+}
+
 function IconButton({ icon: Icon, label, onClick, disabled = false }) {
   return (
     <button className="icon-btn" type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
@@ -5054,7 +5058,7 @@ function LoginScreen({ onLogin }) {
           <span>Запомнить меня на этом устройстве</span>
         </label>
         {error ? <div className="form-error">{error}</div> : null}
-        <button className="btn primary" type="submit" disabled={loading}>
+        <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading} aria-busy={loading || undefined}>
           {loading ? "Входим..." : "Войти"}
         </button>
       </form>
@@ -5303,6 +5307,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
+  const [teamSaving, setTeamSaving] = useState(false);
   const [importJob, setImportJob] = useState(null);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
 
@@ -5396,9 +5401,15 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
   }
 
-  function saveTeamDraft() {
-    onUpdateTeam(teamDraft);
-    setTeamEditing(false);
+  async function saveTeamDraft() {
+    if (teamSaving) return;
+    setTeamSaving(true);
+    try {
+      await onUpdateTeam(teamDraft);
+      setTeamEditing(false);
+    } finally {
+      setTeamSaving(false);
+    }
   }
 
   async function saveNameDraft() {
@@ -5532,7 +5543,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   maxLength={120}
                   autoFocus
                 />
-                <button className="btn primary" type="button" onClick={saveNameDraft} disabled={nameSaving}>
+                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
                   {nameSaving ? "Сохраняем" : "Сохранить"}
                 </button>
                 <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>
@@ -5618,7 +5629,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                       return (
                         <label className="team-editor-row" key={roleKey}>
                           <span>{label}</span>
-                          <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)}>
+                          <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)} disabled={teamSaving}>
                             <option value="">Не назначен</option>
                             {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
                           </select>
@@ -5626,8 +5637,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                       );
                     })}
                     <div className="team-editor-actions">
-                      <button className="btn primary" type="button" onClick={saveTeamDraft}>Сохранить состав</button>
-                      <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }}>Отмена</button>
+                      <button className={loadingButtonClass("btn primary", teamSaving)} type="button" onClick={saveTeamDraft} disabled={teamSaving} aria-busy={teamSaving || undefined}>{teamSaving ? "Сохраняем" : "Сохранить состав"}</button>
+                      <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }} disabled={teamSaving}>Отмена</button>
                     </div>
                   </div>
                 )}
@@ -5664,11 +5675,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 Нажимайте Загрузить свежие данные перед новой волной аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
               </HelpHint>
               <div className="panel-actions">
-                <button className="btn" type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading}>
+                <button className={loadingButtonClass("btn", cardsLoading)} type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading} aria-busy={cardsLoading || undefined}>
                   <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
                 </button>
                 {isManual ? (
-                  <button className="btn primary" type="button" onClick={startFullImport} disabled={!canRefreshSource || cardsLoading || importRunning}>
+                  <button className={loadingButtonClass("btn primary", importRunning)} type="button" onClick={startFullImport} disabled={!canRefreshSource || cardsLoading || importRunning} aria-busy={importRunning || undefined}>
                     <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
                   </button>
                 ) : null}
@@ -5729,10 +5740,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </Tag>
               </div>
               <div className="panel-actions">
-                <button className="btn" type="button" onClick={downloadPortalSemanticCore} disabled={portal.isDemo || cabinetExportStatus === "semantic-loading"}>
+                <button className={loadingButtonClass("btn", cabinetExportStatus === "semantic-loading")} type="button" onClick={downloadPortalSemanticCore} disabled={portal.isDemo || cabinetExportStatus === "semantic-loading"} aria-busy={cabinetExportStatus === "semantic-loading" || undefined}>
                   <Download size={16} />{cabinetExportStatus === "semantic-loading" ? "Собираем СЯ" : "Скачать итоговое СЯ по кабинету"}
                 </button>
-                <button className="btn" type="button" onClick={downloadPortalFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"}>
+                <button className={loadingButtonClass("btn", cabinetExportStatus === "content-loading")} type="button" onClick={downloadPortalFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"} aria-busy={cabinetExportStatus === "content-loading" || undefined}>
                   <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
                 </button>
               </div>
@@ -5947,7 +5958,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
               По какое число
               <input type="date" value={period.end} onChange={(event) => setPeriod((current) => ({ ...current, end: event.target.value }))} />
             </label>
-            <button className="btn primary" type="button" onClick={() => generateReport()} disabled={!portal || isLoading}>
+            <button className={loadingButtonClass("btn primary", isLoading)} type="button" onClick={() => generateReport()} disabled={!portal || isLoading} aria-busy={isLoading || undefined}>
               <Download size={17} />{isLoading ? "Формируем" : "Сформировать"}
             </button>
           </div>
@@ -6015,7 +6026,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
                   <em>{item.fileName}</em>
                 </div>
                 <Tag tone={reportHistoryStatusTone(item.status)}>{reportHistoryStatusLabel(item.status)}</Tag>
-                <button className="btn mini" type="button" onClick={() => repeatReport(item)} disabled={isLoading}>Скачать снова</button>
+                <button className={loadingButtonClass("btn mini", isLoading)} type="button" onClick={() => repeatReport(item)} disabled={isLoading} aria-busy={isLoading || undefined}>Скачать снова</button>
               </div>
             ))}
           </div>
@@ -6368,7 +6379,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
             {batchStatus === "error" ? " · не удалось взять в работу" : ""}
           </span>
           <div className="toolbar">
-            <button className="btn primary" type="button" onClick={() => setWorkPackageOpen(true)} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"}>
+            <button className={loadingButtonClass("btn primary", batchStatus === "saving")} type="button" onClick={() => setWorkPackageOpen(true)} disabled={portal?.isDemo || !selectedCards.length || batchStatus === "saving"} aria-busy={batchStatus === "saving" || undefined}>
               <Plus size={16} />{batchStatus === "saving" ? "Берем в работу" : "Взять в работу"}
             </button>
             <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
@@ -6515,7 +6526,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className="btn primary" type="submit" disabled={loading || !workTypes.length}>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !workTypes.length} aria-busy={loading || undefined}>
             {loading ? "Создаем задачу" : "Создать задачу"}
           </button>
         </div>
@@ -6744,6 +6755,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const draftStockRows = Array.isArray(draftStocks.rows) ? draftStocks.rows : normalizeDraftStocks(draftStocks, card).rows;
   const auditDone = auditStatus === "done";
   const auditRunning = auditStatus === "loading";
+  const auditButtonBusy = auditRunning || mpstatsCharacteristicsStatus === "loading";
   const auditStale = auditStatus === "stale";
   const draftTitleLength = draftTitle.length;
   const draftCardKeys = cardDraftKeyCandidates(card);
@@ -8783,21 +8795,22 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <HelpCircle size={15} />
                   </span>
                   <button
-                    className="btn"
+                    className={loadingButtonClass("btn", semanticContentRunning)}
                     type="button"
                     onClick={reoptimizeContentFromSemanticCore}
                     disabled={!canReoptimizeContent}
+                    aria-busy={semanticContentRunning || undefined}
                     title={activeSemanticNewRows.length ? (semanticCurrentChoiceSaved ? "Переписать заголовок и описание с учетом новых запросов" : "Сначала нажмите Сохранить текущий выбор.") : "Сначала добавьте новые запросы с частотностью"}
                   >
                     <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
-                  <button className="btn" type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID}>
+                  <button className={loadingButtonClass("btn", semanticRankStatus === "loading")} type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID} aria-busy={semanticRankStatus === "loading" || undefined}>
                     <RefreshCw size={17} />{semanticRankStatus === "loading" ? "Обновляем позиции" : "Обновить позиции"}
                   </button>
-                  <button className="btn" type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} title={semanticSaveCurrentTitle}>
+                  <button className={loadingButtonClass("btn", semanticSaveStatus === "saving")} type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} aria-busy={semanticSaveStatus === "saving" || undefined} title={semanticSaveCurrentTitle}>
                     <Save size={17} />{semanticSaveStatus === "saving" ? "Сохраняем выбор" : "Сохранить текущий выбор"}
                   </button>
-                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: hasSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
+                  <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={() => loadSemanticCore({ forceRefresh: hasSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
                     <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : hasSemanticExpansion ? "Собрать еще" : "Подобрать запросы"}
                   </button>
                 </div>
@@ -8821,7 +8834,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!semanticCurrentChoiceSaved || (!activeSemanticPositionRows.length && !activeSemanticNewRows.length)} title={semanticCurrentChoiceSaved ? "Скачать сохраненный текущий выбор СЯ по карточке." : "Сначала нажмите Сохранить текущий выбор."}>
                       <Download size={17} />Скачать файл карточки
                     </button>
-                    <button className="btn primary" type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} title={semanticFinalAddTitle}>
+                    <button className={loadingButtonClass("btn primary", semanticFinalStatus === "saving")} type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} aria-busy={semanticFinalStatus === "saving" || undefined} title={semanticFinalAddTitle}>
                       <CheckSquare size={17} />{semanticFinalMatchesCurrent ? "В итоговом СЯ" : "Добавить в итоговое СЯ"}
                     </button>
                   </div>
@@ -8831,7 +8844,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <strong>{semanticFinalBanner.title}</strong>
                     <span>{semanticFinalBanner.copy}</span>
                     {semanticFinalBanner.action === "replace" ? (
-                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving" || !semanticCurrentChoiceSaved} title={semanticCurrentChoiceSaved ? "Заменить сохраненную итоговую версию текущей." : "Сначала нажмите Сохранить текущий выбор."}>
+                      <button className={loadingButtonClass("btn mini", semanticFinalStatus === "saving")} type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving" || !semanticCurrentChoiceSaved} aria-busy={semanticFinalStatus === "saving" || undefined} title={semanticCurrentChoiceSaved ? "Заменить сохраненную итоговую версию текущей." : "Сначала нажмите Сохранить текущий выбор."}>
                         <CheckSquare size={14} />Заменить старую новой
                       </button>
                     ) : null}
@@ -8879,13 +8892,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         <CheckSquare size={17} />{auditNextStep.action}
                       </button>
                     ) : (
-                      <button className="btn primary" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}>
-                        <ClipboardList size={17} />{auditRunning ? "Аудит идет" : auditNextStep.action}
+                      <button className={loadingButtonClass("btn primary", auditButtonBusy)} type="button" onClick={() => runAudit("audit")} disabled={auditButtonBusy} aria-busy={auditButtonBusy || undefined}>
+                        <ClipboardList size={17} />{auditRunning ? "Аудит идет" : mpstatsCharacteristicsStatus === "loading" ? "Ждем MPStats" : auditNextStep.action}
                       </button>
                     )}
                     {auditDone ? (
-                      <button className="btn" type="button" onClick={() => runAudit("audit")} disabled={auditRunning || mpstatsCharacteristicsStatus === "loading"}>
-                        <RefreshCw size={16} />Запустить заново
+                      <button className={loadingButtonClass("btn", auditButtonBusy)} type="button" onClick={() => runAudit("audit")} disabled={auditButtonBusy} aria-busy={auditButtonBusy || undefined}>
+                        <RefreshCw size={16} />{auditRunning ? "Запускаем" : mpstatsCharacteristicsStatus === "loading" ? "Ждем MPStats" : "Запустить заново"}
                       </button>
                     ) : null}
                   </div>
@@ -9168,13 +9181,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                   <div className="strip-actions">
                     <button
-                      className="btn"
+                      className={loadingButtonClass("btn", mpstatsCharacteristicsStatus === "loading")}
                       type="button"
                       onClick={() => loadMpstatsCharacteristicHints({ forceRefresh: true })}
                       disabled={mpstatsCharacteristicsStatus === "loading"}
+                      aria-busy={mpstatsCharacteristicsStatus === "loading" || undefined}
                       title="Принудительно обновить аналитику MPStats. Расходует запрос MPStats."
                     >
-                      <RefreshCw size={16} />Обновить аналитику
+                      <RefreshCw size={16} />{mpstatsCharacteristicsStatus === "loading" ? "Обновляем аналитику" : "Обновить аналитику"}
                     </button>
                     <Tag tone={mpstatsHintsTone} title={mpstatsHintsTitle}>{mpstatsHintsLabel}</Tag>
                   </div>
@@ -9405,8 +9419,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                       {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
-                    <button className="btn primary" type="button" onClick={saveDraft} disabled={approvalReadOnly}><Save size={17} />Сохранить</button>
-                    <button className="btn" type="button" onClick={resetDraft} disabled={approvalReadOnly || draftSaveStatus === "resetting"}><RotateCcw size={17} />Сбросить</button>
+                    <button className={loadingButtonClass("btn primary", draftSaveStatus === "saving")} type="button" onClick={saveDraft} disabled={approvalReadOnly || draftSaveStatus === "saving"} aria-busy={draftSaveStatus === "saving" || undefined}><Save size={17} />{draftSaveStatus === "saving" ? "Сохраняем" : "Сохранить"}</button>
+                    <button className={loadingButtonClass("btn", draftSaveStatus === "resetting")} type="button" onClick={resetDraft} disabled={approvalReadOnly || draftSaveStatus === "resetting"} aria-busy={draftSaveStatus === "resetting" || undefined}><RotateCcw size={17} />{draftSaveStatus === "resetting" ? "Сбрасываем" : "Сбросить"}</button>
                   </div>
                 </div>
               </section>
@@ -9894,14 +9908,14 @@ function TopCompetitorsPanel({
             placeholder="https://www.wildberries.ru/catalog/123456789/detail.aspx"
           />
         </label>
-        <button className="btn primary" type="button" onClick={onSuggest} disabled={!enabled || busy || !competitors.length}>
+        <button className={loadingButtonClass("btn primary", status === "suggesting")} type="button" onClick={onSuggest} disabled={!enabled || busy || !competitors.length} aria-busy={status === "suggesting" || undefined}>
           <Search size={17} />{status === "suggesting" ? "Проверяем" : "Проверить карточки"}
         </button>
-        <button className="btn" type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= topCompetitorLimit}>
-          <Plus size={17} />Добавить
+        <button className={loadingButtonClass("btn", status === "saving")} type="button" onClick={onAdd} disabled={!enabled || busy || competitors.length >= topCompetitorLimit} aria-busy={status === "saving" || undefined}>
+          <Plus size={17} />{status === "saving" ? "Добавляем" : "Добавить"}
         </button>
-        <button className="btn" type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length}>
-          <RefreshCw size={17} />Обновить снимки
+        <button className={loadingButtonClass("btn", status === "refreshing" || status === "loading")} type="button" onClick={onRefresh} disabled={!enabled || busy || !competitors.length} aria-busy={status === "refreshing" || status === "loading" || undefined}>
+          <RefreshCw size={17} />{status === "refreshing" || status === "loading" ? "Обновляем снимки" : "Обновить снимки"}
         </button>
       </div>
       {statusText ? <div className={`competitor-status status-${status}`}>{statusText}</div> : null}
@@ -9912,6 +9926,7 @@ function TopCompetitorsPanel({
               key={item.competitorNmID}
               competitor={item}
               busy={busy}
+              status={status}
               onRemove={onRemove}
               onReoptimizeChange={onReoptimizeChange}
               onSkipChange={onSkipChange}
@@ -9928,7 +9943,7 @@ function TopCompetitorsPanel({
   );
 }
 
-function CompetitorCard({ competitor, busy, onRemove, onReoptimizeChange, onSkipChange }) {
+function CompetitorCard({ competitor, busy, status, onRemove, onReoptimizeChange, onSkipChange }) {
   const snapshot = competitor.snapshot || {};
   const changes = Array.isArray(competitor.changes) ? competitor.changes : [];
   const visibleChanges = competitorVisibleChanges(changes);
@@ -10038,11 +10053,11 @@ function CompetitorCard({ competitor, busy, onRemove, onReoptimizeChange, onSkip
           })}
           {canResolveChange ? (
             <div className="competitor-change-actions">
-              <button className="btn primary" type="button" onClick={() => onReoptimizeChange(competitor)} disabled={busy}>
-                <WandSparkles size={17} />Переоптимизировать
+              <button className={loadingButtonClass("btn primary", status === "change-reoptimizing")} type="button" onClick={() => onReoptimizeChange(competitor)} disabled={busy} aria-busy={status === "change-reoptimizing" || undefined}>
+                <WandSparkles size={17} />{status === "change-reoptimizing" ? "Переоптимизируем" : "Переоптимизировать"}
               </button>
-              <button className="btn" type="button" onClick={() => onSkipChange(competitor)} disabled={busy}>
-                <X size={17} />Пропустить изменение
+              <button className={loadingButtonClass("btn", status === "change-skipping")} type="button" onClick={() => onSkipChange(competitor)} disabled={busy} aria-busy={status === "change-skipping" || undefined}>
+                <X size={17} />{status === "change-skipping" ? "Пропускаем" : "Пропустить изменение"}
               </button>
             </div>
           ) : null}
@@ -10213,14 +10228,14 @@ function ApprovalPanel({
             <span>{status === "approval-reason-required" ? "Чтобы вернуть задачу, нужно указать причину." : "Комментарий обязателен только для возврата на доработку."}</span>
           </div>
           <div className="approval-buttons">
-            <button className="btn" type="button" onClick={onReturn} disabled={busy || !comment.trim()}><RotateCcw size={17} />На доработку</button>
-            <button className="btn primary" type="button" onClick={onApprove} disabled={busy}><CheckSquare size={17} />Принято</button>
+            <button className={loadingButtonClass("btn", busy)} type="button" onClick={onReturn} disabled={busy || !comment.trim()} aria-busy={busy || undefined}><RotateCcw size={17} />На доработку</button>
+            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={onApprove} disabled={busy} aria-busy={busy || undefined}><CheckSquare size={17} />Принято</button>
           </div>
         </div>
       ) : null}
       {canSubmit ? (
         <div className="approval-buttons">
-            <button className="btn primary" type="button" onClick={onSubmit} disabled={busy}>
+            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={onSubmit} disabled={busy} aria-busy={busy || undefined}>
               <Upload size={17} />Отправить на согласование
             </button>
         </div>
@@ -11063,8 +11078,8 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
           {error ? <div className="form-error">{error}</div> : null}
         </div>
         <div className="modal-actions">
-          <button className="btn ghost" type="button" onClick={onClose}>Отмена</button>
-          <button className="btn primary" type="submit" disabled={loading}>{loading ? (mode === "manual" && !isReplacement ? "Создаем..." : "Проверяем...") : (isReplacement ? "Заменить ключ" : (mode === "manual" ? "Создать без API" : "Добавить кабинет"))}</button>
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading} aria-busy={loading || undefined}>{loading ? (mode === "manual" && !isReplacement ? "Создаем..." : "Проверяем...") : (isReplacement ? "Заменить ключ" : (mode === "manual" ? "Создать без API" : "Добавить кабинет"))}</button>
         </div>
       </form>
     </div>
@@ -11493,18 +11508,20 @@ function AdminUserRow({ user, canManageUsers, saving, resetting, onSave, onReset
         </label>
         <div className="admin-user-button-row">
           <button
-            className="btn mini primary"
+            className={loadingButtonClass("btn mini primary", saving)}
             type="button"
             disabled={disabled || !isDirty}
             onClick={() => onSave(user, userDraftPayload(draft))}
+            aria-busy={saving || undefined}
           >
             {saving ? "Сохраняем" : "Сохранить"}
           </button>
           <button
-            className="btn mini"
+            className={loadingButtonClass("btn mini", resetting)}
             type="button"
             onClick={() => onResetPassword(user.login)}
             disabled={!canManageUsers || resetting || !draft.isActive}
+            aria-busy={resetting || undefined}
           >
             {resetting ? "Сбрасываем" : "Сброс пароля"}
           </button>
@@ -11521,6 +11538,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   const [adminEvents, setAdminEvents] = useState([]);
   const [adminEventsStatus, setAdminEventsStatus] = useState("idle");
   const [adminStatus, setAdminStatus] = useState(null);
+  const [adminStatusLoading, setAdminStatusLoading] = useState(false);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
   const [mpstatsUsageStatus, setMpstatsUsageStatus] = useState("idle");
@@ -11585,11 +11603,14 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
     if (!canManage) {
       return;
     }
+    setAdminStatusLoading(true);
     try {
       const payload = await apiRequest("/api/admin-status");
       setAdminStatus(payload);
     } catch {
       setAdminStatus(null);
+    } finally {
+      setAdminStatusLoading(false);
     }
   }
 
@@ -12019,7 +12040,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                 </label>
               </div>
               <div className="panel-actions">
-                <button className="btn primary" type="submit" disabled={!canManageUsers || newUserStatus === "saving"}><Save size={16} />Создать сотрудника</button>
+                <button className={loadingButtonClass("btn primary", newUserStatus === "saving")} type="submit" disabled={!canManageUsers || newUserStatus === "saving"} aria-busy={newUserStatus === "saving" || undefined}><Save size={16} />{newUserStatus === "saving" ? "Создаем сотрудника" : "Создать сотрудника"}</button>
               </div>
               {!canManageUsers ? <div className="integration-status">Создавать сотрудников может только руководитель отдела или администратор.</div> : null}
               {newUserStatus === "saving" ? <div className="integration-status">Создаем сотрудника...</div> : null}
@@ -12098,7 +12119,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                 <h2>Журнал действий</h2>
                 <p>Последние изменения пользователей, доступов и интеграций.</p>
               </div>
-              <button className="btn" type="button" onClick={loadAdminEvents} disabled={adminEventsStatus === "loading"}>
+              <button className={loadingButtonClass("btn", adminEventsStatus === "loading")} type="button" onClick={loadAdminEvents} disabled={adminEventsStatus === "loading"} aria-busy={adminEventsStatus === "loading" || undefined}>
                 <RefreshCw size={16} />{adminEventsStatus === "loading" ? "Обновляем" : "Обновить"}
               </button>
             </div>
@@ -12130,7 +12151,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                   <h2>Интеграции</h2>
                   <p>WB API по кабинетам, MPStats, LLM и состояние backend-хранилища ключей.</p>
                 </div>
-                <button className="btn" type="button" onClick={loadAdminStatus}><RefreshCw size={16} />Обновить статус</button>
+                <button className={loadingButtonClass("btn", adminStatusLoading)} type="button" onClick={loadAdminStatus} disabled={adminStatusLoading} aria-busy={adminStatusLoading || undefined}><RefreshCw size={16} />{adminStatusLoading ? "Обновляем статус" : "Обновить статус"}</button>
               </div>
               <div className="integration-card-grid">
                 <div className="integration-card">
@@ -12225,9 +12246,9 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                   </div>
                 ) : null}
                 <div className="panel-actions">
-                  <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
-                  <button className="btn" type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection}><RefreshCw size={16} />Проверить</button>
-                  <button className="btn" type="button" disabled={!canManage || mpstatsUsageStatus === "loading"} onClick={downloadMpstatsUsageReport}>
+                  <button className={loadingButtonClass("btn primary", mpstatsStatus === "saving")} type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"} aria-busy={mpstatsStatus === "saving" || undefined}><Save size={16} />{mpstatsStatus === "saving" ? "Сохраняем ключ" : "Сохранить ключ"}</button>
+                  <button className={loadingButtonClass("btn", mpstatsStatus === "checking")} type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection} aria-busy={mpstatsStatus === "checking" || undefined}><RefreshCw size={16} />{mpstatsStatus === "checking" ? "Проверяем" : "Проверить"}</button>
+                  <button className={loadingButtonClass("btn", mpstatsUsageStatus === "loading")} type="button" disabled={!canManage || mpstatsUsageStatus === "loading"} onClick={downloadMpstatsUsageReport} aria-busy={mpstatsUsageStatus === "loading" || undefined}>
                     <Download size={16} />{mpstatsUsageStatus === "loading" ? "Готовим журнал" : "Скачать журнал API"}
                   </button>
                 </div>

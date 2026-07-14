@@ -467,6 +467,8 @@ a {
   box-shadow: 0 1px 0 rgba(31, 37, 34, .03);
   text-decoration: none;
   white-space: nowrap;
+  position: relative;
+  overflow: hidden;
 }
 
 .btn.primary {
@@ -509,6 +511,32 @@ a {
   color: var(--blue);
   background: var(--blue-soft);
   border-color: #bfd6ed;
+}
+
+.btn.loading::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, currentColor, transparent);
+  opacity: .55;
+  animation: button-progress-slide 1s ease-in-out infinite;
+}
+
+.btn.primary.loading::after {
+  opacity: .72;
+}
+
+@keyframes button-progress-slide {
+  0% {
+    transform: translateX(-80%);
+  }
+  100% {
+    transform: translateX(80%);
+  }
 }
 
 .icon-btn {
