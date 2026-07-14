@@ -2868,6 +2868,18 @@ function semanticCandidateSourceRows(core) {
   return semanticRowsByKey(rows).filter((item) => semanticFrequencyValue(item));
 }
 
+function semanticReportCandidateCount(report) {
+  return semanticCandidateSourceRows(report?.semanticCore).length;
+}
+
+function semanticPreferredReport(reports) {
+  const normalizedReports = Array.isArray(reports) ? reports : [];
+  return normalizedReports.find((report) => semanticReportCandidateCount(report))
+    || normalizedReports.find((report) => report?.semanticCore?.source === "mpstats-expanding")
+    || normalizedReports[0]
+    || null;
+}
+
 function semanticSelectedExportRows(selectedRows, core) {
   const sourceByKey = new Map(semanticCandidateSourceRows(core).map((item) => [semanticQueryKey(item), item]));
   const currentKeys = semanticExistingQueryKeys(core);
@@ -6608,7 +6620,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreSelected(normalized.semanticCoreSelected);
       setSemanticCoreReports(normalized.semanticCoreReports);
       if (normalized.semanticCoreReports.length) {
-        const latestReport = normalized.semanticCoreReports[0];
+        const latestReport = semanticPreferredReport(normalized.semanticCoreReports);
         setSemanticActiveReportId(latestReport.id);
         setSemanticCore(latestReport.semanticCore);
         setSemanticSeedQuery(latestReport.seedQuery || defaultSemanticSeedQuery(card));
@@ -6989,9 +7001,23 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
   async function persistSemanticSelection(nextSelection) {
     const normalizedSelection = normalizeSemanticSelection(nextSelection);
-    const nextReports = semanticReportsWithSelection(semanticCoreReports, normalizedSelection);
+    let reportSource = semanticCoreReports;
+    let fallbackReport = null;
+    const shouldCreateFallbackReport = activeSemanticCore
+      && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
+    if (shouldCreateFallbackReport) {
+      fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
+        seedQuery: semanticSeedQuery.trim(),
+        subjectFilter: semanticSubjectFilter,
+      });
+      reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
+    }
+    const nextReports = semanticReportsWithSelection(reportSource, normalizedSelection);
     setSemanticCoreSelected(normalizedSelection);
     setSemanticCoreReports(nextReports);
+    if (!semanticActiveReportId && fallbackReport?.id) {
+      setSemanticActiveReportId(fallbackReport.id);
+    }
     setSemanticSaveStatus("saving");
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
