@@ -1182,6 +1182,63 @@ function normalizedCardSearchText(card) {
   ].map((value) => String(value || "").toLowerCase()).join(" ");
 }
 
+function normalizeBulkCardToken(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^0-9a-zа-я]+/gi, "")
+    .trim();
+}
+
+function bulkCardTokensFromText(value) {
+  const seen = new Set();
+  const output = [];
+  const addToken = (token) => {
+    const normalized = normalizeBulkCardToken(token);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    output.push(normalized);
+  };
+  String(value || "")
+    .split(/[\n\r\t,;]+/)
+    .forEach((chunk) => {
+      const raw = chunk.trim();
+      if (!raw) return;
+      const catalogMatch = raw.match(/\/catalog\/(\d+)/i);
+      const longNumberMatches = raw.match(/\d{5,}/g) || [];
+      if (catalogMatch) addToken(catalogMatch[1]);
+      longNumberMatches.forEach(addToken);
+      if (!catalogMatch && !(longNumberMatches.length && /\s/.test(raw))) {
+        addToken(raw);
+      }
+    });
+  return output;
+}
+
+function cardBulkIdentifiers(card) {
+  const rawFields = card?.rawFields && typeof card.rawFields === "object" ? card.rawFields : {};
+  const values = [
+    cardStableKey(card),
+    card?.nmID,
+    card?.nmId,
+    card?.id,
+    card?.vendorCode,
+    card?.supplierArticle,
+    card?.barcode,
+    rawFields.nmID,
+    rawFields.nmId,
+    rawFields.vendorCode,
+    rawFields.supplierArticle,
+    rawFields.barcode,
+  ];
+  const sizes = Array.isArray(card?.sizes) ? card.sizes : Array.isArray(rawFields.sizes) ? rawFields.sizes : [];
+  sizes.forEach((size) => {
+    values.push(size?.chrtID, size?.chrtId, size?.techSize, size?.wbSize);
+    (Array.isArray(size?.skus) ? size.skus : []).forEach((sku) => values.push(sku));
+  });
+  return new Set(values.map(normalizeBulkCardToken).filter(Boolean));
+}
+
 function cardStableKey(card) {
   return cardDraftKey(card);
 }
@@ -5372,6 +5429,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
 function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpenCard, onWorkflowChange }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
+  const [bulkFilterText, setBulkFilterText] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -5458,6 +5516,9 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   }
 
   const normalizedQuery = query.trim().toLowerCase();
+  const bulkTokens = bulkCardTokensFromText(bulkFilterText);
+  const bulkFilterActive = bulkTokens.length > 0;
+  const cardIdentifierSets = new Map(cards.map((card) => [cardStableKey(card), cardBulkIdentifiers(card)]));
   const categories = [...new Set(cards.map((card) => String(card.subjectName || "категория не указана").trim()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "ru"));
   const selectedSet = new Set(selectedKeys);
@@ -5468,11 +5529,31 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   const cleanCards = cards.filter((card) => !cardProblemReasons(card).length && !cardDataSignals(card).length).length;
   const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
   const taskCards = cards.filter((card) => approvalTaskForCard(card, approvalTaskLookup));
+  const bulkMatchedCards = bulkFilterActive
+    ? cards.filter((card) => {
+      const identifiers = cardIdentifierSets.get(cardStableKey(card)) || new Set();
+      return bulkTokens.some((token) => identifiers.has(token));
+    })
+    : [];
+  const bulkMatchedTokenSet = new Set();
+  if (bulkFilterActive) {
+    bulkMatchedCards.forEach((card) => {
+      const identifiers = cardIdentifierSets.get(cardStableKey(card)) || new Set();
+      bulkTokens.forEach((token) => {
+        if (identifiers.has(token)) bulkMatchedTokenSet.add(token);
+      });
+    });
+  }
+  const bulkUnmatchedTokens = bulkFilterActive ? bulkTokens.filter((token) => !bulkMatchedTokenSet.has(token)) : [];
   const visibleCards = cards.filter((card) => {
     const key = cardStableKey(card);
+    const identifiers = cardIdentifierSets.get(key) || new Set();
     const hasProblems = cardProblemReasons(card).length > 0;
     const hasSignals = cardDataSignals(card).length > 0;
     const hasTask = Boolean(approvalTaskForCard(card, approvalTaskLookup));
+    if (bulkFilterActive && !bulkTokens.some((token) => identifiers.has(token))) {
+      return false;
+    }
     if (issueFilter === "problems" && !hasProblems) {
       return false;
     }
@@ -5523,6 +5604,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
       const currentSet = new Set(current);
       if (allVisibleSelected) {
         visibleKeys.forEach((key) => currentSet.delete(key));
+      } else if (bulkFilterActive) {
+        return visibleKeys;
       } else {
         visibleKeys.forEach((key) => currentSet.add(key));
       }
@@ -5532,6 +5615,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
 
   function resetFilters() {
     setQuery("");
+    setBulkFilterText("");
     setIssueFilter("all");
     setWorkFilter("all");
     setCategoryFilter("all");
@@ -5660,11 +5744,21 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
             <option value="all">Все категории</option>
             {categories.map((category) => <option value={category} key={category}>{category}</option>)}
           </select>
+          <label className="bulk-card-filter">
+            <span>Список артикулов / nmID</span>
+            <textarea
+              value={bulkFilterText}
+              onChange={(event) => setBulkFilterText(event.target.value)}
+              placeholder="Вставьте столбец из таблицы"
+              rows={3}
+            />
+          </label>
         </div>
 
         <div className="cards-toolbar">
           <span>
             Показано {formatNumber(visibleCards.length)} из {formatNumber(cards.length)}
+            {bulkFilterActive ? ` · список ${formatNumber(bulkTokens.length)}, найдено ${formatNumber(bulkMatchedCards.length)}${bulkUnmatchedTokens.length ? `, не найдено ${formatNumber(bulkUnmatchedTokens.length)}` : ""}` : ""}
             {worksetStatus === "saving" ? " · сохраняем набор" : ""}
             {worksetStatus === "local-fallback" ? " · набор только в браузере" : ""}
             {batchStatus === "created" ? " · взято в работу" : ""}
@@ -5675,12 +5769,18 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
               <Plus size={16} />{batchStatus === "saving" ? "Берем в работу" : "Взять в работу"}
             </button>
             <button className="btn" type="button" onClick={toggleVisible} disabled={!visibleCards.length}>
-              <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
+              <CheckSquare size={16} />{allVisibleSelected ? (bulkFilterActive ? "Убрать найденные" : "Убрать видимые") : (bulkFilterActive ? "Выбрать найденные" : "Выбрать видимые")}
             </button>
             <button className="btn" type="button" onClick={() => setSelectedKeys([])} disabled={!selectedKeys.length}>Очистить набор</button>
             <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
           </div>
         </div>
+        {bulkFilterActive && bulkUnmatchedTokens.length ? (
+          <div className="bulk-card-warning">
+            <strong>Не найдены</strong>
+            <span>{bulkUnmatchedTokens.slice(0, 12).join(", ")}{bulkUnmatchedTokens.length > 12 ? ` и еще ${formatNumber(bulkUnmatchedTokens.length - 12)}` : ""}</span>
+          </div>
+        ) : null}
       </div>
 
       {workPackageOpen ? (
@@ -6049,6 +6149,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
   const hasSemanticExpansion = Boolean(activeSemanticCore?.seedQuery || activeSemanticCore?.source === "mpstats-expanding");
+  const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
+  const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
   const semanticContentRunning = semanticContentStatus === "loading";
   const canReoptimizeContent = Boolean(activeSemanticNewRows.length && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
@@ -7640,12 +7742,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <div>
                     <span>Действующие с позицией</span>
                     <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
-                    <em>из отчета видимости MPStats</em>
+                    <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
                   </div>
                   <div>
                     <span>К добавлению с частотой</span>
                     <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
-                    <em>{semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
+                    <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
                   </div>
                   <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
                     <Download size={17} />Скачать итоговый файл

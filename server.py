@@ -85,6 +85,8 @@ MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_
 MPSTATS_STORE_FULL_IMPORT_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_FULL_IMPORT_MAX_CARDS", "1000"))
 MPSTATS_STORE_IMPORT_BATCH_SIZE = int(os.environ.get("MPSTATS_STORE_IMPORT_BATCH_SIZE", "100"))
 MPSTATS_API_EVENT_RETENTION_DAYS = int(os.environ.get("MPSTATS_API_EVENT_RETENTION_DAYS", "90"))
+MPSTATS_SEMANTIC_PERIOD_DAYS = int(os.environ.get("MPSTATS_SEMANTIC_PERIOD_DAYS", "30"))
+MPSTATS_SEMANTIC_PERIOD_LAG_DAYS = int(os.environ.get("MPSTATS_SEMANTIC_PERIOD_LAG_DAYS", "1"))
 WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
 WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
 WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
@@ -5822,6 +5824,14 @@ def audit_period_default():
   return {"d1": d1.isoformat(), "d2": d2.isoformat()}
 
 
+def mpstats_semantic_period_default():
+  days = max(1, min(int(MPSTATS_SEMANTIC_PERIOD_DAYS or 30), 365))
+  lag_days = max(0, min(int(MPSTATS_SEMANTIC_PERIOD_LAG_DAYS or 0), 30))
+  d2 = utc_now().date() - dt.timedelta(days=lag_days)
+  d1 = d2 - dt.timedelta(days=days - 1)
+  return {"d1": d1.isoformat(), "d2": d2.isoformat()}
+
+
 def audit_str(value, limit=None):
   text = str(value or "").strip()
   if limit and len(text) > limit:
@@ -7495,7 +7505,7 @@ def fetch_mpstats_keywords_core(card, force_refresh=False):
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
 
-  period = audit_period_default()
+  period = mpstats_semantic_period_default()
   path = f"/analytics/v1/wb/items/{nm_id}/keywords"
   params = {"d1": period["d1"], "d2": period["d2"]}
   body = {"startRow": 0, "endRow": 500, "filterModel": {}, "sortModel": []}
@@ -7590,7 +7600,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   if not seed_query:
     raise ValueError("missing_semantic_query")
 
-  period = audit_period_default()
+  period = mpstats_semantic_period_default()
   body = {
     "type": "keyword",
     "mp": 0,

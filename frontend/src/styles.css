@@ -908,6 +908,49 @@ a {
   background: var(--surface);
 }
 
+.bulk-card-filter {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 7px;
+}
+
+.bulk-card-filter span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.bulk-card-filter textarea {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.bulk-card-warning {
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: var(--amber-soft);
+  padding: 9px 11px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.bulk-card-warning span {
+  color: var(--muted);
+}
+
 .cards-toolbar {
   min-height: 40px;
   display: flex;

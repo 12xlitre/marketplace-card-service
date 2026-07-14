@@ -79,6 +79,7 @@ GET /api/wb/cards?portal_id=demo-wb&limit=100
 GET /api/wb/characteristics?portal_id=1&subject_id=123
 GET /api/mpstats/characteristics?portal_id=1&type=subject&value=123
 GET /api/portals/<portal_id>/wb-client-report?start=2026-07-01&end=2026-07-07
+GET /api/admin/mpstats-usage?limit=5000
 POST /api/card-audit
 POST /api/card-content-reoptimize
 POST /api/card-competitors/suggest
@@ -93,6 +94,10 @@ POST /api/card-competitors/suggest
 `POST /api/card-content-reoptimize` переписывает заголовок и описание через настроенный LLM/GigaChat по выбранным запросам вкладки `Семантическое ядро`. Маршрут требует доступ пользователя к `portalId`, не пишет в WB и возвращает только `draftContent` для сохранения во вкладке `Изменения`.
 
 `POST /api/card-competitors/suggest` собирает до 5 конкурентов для вкладки `ТОП конкурентов`: использует MPStats-нишу и тот же скоринг коммерческой схожести, что аудит, сохраняет список в `card_competitors` и возвращает сравнительные метрики. Маршрут проверяет доступ к `portalId` и не выполняет write-операции в WB.
+
+`GET /api/admin/mpstats-usage` возвращает журнал обращений к MPStats для XLSX-выгрузки из `Настройки -> Интеграции -> MPStats API -> Скачать журнал API`. Маршрут доступен только пользователям, которые могут управлять кабинетами/интеграциями, и не возвращает сохраненный MPStats-токен. Журнал хранит пользователя, место действия, портал/карточку, метод и путь MPStats, HTTP-статус, источник `api/cache`, оценку расхода лимита и остаток, если MPStats когда-либо вернет его в headers. По публичной справке MPStats 1 API-запрос списывает 1 лимит внешней аналитики; отдельный API-остаток сейчас не передается.
+
+Семантическое ядро использует отдельный свежий MPStats-период: по умолчанию последние 30 дней с лагом 1 день (`MPSTATS_SEMANTIC_PERIOD_DAYS`, `MPSTATS_SEMANTIC_PERIOD_LAG_DAYS`). Аудит и конкурентные срезы остаются на стабильном историческом окне `audit_period_default`, поэтому даты в СЯ и аудите могут отличаться намеренно.
 
 `GET /api/portals/<portal_id>/wb-client-report` собирает данные для клиентского XLSX-отчета по выбранному периоду `start/end` в формате `YYYY-MM-DD`. Старый параметр `weeks` остается совместимым fallback, но UI использует сценарий `выбрать отчет -> выбрать период -> сформировать` во вкладке `Отчеты` внутри кабинета селлера. Маршрут проверяет доступ к кабинету, берет WB-токен только из backend-хранилища и не выполняет write-операции в WB.
 
