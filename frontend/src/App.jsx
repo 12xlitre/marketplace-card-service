@@ -325,7 +325,8 @@ function sheetXml(sheet) {
     const rowNumber = rowIndex + 1;
     const cells = row.map((cell, columnIndex) => {
       const value = cell && typeof cell === "object" && !Array.isArray(cell) ? cell.value : cell;
-      const style = rowIndex === 0 ? 1 : 0;
+      const explicitStyle = cell && typeof cell === "object" && !Array.isArray(cell) ? cell.style : null;
+      const style = explicitStyle ?? (rowIndex === 0 ? 1 : 0);
       const ref = `${columnName(columnIndex)}${rowNumber}`;
       if (typeof value === "number" && Number.isFinite(value)) {
         return `<c r="${ref}" s="${style}"><v>${value}</v></c>`;
@@ -335,8 +336,12 @@ function sheetXml(sheet) {
     return `<row r="${rowNumber}">${cells}</row>`;
   }).join("");
   const autoFilter = rows.length > 1 ? `<autoFilter ref="A1:${lastCell}"/>` : "";
+  const dataValidations = (sheet.dataValidations || []).length
+    ? `<dataValidations count="${sheet.dataValidations.length}">${sheet.dataValidations.map((item) => `<dataValidation type="${item.type || "list"}" allowBlank="${item.allowBlank === false ? 0 : 1}" showErrorMessage="1" sqref="${xmlEscape(item.range)}"><formula1>${xmlEscape(item.formula1 || "")}</formula1></dataValidation>`).join("")}</dataValidations>`
+    : "";
+  const sheetProtection = sheet.protected ? '<sheetProtection sheet="1" objects="1" scenarios="1" insertRows="0"/>' : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${freezePane}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${autoFilter}</worksheet>`;
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${freezePane}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${sheetProtection}${autoFilter}${dataValidations}</worksheet>`;
 }
 
 function xlsxFiles(sheets) {
@@ -372,7 +377,7 @@ function xlsxFiles(sheets) {
     {
       name: "xl/styles.xml",
       data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
     },
     ...worksheetFiles,
   ];
@@ -2133,35 +2138,66 @@ function cardExportSheetName(card, draft, usedNames) {
   return safeSheetName(cardExportArticle(card, draft), `WB ${card?.nmID || draft?.nmID || "card"}`, usedNames);
 }
 
-function semanticCoreExportSheetRows(currentRows, selectedRows) {
-  const rowCount = Math.max(currentRows.length, selectedRows.length);
+function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows) {
+  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length);
   return [
     [
-      "Действующий запрос",
-      "Позиция карточки",
-      "Запрос к добавлению",
-      "Частотность",
+      "Ключи в карточке (действующие)",
+      "Ранжируемые ключи",
+      "Позиция ранжируемого ключа",
+      "Ключ к добавлению",
+      "Частота запроса ключа к добавлению",
+      "Согласование",
     ],
     ...Array.from({ length: rowCount }, (_, index) => [
       currentRows[index]?.query || "",
-      semanticRankExportValue(currentRows[index]?.position),
+      rankingRows[index]?.query || "",
+      semanticRankExportValue(rankingRows[index]?.position),
       selectedRows[index]?.query || "",
       semanticFrequencyValue(selectedRows[index]),
+      selectedRows[index]?.query ? { value: "Да", style: 2 } : "",
     ]),
   ];
 }
 
 function buildSemanticCoreExportSheet(name, core, selectedRows) {
-  const currentRows = semanticCurrentPositionRows(core);
+  const currentRows = semanticCurrentContentRows(core);
   const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
-  if (!currentRows.length && !selectedRowsNormalized.length) {
+  const rankingRows = semanticCurrentPositionRows(core);
+  if (!currentRows.length && !rankingRows.length && !selectedRowsNormalized.length) {
     return null;
   }
+  const agreementEndRow = Math.max(selectedRowsNormalized.length + 1, 2);
   return {
     name,
     freezeRows: 1,
-    widths: [48, 18, 48, 18],
-    rows: semanticCoreExportSheetRows(currentRows, selectedRowsNormalized),
+    widths: [48, 48, 22, 48, 32, 18],
+    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized),
+    protected: true,
+    dataValidations: selectedRowsNormalized.length ? [{
+      type: "list",
+      range: `F2:F${agreementEndRow}`,
+      formula1: '"Да,Нет"',
+      allowBlank: false,
+    }] : [],
+  };
+}
+
+function buildSemanticCoreInstructionSheet(card) {
+  return {
+    name: "Инструкция",
+    widths: [34, 100],
+    rows: [
+      ["Раздел", "Описание"],
+      ["Файл", `Семантическое ядро карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}. Файл нужен для согласования новых ключей перед обновлением контента.`],
+      ["Ключи в карточке (действующие)", "Ключи, которые уже заложены в текущий заголовок или описание карточки. По ним карточка может не иметь позиции."],
+      ["Ранжируемые ключи", "Запросы из MPStats, по которым карточка уже ранжируется."],
+      ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
+      ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
+      ["Частота запроса ключа к добавлению", "Частотность WB по запросу из MPStats."],
+      ["Согласование", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
+      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбце Согласование."],
+    ],
   };
 }
 
@@ -2435,6 +2471,12 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   const meta = payload.meta || {};
   const approval = normalizeApprovalState(meta.approval);
   const approvalSections = normalizeApprovalSections(meta.approvalSections, approval);
+  const semanticCoreReports = normalizeSemanticReports(meta.semanticCoreReports);
+  const semanticCoreSelected = normalizeSemanticSelection(
+    Array.isArray(meta.semanticCoreSelected) && meta.semanticCoreSelected.length
+      ? meta.semanticCoreSelected
+      : semanticCoreReports.flatMap((report) => report.selected || [])
+  );
   return {
     auditStatus: payload.auditStatus || storedDraft?.auditStatus || "idle",
     title: typeof title === "object" ? title.value || "" : payload.title || "",
@@ -2446,8 +2488,8 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
-    semanticCoreSelected: normalizeSemanticSelection(meta.semanticCoreSelected),
-    semanticCoreReports: normalizeSemanticReports(meta.semanticCoreReports),
+    semanticCoreSelected,
+    semanticCoreReports,
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: deriveOverallApproval(approvalSections),
     approvalSections,
@@ -2794,11 +2836,26 @@ function semanticRankedSourceRows(core) {
   return semanticRowsByKey(sourceRows.filter((item) => item?.status !== "selected" && semanticHasKeywordRank(item)));
 }
 
+function semanticCurrentContentRows(core) {
+  if (!core || typeof core !== "object") return [];
+  return semanticRowsByKey((Array.isArray(core.current) ? core.current : [])
+    .filter((item) => item?.status !== "selected" && semanticQueryKey(item))
+    .map((item) => ({ ...item, position: semanticPrimaryPositionValue(item) })))
+    .sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+}
+
 function semanticCurrentPositionRows(core) {
   return semanticRankedSourceRows(core)
     .map((item) => ({ ...item, position: semanticPrimaryPositionValue(item) }))
     .filter((item) => item.position)
     .sort((left, right) => Number(left.position || 9999) - Number(right.position || 9999));
+}
+
+function semanticExistingQueryKeys(core) {
+  return new Set([
+    ...semanticCurrentContentRows(core),
+    ...semanticCurrentPositionRows(core),
+  ].map(semanticQueryKey).filter(Boolean));
 }
 
 function semanticCandidateSourceRows(core) {
@@ -2813,7 +2870,7 @@ function semanticCandidateSourceRows(core) {
 
 function semanticSelectedExportRows(selectedRows, core) {
   const sourceByKey = new Map(semanticCandidateSourceRows(core).map((item) => [semanticQueryKey(item), item]));
-  const currentKeys = new Set(semanticCurrentPositionRows(core).map(semanticQueryKey));
+  const currentKeys = semanticExistingQueryKeys(core);
   const output = [];
   const seen = new Set();
   normalizeSemanticSelection(selectedRows).forEach((item) => {
@@ -6390,6 +6447,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     riskNotes: latestRiskNotes,
   });
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+  const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
   const hasSemanticExpansion = Boolean(activeSemanticCore?.seedQuery || activeSemanticCore?.source === "mpstats-expanding");
@@ -6954,8 +7012,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       card,
     });
     try {
-      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
-      setSemanticSaveStatus("saved");
+      const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      setSemanticSaveStatus(["backend", "local", "local-fallback"].includes(persistStatus) ? "saved" : "error");
     } catch {
       setSemanticSaveStatus("error");
     }
@@ -6966,8 +7024,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     if (!key || semanticCoreSelected.some((selected) => semanticQueryKey(selected) === key)) {
       return;
     }
-    if (new Set(activeSemanticPositionRows.map(semanticQueryKey)).has(key)) {
-      setSemanticCoreError("Этот запрос уже есть среди действующих позиций карточки и не попадет в добавление.");
+    if (semanticExistingQueryKeys(activeSemanticCore).has(key)) {
+      setSemanticCoreError("Этот запрос уже есть в контенте или среди ранжирующихся запросов карточки и не попадет в добавление.");
       return;
     }
     if (!semanticFrequencyValue(item)) {
@@ -6983,7 +7041,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreError("Сначала соберите подборку MPStats по стартовому запросу.");
       return;
     }
-    const existingKeys = new Set(activeSemanticPositionRows.map(semanticQueryKey));
+    const existingKeys = semanticExistingQueryKeys(activeSemanticCore);
     const selectedKeys = new Set(semanticCoreSelected.map(semanticQueryKey));
     const searchText = semanticSearch.trim().toLowerCase();
     const excludedWords = semanticFilterWords(semanticExcludeWords);
@@ -7694,6 +7752,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         });
         setDraftSavedAt(response.draft?.updatedAt || savedAt);
         setDraftSaveStatus("backend");
+        try {
+          localStorage.setItem(draftStorageKey, JSON.stringify(response.draft || { ...structuredDraft, savedAt }));
+        } catch {
+          // Backend save succeeded; local cache sync is best effort.
+        }
         if (onDraftActivity) {
           onDraftActivity({ audit: auditDone, draft: true });
         }
@@ -7901,7 +7964,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore } = {}) {
     const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows);
     if (!sheet) return;
-    downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [sheet]);
+    downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [buildSemanticCoreInstructionSheet(card), sheet]);
   }
 
   function openSemanticReport(report) {
@@ -7973,15 +8036,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
 
             {activeTab === "semantic" ? (
               <section className="workspace-strip semantic-core-workspace">
-                <div className="strip-head">
-                  <div>
-                    <h2>Семантическое ядро</h2>
-                    <p>Действующие позиции карточки и новые запросы из MPStats для итогового SEO-файла.</p>
+                  <div className="strip-head">
+                    <div>
+                      <h2>Семантическое ядро</h2>
+                      <p>Действующие позиции карточки и новые запросы из MPStats для итогового SEO-файла.</p>
+                    </div>
+                    <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
+                      {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : activeSemanticNewRows.length ? `${activeSemanticNewRows.length} к добавлению` : activeSemanticPositionRows.length ? `${activeSemanticPositionRows.length} ранж.` : activeSemanticContentRows.length ? `${activeSemanticContentRows.length} ключей` : "нет данных"}
+                    </Tag>
                   </div>
-                  <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
-                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : activeSemanticNewRows.length ? `${activeSemanticNewRows.length} к добавлению` : activeSemanticPositionRows.length ? `${activeSemanticPositionRows.length} действующих` : "нет данных"}
-                  </Tag>
-                </div>
                 <div className="semantic-query-bar">
                   <label className="field-label">
                     <span>Стартовый запрос</span>
@@ -8015,12 +8078,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         : "Повторите подбор или добавление ключа еще раз."}</span>
                   </div>
                 ) : null}
-                <div className="semantic-final-bar">
-                  <div>
-                    <span>Действующие с позицией</span>
-                    <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
-                    <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
-                  </div>
+                  <div className="semantic-final-bar">
+                    <div>
+                      <span>Ключи в карточке</span>
+                      <strong>{formatNumber(activeSemanticContentRows.length)} {pluralRu(activeSemanticContentRows.length, "ключ", "ключа", "ключей")}</strong>
+                      <em>заложены в текущий контент</em>
+                    </div>
+                    <div>
+                      <span>Ранжирующиеся запросы</span>
+                      <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
+                      <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
+                    </div>
                   <div>
                     <span>К добавлению с частотой</span>
                     <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
@@ -8065,9 +8133,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   </div>
                 )}
                 <div className="tab-actions">
-                  {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
-                  {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем действующие запросы и позиции карточки...</span> : null}
-                  {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул действующие позиции карточки.</span> : null}
+                    {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
+                    {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем ранжирующиеся запросы и позиции карточки...</span> : null}
+                    {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул ранжирующиеся запросы карточки.</span> : null}
                   {semanticRankStatus === "error" ? <span className="status-note">Подборка доступна, но позиции карточки сейчас не загрузились.</span> : null}
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем итоговое СЯ...</span> : null}
                   {semanticSaveStatus === "saved" ? <span className="status-note">Итоговое СЯ сохранено в карточке.</span> : null}
@@ -8473,11 +8541,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   descriptionChanged={normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description)}
                   descriptionSource={draftDescriptionSource}
                   descriptionReason={draftDescriptionReason}
-	                  changedCharacteristicsCount={changedDraftCharacteristicsCount}
-	                  auditCharacteristicsCount={auditDraftCharacteristicsCount}
-	                  mpstatsStatus={mpstatsHintsLabel}
-	                />
-	                <div className="before-after">
+                    changedCharacteristicsCount={changedDraftCharacteristicsCount}
+                    auditCharacteristicsCount={auditDraftCharacteristicsCount}
+                    mpstatsStatus={mpstatsHintsLabel}
+                  />
+                  <div className="before-after">
                   <div className="field-box">
                     <strong>Текущий заголовок</strong>
                     <p>{currentTitle}</p>
@@ -8548,60 +8616,60 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 </div>
                 </>
                 ) : null}
-	                {changesTab === "prices" ? (
-	                  <div className="before-after">
-	                    <div className="field-box">
-	                      <strong>Текущие цены</strong>
-	                      <div className="panel-list compact-list">
-	                        <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
-	                        <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(discountValue)}</strong></div>
-	                        <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
-	                        <div className="list-row"><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
-	                      </div>
-	                    </div>
-	                    <div className="field-box">
-	                      <strong>Черновик цен</strong>
-	                      <label className="field-label">
-	                        Цена до скидки
-	                        <input
-	                          type="number"
-	                          min="0"
-	                          value={draftPrices.price ?? ""}
-	                          disabled={approvalReadOnly}
-	                          onChange={(event) => updateDraftPrice("price", event.target.value)}
-	                        />
-	                      </label>
-	                      <label className="field-label">
-	                        Скидка продавца, %
-	                        <input
-	                          type="number"
-	                          min="0"
-	                          max="99"
-	                          value={draftPrices.discount ?? ""}
-	                          disabled={approvalReadOnly}
-	                          onChange={(event) => updateDraftPrice("discount", event.target.value)}
-	                        />
-	                      </label>
-	                      <div className="panel-list compact-list">
-	                        <div className="list-row"><span>Расчетная цена со скидкой</span><strong>{valueSummary(draftDiscountedPriceValue)}</strong></div>
-	                      </div>
-	                      <label className="field-label price-recommendation-field">
-	                        Рекомендация по цене
-	                        <textarea
-	                          value={draftPrices.recommendation || ""}
-	                          disabled={approvalReadOnly}
-	                          onChange={(event) => updatePriceRecommendation(event.target.value)}
-	                          placeholder="Система сформирует рекомендацию после заполнения цены."
-	                        />
-	                      </label>
-	                      <div className="price-recommendation-actions">
-	                        <span>{draftPrices.recommendationSource === "manual" ? "Текст изменен вручную" : "Системная рекомендация"}</span>
-	                        <button className="btn" type="button" onClick={regeneratePriceRecommendation} disabled={approvalReadOnly}><RefreshCw size={16} />Обновить</button>
-	                      </div>
-	                      <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
-	                    </div>
-	                  </div>
-	                ) : null}
+                  {changesTab === "prices" ? (
+                    <div className="before-after">
+                      <div className="field-box">
+                        <strong>Текущие цены</strong>
+                        <div className="panel-list compact-list">
+                          <div className="list-row"><span>Цена до скидки</span><strong>{valueSummary(priceValue)}</strong></div>
+                          <div className="list-row"><span>Скидка продавца</span><strong>{valueSummary(discountValue)}</strong></div>
+                          <div className="list-row"><span>Цена со скидкой</span><strong>{valueSummary(discountedPriceValue)}</strong></div>
+                          <div className="list-row"><span>Баркод</span><strong>{valueSummary(firstSku(card))}</strong></div>
+                        </div>
+                      </div>
+                      <div className="field-box">
+                        <strong>Черновик цен</strong>
+                        <label className="field-label">
+                          Цена до скидки
+                          <input
+                            type="number"
+                            min="0"
+                            value={draftPrices.price ?? ""}
+                            disabled={approvalReadOnly}
+                            onChange={(event) => updateDraftPrice("price", event.target.value)}
+                          />
+                        </label>
+                        <label className="field-label">
+                          Скидка продавца, %
+                          <input
+                            type="number"
+                            min="0"
+                            max="99"
+                            value={draftPrices.discount ?? ""}
+                            disabled={approvalReadOnly}
+                            onChange={(event) => updateDraftPrice("discount", event.target.value)}
+                          />
+                        </label>
+                        <div className="panel-list compact-list">
+                          <div className="list-row"><span>Расчетная цена со скидкой</span><strong>{valueSummary(draftDiscountedPriceValue)}</strong></div>
+                        </div>
+                        <label className="field-label price-recommendation-field">
+                          Рекомендация по цене
+                          <textarea
+                            value={draftPrices.recommendation || ""}
+                            disabled={approvalReadOnly}
+                            onChange={(event) => updatePriceRecommendation(event.target.value)}
+                            placeholder="Система сформирует рекомендацию после заполнения цены."
+                          />
+                        </label>
+                        <div className="price-recommendation-actions">
+                          <span>{draftPrices.recommendationSource === "manual" ? "Текст изменен вручную" : "Системная рекомендация"}</span>
+                          <button className="btn" type="button" onClick={regeneratePriceRecommendation} disabled={approvalReadOnly}><RefreshCw size={16} />Обновить</button>
+                        </div>
+                        <button className="btn" type="button" onClick={() => downloadDraftTable("prices")}><Download size={17} />Скачать цены</button>
+                      </div>
+                    </div>
+                  ) : null}
                 {changesTab === "stocks" ? (
                   <div className="before-after">
                     <div className="field-box">
@@ -8615,24 +8683,24 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         ))}
                       </div>
                     </div>
-	                    <div className="field-box">
-	                      <strong>Черновик остатков</strong>
-	                      <div className="panel-list compact-list">
-	                        {(draftStockRows.length ? draftStockRows : [{}]).slice(0, 12).map((row, index) => (
-	                          <div className="list-row" key={row.key || index}>
-	                            <span>{row.sizeName || `Размер ${index + 1}`} · {row.sku || "без баркода"}</span>
-	                            <input
-	                              type="number"
-	                              min="0"
-	                              value={row.amount ?? ""}
-	                              disabled={approvalReadOnly || !row.key}
-	                              onChange={(event) => updateDraftStock(row.key, event.target.value)}
-	                            />
-	                          </div>
-	                        ))}
-	                      </div>
-	                      <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Скачать остатки</button>
-	                    </div>
+                      <div className="field-box">
+                        <strong>Черновик остатков</strong>
+                        <div className="panel-list compact-list">
+                          {(draftStockRows.length ? draftStockRows : [{}]).slice(0, 12).map((row, index) => (
+                            <div className="list-row" key={row.key || index}>
+                              <span>{row.sizeName || `Размер ${index + 1}`} · {row.sku || "без баркода"}</span>
+                              <input
+                                type="number"
+                                min="0"
+                                value={row.amount ?? ""}
+                                disabled={approvalReadOnly || !row.key}
+                                onChange={(event) => updateDraftStock(row.key, event.target.value)}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                        <button className="btn" type="button" onClick={() => downloadDraftTable("stocks")}><Download size={17} />Скачать остатки</button>
+                      </div>
                   </div>
                 ) : null}
                 <ApprovalPanel
@@ -8663,10 +8731,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "approval-submitted" ? <p>Задача отправлена аккаунт-менеджеру на согласование.</p> : null}
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
-	                    {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
-	                    {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
-	                    {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
-	                    {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
+                      {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
+                      {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
+                      {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
+                      {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className="btn primary" type="button" onClick={saveDraft} disabled={approvalReadOnly}><Save size={17} />Сохранить</button>
@@ -9693,8 +9761,11 @@ function SemanticMetric({ active = false, label, value, hint, onClick }) {
 function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
+  const contentItems = semanticCurrentContentRows(semanticCore);
   const positionItems = semanticCurrentPositionRows(semanticCore);
-  const existingKeys = new Set(positionItems.map(semanticQueryKey));
+  const contentKeys = new Set(contentItems.map(semanticQueryKey));
+  const rankingOnlyItems = positionItems.filter((item) => !contentKeys.has(semanticQueryKey(item)));
+  const existingKeys = semanticExistingQueryKeys(semanticCore);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = semanticCandidateSourceRows(semanticCore);
   const coverage = semanticCore?.coveragePercent;
@@ -9710,6 +9781,10 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const expansionPeriod = semanticPeriodLabel(semanticCore?.period);
   const rankingPeriod = semanticPeriodLabel(semanticCore?.rankingPeriod || semanticCore?.period);
   const filteredPositionItems = positionItems
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredContentItems = contentItems
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredRankingOnlyItems = rankingOnlyItems
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
@@ -9731,40 +9806,50 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
-  const displayedCurrentItems = metricFilter === "positions" || metricFilter === "all" ? filteredPositionItems : [];
+  const displayedCurrentItems = metricFilter === "positions"
+    ? filteredPositionItems
+    : metricFilter === "all"
+      ? [...filteredContentItems, ...filteredRankingOnlyItems]
+      : [];
   const leftListTitle = metricFilter === "positions"
-    ? "Действующие запросы с позициями"
+    ? "Ранжирующиеся запросы"
     : metricFilter === "selected"
         ? "Добавленные в работу"
-        : "Итоговый файл";
+        : "Ключи в карточке и ранжирующиеся запросы";
   const showWorkColumn = metricFilter === "all";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
         <strong>Семантическое ядро</strong>
-        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{positionItems.length ? `${formatNumber(positionItems.length)} позиций` : coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
+        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{positionItems.length ? `${formatNumber(positionItems.length)} ранж.` : coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
       </div>
       <p>{semanticCore?.reason || "MPStats собирает действующие позиции карточки и расширение по стартовой фразе."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
           <SemanticMetric
             active={metricFilter === "positions"}
-            label="Действующие"
+            label="Ранжирующиеся"
             value={formatNumber(positionItems.length)}
-            hint={`Запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. Они попадут в Excel с позицией карточки.`}
+            hint={`Запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. По ним карточка уже ранжируется.`}
             onClick={() => toggleMetricFilter("positions")}
+          />
+          <SemanticMetric
+            label="Ключи в карточке"
+            value={formatNumber(contentItems.length)}
+            hint="Действующие ключи, которые уже заложены в заголовок или описание карточки. По ним может не быть позиции."
+            onClick={() => setMetricFilter("all")}
           />
           <SemanticMetric
             active={metricFilter === "selected"}
             label="К добавлению"
             value={formatNumber(selectedItems.length)}
-            hint="Новые запросы, которых нет среди действующих позиций карточки. В Excel попадут только запросы с частотностью WB."
+            hint="Новые запросы, которых нет среди ключей карточки и ранжирующихся запросов. В Excel попадут только запросы с частотностью WB."
             onClick={() => toggleMetricFilter("selected")}
           />
           <SemanticMetric
             label="Кандидаты"
             value={formatNumber(filteredWorkItems.length)}
-            hint="Новые запросы из текущей подборки MPStats после фильтров, слов-исключений, дублей и действующих позиций."
+            hint="Новые запросы из текущей подборки MPStats после фильтров, слов-исключений, дублей, ключей карточки и ранжирующихся запросов."
             onClick={() => setMetricFilter("all")}
           />
           <SemanticMetric
@@ -9798,7 +9883,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || "действующий запрос карточки"}</em>
+                  <em>{semanticKeywordMeta(item) || (semanticHasKeywordRank(item) ? "ранжирующийся запрос карточки" : "действующий ключ в карточке")}</em>
                   {standalone ? (
                     <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
                       {semanticKeywordRankLabel(item)}
@@ -9807,8 +9892,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} действующих. Полный список попадет в Excel.</p> : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Действующих запросов с позициями нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
+            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} ключей. Полный список попадет в Excel.</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
