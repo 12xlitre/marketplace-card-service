@@ -6105,7 +6105,7 @@ def suggest_card_competitors(portal_id, card_key, raw_card, manual_competitors, 
     manual_limit=CARD_COMPETITOR_LIMIT,
   )
   if not competitors:
-    warnings.append(f"ТОП конкурентов пуст: добавьте до {CARD_COMPETITOR_LIMIT} конкурентов вручную.")
+    warnings.append(f"Товарный аудит пуст: добавьте до {CARD_COMPETITOR_LIMIT} конкурентов вручную.")
     return {
       "competitors": list_card_competitors(numeric_portal_id, card_key, user),
       "selection": selection,
@@ -13250,7 +13250,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       payload = self.read_json() or {}
       try:
-        context_token = mpstats_call_context_start(user, "ТОП конкурентов: обновить", portal_id=payload.get("portalId"), card_key=payload.get("cardKey"))
+        context_token = mpstats_call_context_start(user, "Товарный аудит: обновить", portal_id=payload.get("portalId"), card_key=payload.get("cardKey"))
         try:
           competitors = refresh_card_competitors(
             payload.get("portalId"),
@@ -13332,7 +13332,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if not card_key:
         card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
       try:
-        context_token = mpstats_call_context_start(user, "ТОП конкурентов: подобрать", portal_id=payload.get("portalId"), card_key=card_key, nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
+        context_token = mpstats_call_context_start(user, "Товарный аудит: подобрать", portal_id=payload.get("portalId"), card_key=card_key, nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
           "hasManualCompetitors": bool(payload.get("competitors") or payload.get("manualCompetitors")),
         })
         try:

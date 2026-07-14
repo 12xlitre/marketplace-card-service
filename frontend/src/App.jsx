@@ -36,6 +36,7 @@ const hardcodedDirectoryFallback = [
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
 const appScreens = new Set(["cabinets", "seller", "card", "settings", "admin"]);
+const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods"]);
 const topCompetitorLimit = 3;
 
 const projectRoleLabels = {
@@ -175,10 +176,23 @@ function readSavedAppView() {
       screen: appScreens.has(saved.screen) ? saved.screen : "cabinets",
       portalId: saved.portalId ? String(saved.portalId) : "demo-wb",
       cardKey: saved.cardKey ? String(saved.cardKey) : "",
+      sellerTab: sellerTabs.has(saved.sellerTab) ? saved.sellerTab : "cabinet",
     };
   } catch {
     return {};
   }
+}
+
+function normalizeSellerTab(value) {
+  return sellerTabs.has(value) ? value : "cabinet";
+}
+
+function sellerBackLabel(tab) {
+  return {
+    tasks: "Задачи",
+    reports: "Отчеты",
+    "work-periods": "Отчетный период",
+  }[tab] || "Карточки";
 }
 
 function xmlEscape(value) {
@@ -2088,6 +2102,21 @@ const CHARACTERISTIC_NAME_STOPWORDS = new Set([
   "характеристика",
   "значение",
 ]);
+
+const descriptionKeywordStopwords = new Set([
+  "для",
+  "без",
+  "или",
+  "при",
+  "под",
+  "над",
+  "как",
+  "что",
+  "это",
+  "все",
+]);
+
+const descriptionKeywordTones = ["blue", "green", "amber", "violet", "red", "slate"];
 
 const AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS = new Set([
   "длин",
@@ -4347,6 +4376,11 @@ export default function App() {
   const [screen, setScreen] = useState(initialView.screen || "cabinets");
   const [portalStatusFilter, setPortalStatusFilter] = useState("active");
   const [selectedPortalId, setSelectedPortalId] = useState(initialView.portalId || "demo-wb");
+  const [sellerTab, setSellerTab] = useState(normalizeSellerTab(initialView.sellerTab));
+  const [cardReturnTarget, setCardReturnTarget] = useState(() => ({
+    sellerTab: normalizeSellerTab(initialView.sellerTab),
+    label: sellerBackLabel(normalizeSellerTab(initialView.sellerTab)),
+  }));
   const [selectedCardKey, setSelectedCardKey] = useState(initialView.cardKey || cardDraftKey(demoCards[0]));
   const [selectedCard, setSelectedCard] = useState(
     demoCards.find((card) => cardDraftKey(card) === initialView.cardKey) || demoCards[0],
@@ -4410,8 +4444,9 @@ export default function App() {
       screen,
       portalId: selectedPortalId,
       cardKey: selectedCardKey,
+      sellerTab,
     }));
-  }, [currentUser, screen, selectedPortalId, selectedCardKey]);
+  }, [currentUser, screen, selectedPortalId, selectedCardKey, sellerTab]);
 
   useEffect(() => {
     localStorage.setItem(helpModeStorageKey, helpEnabled ? "1" : "0");
@@ -4826,6 +4861,7 @@ export default function App() {
       return;
     }
     setSelectedPortalId(portal.id);
+    setSellerTab("cabinet");
     setScreen("seller");
     await loadPortalCards(portal);
   }
@@ -5002,10 +5038,21 @@ export default function App() {
     return portal.realCards?.length ? portal.realCards : (portal.isDemo ? demoCards : []);
   }
 
-  function openCard(card) {
+  function openCard(card, context = {}) {
+    const nextSellerTab = normalizeSellerTab(context.sellerTab || sellerTab);
     setSelectedCard(card);
     setSelectedCardKey(cardDraftKey(card));
+    setCardReturnTarget({
+      sellerTab: nextSellerTab,
+      label: context.backLabel || sellerBackLabel(nextSellerTab),
+    });
     setScreen("card");
+  }
+
+  function backFromCard() {
+    const nextSellerTab = normalizeSellerTab(cardReturnTarget.sellerTab);
+    setSellerTab(nextSellerTab);
+    setScreen("seller");
   }
 
   async function createPortal(payload) {
@@ -5017,6 +5064,7 @@ export default function App() {
     setUserPortals((items) => [...items, portal]);
     setPortalModalOpen(false);
     setSelectedPortalId(portal.id);
+    setSellerTab("cabinet");
     setScreen("seller");
     if (portal.mode === "manual") {
       setNotice(manualBootstrapNotice(portal, "create"));
@@ -5033,6 +5081,7 @@ export default function App() {
     setPortalModalOpen(false);
     setPortalModalTarget(null);
     setSelectedPortalId(portal.id);
+    setSellerTab("cabinet");
     setScreen("seller");
     const firstCard = (portal.realCards || [])[0] || null;
     if (firstCard) {
@@ -5167,6 +5216,8 @@ export default function App() {
             canManage={canManagePortals}
             onBack={() => setScreen("cabinets")}
             onOpenCard={openCard}
+            sellerTab={sellerTab}
+            onSellerTabChange={setSellerTab}
             onRefreshCards={() => refreshPortalCards(currentPortal)}
             onResetWork={() => resetPortalWork(currentPortal)}
             onOpenModal={(mode) => {
@@ -5188,7 +5239,8 @@ export default function App() {
             card={selectedCardFromPortal}
             portal={currentPortal}
             currentUser={currentUser}
-            onBack={() => setScreen("seller")}
+            onBack={backFromCard}
+            backLabel={cardReturnTarget.label}
             onDraftSaved={refreshPortals}
             onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
             onDraftReset={() => resetPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal))}
@@ -5197,10 +5249,10 @@ export default function App() {
         ) : null}
 
         {screen === "card" && !selectedCardFromPortal ? (
-          <CardRecoveryScreen loading={cardScreenLoading} onBack={() => setScreen("seller")} />
+          <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
         ) : null}
 
-        {screen === "audit" ? <PlaceholderScreen title="Аудит" copy="MPStats и полноценный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
+        {screen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
         {(screen === "admin" || screen === "settings") && canManagePortals ? (
           <SettingsScreen
             users={displayUsers}
@@ -5304,7 +5356,7 @@ function LoginScreen({ onLogin }) {
 function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
     { key: "cabinets", label: "Кабинеты", Icon: LayoutDashboard },
-    { key: "audit", label: "Аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
+    { key: "audit", label: "Рыночный аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
     canManage ? { key: "admin", label: "Админка", Icon: Settings } : null,
   ].filter(Boolean);
   return (
@@ -5522,7 +5574,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, sellerTab = "cabinet", onSellerTabChange, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
@@ -5538,7 +5590,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
-  const [sellerTab, setSellerTab] = useState("cabinet");
+  const activeSellerTab = normalizeSellerTab(sellerTab);
+  const setSellerTab = onSellerTabChange || (() => {});
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
@@ -5672,7 +5725,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       || String(item?.vendorCode || "") === String(task.vendorCode || "")
     ));
     if (card) {
-      onOpenCard(card);
+      onOpenCard(card, { sellerTab: "tasks", backLabel: "Задачи" });
     }
   }
 
@@ -5837,16 +5890,16 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
         <div className="seller-layout">
           <div className="seller-main">
             <div className="seller-tabs">
-              <button className={sellerTab === "cabinet" ? "active" : ""} type="button" onClick={() => setSellerTab("cabinet")}>Кабинет</button>
-              <button className={sellerTab === "tasks" ? "active" : ""} type="button" onClick={() => setSellerTab("tasks")}>Задачи</button>
-              <button className={sellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
-              <button className={sellerTab === "work-periods" ? "active" : ""} type="button" onClick={() => setSellerTab("work-periods")}>Отчетный период</button>
+              <button className={activeSellerTab === "cabinet" ? "active" : ""} type="button" onClick={() => setSellerTab("cabinet")}>Кабинет</button>
+              <button className={activeSellerTab === "tasks" ? "active" : ""} type="button" onClick={() => setSellerTab("tasks")}>Задачи</button>
+              <button className={activeSellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
+              <button className={activeSellerTab === "work-periods" ? "active" : ""} type="button" onClick={() => setSellerTab("work-periods")}>Отчетный период</button>
             </div>
             <HelpHint enabled={helpEnabled} title="Где что находится">
-              Кабинет хранит общую информацию и список карточек. Задачи показывают пачки работ по СЯ, контенту, ценам и остаткам. Отчеты нужны для XLSX-выгрузок по кабинету.
+              Кабинет хранит общую информацию и список карточек. Задачи показывают пачки работ по СЯ, контенту, ценам и остаткам. Отчеты скачивают XLSX-выгрузки, а Отчетный период фиксирует план отдела по клиенту.
             </HelpHint>
 
-            {sellerTab === "cabinet" ? (
+            {activeSellerTab === "cabinet" ? (
               <>
             <section className="workspace-strip">
               <div className="strip-head">
@@ -5937,7 +5990,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <Tag tone={portal.apiConnected || isMpstatsLoaded ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isMpstatsLoaded ? "MPStats витрина" : (isManual ? "Без API" : "ручной режим"))}</Tag>
               </div>
               <HelpHint enabled={helpEnabled} title="Когда нажимать обновление">
-                Нажимайте Загрузить свежие данные перед новой волной аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
+                Нажимайте Загрузить свежие данные перед новой волной рыночного аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
               </HelpHint>
               <div className="panel-actions">
                 <button className={loadingButtonClass("btn", cardsLoading)} type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading} aria-busy={cardsLoading || undefined}>
@@ -5982,7 +6035,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <Tag tone={workRoute.done ? "blue" : "amber"}>{workRoute.done ? `Факт: ${workRoute.done} из 5` : "Ожидает данные"}</Tag>
               </div>
               <HelpHint enabled={helpEnabled} title="Маршрут работы по кабинету">
-                Идите слева направо: загрузили данные, открыли карточки, запустили аудит, проверили изменения, отправили на согласование. Счетчики показывают, где работа уже началась.
+                Идите слева направо: загрузили данные, открыли карточки, запустили рыночный аудит, проверили товарный аудит и изменения, отправили готовые правки на согласование.
               </HelpHint>
               <div className="pipeline">
                 {workRoute.rows.map((step) => (
@@ -6025,19 +6078,19 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
               <HelpHint enabled={helpEnabled} title="Как открыть аудит карточки">
-                Найдите карточку по артикулу или WB ID и нажмите Открыть. Внутри карточки перейдите на вкладку Аудит и нажмите Запустить аудит.
+                Найдите карточку по артикулу или WB ID и нажмите Открыть. Внутри карточки перейдите на вкладку Рыночный аудит или Товарный аудит в зависимости от задачи.
               </HelpHint>
               <CardsTable
                 cards={cards}
                 portal={portal}
                 workflow={approvalWorkflow}
-                onOpenCard={onOpenCard}
+                onOpenCard={(card) => onOpenCard(card, { sellerTab: "cabinet", backLabel: "Карточки" })}
                 onWorkflowChange={replaceApprovalWorkflow}
               />
             </section>
               </>
             ) : null}
-            {sellerTab === "tasks" ? (
+            {activeSellerTab === "tasks" ? (
               <ApprovalWorkflowPanel
                 workflow={approvalWorkflow}
                 status={approvalWorkflowStatus}
@@ -6046,12 +6099,13 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 onOpenTask={openApprovalTask}
                 onDeleteTaskGroup={deleteApprovalTaskGroup}
                 taskActionStatus={taskActionStatus}
+                helpEnabled={helpEnabled}
               />
             ) : null}
-            {sellerTab === "reports" ? (
+            {activeSellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
-            {sellerTab === "work-periods" ? (
+            {activeSellerTab === "work-periods" ? (
               <WorkPeriodsPanel portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
           </div>
@@ -7268,7 +7322,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "" }) {
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const activeTasks = tasks.filter((task) => ["draft", "submitted", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
@@ -7287,6 +7341,15 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
           {status === "loading" ? "загрузка" : `${totalGroups} ${pluralRu(totalGroups, "задача", "задачи", "задач")}`}
         </Tag>
       </div>
+      <HelpList
+        enabled={helpEnabled}
+        title="Как работать с задачами"
+        items={[
+          "Откройте задачу кнопкой Открыть первую или конкретную строку в списке карточек: после возврата вы снова попадете во вкладку Задачи.",
+          "Удалить задачу нужно только для ошибочных или неактуальных пачек. Сохраненные результаты карточек останутся в черновиках.",
+          "Если задача по СЯ закрыта, добавьте выбранные ключи в итоговое СЯ карточки: после этого кабинетная выгрузка соберет их в общий файл.",
+        ]}
+      />
 
       {status === "error" ? (
         <div className="empty-state"><span>Не удалось загрузить задачи согласования</span></div>
@@ -7410,7 +7473,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   );
 }
 
-function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
+function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Карточки", onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
   const [activeTab, setActiveTab] = useState("card");
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
@@ -7583,6 +7646,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const descriptionKeywordRows = descriptionKeywordCandidates([
+    { items: activeSemanticNewRows, origin: "selected", label: "к добавлению" },
+    { items: activeSemanticContentRows, origin: "content", label: "в карточке" },
+    { items: activeSemanticPositionRows, origin: "ranking", label: "ранжируется" },
+  ]);
   const activeSemanticReport = semanticCoreReports.find((report) => report.id === semanticActiveReportId) || null;
   const activeSemanticSeedQuery = String(activeSemanticReport?.seedQuery || activeSemanticCore?.seedQuery || "").trim();
   const semanticInputSeedQuery = semanticSeedQuery.trim();
@@ -7770,7 +7838,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         : readyForApprovalCount
           ? `${readyForApprovalCount} ${pluralRu(readyForApprovalCount, "блок готов", "блока готовы", "блоков готовы")} к отправке на согласование.`
           : "Подготовьте черновик, затем отправьте нужный блок на согласование.";
-  const auditStatusText = auditRunning ? "Идет аудит" : auditDone ? "Аудит готов" : auditStale ? "Аудит устарел" : "Аудит не запускался";
+  const auditStatusText = auditRunning ? "Идет аудит" : auditDone ? "Рыночный аудит готов" : auditStale ? "Рыночный аудит устарел" : "Рыночный аудит не запускался";
   const auditStatusTone = auditRunning ? "blue" : auditDone ? "green" : auditStale ? "amber" : "amber";
   const auditNextStep = auditRunning
     ? {
@@ -7786,12 +7854,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       }
       : auditStale
         ? {
-          title: "Запустите аудит заново",
-          copy: "Данные WB обновились, поэтому прежняя аналитика устарела. Черновик сохранен, но рекомендации лучше пересчитать.",
-          action: "Запустить заново",
-        }
-        : {
-          title: "Запустите аудит",
+        title: "Запустите рыночный аудит заново",
+        copy: "Данные WB обновились, поэтому прежняя аналитика устарела. Черновик сохранен, но рекомендации лучше пересчитать.",
+        action: "Запустить заново",
+      }
+      : {
+          title: "Запустите рыночный аудит",
           copy: "Можно оставить конкурентов пустыми: система сама подберет похожие карточки через MPStats и подготовит черновик правок.",
           action: "Запустить аудит",
         };
@@ -9665,7 +9733,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           <p>{textOrDash(card?.title)} · WB {textOrDash(card?.nmID)} · артикул {textOrDash(card?.vendorCode)}</p>
         </div>
         <div className="toolbar">
-          <button className="btn ghost" type="button" onClick={handleBackToCards}><ArrowLeft size={17} />Карточки</button>
+          <button className="btn ghost" type="button" onClick={handleBackToCards}><ArrowLeft size={17} />{backLabel}</button>
           <a className="btn" href={wbCardUrl(card)} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть WB</a>
           <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
         </div>
@@ -9722,12 +9790,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
             <nav className="detail-tabs" aria-label="Разделы карточки">
               <button className={activeTab === "semantic" ? "active" : ""} type="button" onClick={() => switchDetailTab("semantic")}>Семантическое ядро</button>
               <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => switchDetailTab("card")}>Карточка</button>
-              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => switchDetailTab("audit")}>Аудит</button>
+              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => switchDetailTab("audit")}>Рыночный аудит</button>
+              <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => switchDetailTab("competitors")}>Товарный аудит</button>
               <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => switchDetailTab("changes")}>Изменения</button>
-              <button className={activeTab === "competitors" ? "active" : ""} type="button" onClick={() => switchDetailTab("competitors")}>ТОП конкурентов</button>
             </nav>
             <HelpHint enabled={helpEnabled} title="Как работать с карточкой">
-              Сначала можно собрать Семантическое ядро, затем запустить Аудит. После аудита проверьте вкладку Изменения и отправьте готовые правки на согласование.
+              Идите по порядку: соберите Семантическое ядро, запустите Рыночный аудит, при необходимости проверьте Товарный аудит по конкурентам, затем откройте Изменения и сохраните готовый черновик.
             </HelpHint>
 
             {activeTab === "semantic" ? (
@@ -9764,6 +9832,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
                   </label>
                 </div>
+                <HelpList
+                  enabled={helpEnabled}
+                  title="Порядок работы с СЯ"
+                  items={[
+                    "Введите стартовый запрос и нажмите Enter или Подобрать запросы: MPStats соберет новую выдачу именно по этому запросу.",
+                    "Добавьте подходящие ключи в работу вручную или кнопкой Автодобавить запросы, затем нажмите Сохранить текущий выбор.",
+                    "Когда выбор сохранен, можно переоптимизировать описание, сохранить подборку в архив или добавить версию в итоговое СЯ кабинета.",
+                  ]}
+                />
                 <div className="semantic-collection-actions">
                   <button className={loadingButtonClass("btn", semanticCollectionActionStatus === "saving")} type="button" onClick={() => { setSemanticCollectionSaveOpen(true); setSemanticCollectionError(""); }} disabled={!canSaveSemanticCollection} aria-busy={semanticCollectionActionStatus === "saving" || undefined} title={activeSemanticNewRows.length ? "Сохранить выбранные ключи как архивную подборку для аналогичных карточек." : "Сначала добавьте ключи к добавлению."}>
                     <Archive size={17} />{semanticCollectionActionStatus === "saving" ? "Сохраняем подборку" : "Сохранить подборку"}
@@ -9996,15 +10073,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
             {activeTab === "audit" ? (
               <section className="workspace-strip audit-workspace">
                 <div className="strip-head">
-                  <div>
-                    <h2>Аудит карточки</h2>
-                    <p>{auditNextStep.copy}</p>
-                  </div>
+                    <div>
+                      <h2>Рыночный аудит карточки</h2>
+                      <p>{auditNextStep.copy}</p>
+                    </div>
                   <Tag tone={auditStatusTone}>{auditStatusText}</Tag>
                 </div>
                 <HelpList
                   enabled={helpEnabled}
-                  title="Как сделать аудит"
+                  title="Как сделать рыночный аудит"
                   items={[
                     "Если есть важные конкуренты, вставьте ссылки WB или nmID в поле Конкуренты для этого аудита.",
                     "Если конкурентов нет, оставьте поле пустым: система сама подберет похожие карточки через MPStats.",
@@ -10290,6 +10367,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 competitorInput={competitorInput}
                 status={competitorStatus}
                 enabled={competitorsEnabled}
+                helpEnabled={helpEnabled}
                 onInput={setCompetitorInput}
                 onAdd={addCompetitor}
                 onSuggest={suggestCompetitors}
@@ -10410,6 +10488,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     />
                     <DraftSourceMark source={draftDescriptionSource} />
                     <DraftReason reason={draftDescriptionReason} />
+                    <DescriptionKeywordCoverage
+                      description={draftDescription}
+                      keywords={descriptionKeywordRows}
+                      helpEnabled={helpEnabled}
+                    />
                   </div>
                   <div className="field-box characteristics-diff-box">
                     <strong>Характеристики</strong>
@@ -11003,6 +11086,7 @@ function TopCompetitorsPanel({
   competitorInput,
   status,
   enabled,
+  helpEnabled = false,
   onInput,
   onAdd,
   onSuggest,
@@ -11023,13 +11107,22 @@ function TopCompetitorsPanel({
     <section className="workspace-strip competitors-strip">
       <div className="strip-head">
         <div>
-          <h2>ТОП конкурентов</h2>
-          <p>Только конкуренты, добавленные специалистом вручную: до {topCompetitorLimit} карточек для сравнения цены, текста, характеристик и изменений по версиям MPStats.</p>
+          <h2>Товарный аудит</h2>
+          <p>Конкуренты, добавленные специалистом вручную: до {topCompetitorLimit} карточек для сравнения цены, текста, характеристик и изменений по версиям MPStats.</p>
         </div>
         <Tag tone={criticalCount ? "amber" : competitors.length ? "blue" : "green"}>
           {criticalCount ? `${criticalCount} сигнал` : `${competitors.length}/${topCompetitorLimit}`}
         </Tag>
       </div>
+      <HelpList
+        enabled={helpEnabled}
+        title="Как сделать товарный аудит"
+        items={[
+          `Добавьте вручную до ${topCompetitorLimit} WB-конкурентов, которые действительно похожи на нашу карточку по товару и цене.`,
+          "Нажмите Проверить карточки или Обновить снимки: MPStats сохранит цену, текст, характеристики и изменения конкурента.",
+          "Если у конкурента появилось важное изменение, используйте Переоптимизировать, чтобы подготовить новый черновик описания.",
+        ]}
+      />
       {competitors.length ? (
         <div className="competitor-summary">
           <div><span>В списке</span><strong>{competitors.length}/{topCompetitorLimit}</strong></div>
@@ -11075,7 +11168,7 @@ function TopCompetitorsPanel({
         </div>
       ) : (
         <div className="empty-state">
-          <strong>ТОП еще не подобран</strong>
+          <strong>Товарный аудит еще не начат</strong>
           <span>Добавьте до {topCompetitorLimit} WB-конкурентов вручную, затем зафиксируйте цену, текст и характеристики через MPStats.</span>
         </div>
       )}
@@ -11511,6 +11604,78 @@ function ContentAuditSummary({
   );
 }
 
+function DescriptionKeywordCoverage({ description, keywords, helpEnabled = false }) {
+  const text = String(description || "").trim();
+  const [activeKey, setActiveKey] = useState("");
+  if (!text && !helpEnabled) {
+    return null;
+  }
+  const visibleKeywords = Array.isArray(keywords) ? keywords : [];
+  const highlight = buildDescriptionKeywordHighlights(text, visibleKeywords);
+  const matchedCount = highlight.counts.size;
+  const activeTitle = activeKey
+    ? visibleKeywords.find((item) => item.key === activeKey)?.query || ""
+    : "";
+  return (
+    <div className="description-keyword-coverage">
+      <div className="description-keyword-head">
+        <div>
+          <strong>Покрытие ключей в описании</strong>
+          <span>{visibleKeywords.length ? `${matchedCount} из ${visibleKeywords.length} ${pluralRu(visibleKeywords.length, "ключ", "ключа", "ключей")} найдено в тексте` : "нет выбранных ключей для подсветки"}</span>
+        </div>
+        <Tag tone={matchedCount ? "blue" : "amber"}>{matchedCount ? "подсветка" : "нет совпадений"}</Tag>
+      </div>
+      <HelpHint enabled={helpEnabled} title="Как читать подсветку">
+        Цветной фрагмент показывает, какой кусок черновика закрывает конкретный ключ. Наведите на ключ в легенде или на фрагмент текста, чтобы увидеть связь; если ключ серый, его пока нет в описании.
+      </HelpHint>
+      {visibleKeywords.length ? (
+        <div className="description-keyword-legend">
+          {visibleKeywords.map((keyword) => {
+            const count = highlight.counts.get(keyword.key) || 0;
+            const active = activeKey === keyword.key;
+            return (
+              <button
+                className={`description-keyword-chip tone-${keyword.tone} ${count ? "matched" : "missing"} ${active ? "active" : ""}`}
+                type="button"
+                key={keyword.key}
+                onMouseEnter={() => setActiveKey(keyword.key)}
+                onFocus={() => setActiveKey(keyword.key)}
+                onMouseLeave={() => setActiveKey("")}
+                onBlur={() => setActiveKey("")}
+                onClick={() => setActiveKey((current) => (current === keyword.key ? "" : keyword.key))}
+                title={count ? `Найдено в описании: ${count}` : "Ключ пока не найден в описании"}
+              >
+                <span>{keyword.query}</span>
+                <em>{count ? `${count}x` : "нет"}</em>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+      <div className={`description-highlighted-text ${activeKey ? "has-active" : ""}`}>
+        {text ? highlight.segments.map((segment) => (
+          segment.type === "match" ? (
+            <mark
+              className={`keyword-highlight tone-${segment.match.keyword.tone} ${activeKey === segment.match.keyword.key ? "active" : ""} ${activeKey && activeKey !== segment.match.keyword.key ? "muted" : ""}`}
+              key={segment.key}
+              title={`Ключ: ${segment.match.keyword.query}`}
+              onMouseEnter={() => setActiveKey(segment.match.keyword.key)}
+              onMouseLeave={() => setActiveKey("")}
+            >
+              {segment.text}
+            </mark>
+          ) : (
+            <span key={segment.key}>{segment.text}</span>
+          )
+        )) : (
+          <span>Сначала появится черновик описания после аудита, переоптимизации или ручного ввода.</span>
+        )}
+      </div>
+      {activeTitle ? <p className="description-keyword-active">Сейчас выделен ключ: {activeTitle}</p> : null}
+    </div>
+  );
+}
+
 function semanticKeywordMeta(item) {
   const parts = [];
   if (Number(item?.wbCount || 0) > 0) {
@@ -11561,6 +11726,120 @@ function semanticMatchesExclusion(query, excludedWords) {
     const stem = semanticExclusionStem(word);
     return normalizedQuery.includes(word) || (stem.length >= 4 && normalizedQuery.includes(stem));
   });
+}
+
+function keywordHighlightTokens(value) {
+  return semanticFilterWords(value)
+    .filter((token) => token.length >= 3 && !descriptionKeywordStopwords.has(token))
+    .map((token) => ({
+      value: token,
+      stem: semanticExclusionStem(token),
+    }))
+    .filter((token) => token.stem.length >= 3);
+}
+
+function descriptionTextTokens(value) {
+  const tokens = [];
+  const pattern = /[\p{L}\p{N}]+/gu;
+  const text = String(value || "");
+  let match = pattern.exec(text);
+  while (match) {
+    const raw = match[0];
+    const normalized = normalizedCharacteristicOption(raw);
+    tokens.push({
+      raw,
+      normalized,
+      stem: semanticExclusionStem(normalized),
+      start: match.index,
+      end: match.index + raw.length,
+    });
+    match = pattern.exec(text);
+  }
+  return tokens;
+}
+
+function keywordTokenMatches(textToken, keywordToken) {
+  if (!textToken?.normalized || !keywordToken?.value) return false;
+  if (textToken.normalized === keywordToken.value) return true;
+  if (keywordToken.stem.length < 4 || textToken.stem.length < 4) return false;
+  return textToken.stem.startsWith(keywordToken.stem) || keywordToken.stem.startsWith(textToken.stem);
+}
+
+function descriptionKeywordCandidates(groups, limit = 80) {
+  const rows = [];
+  const seen = new Set();
+  groups.forEach((group, groupIndex) => {
+    (Array.isArray(group.items) ? group.items : []).forEach((item) => {
+      const query = String(item?.query || item?.keyword || item?.text || "").trim();
+      const key = semanticQueryKey({ query });
+      if (!query || !key || seen.has(key)) return;
+      const tokens = keywordHighlightTokens(query);
+      if (!tokens.length) return;
+      seen.add(key);
+      rows.push({
+        ...item,
+        key,
+        query,
+        tokens,
+        origin: group.origin || "",
+        originLabel: group.label || "",
+        priority: groupIndex,
+        tone: descriptionKeywordTones[rows.length % descriptionKeywordTones.length],
+      });
+    });
+  });
+  return rows.slice(0, limit);
+}
+
+function buildDescriptionKeywordHighlights(textValue, keywords) {
+  const text = String(textValue || "");
+  const textTokens = descriptionTextTokens(text);
+  const potentials = [];
+  const normalizedKeywords = (Array.isArray(keywords) ? keywords : []).filter((item) => item?.tokens?.length);
+  normalizedKeywords.forEach((keyword, keywordIndex) => {
+    const tokens = keyword.tokens || [];
+    if (!tokens.length || tokens.length > textTokens.length) return;
+    for (let index = 0; index <= textTokens.length - tokens.length; index += 1) {
+      const windowTokens = textTokens.slice(index, index + tokens.length);
+      const matched = tokens.every((token, tokenIndex) => keywordTokenMatches(windowTokens[tokenIndex], token));
+      if (!matched) continue;
+      const start = windowTokens[0].start;
+      const end = windowTokens[windowTokens.length - 1].end;
+      potentials.push({
+        keyword,
+        keywordIndex,
+        start,
+        end,
+        text: text.slice(start, end),
+        score: tokens.length * 1000 + (end - start),
+      });
+    }
+  });
+  const accepted = [];
+  potentials
+    .sort((left, right) => right.score - left.score || left.keywordIndex - right.keywordIndex || left.start - right.start)
+    .forEach((match) => {
+      const overlaps = accepted.some((item) => match.start < item.end && match.end > item.start);
+      if (!overlaps) accepted.push(match);
+    });
+  accepted.sort((left, right) => left.start - right.start);
+  const counts = new Map();
+  accepted.forEach((match) => {
+    counts.set(match.keyword.key, (counts.get(match.keyword.key) || 0) + 1);
+  });
+  const segments = [];
+  let cursor = 0;
+  accepted.forEach((match, index) => {
+    if (match.start > cursor) {
+      segments.push({ type: "text", text: text.slice(cursor, match.start), key: `text-${index}-${cursor}` });
+    }
+    segments.push({ type: "match", text: text.slice(match.start, match.end), match, key: `match-${index}-${match.start}` });
+    cursor = match.end;
+  });
+  if (cursor < text.length) {
+    segments.push({ type: "text", text: text.slice(cursor), key: `text-tail-${cursor}` });
+  }
+  return { segments, matches: accepted, counts };
 }
 
 function SemanticMetric({ active = false, label, value, hint, onClick }) {
@@ -12307,7 +12586,7 @@ function workRouteRows(portal) {
   const rows = [
     { title: "Загрузка", status: hasCards ? "данные получены" : "ожидает загрузку", className: hasCards ? "active" : "paused" },
     {
-      title: "Аудит",
+      title: "Рыночный аудит",
       status: hasAudit
         ? `${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}`
         : (hasCards ? "по карточкам не запускался" : "ожидает карточки"),
@@ -12332,7 +12611,7 @@ function workRouteRows(portal) {
       className: hasApproval ? "active" : "off",
     },
     {
-      title: "Конкуренты",
+      title: "Товарный аудит",
       status: hasCards ? "мониторинг раз в 7 дней" : "после загрузки карточек",
       className: hasCards ? "active" : "paused",
     },
@@ -12346,7 +12625,7 @@ function workRouteRows(portal) {
       : hasDrafts
         ? `Данные WB загружены. Найдено ${draftCount} ${pluralRu(draftCount, "черновик правок", "черновика правок", "черновиков правок")}${hasAudit ? ` и ${auditCount} ${pluralRu(auditCount, "аудит", "аудита", "аудитов")}` : ""}.`
       : hasCards
-        ? "Данные WB загружены. Аудит, черновики и мониторинг конкурентов появятся здесь после начала работы."
+        ? "Данные WB загружены. Рыночный аудит, черновики и товарный аудит появятся здесь после начала работы."
         : "Сначала нужен источник данных: WB API или ручной импорт. Остальные этапы пока не активны.",
   };
 }
