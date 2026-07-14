@@ -9919,8 +9919,6 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
   const contentItems = semanticCurrentContentRows(semanticCore);
   const positionItems = semanticCurrentPositionRows(semanticCore);
-  const contentKeys = new Set(contentItems.map(semanticQueryKey));
-  const rankingOnlyItems = positionItems.filter((item) => !contentKeys.has(semanticQueryKey(item)));
   const existingKeys = semanticExistingQueryKeys(semanticCore);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const sourceItems = semanticCandidateSourceRows(semanticCore);
@@ -9940,8 +9938,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredContentItems = contentItems
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
-  const filteredRankingOnlyItems = rankingOnlyItems
-    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredPositionKeys = new Set(filteredPositionItems.map(semanticQueryKey).filter(Boolean));
+  const filteredContentOnlyItems = filteredContentItems
+    .filter((item) => !filteredPositionKeys.has(semanticQueryKey(item)));
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
@@ -9967,7 +9966,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
     : metricFilter === "content"
       ? filteredContentItems
       : metricFilter === "all"
-        ? [...filteredContentItems, ...filteredRankingOnlyItems]
+        ? [...filteredPositionItems, ...filteredContentOnlyItems]
         : [];
   const leftListTitle = metricFilter === "positions"
     ? "Ранжирующиеся запросы"
