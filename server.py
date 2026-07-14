@@ -84,6 +84,7 @@ CARD_COMPETITOR_AUTO_CHECK_ENABLED = os.environ.get("CARD_COMPETITOR_AUTO_CHECK_
 MPSTATS_STORE_BOOTSTRAP_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_BOOTSTRAP_MAX_CARDS", "100"))
 MPSTATS_STORE_FULL_IMPORT_MAX_CARDS = int(os.environ.get("MPSTATS_STORE_FULL_IMPORT_MAX_CARDS", "1000"))
 MPSTATS_STORE_IMPORT_BATCH_SIZE = int(os.environ.get("MPSTATS_STORE_IMPORT_BATCH_SIZE", "100"))
+MPSTATS_API_EVENT_RETENTION_DAYS = int(os.environ.get("MPSTATS_API_EVENT_RETENTION_DAYS", "90"))
 WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
 WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
 WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
@@ -105,6 +106,7 @@ WB_DIRECTORY_CACHE = {}
 AUDIT_MARKET_CACHE = {}
 GIGACHAT_TOKEN_CACHE = {"accessToken": "", "expiresAt": 0}
 MPSTATS_USAGE_CONTEXT = contextvars.ContextVar("mpstats_usage", default=None)
+MPSTATS_CALL_CONTEXT = contextvars.ContextVar("mpstats_call_context", default={})
 CARD_COMPETITOR_AUTO_CHECK_LOCK = threading.Lock()
 CARD_COMPETITOR_AUTO_CHECK_WORKER_STARTED = False
 MPSTATS_STORE_IMPORT_LOCK = threading.Lock()
@@ -134,23 +136,104 @@ def mpstats_usage_stop(token):
   MPSTATS_USAGE_CONTEXT.reset(token)
 
 
-def mpstats_usage_record(method, path, source="api", status="sent"):
-  usage = MPSTATS_USAGE_CONTEXT.get()
-  if usage is None:
+def mpstats_call_context_start(user=None, source_area="", portal_id="", card_key="", nm_id="", details=None):
+  user = user if user is not None else {}
+  context = {
+    "actorLogin": audit_str(user["login"] if isinstance(user, sqlite3.Row) and "login" in user.keys() else (user.get("login") if isinstance(user, dict) else "")),
+    "actorName": audit_str(user["full_name"] if isinstance(user, sqlite3.Row) and "full_name" in user.keys() else (user.get("full_name") if isinstance(user, dict) else "")),
+    "sourceArea": audit_str(source_area or "MPStats"),
+    "portalId": audit_str(portal_id),
+    "cardKey": audit_str(card_key),
+    "nmID": audit_str(nm_id),
+    "details": details if isinstance(details, dict) else {},
+  }
+  return MPSTATS_CALL_CONTEXT.set(context)
+
+
+def mpstats_call_context_stop(token):
+  MPSTATS_CALL_CONTEXT.reset(token)
+
+
+def mpstats_balance_from_headers(headers):
+  if not headers:
+    return ""
+  for name in (
+    "X-RateLimit-Remaining",
+    "X-Rate-Limit-Remaining",
+    "X-Request-Remaining",
+    "X-Requests-Remaining",
+    "X-Credits-Remaining",
+    "X-Balance-Remaining",
+    "X-Mpstats-Remaining",
+  ):
+    value = headers.get(name)
+    if value not in (None, ""):
+      return audit_str(value, 80)
+  return ""
+
+
+def record_mpstats_api_event(method, path, source, status, credits_estimate, balance_remaining="", http_status=""):
+  try:
+    context = MPSTATS_CALL_CONTEXT.get() or {}
+    with connect_db() as db:
+      db.execute(
+        """
+        INSERT INTO mpstats_api_events (
+          actor_login, actor_name, source_area, portal_id, card_key, nm_id,
+          method, path, source, status, http_status, credits_estimate,
+          balance_remaining, details_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+          audit_str(context.get("actorLogin"), 120),
+          audit_str(context.get("actorName"), 180),
+          audit_str(context.get("sourceArea") or "MPStats", 180),
+          audit_str(context.get("portalId"), 80),
+          audit_str(context.get("cardKey"), 120),
+          audit_str(context.get("nmID"), 80),
+          audit_str(method, 12),
+          audit_str(path, 420),
+          audit_str(source, 24),
+          audit_str(status, 80),
+          audit_str(http_status, 24),
+          int(credits_estimate or 0),
+          audit_str(balance_remaining, 80),
+          json.dumps(context.get("details") if isinstance(context.get("details"), dict) else {}, ensure_ascii=False),
+        ),
+      )
+      db.execute(
+        """
+        DELETE FROM mpstats_api_events
+        WHERE created_at < datetime('now', ?)
+        """,
+        (f"-{max(1, MPSTATS_API_EVENT_RETENTION_DAYS)} days",),
+      )
+  except Exception:
+    # Журналирование не должно ломать рабочий сценарий MPStats.
     return
+
+
+def mpstats_usage_record(method, path, source="api", status="sent", http_status="", balance_remaining=""):
+  usage = MPSTATS_USAGE_CONTEXT.get()
+  credits_estimate = 0 if source == "cache" else 1
   entry = {
     "method": method,
     "path": str(path or "")[:220],
     "source": source,
     "status": status,
+    "httpStatus": str(http_status or ""),
+    "balanceRemaining": str(balance_remaining or ""),
   }
-  if source == "cache":
-    usage["cacheHits"] += 1
-    usage["cache"].append(entry)
-    return
-  usage["apiRequests"] += 1
-  usage["creditsEstimate"] += 1
-  usage["requests"].append(entry)
+  if usage is not None:
+    if source == "cache":
+      usage["cacheHits"] += 1
+      usage["cache"].append(entry)
+    else:
+      usage["apiRequests"] += 1
+      usage["creditsEstimate"] += credits_estimate
+      usage["requests"].append(entry)
+  record_mpstats_api_event(method, path, source, status, credits_estimate, balance_remaining=balance_remaining, http_status=http_status)
 
 
 def mpstats_usage_public(usage):
@@ -332,6 +415,25 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS mpstats_api_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_login TEXT NOT NULL DEFAULT '',
+        actor_name TEXT NOT NULL DEFAULT '',
+        source_area TEXT NOT NULL DEFAULT '',
+        portal_id TEXT NOT NULL DEFAULT '',
+        card_key TEXT NOT NULL DEFAULT '',
+        nm_id TEXT NOT NULL DEFAULT '',
+        method TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'api',
+        status TEXT NOT NULL DEFAULT '',
+        http_status TEXT NOT NULL DEFAULT '',
+        credits_estimate INTEGER NOT NULL DEFAULT 0,
+        balance_remaining TEXT NOT NULL DEFAULT '',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS report_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
@@ -408,6 +510,24 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_admin_events_created_at
       ON admin_events(created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_mpstats_api_events_created_at
+      ON mpstats_api_events(created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_mpstats_api_events_actor
+      ON mpstats_api_events(actor_login, created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_mpstats_api_events_area
+      ON mpstats_api_events(source_area, created_at)
       """
     )
     db.execute(
@@ -583,6 +703,85 @@ def list_admin_events(user, limit=80):
       (limit,),
     ).fetchall()
   return [public_admin_event(row) for row in rows]
+
+
+def public_mpstats_api_event(row):
+  try:
+    details = json.loads(row["details_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    details = {}
+  return {
+    "id": row["id"],
+    "createdAt": row["created_at"] or "",
+    "actorLogin": row["actor_login"] or "",
+    "actorName": row["actor_name"] or "",
+    "sourceArea": row["source_area"] or "",
+    "portalId": row["portal_id"] or "",
+    "cardKey": row["card_key"] or "",
+    "nmID": row["nm_id"] or "",
+    "method": row["method"] or "",
+    "path": row["path"] or "",
+    "source": row["source"] or "",
+    "status": row["status"] or "",
+    "httpStatus": row["http_status"] or "",
+    "creditsEstimate": int(row["credits_estimate"] or 0),
+    "balanceRemaining": row["balance_remaining"] or "",
+    "details": details if isinstance(details, dict) else {},
+  }
+
+
+def mpstats_api_usage_report(user, limit=1000):
+  if not user_can_manage_portals(user):
+    raise PermissionError("forbidden")
+  limit = max(1, min(int(limit or 1000), 5000))
+  init_db()
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT id, actor_login, actor_name, source_area, portal_id, card_key, nm_id,
+             method, path, source, status, http_status, credits_estimate,
+             balance_remaining, details_json, created_at
+      FROM mpstats_api_events
+      ORDER BY id DESC
+      LIMIT ?
+      """,
+      (limit,),
+    ).fetchall()
+    summary = db.execute(
+      """
+      SELECT
+        COUNT(*) AS event_count,
+        SUM(CASE WHEN source = 'api' THEN 1 ELSE 0 END) AS api_requests,
+        SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END) AS cache_hits,
+        SUM(credits_estimate) AS credits_estimate,
+        MIN(created_at) AS first_at,
+        MAX(created_at) AS last_at
+      FROM (
+        SELECT source, credits_estimate, created_at
+        FROM mpstats_api_events
+        ORDER BY id DESC
+        LIMIT ?
+      )
+      """,
+      (limit,),
+    ).fetchone()
+  events = [public_mpstats_api_event(row) for row in rows]
+  balance_remaining = next((item["balanceRemaining"] for item in events if item.get("balanceRemaining")), "")
+  return {
+    "events": events,
+    "summary": {
+      "eventCount": int(summary["event_count"] or 0) if summary else 0,
+      "apiRequests": int(summary["api_requests"] or 0) if summary else 0,
+      "cacheHits": int(summary["cache_hits"] or 0) if summary else 0,
+      "creditsEstimate": int(summary["credits_estimate"] or 0) if summary else 0,
+      "balanceRemaining": balance_remaining,
+      "balanceNote": "MPStats публично списывает 1 лимит за 1 API-запрос; остаток лимита не пришел в headers API." if not balance_remaining else "",
+      "firstAt": (summary["first_at"] or "") if summary else "",
+      "lastAt": (summary["last_at"] or "") if summary else "",
+      "limit": limit,
+      "retentionDays": MPSTATS_API_EVENT_RETENTION_DAYS,
+    },
+  }
 
 
 def clean_report_text(value, limit=180):
@@ -1755,12 +1954,19 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
   if bool(row["api_connected"]):
     raise ValueError("portal_has_api")
   existing_cards = wb_snapshot_cards_from_row(row)
-  snapshot = build_mpstats_storefront_snapshot(
-    row["name"],
-    row["store_url"] or "",
-    row["manual_source"] or "",
-    limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS,
-  )
+  context_token = mpstats_call_context_start(user, "Кабинет: обновить из MPStats", portal_id=portal_id, details={
+    "portalName": row["name"],
+    "storeUrl": row["store_url"] or "",
+  })
+  try:
+    snapshot = build_mpstats_storefront_snapshot(
+      row["name"],
+      row["store_url"] or "",
+      row["manual_source"] or "",
+      limit=MPSTATS_STORE_BOOTSTRAP_MAX_CARDS,
+    )
+  finally:
+    mpstats_call_context_stop(context_token)
   bootstrap = snapshot.get("manualBootstrap") or {}
   if not snapshot.get("cards"):
     if bootstrap.get("strictSellerSource"):
@@ -1857,6 +2063,17 @@ def merge_snapshot_with_existing_cards(row, snapshot):
 
 
 def mpstats_store_import_worker(job_id, portal_id, user, limit):
+  context_token = mpstats_call_context_start(user, "Кабинет: загрузить все из MPStats", portal_id=portal_id, details={
+    "jobId": job_id,
+    "limit": limit,
+  })
+  try:
+    return mpstats_store_import_worker_inner(job_id, portal_id, user, limit)
+  finally:
+    mpstats_call_context_stop(context_token)
+
+
+def mpstats_store_import_worker_inner(job_id, portal_id, user, limit):
   try:
     row = get_portal_row(portal_id, user)
     if not row:
@@ -5253,15 +5470,16 @@ def mpstats_get_json(token, path, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, headers=headers, method="GET")
-    mpstats_usage_record("GET", path, status=f"attempt-{attempt + 1}")
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
+        mpstats_usage_record("GET", path, status=f"ok-attempt-{attempt + 1}", http_status=response.getcode(), balance_remaining=mpstats_balance_from_headers(response.headers))
         return json.loads(response_body) if response_body else {}
     except urlerror.HTTPError as exc:
       response_body = exc.read().decode("utf-8", errors="replace")
       retry_after = parse_retry_after(exc.headers.get("Retry-After"))
       retryable = exc.code == 429 or 500 <= exc.code < 600
+      mpstats_usage_record("GET", path, status=f"error-attempt-{attempt + 1}", http_status=exc.code, balance_remaining=mpstats_balance_from_headers(exc.headers))
       if retryable and attempt < attempts - 1:
         time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
         continue
@@ -5271,6 +5489,7 @@ def mpstats_get_json(token, path, attempts=3):
         retryable=retryable,
       ) from exc
     except (TimeoutError, urlerror.URLError) as exc:
+      mpstats_usage_record("GET", path, status=f"timeout-attempt-{attempt + 1}", http_status=HTTPStatus.GATEWAY_TIMEOUT)
       if attempt < attempts - 1:
         time.sleep(0.5 * (2 ** attempt))
         continue
@@ -5296,15 +5515,17 @@ def mpstats_post_json(token, path, params=None, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, data=b"{}", headers=headers, method="POST")
-    mpstats_usage_record("POST", f"{path}{'?' + query if query else ''}", status=f"attempt-{attempt + 1}")
+    request_path = f"{path}{'?' + query if query else ''}"
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
+        mpstats_usage_record("POST", request_path, status=f"ok-attempt-{attempt + 1}", http_status=response.getcode(), balance_remaining=mpstats_balance_from_headers(response.headers))
         return json.loads(response_body) if response_body else {}
     except urlerror.HTTPError as exc:
       response_body = exc.read().decode("utf-8", errors="replace")
       retry_after = parse_retry_after(exc.headers.get("Retry-After"))
       retryable = exc.code == 429 or 500 <= exc.code < 600
+      mpstats_usage_record("POST", request_path, status=f"error-attempt-{attempt + 1}", http_status=exc.code, balance_remaining=mpstats_balance_from_headers(exc.headers))
       if retryable and attempt < attempts - 1:
         time.sleep(retry_after if retry_after is not None else 0.5 * (2 ** attempt))
         continue
@@ -5314,6 +5535,7 @@ def mpstats_post_json(token, path, params=None, attempts=3):
         retryable=retryable,
       ) from exc
     except (TimeoutError, urlerror.URLError) as exc:
+      mpstats_usage_record("POST", request_path, status=f"timeout-attempt-{attempt + 1}", http_status=HTTPStatus.GATEWAY_TIMEOUT)
       if attempt < attempts - 1:
         time.sleep(0.5 * (2 ** attempt))
         continue
@@ -6858,15 +7080,17 @@ def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
 
   for attempt in range(attempts):
     request = urlrequest.Request(url, data=data, headers=headers, method="POST")
-    mpstats_usage_record("POST", f"{path}{'?' + query if query else ''}", status=f"attempt-{attempt + 1}")
+    request_path = f"{path}{'?' + query if query else ''}"
     try:
       with urlrequest.urlopen(request, timeout=MPSTATS_CONNECT_TIMEOUT + MPSTATS_READ_TIMEOUT) as response:
         response_body = response.read().decode("utf-8")
+        mpstats_usage_record("POST", request_path, status=f"ok-attempt-{attempt + 1}", http_status=response.getcode(), balance_remaining=mpstats_balance_from_headers(response.headers))
         return json.loads(response_body) if response_body else {}
     except urlerror.HTTPError as exc:
       response_body = exc.read().decode("utf-8", errors="replace")
       retry_after = parse_retry_after(exc.headers.get("Retry-After"))
       retryable = exc.code == 202 or exc.code == 429 or 500 <= exc.code < 600
+      mpstats_usage_record("POST", request_path, status=f"error-attempt-{attempt + 1}", http_status=exc.code, balance_remaining=mpstats_balance_from_headers(exc.headers))
       if retryable and attempt < attempts - 1:
         time.sleep(retry_after if retry_after is not None else 0.75 * (2 ** attempt))
         continue
@@ -6876,6 +7100,7 @@ def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
         retryable=retryable,
       ) from exc
     except (TimeoutError, urlerror.URLError) as exc:
+      mpstats_usage_record("POST", request_path, status=f"timeout-attempt-{attempt + 1}", http_status=HTTPStatus.GATEWAY_TIMEOUT)
       if attempt < attempts - 1:
         time.sleep(0.75 * (2 ** attempt))
         continue
@@ -10707,6 +10932,21 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
       return
 
+    if path == "/api/admin/mpstats-usage":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      try:
+        limit = int(query.get("limit", ["1000"])[0])
+      except ValueError:
+        limit = 1000
+      try:
+        self.send_json(HTTPStatus.OK, mpstats_api_usage_report(user, limit=limit))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      return
+
     if path == "/api/portals":
       user = self.require_user()
       if not user:
@@ -10879,7 +11119,18 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       force_refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
       cache_only = query.get("cache_only", ["0"])[0] in {"1", "true", "yes"}
       try:
-        payload = fetch_mpstats_characteristics(report_type, value, num_top=num_top, min_cats=min_cats, force_refresh=force_refresh, cache_only=cache_only)
+        context_token = mpstats_call_context_start(user, "Карточка: подсказки характеристик MPStats", portal_id=portal_id, details={
+          "reportType": report_type,
+          "value": value,
+          "numTop": num_top,
+          "minCats": min_cats,
+          "refresh": force_refresh,
+          "cacheOnly": cache_only,
+        })
+        try:
+          payload = fetch_mpstats_characteristics(report_type, value, num_top=num_top, min_cats=min_cats, force_refresh=force_refresh, cache_only=cache_only)
+        finally:
+          mpstats_call_context_stop(context_token)
       except ValueError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mpstats_characteristics_request"})
         return
@@ -11350,7 +11601,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       payload = self.read_json() or {}
       if payload.get("action") == "check":
         try:
-          result = check_mpstats_connection()
+          context_token = mpstats_call_context_start(user, "Настройки: проверка MPStats API", details={"action": "check"})
+          try:
+            result = check_mpstats_connection()
+          finally:
+            mpstats_call_context_stop(context_token)
         except RuntimeError:
           self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
           return
@@ -11359,7 +11614,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       api_key = str(payload.get("apiKey", "")).strip()
       try:
         save_service_integration(MPSTATS_PROVIDER, api_key, user)
-        result = check_mpstats_connection()
+        context_token = mpstats_call_context_start(user, "Настройки: сохранение MPStats API", details={"action": "save-and-check"})
+        try:
+          result = check_mpstats_connection()
+        finally:
+          mpstats_call_context_stop(context_token)
         record_admin_event(user, "service_integration_saved", "integration", MPSTATS_PROVIDER, details={
           "provider": MPSTATS_PROVIDER,
           "status": result.get("status") or "",
@@ -11390,15 +11649,21 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_card_key"})
         return
       try:
-        result = build_card_audit(
-          portal_id,
-          card_key,
-          raw_card,
-          subject_characteristics=None,
-          mpstats_characteristics=None,
-          period=payload.get("period"),
-          audit_competitors=payload.get("auditCompetitors") or payload.get("competitorsForAudit"),
-        )
+        context_token = mpstats_call_context_start(user, "Карточка: аудит", portal_id=portal_id, card_key=card_key, nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
+          "hasManualCompetitors": bool(payload.get("auditCompetitors") or payload.get("competitorsForAudit")),
+        })
+        try:
+          result = build_card_audit(
+            portal_id,
+            card_key,
+            raw_card,
+            subject_characteristics=None,
+            mpstats_characteristics=None,
+            period=payload.get("period"),
+            audit_competitors=payload.get("auditCompetitors") or payload.get("competitorsForAudit"),
+          )
+        finally:
+          mpstats_call_context_stop(context_token)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_audit_request"})
         return
@@ -11459,7 +11724,13 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
       force_refresh = bool(payload.get("refresh"))
       try:
-        result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh)
+        context_token = mpstats_call_context_start(user, "СЯ: действующие позиции", portal_id=portal_id, card_key=card_key_from_snapshot_card(raw_card), nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
+          "refresh": force_refresh,
+        })
+        try:
+          result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh)
+        finally:
+          mpstats_call_context_stop(context_token)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_keywords_request"})
         return
@@ -11495,7 +11766,14 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
       force_refresh = bool(payload.get("refresh"))
       try:
-        result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh)
+        context_token = mpstats_call_context_start(user, "СЯ: подбор новых запросов", portal_id=portal_id, card_key=card_key_from_snapshot_card(raw_card), nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
+          "query": payload.get("query") or "",
+          "refresh": force_refresh,
+        })
+        try:
+          result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh)
+        finally:
+          mpstats_call_context_stop(context_token)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_semantic_request"})
         return
@@ -11571,11 +11849,15 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       payload = self.read_json() or {}
       try:
-        competitors = refresh_card_competitors(
-          payload.get("portalId"),
-          payload.get("cardKey"),
-          user,
-        )
+        context_token = mpstats_call_context_start(user, "ТОП конкурентов: обновить", portal_id=payload.get("portalId"), card_key=payload.get("cardKey"))
+        try:
+          competitors = refresh_card_competitors(
+            payload.get("portalId"),
+            payload.get("cardKey"),
+            user,
+          )
+        finally:
+          mpstats_call_context_stop(context_token)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
@@ -11649,13 +11931,19 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if not card_key:
         card_key = card_key_from_snapshot_card(raw_card) or draft_card_key(raw_card.get("nmID") or raw_card.get("vendorCode"))
       try:
-        result = suggest_card_competitors(
-          payload.get("portalId"),
-          card_key,
-          raw_card,
-          payload.get("competitors") or payload.get("manualCompetitors"),
-          user,
-        )
+        context_token = mpstats_call_context_start(user, "ТОП конкурентов: подобрать", portal_id=payload.get("portalId"), card_key=card_key, nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
+          "hasManualCompetitors": bool(payload.get("competitors") or payload.get("manualCompetitors")),
+        })
+        try:
+          result = suggest_card_competitors(
+            payload.get("portalId"),
+            card_key,
+            raw_card,
+            payload.get("competitors") or payload.get("manualCompetitors"),
+            user,
+          )
+        finally:
+          mpstats_call_context_stop(context_token)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return

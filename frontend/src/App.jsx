@@ -10340,6 +10340,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
   const [adminStatus, setAdminStatus] = useState(null);
   const [mpstatsKey, setMpstatsKey] = useState("");
   const [mpstatsStatus, setMpstatsStatus] = useState("idle");
+  const [mpstatsUsageStatus, setMpstatsUsageStatus] = useState("idle");
   const [newUserForm, setNewUserForm] = useState(defaultNewUserForm);
   const [newUserStatus, setNewUserStatus] = useState("idle");
   const [newUserResult, setNewUserResult] = useState(null);
@@ -10449,6 +10450,90 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
       setMpstatsStatus(payload.ok ? "verified" : payload.status || "error");
     } catch {
       setMpstatsStatus("error");
+    }
+  }
+
+  async function downloadMpstatsUsageReport() {
+    if (!canManage) {
+      return;
+    }
+    setMpstatsUsageStatus("loading");
+    try {
+      const payload = await apiRequest("/api/admin/mpstats-usage?limit=5000");
+      const summary = payload.summary || {};
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      const detailsText = (details) => {
+        if (!details || typeof details !== "object" || Array.isArray(details)) return "";
+        return Object.entries(details)
+          .filter(([, value]) => value !== "" && value !== null && value !== undefined)
+          .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : String(value)}`)
+          .join("; ");
+      };
+      const generatedAt = new Date();
+      downloadXlsx(`mpstats-api-usage-${generatedAt.toISOString().slice(0, 10)}.xlsx`, [
+        {
+          name: "Сводка",
+          freezeRows: 1,
+          widths: [34, 40],
+          rows: [
+            ["Показатель", "Значение"],
+            ["Сформировано", generatedAt.toLocaleString("ru-RU")],
+            ["Событий в файле", summary.eventCount || events.length],
+            ["Внешних API-запросов", summary.apiRequests || 0],
+            ["Кэш-хитов", summary.cacheHits || 0],
+            ["Расход лимита MPStats", summary.creditsEstimate || 0],
+            ["Остаток лимита MPStats", summary.balanceRemaining || "не передается API"],
+            ["Комментарий по остатку", summary.balanceNote || ""],
+            ["Первая запись", summary.firstAt || ""],
+            ["Последняя запись", summary.lastAt || ""],
+            ["Хранение журнала, дней", summary.retentionDays || ""],
+          ],
+        },
+        {
+          name: "Обращения",
+          freezeRows: 1,
+          widths: [22, 18, 24, 28, 14, 24, 16, 10, 58, 12, 12, 18, 14, 16, 46],
+          rows: [
+            [
+              "Дата",
+              "Пользователь",
+              "ФИО",
+              "Где нажимали",
+              "Кабинет",
+              "Карточка",
+              "nmID",
+              "Метод",
+              "Запрос MPStats",
+              "Источник",
+              "HTTP",
+              "Статус",
+              "Расход",
+              "Остаток",
+              "Детали",
+            ],
+            ...events.map((event) => [
+              event.createdAt ? new Date(event.createdAt).toLocaleString("ru-RU") : "",
+              event.actorLogin || "",
+              event.actorName || "",
+              event.sourceArea || "",
+              event.portalId || "",
+              event.cardKey || "",
+              event.nmID || "",
+              event.method || "",
+              event.path || "",
+              event.source || "",
+              event.httpStatus || "",
+              event.status || "",
+              event.creditsEstimate || 0,
+              event.balanceRemaining || "",
+              detailsText(event.details),
+            ]),
+          ],
+        },
+      ]);
+      setMpstatsUsageStatus("done");
+    } catch {
+      setMpstatsUsageStatus("error");
     }
   }
 
@@ -10959,6 +11044,9 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                 <div className="panel-actions">
                   <button className="btn primary" type="submit" disabled={!canManage || !mpstatsKey.trim() || mpstatsStatus === "saving"}><Save size={16} />Сохранить ключ</button>
                   <button className="btn" type="button" disabled={!canManage || !mpstatsConnected || mpstatsStatus === "checking"} onClick={checkMpstatsConnection}><RefreshCw size={16} />Проверить</button>
+                  <button className="btn" type="button" disabled={!canManage || mpstatsUsageStatus === "loading"} onClick={downloadMpstatsUsageReport}>
+                    <Download size={16} />{mpstatsUsageStatus === "loading" ? "Готовим журнал" : "Скачать журнал API"}
+                  </button>
                 </div>
                 <div className="integration-status">
                   {mpstatsStatus === "saving" ? "Сохраняем..." : null}
@@ -10969,6 +11057,8 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
                   {mpstatsStatus === "rate_limited" ? "MPStats ответил лимитом запросов. Ключ сохранен, проверку можно повторить позже." : null}
                   {mpstatsStatus === "error" ? "Не удалось обновить статус MPStats." : null}
                   {!mpstatsStatus || mpstatsStatus === "idle" ? (mpstatsConnected ? (mpstatsVerified ? "MPStats подключен и проверен." : "MPStats ключ сохранен, но соединение еще не проверено.") : "MPStats пока не настроен.") : null}
+                  {mpstatsUsageStatus === "done" ? "Журнал MPStats API сформирован." : null}
+                  {mpstatsUsageStatus === "error" ? "Не удалось сформировать журнал MPStats API." : null}
                 </div>
               </form>
             </section>
