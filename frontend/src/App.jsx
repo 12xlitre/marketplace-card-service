@@ -1038,37 +1038,42 @@ function issueCopy(issue, sourceLabel = "WB API") {
   const copies = {
     "Нет бренда": `${sourceLabel} не вернул бренд. Нужно проверить бренд в кабинете и не подставлять его вручную без подтверждения.`,
     "Нет описания": "В текущем снимке нет описания. Перед правками нужно подтянуть описание или заполнить его вручную.",
+    "нет описания": "В текущем снимке нет описания. Перед правками нужно подтянуть описание или заполнить его вручную.",
     "Пустые характеристики": `${sourceLabel} не вернул характеристики. Нужно сверить обязательные поля категории перед публикацией.`,
+    "пустые характеристики": `${sourceLabel} не вернул характеристики. Нужно сверить обязательные поля категории перед публикацией.`,
     "Нет фото": "В текущем снимке нет фото. Нужно проверить медиа в кабинете WB перед аудитом.",
+    "нет фото": "В текущем снимке нет фото. Нужно проверить медиа в кабинете WB перед аудитом.",
     "Нет названия": "У карточки нет названия. Нужно заполнить заголовок до 60 символов.",
+    "нет названия": "У карточки нет названия. Нужно заполнить заголовок до 60 символов.",
     "Название длиннее 60": "Название превышает лимит WB. Нужно сократить его до 60 символов без потери смысла.",
+    "название длиннее 60": "Название превышает лимит WB. Нужно сократить его до 60 символов без потери смысла.",
     "Габариты требуют проверки": "WB пометил габариты как требующие проверки. Перед публикацией нужно сверить размеры.",
+    "габариты требуют проверки": "WB пометил габариты как требующие проверки. Перед публикацией нужно сверить размеры.",
   };
   return copies[issue] || `Карточка требует ручной проверки по данным из ${sourceLabel}.`;
 }
 
 function cardProblemReasons(card) {
-  if (Number(card?.issueCount || 0) === 0 || card?.issue === "Нет критичных") {
-    return [];
-  }
   const reasons = [];
+  const rawFields = rawFieldsForCard(card);
   const title = String(card?.title || "").trim();
   if (!title || title === "Карточка WB") {
     reasons.push("нет названия");
   } else if (title.length > 60) {
     reasons.push("название длиннее 60");
   }
-  if (!String(card?.description || "").trim()) {
+  if (!String(card?.description || rawFields.description || "").trim()) {
     reasons.push("нет описания");
   }
   if (!rawCharacteristicItems(card).length) {
     reasons.push("пустые характеристики");
   }
-  const photos = Array.isArray(card?.photos) ? card.photos : [];
-  if (!photos.length && !card?.photoUrl) {
+  const photos = Array.isArray(card?.photos) ? card.photos : (Array.isArray(rawFields.photos) ? rawFields.photos : []);
+  if (!photos.length && !card?.photoUrl && !rawFields.photoUrl) {
     reasons.push("нет фото");
   }
-  if (card?.dimensions?.isValid === false) {
+  const dimensions = card?.dimensions || rawFields.dimensions || {};
+  if (dimensions?.isValid === false) {
     reasons.push("габариты требуют проверки");
   }
   if (!reasons.length && Number(card?.issueCount || 0) > 0 && card?.issue && !["Нет критичных", "Нет бренда"].includes(card.issue)) {
@@ -1083,6 +1088,20 @@ function cardDataSignals(card) {
     signals.push("бренд не указан в WB");
   }
   return signals;
+}
+
+function cardSourceLabelFromRaw(rawFields, portal) {
+  const source = rawFields?.mpstats?.source || "";
+  if (source === "wb-public-seller") {
+    return "WB seller-витрина";
+  }
+  if (source === "wb-public-card-details") {
+    return "публичный WB";
+  }
+  if (portal?.syncStatus === "mpstats-loaded" || Boolean(rawFields?.mpstats)) {
+    return "MPStats";
+  }
+  return "WB API";
 }
 
 function cardCompleteness(card) {
@@ -5809,10 +5828,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const currentTitle = textOrDash(card?.title);
   const portalName = portalDisplayName(portal);
   const titleLength = currentTitle.length;
-  const issueCount = Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
+  const cardIssueReasons = cardProblemReasons(card);
+  const issueCount = cardIssueReasons.length || Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
+  const primaryIssue = card?.issue && card.issue !== "Нет критичных" ? card.issue : cardIssueReasons[0];
   const rawFields = rawFieldsForCard(card);
-  const isMpstatsCard = portal?.syncStatus === "mpstats-loaded" || Boolean(rawFields.mpstats);
-  const cardSourceLabel = isMpstatsCard ? "MPStats" : "WB API";
+  const cardSourceLabel = cardSourceLabelFromRaw(rawFields, portal);
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
@@ -7518,10 +7538,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   ) : null}
                   <div className="issue">
                     <div className="issue-head">
-                      <strong>{issueCount ? card.issue : "Критичных проблем нет"}</strong>
+                      <strong>{issueCount ? primaryIssue : "Критичных проблем нет"}</strong>
                       <Tag tone={issueCount ? "amber" : "green"}>{issueCount ? "проверка" : "ок"}</Tag>
                     </div>
-                    <p>{issueCount ? issueCopy(card.issue, cardSourceLabel) : `Карточка выглядит рабочей по текущему снимку ${cardSourceLabel}. Перед публикацией все равно нужна ручная проверка.`}</p>
+                    <p>{issueCount ? issueCopy(primaryIssue, cardSourceLabel) : `Карточка выглядит рабочей по текущему снимку ${cardSourceLabel}. Перед публикацией все равно нужна ручная проверка.`}</p>
                   </div>
                   <div className="issue audit-competitors-input">
                     <div className="issue-head">
