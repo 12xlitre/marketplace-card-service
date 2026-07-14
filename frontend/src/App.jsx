@@ -1415,6 +1415,11 @@ function rawCharacteristicItems(card) {
   return Array.isArray(raw) ? raw : [];
 }
 
+function currentCardCharacteristicItems(card) {
+  const raw = card?.rawFields?.characteristics;
+  return Array.isArray(raw) ? raw : rawCharacteristicItems(card);
+}
+
 function rawCharacteristicValueTokens(value) {
   if (isEmptyValue(value)) {
     return [];
@@ -1669,6 +1674,22 @@ function characteristicRows(items) {
       charcID,
     };
   });
+}
+
+function characteristicDisplayValue(value) {
+  if (isEmptyValue(value)) {
+    return "Пусто";
+  }
+  if (Array.isArray(value)) {
+    const values = value
+      .map(characteristicDisplayValue)
+      .filter((item) => item && item !== "Пусто");
+    return values.length ? values.join(", ") : "Пусто";
+  }
+  if (typeof value === "object") {
+    return characteristicDisplayValue(value.value || value.name || value.charcName || value.values || "");
+  }
+  return String(value);
 }
 
 function editableCharacteristicValue(value) {
@@ -6657,6 +6678,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
   const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
+  const [cardCharacteristicsOpen, setCardCharacteristicsOpen] = useState(false);
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const portalName = portalDisplayName(portal);
@@ -6669,6 +6691,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const description = card?.description || rawFields.description || "";
   const characteristics = card?.characteristics || rawFields.characteristics || [];
   const characteristicItems = characteristicRows(characteristics);
+  const currentCardCharacteristics = currentCardCharacteristicItems(card);
+  const currentCardCharacteristicRows = characteristicRows(currentCardCharacteristics);
   const characteristicValueOptions = characteristicValueOptionsByKey(portal, characteristicItems, subjectCharacteristics, mpstatsCharacteristics);
   const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
   const sizes = card?.sizes || rawFields.sizes || [];
@@ -6943,6 +6967,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticContentStatus("");
     setSemanticContentError("");
     setSemanticRankStatus("idle");
+    setCardCharacteristicsOpen(false);
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -8504,7 +8529,25 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="list-row"><span>Категория</span><strong>{valueSummary(card?.subjectName)}</strong></div>
                 <div className="list-row"><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
                 <div className="list-row"><span>Описание</span><strong>{isEmptyValue(description) ? "Пусто" : "есть"}</strong></div>
-                <div className="list-row"><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
+                <div className="list-row expandable-row">
+                  <span>Характеристики</span>
+                  <div className="row-action">
+                    <strong>{valueSummary(currentCardCharacteristics)}</strong>
+                    <button className="icon-mini" type="button" onClick={() => setCardCharacteristicsOpen((value) => !value)} disabled={!currentCardCharacteristicRows.length} title={cardCharacteristicsOpen ? "Свернуть текущие характеристики" : "Раскрыть текущие характеристики"} aria-label={cardCharacteristicsOpen ? "Свернуть текущие характеристики" : "Раскрыть текущие характеристики"}>
+                      {cardCharacteristicsOpen ? <X size={14} /> : <Plus size={14} />}
+                    </button>
+                  </div>
+                </div>
+                {cardCharacteristicsOpen && currentCardCharacteristicRows.length ? (
+                  <div className="characteristics-inline-list">
+                    {currentCardCharacteristicRows.map((item) => (
+                      <div className="characteristics-inline-row" key={item.key}>
+                        <span>{item.label}</span>
+                        <strong>{characteristicDisplayValue(item.value)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="list-row"><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
                 <div className="list-row"><span>Размеры</span><strong>{valueSummary(sizes)}</strong></div>
                 <div className="list-row"><span>Цена</span><strong>{valueSummary(priceValue)}</strong></div>
