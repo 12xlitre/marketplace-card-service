@@ -6726,6 +6726,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
+  const [semanticCleared, setSemanticCleared] = useState(false);
   const [semanticFinalStatus, setSemanticFinalStatus] = useState("");
   const [semanticActiveReportId, setSemanticActiveReportId] = useState("");
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
@@ -7135,6 +7136,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticCoreSelected([]);
     setSemanticCoreReports([]);
     setSemanticCoreFinal(null);
+    setSemanticCleared(false);
     setSemanticFinalStatus("");
     setSemanticActiveReportId("");
     setSemanticCollections([]);
@@ -7167,6 +7169,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreSelected(normalized.semanticCoreSelected);
       setSemanticCoreReports(normalized.semanticCoreReports);
       setSemanticCoreFinal(normalized.semanticCoreFinal);
+      setSemanticCleared(false);
       setSemanticDraftDirty(false);
       setSemanticDraftSaved(Boolean(normalized.semanticCoreReports.length || normalized.semanticCoreSelected.length || normalized.semanticCoreFinal));
       setSemanticFinalStatus("");
@@ -7559,6 +7562,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       });
       const nextSemanticCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
       setSemanticCore(nextSemanticCore);
+      setSemanticCleared(false);
       const nextSubjectFilter = "";
       setSemanticSubjectFilter(nextSubjectFilter);
       const requestedSeedKey = semanticQueryKey(requestedSeedQuery);
@@ -7600,6 +7604,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     let reportSource = semanticCoreReports;
     let fallbackReport = null;
     const shouldCreateFallbackReport = activeSemanticCore
+      && !semanticCleared
       && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
     if (shouldCreateFallbackReport) {
       fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
@@ -7611,6 +7616,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     const nextReports = semanticReportsWithSelection(reportSource, normalizedSelection);
     setSemanticCoreSelected(normalizedSelection);
     setSemanticCoreReports(nextReports);
+    setSemanticCleared(false);
     if (!semanticActiveReportId && fallbackReport?.id) {
       setSemanticActiveReportId(fallbackReport.id);
     }
@@ -7624,6 +7630,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     let reportSource = semanticCoreReports;
     let fallbackReport = null;
     const shouldCreateFallbackReport = activeSemanticCore
+      && !semanticCleared
       && (!reportSource.length || !reportSource.some((report) => semanticReportCandidateCount(report)));
     if (shouldCreateFallbackReport) {
       fallbackReport = semanticReportFromCore(activeSemanticCore, normalizedSelection, {
@@ -7633,6 +7640,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
     }
     const nextReports = semanticReportsWithSelection(reportSource, normalizedSelection);
+    const nextFinal = !nextReports.length && !normalizedSelection.length ? null : semanticCoreFinal;
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       auditHistory,
@@ -7649,11 +7657,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected: normalizedSelection,
       semanticCoreReports: nextReports,
-      semanticCoreFinal,
+      semanticCoreFinal: nextFinal,
       card,
     });
     setSemanticCoreSelected(normalizedSelection);
     setSemanticCoreReports(nextReports);
+    setSemanticCoreFinal(nextFinal);
     if (!semanticActiveReportId && fallbackReport?.id) {
       setSemanticActiveReportId(fallbackReport.id);
     }
@@ -7664,7 +7673,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         throw new Error("semantic_save_failed");
       }
       setSemanticDraftDirty(false);
-      setSemanticDraftSaved(Boolean(nextReports.length || normalizedSelection.length || semanticCoreFinal));
+      setSemanticDraftSaved(Boolean(nextReports.length || normalizedSelection.length || nextFinal));
+      setSemanticCleared(!nextReports.length && !normalizedSelection.length && !nextFinal);
       setSemanticSaveStatus("saved");
     } catch {
       setSemanticDraftDirty(true);
@@ -7974,6 +7984,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   function stageSemanticReports(nextReports) {
     const normalizedReports = normalizeSemanticReports(nextReports);
     setSemanticCoreReports(normalizedReports);
+    setSemanticCleared(!normalizedReports.length);
     setSemanticDraftDirty(true);
     setSemanticDraftSaved(false);
     setSemanticSaveStatus("unsaved");
@@ -7983,6 +7994,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     const reportId = report?.id;
     if (!reportId) return;
     const nextReports = semanticCoreReports.filter((item) => item.id !== reportId);
+    const nextSelection = normalizeSemanticSelection(nextReports.flatMap((item) => item.selected || []));
+    const finalBelongsToRemovedReport = Boolean(
+      semanticCoreFinal
+      && (
+        String(semanticCoreFinal.reportId || "") === String(reportId)
+        || String(semanticCoreFinal.id || "") === String(reportId)
+        || String(semanticCoreFinal.id || "") === `semantic-final-${reportId}`
+      )
+    );
     if (semanticActiveReportId === reportId) {
       const nextActiveReport = nextReports[0] || null;
       if (nextActiveReport) {
@@ -7998,6 +8018,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         setSemanticCoreError("");
         setSemanticRankStatus("idle");
       }
+    }
+    setSemanticCoreSelected(nextSelection);
+    if (!nextReports.length || finalBelongsToRemovedReport) {
+      setSemanticCoreFinal(null);
+      setSemanticFinalStatus("");
     }
     stageSemanticReports(nextReports);
   }
@@ -8798,6 +8823,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setSemanticCoreSelected([]);
       setSemanticCoreReports([]);
       setSemanticCoreFinal(null);
+      setSemanticCleared(false);
       setSemanticDraftDirty(false);
       setSemanticDraftSaved(false);
       setSemanticFinalStatus("");
@@ -8902,6 +8928,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   function openSemanticReport(report) {
     if (!report?.semanticCore) return;
     setSemanticCore(report.semanticCore);
+    setSemanticCleared(false);
     setSemanticActiveReportId(report.id);
     setSemanticSeedQuery(report.seedQuery || report.semanticCore.seedQuery || defaultSemanticSeedQuery(card));
     setSemanticSubjectFilter("");
