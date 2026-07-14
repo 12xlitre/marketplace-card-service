@@ -80,10 +80,14 @@ GET /api/wb/characteristics?portal_id=1&subject_id=123
 GET /api/mpstats/characteristics?portal_id=1&type=subject&value=123
 GET /api/portals/<portal_id>/wb-client-report?start=2026-07-01&end=2026-07-07
 GET /api/admin/mpstats-usage?limit=5000
+GET /api/approval-workflow?portal_id=1
+GET /api/card-workset?portal_id=1
 GET /api/portal-card-drafts?portal_id=1
 POST /api/card-audit
 POST /api/card-content-reoptimize
 POST /api/card-competitors/suggest
+POST /api/card-workset
+POST /api/card-workset/create-tasks
 ```
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
@@ -100,7 +104,13 @@ POST /api/card-competitors/suggest
 
 Семантическое ядро использует отдельный свежий MPStats-период: по умолчанию последние 30 дней с лагом 1 день (`MPSTATS_SEMANTIC_PERIOD_DAYS`, `MPSTATS_SEMANTIC_PERIOD_LAG_DAYS`). Аудит и конкурентные срезы остаются на стабильном историческом окне `audit_period_default`, поэтому даты в СЯ и аудите могут отличаться намеренно.
 
+Частотные корзины СЯ настраиваются через `MPSTATS_SEMANTIC_HIGH_FREQUENCY` и `MPSTATS_SEMANTIC_MEDIUM_FREQUENCY`; значения по умолчанию: высокий спрос `>=1000`, средний `>=300`, низкий `<300`. Автодобавление выбирает до 36 запросов, балансируя до 12 строк из каждой корзины.
+
+Карточечная XLSX-выгрузка `Семантическое ядро` содержит вкладку `Инструкция` и рабочую вкладку `СЯ в работу`. Рабочие колонки: `Ключи в карточке (действующие)`, `Ранжируемые ключи`, `Позиция ранжируемого ключа`, `Ключ к добавлению`, `Частота запроса ключа к добавлению`, `Согласование`. Заполненные данные защищены от редактирования; в `Согласование` доступен выбор `Да/Нет`, по умолчанию `Да` для каждой строки с ключом к добавлению.
+
 `GET /api/portal-card-drafts` отдает сохраненные черновики карточек по одному кабинету после проверки доступа. Frontend использует его для кабинетных XLSX-выгрузок: итоговое СЯ по карточкам с сохраненным СЯ и итоговый контент только по карточкам, где секция `Контент` принята (`approved/exported`).
+
+`GET/POST /api/card-workset` хранит рабочий набор карточек кабинета в backend, а `POST /api/card-workset/create-tasks` создает внутренние задачи по выбранным типам работ (`СЯ`, `Контент`, `Цены`, `Остатки`). Задачи остаются в `card_drafts` и approval workflow; для СЯ задача считается закрытой после сохранения карточки в итоговое СЯ кабинета.
 
 `GET /api/portals/<portal_id>/wb-client-report` собирает данные для клиентского XLSX-отчета по выбранному периоду `start/end` в формате `YYYY-MM-DD`. Старый параметр `weeks` остается совместимым fallback, но UI использует сценарий `выбрать отчет -> выбрать период -> сформировать` во вкладке `Отчеты` внутри кабинета селлера. Маршрут проверяет доступ к кабинету, берет WB-токен только из backend-хранилища и не выполняет write-операции в WB.
 

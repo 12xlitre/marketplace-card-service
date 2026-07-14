@@ -88,6 +88,8 @@ MPSTATS_STORE_IMPORT_BATCH_SIZE = int(os.environ.get("MPSTATS_STORE_IMPORT_BATCH
 MPSTATS_API_EVENT_RETENTION_DAYS = int(os.environ.get("MPSTATS_API_EVENT_RETENTION_DAYS", "90"))
 MPSTATS_SEMANTIC_PERIOD_DAYS = int(os.environ.get("MPSTATS_SEMANTIC_PERIOD_DAYS", "30"))
 MPSTATS_SEMANTIC_PERIOD_LAG_DAYS = int(os.environ.get("MPSTATS_SEMANTIC_PERIOD_LAG_DAYS", "1"))
+MPSTATS_SEMANTIC_HIGH_FREQUENCY = int(os.environ.get("MPSTATS_SEMANTIC_HIGH_FREQUENCY", "1000"))
+MPSTATS_SEMANTIC_MEDIUM_FREQUENCY = int(os.environ.get("MPSTATS_SEMANTIC_MEDIUM_FREQUENCY", "300"))
 WB_CLIENT_REPORT_WEEKS = int(os.environ.get("WB_CLIENT_REPORT_WEEKS", "8"))
 WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS", "3"))
 WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
@@ -6394,6 +6396,30 @@ def audit_contains_semantic_query(text, query):
   return all(token in text_tokens for token in query_tokens)
 
 
+def semantic_frequency_priority(value):
+  wb_count = audit_int(value, 0)
+  if wb_count >= MPSTATS_SEMANTIC_HIGH_FREQUENCY:
+    return "high"
+  if wb_count >= MPSTATS_SEMANTIC_MEDIUM_FREQUENCY:
+    return "medium"
+  return "low"
+
+
+def audit_contains_semantic_content_query(text, query):
+  text_tokens = [token for token in audit_tokens(text) if len(token) > 3]
+  query_tokens = [token for token in audit_tokens(query) if len(token) > 3]
+  if not text_tokens or not query_tokens:
+    return False
+  text_phrase = f" {' '.join(text_tokens)} "
+  query_phrase = " ".join(query_tokens)
+  if f" {query_phrase} " in text_phrase:
+    return True
+  if len(query_tokens) == 2:
+    text_token_set = set(text_tokens)
+    return all(token in text_token_set for token in query_tokens)
+  return False
+
+
 def audit_unique(values, limit=12):
   output = []
   seen = set()
@@ -7642,8 +7668,8 @@ def audit_build_semantic_core(card, keywords):
   current = []
   missing = []
   for item in keywords[:80]:
-    in_title = audit_contains_semantic_query(current_title, item.get("query"))
-    in_description = audit_contains_semantic_query(description, item.get("query"))
+    in_title = audit_contains_semantic_content_query(current_title, item.get("query"))
+    in_description = audit_contains_semantic_content_query(description, item.get("query"))
     if in_title or in_description:
       field = "title" if in_title else "description"
       if in_title and in_description:
@@ -7654,7 +7680,7 @@ def audit_build_semantic_core(card, keywords):
   recommended = []
   for item in missing:
     wb_count = audit_int(item.get("wbCount"), 0)
-    priority = "high" if wb_count >= 1000 else "medium" if wb_count >= 300 else "low"
+    priority = semantic_frequency_priority(wb_count)
     recommended.append({
       **item,
       "priority": priority,
@@ -7668,7 +7694,7 @@ def audit_build_semantic_core(card, keywords):
   total_top = min(len(keywords), 12)
   present_top = sum(
     1 for item in keywords[:12]
-    if audit_contains_phrase(current_title, item.get("query")) or audit_contains_phrase(description, item.get("query"))
+    if audit_contains_semantic_content_query(current_title, item.get("query")) or audit_contains_semantic_content_query(description, item.get("query"))
   )
   coverage = round((present_top / total_top) * 100) if total_top else None
   reason = "MPStats SEO-запросы не получены; СЯ нужно собрать вручную."
@@ -7841,12 +7867,14 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   content = f"{audit_str(card.get('title') or '')} {audit_str(card.get('description') or '')}".strip()
   current = []
   recommended = []
+  all_keywords = []
   for row in rows:
     target = {
       **row,
-      "priority": "high" if audit_int(row.get("wbCount"), 0) >= 1000 else "medium" if audit_int(row.get("wbCount"), 0) >= 100 else "low",
+      "priority": semantic_frequency_priority(row.get("wbCount")),
     }
-    if content and audit_contains_semantic_query(content, row.get("query")):
+    all_keywords.append(target)
+    if content and audit_contains_semantic_content_query(content, row.get("query")):
       current.append({**target, "field": "title_description", "status": "current"})
     else:
       recommended.append({**target, "reason": "найдено MPStats в расширении запросов"})
@@ -7872,7 +7900,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
       "current": current[:1000],
       "recommended": recommended[:5000],
       "missing": recommended[:5000],
-      "allKeywords": rows[:5000],
+      "allKeywords": all_keywords[:5000],
       "subjectOptions": subject_options[:200],
       "totalKeywords": len(rows),
       "coveragePercent": round((len(current) / len(rows)) * 100) if rows else None,

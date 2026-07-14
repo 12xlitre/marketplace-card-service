@@ -2827,10 +2827,15 @@ function semanticQueryKey(value) {
 const semanticSelectionLimit = 2000;
 const semanticReportHistoryLimit = 2;
 const semanticCurrentRowsLimit = 600;
-const semanticRecommendedRowsLimit = 900;
+const semanticRecommendedRowsLimit = 1200;
+const semanticAllKeywordRowsLimit = 5000;
 const semanticRankedRowsLimit = 600;
 const semanticSubjectOptionsLimit = 120;
 const semanticManualAppendRows = 100;
+const semanticFrequencyHighThreshold = 1000;
+const semanticFrequencyMediumThreshold = 300;
+const semanticAutoAddTotalLimit = 36;
+const semanticAutoAddBucketLimit = 12;
 
 function semanticRankValue(value) {
   const number = Number(value);
@@ -2849,6 +2854,17 @@ function semanticCountExportValue(value) {
 
 function semanticFrequencyValue(item) {
   return semanticCountExportValue(item?.wbCount);
+}
+
+function semanticFrequencyBucket(item) {
+  const frequency = Number(semanticFrequencyValue(item) || 0);
+  if (frequency >= semanticFrequencyHighThreshold) return "high";
+  if (frequency >= semanticFrequencyMediumThreshold) return "medium";
+  return "low";
+}
+
+function semanticFrequencyBucketLabel(bucket) {
+  return bucket === "high" ? "высокий" : bucket === "medium" ? "средний" : "низкий";
 }
 
 function semanticHasKeywordRank(item) {
@@ -3013,6 +3029,7 @@ function compactSemanticCore(core) {
     ].filter(semanticHasKeywordRank);
   const compactCurrent = compactItems(core.current, semanticCurrentRowsLimit, { prioritizeRanked: true });
   const compactRecommended = compactItems(recommendedSource, semanticRecommendedRowsLimit);
+  const compactAllKeywords = compactItems(core.allKeywords, semanticAllKeywordRowsLimit);
   const compactRankedKeywords = compactItems(rankedSource, semanticRankedRowsLimit, { prioritizeRanked: true });
   return {
     source: core.source || "mpstats-expanding",
@@ -3021,7 +3038,7 @@ function compactSemanticCore(core) {
     current: compactCurrent,
     recommended: compactRecommended,
     missing: [],
-    allKeywords: [],
+    allKeywords: compactAllKeywords,
     rankedKeywords: compactRankedKeywords,
     subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, semanticSubjectOptionsLimit),
     totalKeywords: Number(core.totalKeywords || 0),
@@ -7091,7 +7108,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         setSemanticActiveReportId(latestReport.id);
         setSemanticCore(latestReport.semanticCore);
         setSemanticSeedQuery(latestReport.seedQuery || defaultSemanticSeedQuery(card));
-        setSemanticSubjectFilter(latestReport.subjectFilter || "");
+        setSemanticSubjectFilter("");
         setSemanticSearch(latestReport.search || "");
         setSemanticExcludeWords(latestReport.excludeWords || "");
       } else {
@@ -7474,16 +7491,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       });
       const nextSemanticCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
       setSemanticCore(nextSemanticCore);
-      const cardSubject = String(card?.subjectName || "").trim().toLowerCase();
-      let nextSubjectFilter = semanticSubjectFilter;
-      if (nextSemanticCore?.subjectOptions?.length && cardSubject && !semanticSubjectFilter) {
-        const matchedSubject = nextSemanticCore.subjectOptions.find((item) => String(item.name || "").trim().toLowerCase() === cardSubject)
-          || nextSemanticCore.subjectOptions.find((item) => String(item.name || "").toLowerCase().includes(cardSubject.split("/").pop().trim()));
-        if (matchedSubject?.name) {
-          nextSubjectFilter = matchedSubject.name;
-          setSemanticSubjectFilter(nextSubjectFilter);
-        }
-      }
+      const nextSubjectFilter = "";
+      setSemanticSubjectFilter(nextSubjectFilter);
       const nextReport = semanticReportFromCore(nextSemanticCore, semanticCoreSelected, {
         seedQuery: semanticSeedQuery.trim(),
         subjectFilter: nextSubjectFilter,
@@ -7637,24 +7646,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     const addGroup = (items, limit) => {
       items.forEach((item) => {
         const key = semanticQueryKey(item);
-        if (!key || chosenKeys.has(key) || chosen.length >= 36) return;
+        if (!key || chosenKeys.has(key) || chosen.length >= semanticAutoAddTotalLimit) return;
         if (chosen.filter((row) => items.includes(row)).length >= limit) return;
         chosenKeys.add(key);
         chosen.push(item);
       });
     };
-    const high = candidates.filter((item) => Number(semanticFrequencyValue(item) || 0) >= 1000);
-    const medium = candidates.filter((item) => {
-      const freq = Number(semanticFrequencyValue(item) || 0);
-      return freq >= 300 && freq < 1000;
-    });
-    const narrow = candidates.filter((item) => Number(semanticFrequencyValue(item) || 0) < 300);
-    addGroup(high, 12);
-    addGroup(medium, 12);
-    addGroup(narrow, 12);
+    const high = candidates.filter((item) => semanticFrequencyBucket(item) === "high");
+    const medium = candidates.filter((item) => semanticFrequencyBucket(item) === "medium");
+    const narrow = candidates.filter((item) => semanticFrequencyBucket(item) === "low");
+    addGroup(high, semanticAutoAddBucketLimit);
+    addGroup(medium, semanticAutoAddBucketLimit);
+    addGroup(narrow, semanticAutoAddBucketLimit);
     candidates.forEach((item) => {
       const key = semanticQueryKey(item);
-      if (chosen.length >= 36 || !key || chosenKeys.has(key)) return;
+      if (chosen.length >= semanticAutoAddTotalLimit || !key || chosenKeys.has(key)) return;
       chosenKeys.add(key);
       chosen.push(item);
     });
@@ -8605,7 +8611,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticCore(report.semanticCore);
     setSemanticActiveReportId(report.id);
     setSemanticSeedQuery(report.seedQuery || report.semanticCore.seedQuery || defaultSemanticSeedQuery(card));
-    setSemanticSubjectFilter(report.subjectFilter || "");
+    setSemanticSubjectFilter("");
     setSemanticSearch(report.search || "");
     setSemanticExcludeWords(report.excludeWords || "");
     setSemanticCoreStatus("loaded");
@@ -10630,7 +10636,11 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                   <em>{semanticKeywordMeta(item) || item.reason || "нет в текущем контенте"}</em>
                 </div>
                 <div className="semantic-keyword-actions">
-                  {item.priority ? <Tag tone={item.priority === "high" ? "amber" : "blue"}>{item.priority === "high" ? "высокий" : item.priority === "medium" ? "средний" : "низкий"}</Tag> : null}
+                  {semanticFrequencyValue(item) ? (
+                    <Tag tone={semanticFrequencyBucket(item) === "high" ? "amber" : "blue"}>
+                      {semanticFrequencyBucketLabel(semanticFrequencyBucket(item))}
+                    </Tag>
+                  ) : null}
                   {standalone && onTakeKeyword ? (
                     <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)}>
                       <Plus size={14} />В работу
