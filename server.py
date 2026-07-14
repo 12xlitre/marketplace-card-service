@@ -2318,24 +2318,37 @@ def card_draft_has_semantic_key(payload, key):
   return key in meta
 
 
+def card_draft_semantic_dict(payload, key):
+  if not isinstance(payload, dict):
+    return None
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  value = meta.get(key)
+  return value if isinstance(value, dict) else None
+
+
 def merge_card_draft_semantics(next_payload, previous_payload):
   if not isinstance(next_payload, dict) or not isinstance(previous_payload, dict):
     return next_payload
   previous_reports = card_draft_semantic_items(previous_payload, "semanticCoreReports")
   previous_selected = card_draft_semantic_items(previous_payload, "semanticCoreSelected")
-  if not previous_reports and not previous_selected:
+  previous_final = card_draft_semantic_dict(previous_payload, "semanticCoreFinal")
+  if not previous_reports and not previous_selected and not previous_final:
     return next_payload
-  if (
-    card_draft_has_semantic_key(next_payload, "semanticCoreReports")
-    or card_draft_has_semantic_key(next_payload, "semanticCoreSelected")
-  ):
+  has_reports = card_draft_has_semantic_key(next_payload, "semanticCoreReports")
+  has_selected = card_draft_has_semantic_key(next_payload, "semanticCoreSelected")
+  has_final = card_draft_has_semantic_key(next_payload, "semanticCoreFinal")
+  if has_reports and has_selected and has_final:
     return next_payload
   next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
   merged_meta = {
     **next_meta,
-    "semanticCoreReports": previous_reports,
-    "semanticCoreSelected": previous_selected,
   }
+  if previous_reports and not has_reports:
+    merged_meta["semanticCoreReports"] = previous_reports
+  if previous_selected and not has_selected:
+    merged_meta["semanticCoreSelected"] = previous_selected
+  if previous_final and not has_final:
+    merged_meta["semanticCoreFinal"] = previous_final
   return {
     **next_payload,
     "meta": merged_meta,

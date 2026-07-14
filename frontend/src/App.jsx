@@ -2206,16 +2206,79 @@ function buildSemanticCoreInstructionSheet(card = null) {
   };
 }
 
+function normalizeSemanticFinalExport(value) {
+  if (!value || typeof value !== "object") return null;
+  const semanticCore = compactSemanticCore(value.semanticCore);
+  if (!semanticCore) return null;
+  return {
+    id: String(value.id || value.reportId || `semantic-final-${Date.parse(value.createdAt || "") || "draft"}`).trim(),
+    reportId: String(value.reportId || value.id || "").trim(),
+    createdAt: value.createdAt || "",
+    updatedAt: value.updatedAt || value.createdAt || "",
+    seedQuery: value.seedQuery || semanticCore.seedQuery || "",
+    subjectFilter: value.subjectFilter || "",
+    selected: normalizeSemanticSelection(value.selected),
+    semanticCore,
+  };
+}
+
+function semanticFinalExportFromCore(core, selectedRows, options = {}) {
+  const semanticCore = compactSemanticCore(core);
+  if (!semanticCore) return null;
+  const createdAt = options.createdAt || new Date().toISOString();
+  const reportId = String(options.reportId || "").trim();
+  return normalizeSemanticFinalExport({
+    id: `semantic-final-${reportId || Date.parse(createdAt) || Date.now()}`,
+    reportId,
+    createdAt,
+    updatedAt: createdAt,
+    seedQuery: options.seedQuery || semanticCore.seedQuery || "",
+    subjectFilter: options.subjectFilter || "",
+    selected: normalizeSemanticSelection(selectedRows),
+    semanticCore,
+  });
+}
+
+function semanticFinalExportSignature(finalExport) {
+  const normalized = normalizeSemanticFinalExport(finalExport);
+  if (!normalized) return "";
+  const selectedKeys = normalized.selected.map(semanticQueryKey).filter(Boolean).sort().join("|");
+  const core = normalized.semanticCore || {};
+  const contentKeys = semanticCurrentContentRows(core).map(semanticQueryKey).filter(Boolean).sort().join("|");
+  const rankingKeys = semanticCurrentPositionRows(core)
+    .map((row) => {
+      const key = semanticQueryKey(row);
+      return key ? `${key}:${semanticRankExportValue(row.position)}` : "";
+    })
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  const selectedExportKeys = semanticSelectedExportRows(normalized.selected, core)
+    .map((row) => {
+      const key = semanticQueryKey(row);
+      return key ? `${key}:${semanticFrequencyValue(row)}` : "";
+    })
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  return [
+    normalized.reportId,
+    normalized.seedQuery,
+    selectedKeys,
+    contentKeys,
+    rankingKeys,
+    selectedExportKeys,
+  ].join("::");
+}
+
 function semanticExportCoreFromDraft(draft, card) {
   const normalized = contentFromStoredDraft(draft, card);
-  const reports = normalizeSemanticReports(normalized.semanticCoreReports);
-  const selected = normalizeSemanticSelection(
-    normalized.semanticCoreSelected.length
-      ? normalized.semanticCoreSelected
-      : reports.flatMap((report) => report.selected || [])
-  );
-  const sourceCore = reports.find((report) => report.semanticCore)?.semanticCore || null;
-  const core = semanticCoreWithSelection(sourceCore, selected);
+  const finalExport = normalizeSemanticFinalExport(normalized.semanticCoreFinal);
+  if (!finalExport) {
+    return { core: null, selected: [] };
+  }
+  const selected = normalizeSemanticSelection(finalExport.selected);
+  const core = semanticCoreWithSelection(finalExport.semanticCore, selected);
   return { core, selected };
 }
 
@@ -2498,6 +2561,7 @@ function buildStructuredCardDraft({
   stocks,
   semanticCoreSelected,
   semanticCoreReports,
+  semanticCoreFinal,
   card,
   auditResult,
   evidenceSummary,
@@ -2532,6 +2596,7 @@ function buildStructuredCardDraft({
       auditHistory: sanitizeAuditHistory(auditHistory).slice(0, 20),
       semanticCoreSelected: normalizeSemanticSelection(semanticCoreSelected),
       semanticCoreReports: normalizeSemanticReports(semanticCoreReports),
+      semanticCoreFinal: normalizeSemanticFinalExport(semanticCoreFinal),
       auditResult: sanitizeAuditResult(auditResult),
       evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
       card: {
@@ -2554,6 +2619,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   const approval = normalizeApprovalState(meta.approval);
   const approvalSections = normalizeApprovalSections(meta.approvalSections, approval);
   const semanticCoreReports = normalizeSemanticReports(meta.semanticCoreReports);
+  const semanticCoreFinal = normalizeSemanticFinalExport(meta.semanticCoreFinal);
   const semanticCoreSelected = normalizeSemanticSelection(
     Array.isArray(meta.semanticCoreSelected) && meta.semanticCoreSelected.length
       ? meta.semanticCoreSelected
@@ -2572,6 +2638,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     stocks: normalizeDraftStocks(payload.stocks, card),
     semanticCoreSelected,
     semanticCoreReports,
+    semanticCoreFinal,
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
     approval: deriveOverallApproval(approvalSections),
     approvalSections,
@@ -5292,7 +5359,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       const sheets = buildPortalSemanticCoreSheets(cards, drafts);
       if (!sheets.length) {
         setCabinetExportStatus("semantic-empty");
-        onNotice?.("В кабинете пока нет карточек с сохраненным итоговым СЯ.");
+        onNotice?.("В кабинете пока нет карточек, добавленных в итоговое СЯ.");
         return;
       }
       downloadXlsx(`семантическое ядро - ${safeFilePart(displayName)} - ${exportDatePart()}.xlsx`, sheets);
@@ -6448,6 +6515,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const [semanticContentError, setSemanticContentError] = useState("");
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
+  const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
+  const [semanticFinalStatus, setSemanticFinalStatus] = useState("");
   const [semanticActiveReportId, setSemanticActiveReportId] = useState("");
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
@@ -6568,6 +6637,75 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const currentSemanticFinalExport = semanticFinalExportFromCore(activeSemanticCore, semanticCoreSelected, {
+    reportId: semanticActiveReportId,
+    seedQuery: semanticSeedQuery.trim(),
+    subjectFilter: semanticSubjectFilter,
+  });
+  const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
+  const semanticCurrentFinalSignature = semanticFinalExportSignature(currentSemanticFinalExport);
+  const semanticStoredFinalSignature = semanticFinalExportSignature(semanticStoredFinal);
+  const semanticFinalHasRows = Boolean(activeSemanticContentRows.length || activeSemanticPositionRows.length || activeSemanticNewRows.length);
+  const semanticFinalMatchesCurrent = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && semanticStoredFinalSignature === semanticCurrentFinalSignature);
+  const semanticFinalConflict = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && !semanticFinalMatchesCurrent);
+  const semanticStoredFinalLabel = semanticStoredFinal
+    ? [
+      semanticStoredFinal.seedQuery || "без стартового запроса",
+      semanticStoredFinal.createdAt ? new Date(semanticStoredFinal.createdAt).toLocaleString("ru-RU") : "",
+    ].filter(Boolean).join(" · ")
+    : "";
+  const semanticFinalBanner = (() => {
+    if (semanticFinalStatus === "saving") {
+      return {
+        tone: "saving",
+        title: "Добавляем в итоговое СЯ",
+        copy: "Сохраняем выбранную версию карточки для кабинетной выгрузки.",
+      };
+    }
+    if (semanticFinalStatus === "error") {
+      return {
+        tone: "error",
+        title: "Итоговое СЯ не сохранилось",
+        copy: "Повторите добавление или замену еще раз.",
+      };
+    }
+    if (semanticFinalStatus === "missing") {
+      return {
+        tone: "error",
+        title: "Нечего добавить в итоговое СЯ",
+        copy: "Сначала загрузите позиции или подберите запросы MPStats для этой карточки.",
+      };
+    }
+    if (semanticFinalStatus === "conflict" || semanticFinalConflict) {
+      return {
+        tone: "saving",
+        title: "По карточке уже есть итоговое СЯ",
+        copy: `В кабинетной выгрузке может быть только одна версия по карточке. Сейчас выбрана старая версия: ${semanticStoredFinalLabel || "без даты"}. Чтобы добавить текущую, замените старую выгрузку новой.`,
+        action: "replace",
+      };
+    }
+    if (semanticFinalMatchesCurrent) {
+      return {
+        tone: "",
+        title: semanticFinalStatus === "replaced" ? "Итоговое СЯ заменено" : semanticFinalStatus === "saved" ? "Итоговое СЯ добавлено" : "Эта версия уже в итоговом СЯ",
+        copy: "Именно она попадет в кнопку Скачать итоговое СЯ по кабинету.",
+      };
+    }
+    if (semanticStoredFinal) {
+      return {
+        tone: "",
+        title: "В итоговом СЯ сохранена версия карточки",
+        copy: `В кабинетную выгрузку попадет версия: ${semanticStoredFinalLabel || "без даты"}. Откройте ее в источниках MPStats или замените текущей подборкой.`,
+      };
+    }
+    return null;
+  })();
+  const semanticFinalAddDisabled = !currentSemanticFinalExport || !semanticFinalHasRows || semanticFinalStatus === "saving" || semanticFinalMatchesCurrent || semanticFinalConflict;
+  const semanticFinalAddTitle = semanticFinalMatchesCurrent
+    ? "Текущая версия уже добавлена в итоговое СЯ кабинета."
+    : semanticFinalConflict
+      ? "По карточке уже есть другая итоговая версия. Используйте замену в предупреждении ниже."
+      : "Добавить текущую версию СЯ этой карточки в кабинетную выгрузку.";
   const hasSemanticExpansion = Boolean(activeSemanticCore?.seedQuery || activeSemanticCore?.source === "mpstats-expanding");
   const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
   const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
@@ -6707,6 +6845,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setSemanticContentError("");
     setSemanticCoreSelected([]);
     setSemanticCoreReports([]);
+    setSemanticCoreFinal(null);
+    setSemanticFinalStatus("");
     setSemanticActiveReportId("");
     setCharacteristicSearch("");
     setDraftSavedAt("");
@@ -6725,6 +6865,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftStocks(normalized.stocks);
       setSemanticCoreSelected(normalized.semanticCoreSelected);
       setSemanticCoreReports(normalized.semanticCoreReports);
+      setSemanticCoreFinal(normalized.semanticCoreFinal);
+      setSemanticFinalStatus("");
       if (normalized.semanticCoreReports.length) {
         const latestReport = semanticPreferredReport(normalized.semanticCoreReports);
         setSemanticActiveReportId(latestReport.id);
@@ -7100,6 +7242,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           stocks: draftStocks,
           semanticCoreSelected,
           semanticCoreReports: nextReports,
+          semanticCoreFinal,
           card,
         });
         setSemanticSaveStatus("saving");
@@ -7159,6 +7302,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected: normalizedSelection,
       semanticCoreReports: nextReports,
+      semanticCoreFinal,
       card,
     });
     try {
@@ -7264,6 +7408,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected,
       semanticCoreReports: normalizedReports,
+      semanticCoreFinal,
       card,
     });
     try {
@@ -7340,6 +7485,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         stocks: draftStocks,
         semanticCoreSelected,
         semanticCoreReports,
+        semanticCoreFinal,
         card,
       });
       setDraftTitle(nextTitle);
@@ -7442,6 +7588,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         stocks: draftStocks,
         semanticCoreSelected,
         semanticCoreReports,
+        semanticCoreFinal,
         card,
         auditResult: payload.auditResult,
         evidenceSummary: payload.evidenceSummary,
@@ -7522,6 +7669,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected,
       semanticCoreReports,
+      semanticCoreFinal,
       card,
     });
     setDraftTitle(nextTitle);
@@ -7849,6 +7997,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         stocks: draftStocks,
         semanticCoreSelected,
         semanticCoreReports,
+        semanticCoreFinal,
         card,
       });
       setDraftTitle(nextTitle);
@@ -7945,6 +8094,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected,
       semanticCoreReports,
+      semanticCoreFinal,
       card,
     });
     await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
@@ -7968,6 +8118,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       stocks: draftStocks,
       semanticCoreSelected,
       semanticCoreReports,
+      semanticCoreFinal,
       card,
     });
   }
@@ -8086,6 +8237,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       setDraftStocks(normalizeDraftStocks({}, card));
       setSemanticCoreSelected([]);
       setSemanticCoreReports([]);
+      setSemanticCoreFinal(null);
+      setSemanticFinalStatus("");
       setSemanticActiveReportId("");
       setSemanticCore(null);
       setApproval(defaultApprovalState());
@@ -8121,6 +8274,65 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows);
     if (!sheet) return;
     downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [buildSemanticCoreInstructionSheet(card), sheet]);
+  }
+
+  async function persistSemanticFinal(nextFinal, { replacing = false } = {}) {
+    const previousFinal = semanticCoreFinal;
+    setSemanticCoreFinal(nextFinal);
+    setSemanticFinalStatus("saving");
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      approval,
+      approvalSections,
+      title: draftTitle,
+      description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
+      characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
+      semanticCoreSelected,
+      semanticCoreReports,
+      semanticCoreFinal: nextFinal,
+      card,
+    });
+    try {
+      const persistStatus = await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      if (!semanticPersistSucceeded(persistStatus)) {
+        throw new Error("semantic_final_save_failed");
+      }
+      setSemanticFinalStatus(replacing ? "replaced" : "saved");
+      return true;
+    } catch {
+      setSemanticCoreFinal(previousFinal);
+      setSemanticFinalStatus("error");
+      return false;
+    }
+  }
+
+  async function addSemanticCoreToFinal() {
+    const nextFinal = currentSemanticFinalExport;
+    if (!nextFinal || !semanticFinalHasRows) {
+      setSemanticFinalStatus("missing");
+      return false;
+    }
+    if (semanticStoredFinal && !semanticFinalMatchesCurrent) {
+      setSemanticFinalStatus("conflict");
+      return false;
+    }
+    return persistSemanticFinal(nextFinal);
+  }
+
+  async function replaceSemanticCoreFinal() {
+    const nextFinal = currentSemanticFinalExport;
+    if (!nextFinal || !semanticFinalHasRows) {
+      setSemanticFinalStatus("missing");
+      return false;
+    }
+    return persistSemanticFinal(nextFinal, { replacing: true });
   }
 
   function openSemanticReport(report) {
@@ -8250,10 +8462,26 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
                     <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
                   </div>
-                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
-                    <Download size={17} />Скачать итоговый файл
-                  </button>
+                  <div className="semantic-final-actions">
+                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
+                      <Download size={17} />Скачать файл карточки
+                    </button>
+                    <button className="btn primary" type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} title={semanticFinalAddTitle}>
+                      <CheckSquare size={17} />{semanticFinalMatchesCurrent ? "В итоговом СЯ" : "Добавить в итоговое СЯ"}
+                    </button>
+                  </div>
                 </div>
+                {semanticFinalBanner ? (
+                  <div className={`semantic-save-banner ${semanticFinalBanner.tone}`}>
+                    <strong>{semanticFinalBanner.title}</strong>
+                    <span>{semanticFinalBanner.copy}</span>
+                    {semanticFinalBanner.action === "replace" ? (
+                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving"}>
+                        <CheckSquare size={14} />Заменить старую новой
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
                 {semanticCoreReports.length ? (
                   <div className="semantic-history">
                     <span>Источники MPStats</span>

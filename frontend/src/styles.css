@@ -3822,7 +3822,7 @@ tr:last-child td {
 
 .semantic-final-bar {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
   gap: 12px;
   align-items: center;
   border: 1px solid var(--line);
@@ -3852,6 +3852,24 @@ tr:last-child td {
   color: var(--muted);
   font-style: normal;
   font-size: 12px;
+}
+
+.semantic-final-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.semantic-final-bar .semantic-final-actions {
+  display: flex;
+}
+
+.semantic-final-actions .btn {
+  max-width: 100%;
+  width: auto;
+  justify-content: center;
+  white-space: normal;
 }
 
 .semantic-history {
