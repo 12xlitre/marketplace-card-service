@@ -3034,6 +3034,7 @@ function compactSemanticCore(core) {
   return {
     source: core.source || "mpstats-expanding",
     seedQuery: core.seedQuery || "",
+    seedQueries: Array.isArray(core.seedQueries) ? core.seedQueries.slice(0, 6) : [],
     period: core.period || {},
     current: compactCurrent,
     recommended: compactRecommended,

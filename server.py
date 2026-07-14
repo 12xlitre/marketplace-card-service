@@ -7763,6 +7763,53 @@ def mpstats_expanding_seed_query(card, query):
   return subject[:250]
 
 
+def mpstats_expanding_add_seed(seeds, seen, value):
+  seed = audit_str(value or "")
+  key = audit_normalized(seed)
+  if not seed or key in seen:
+    return
+  seen.add(key)
+  seeds.append(seed[:250])
+
+
+def mpstats_expanding_seed_queries(card, query):
+  primary = mpstats_expanding_seed_query(card, query)
+  if not primary:
+    return []
+  seeds = []
+  seen = set()
+  mpstats_expanding_add_seed(seeds, seen, primary)
+  content_parts = [
+    primary,
+    card.get("title") or "",
+    card.get("description") or "",
+    card.get("subjectName") or card.get("subject") or "",
+  ]
+  for characteristic in card.get("characteristics") if isinstance(card.get("characteristics"), list) else []:
+    if not isinstance(characteristic, dict):
+      continue
+    content_parts.append(characteristic.get("name") or "")
+    values = characteristic.get("value")
+    if isinstance(values, list):
+      content_parts.extend(str(value) for value in values[:5])
+    else:
+      content_parts.append(str(values or ""))
+  content = audit_normalized(" ".join(str(part or "") for part in content_parts))
+  primary_is_sunglasses = "солнцезащит" in content or "солнечн" in content
+  base = "солнцезащитные очки" if primary_is_sunglasses else "очки"
+  if re.search(r"\bкошк|\bкошач|cat\s*eye", content):
+    mpstats_expanding_add_seed(seeds, seen, "очки кошачий глаз")
+    if primary_is_sunglasses:
+      mpstats_expanding_add_seed(seeds, seen, "солнцезащитные очки кошачий глаз")
+  if "квадрат" in content:
+    mpstats_expanding_add_seed(seeds, seen, f"{base} квадратные")
+  if "поляризац" in content or "поляризацион" in content:
+    mpstats_expanding_add_seed(seeds, seen, f"{base} поляризационные")
+  if "авиатор" in content:
+    mpstats_expanding_add_seed(seeds, seen, f"{base} авиаторы")
+  return seeds[:6]
+
+
 def normalize_mpstats_expanding_query(item):
   if not isinstance(item, dict):
     return None
@@ -7812,15 +7859,16 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
-  seed_query = mpstats_expanding_seed_query(card, query)
-  if not seed_query:
+  seed_queries = mpstats_expanding_seed_queries(card, query)
+  if not seed_queries:
     raise ValueError("missing_semantic_query")
+  seed_query = seed_queries[0]
 
   period = mpstats_semantic_period_default()
   body = {
     "type": "keyword",
     "mp": 0,
-    "queryData": [seed_query],
+    "queryData": seed_queries,
     "d1": period["d1"],
     "d2": period["d2"],
     "stopWords": [],
@@ -7891,11 +7939,13 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
     "source": "mpstats-expanding",
     "status": "loaded" if rows else "empty",
     "seedQuery": seed_query,
+    "seedQueries": seed_queries,
     "period": period,
     "cached": cached_flag,
     "semanticCore": {
       "source": "mpstats-expanding",
       "seedQuery": seed_query,
+      "seedQueries": seed_queries,
       "period": period,
       "current": current[:1000],
       "recommended": recommended[:5000],
