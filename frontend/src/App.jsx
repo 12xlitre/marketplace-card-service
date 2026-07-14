@@ -6789,6 +6789,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const autoSemanticCandidateRows = semanticAutoSelectCandidateRows();
+  const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving");
+  const autoSemanticTitle = activeSemanticCore
+    ? autoSemanticCandidateRows.length
+      ? `Автоматически добавить ${formatNumber(autoSemanticCandidateRows.length)} ${pluralRu(autoSemanticCandidateRows.length, "подходящий запрос", "подходящих запроса", "подходящих запросов")} в работу.`
+      : "Сначала подберите запросы через MPStats: кнопка станет активной, когда появятся новые запросы с частотностью без дублей."
+    : "Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats.";
   const currentSemanticFinalExport = semanticFinalExportFromCore(activeSemanticCore, semanticCoreSelected, {
     reportId: semanticActiveReportId,
     seedQuery: semanticSeedQuery.trim(),
@@ -7483,16 +7490,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     persistSemanticSelection([...semanticCoreSelected, item]);
   }
 
-  function autoSelectSemanticKeywords() {
+  function semanticAutoSelectCandidateRows() {
     if (!activeSemanticCore) {
-      setSemanticCoreError("Сначала соберите подборку MPStats по стартовому запросу.");
-      return;
+      return [];
     }
     const existingKeys = semanticExistingQueryKeys(activeSemanticCore);
     const selectedKeys = new Set(semanticCoreSelected.map(semanticQueryKey));
     const searchText = semanticSearch.trim().toLowerCase();
     const excludedWords = semanticFilterWords(semanticExcludeWords);
-    const candidates = semanticCandidateSourceRows(activeSemanticCore)
+    return semanticCandidateSourceRows(activeSemanticCore)
       .filter((item) => !semanticSubjectFilter || item.prioritySubject === semanticSubjectFilter)
       .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
       .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText))
@@ -7501,6 +7507,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
         return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
       })
       .sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+  }
+
+  function autoSelectSemanticKeywords() {
+    if (!activeSemanticCore) {
+      setSemanticCoreError("Сначала соберите подборку MPStats по стартовому запросу.");
+      return;
+    }
+    const candidates = semanticAutoSelectCandidateRows();
     const chosen = [];
     const chosenKeys = new Set();
     const addGroup = (items, limit) => {
@@ -8617,42 +8631,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         : "Повторите подбор или добавление ключа еще раз."}</span>
                   </div>
                 ) : null}
-                  <div className="semantic-final-bar">
-                    <div>
-                      <span>Ключи в карточке</span>
-                      <strong>{formatNumber(activeSemanticContentRows.length)} {pluralRu(activeSemanticContentRows.length, "ключ", "ключа", "ключей")}</strong>
-                      <em>заложены в текущий контент</em>
-                    </div>
-                    <div>
-                      <span>Ранжирующиеся запросы</span>
-                      <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
-                      <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
-                    </div>
-                  <div>
-                    <span>К добавлению с частотой</span>
-                    <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
-                    <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
-                  </div>
-                  <div className="semantic-final-actions">
-                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
-                      <Download size={17} />Скачать файл карточки
-                    </button>
-                    <button className="btn primary" type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} title={semanticFinalAddTitle}>
-                      <CheckSquare size={17} />{semanticFinalMatchesCurrent ? "В итоговом СЯ" : "Добавить в итоговое СЯ"}
-                    </button>
-                  </div>
-                </div>
-                {semanticFinalBanner ? (
-                  <div className={`semantic-save-banner ${semanticFinalBanner.tone}`}>
-                    <strong>{semanticFinalBanner.title}</strong>
-                    <span>{semanticFinalBanner.copy}</span>
-                    {semanticFinalBanner.action === "replace" ? (
-                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving"}>
-                        <CheckSquare size={14} />Заменить старую новой
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
                 {semanticCoreReports.length ? (
                   <div className="semantic-history">
                     <span>Источники MPStats</span>
@@ -8703,8 +8681,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     className="btn"
                     type="button"
                     onClick={autoSelectSemanticKeywords}
-                    disabled={!activeSemanticCore || semanticSaveStatus === "saving"}
-                    title="Сначала подберите запросы через MPStats. После этого кнопка сразу добавит часть подходящих новых запросов в блок к добавлению."
+                    disabled={!canAutoSelectSemantic}
+                    title={autoSemanticTitle}
                   >
                     <WandSparkles size={17} />Автодобавить запросы
                   </button>
@@ -8731,6 +8709,42 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : hasSemanticExpansion ? "Собрать еще" : "Подобрать запросы"}
                   </button>
                 </div>
+                <div className="semantic-final-bar">
+                  <div>
+                    <span>Ключи в карточке</span>
+                    <strong>{formatNumber(activeSemanticContentRows.length)} {pluralRu(activeSemanticContentRows.length, "ключ", "ключа", "ключей")}</strong>
+                    <em>заложены в текущий контент</em>
+                  </div>
+                  <div>
+                    <span>Ранжирующиеся запросы</span>
+                    <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
+                    <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
+                  </div>
+                  <div>
+                    <span>К добавлению с частотой</span>
+                    <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
+                    <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
+                  </div>
+                  <div className="semantic-final-actions">
+                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
+                      <Download size={17} />Скачать файл карточки
+                    </button>
+                    <button className="btn primary" type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} title={semanticFinalAddTitle}>
+                      <CheckSquare size={17} />{semanticFinalMatchesCurrent ? "В итоговом СЯ" : "Добавить в итоговое СЯ"}
+                    </button>
+                  </div>
+                </div>
+                {semanticFinalBanner ? (
+                  <div className={`semantic-save-banner ${semanticFinalBanner.tone}`}>
+                    <strong>{semanticFinalBanner.title}</strong>
+                    <span>{semanticFinalBanner.copy}</span>
+                    {semanticFinalBanner.action === "replace" ? (
+                      <button className="btn mini" type="button" onClick={replaceSemanticCoreFinal} disabled={semanticFinalStatus === "saving"}>
+                        <CheckSquare size={14} />Заменить старую новой
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
             ) : null}
 

@@ -3986,9 +3986,9 @@ tr:last-child td {
 
 .semantic-final-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
   gap: 12px;
-  align-items: center;
+  align-items: stretch;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 12px;
@@ -4005,17 +4005,20 @@ tr:last-child td {
   color: var(--muted);
   text-transform: uppercase;
   font-size: 12px;
+  line-height: 1.25;
   font-weight: 800;
 }
 
 .semantic-final-bar strong {
   font-size: 18px;
+  line-height: 1.25;
 }
 
 .semantic-final-bar em {
   color: var(--muted);
   font-style: normal;
   font-size: 12px;
+  line-height: 1.35;
 }
 
 .semantic-final-actions {
@@ -4027,6 +4030,9 @@ tr:last-child td {
 
 .semantic-final-bar .semantic-final-actions {
   display: flex;
+  grid-column: 1 / -1;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .semantic-final-actions .btn {
