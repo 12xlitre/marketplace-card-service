@@ -2305,8 +2305,16 @@ function semanticCountExportValue(value) {
   return Number.isFinite(number) && number > 0 ? number : "";
 }
 
+function semanticFrequencyValue(item) {
+  return semanticCountExportValue(item?.wbCount);
+}
+
 function semanticHasKeywordRank(item) {
   return Boolean(semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos));
+}
+
+function semanticPrimaryPositionValue(item) {
+  return semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos);
 }
 
 function semanticKeywordRankParts(item) {
@@ -2525,6 +2533,91 @@ function semanticCoreWithSelection(core, selectedItems) {
     missing,
     selectedCount: selected.length,
     workKeywords: recommended.length,
+  };
+}
+
+function semanticRowsByKey(rows) {
+  const output = [];
+  const seen = new Set();
+  (Array.isArray(rows) ? rows : []).forEach((item) => {
+    const key = semanticQueryKey(item);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    output.push(item);
+  });
+  return output;
+}
+
+function semanticRankedSourceRows(core) {
+  if (!core || typeof core !== "object") return [];
+  const sourceRows = Array.isArray(core.rankedKeywords) && core.rankedKeywords.length
+    ? core.rankedKeywords
+    : [
+      ...(Array.isArray(core.current) ? core.current : []),
+      ...(Array.isArray(core.recommended) ? core.recommended : []),
+      ...(Array.isArray(core.missing) ? core.missing : []),
+      ...(Array.isArray(core.allKeywords) ? core.allKeywords : []),
+    ];
+  return semanticRowsByKey(sourceRows.filter((item) => item?.status !== "selected" && semanticHasKeywordRank(item)));
+}
+
+function semanticCurrentPositionRows(core) {
+  return semanticRankedSourceRows(core)
+    .map((item) => ({ ...item, position: semanticPrimaryPositionValue(item) }))
+    .filter((item) => item.position)
+    .sort((left, right) => Number(left.position || 9999) - Number(right.position || 9999));
+}
+
+function semanticCandidateSourceRows(core) {
+  if (!core || typeof core !== "object") return [];
+  const rows = [
+    ...(Array.isArray(core.allKeywords) && core.allKeywords.length ? core.allKeywords : []),
+    ...(Array.isArray(core.recommended) ? core.recommended : []),
+    ...(Array.isArray(core.missing) ? core.missing : []),
+  ];
+  return semanticRowsByKey(rows).filter((item) => semanticFrequencyValue(item));
+}
+
+function semanticSelectedExportRows(selectedRows, core) {
+  const sourceByKey = new Map(semanticCandidateSourceRows(core).map((item) => [semanticQueryKey(item), item]));
+  const currentKeys = new Set(semanticCurrentPositionRows(core).map(semanticQueryKey));
+  const output = [];
+  const seen = new Set();
+  normalizeSemanticSelection(selectedRows).forEach((item) => {
+    const key = semanticQueryKey(item);
+    if (!key || seen.has(key) || currentKeys.has(key)) return;
+    const merged = { ...(sourceByKey.get(key) || {}), ...item };
+    if (!semanticFrequencyValue(merged)) return;
+    seen.add(key);
+    output.push(merged);
+  });
+  return output.sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+}
+
+function semanticCoreFromRankingPayload(payload) {
+  const rankedKeywords = semanticRowsByKey(Array.isArray(payload?.keywords) ? payload.keywords : [])
+    .map((item) => ({
+      ...item,
+      ...semanticRankFields(item, payload?.period || null),
+      status: "current",
+      source: item.source || "mpstats-keywords",
+    }))
+    .filter(semanticHasKeywordRank);
+  return {
+    source: "mpstats-keywords",
+    seedQuery: "",
+    period: payload?.period || {},
+    current: [],
+    recommended: [],
+    missing: [],
+    allKeywords: [],
+    rankedKeywords,
+    subjectOptions: [],
+    totalKeywords: rankedKeywords.length,
+    coveragePercent: null,
+    rankingSource: payload?.source || "mpstats",
+    rankingPeriod: payload?.period || null,
+    reason: "MPStats позиции карточки собраны отдельным отчетом.",
   };
 }
 
@@ -5953,8 +6046,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     riskNotes: latestRiskNotes,
   });
   const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+  const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
+  const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const hasSemanticExpansion = Boolean(activeSemanticCore?.seedQuery || activeSemanticCore?.source === "mpstats-expanding");
   const semanticContentRunning = semanticContentStatus === "loading";
-  const canReoptimizeContent = Boolean(semanticCoreSelected.length && !approvalReadOnly && !semanticContentRunning);
+  const canReoptimizeContent = Boolean(activeSemanticNewRows.length && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
   const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
     || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
@@ -6352,6 +6448,37 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     }
   }
 
+  async function loadSemanticCurrentPositions({ forceRefresh = false } = {}) {
+    if (!portal?.id || !card?.nmID) {
+      setSemanticRankStatus("idle");
+      return null;
+    }
+    setSemanticRankStatus("loading");
+    setSemanticCoreError("");
+    try {
+      const payload = await apiRequest("/api/mpstats/keywords", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          card,
+          refresh: forceRefresh,
+        }),
+      });
+      const rankingCore = semanticCoreFromRankingPayload(payload);
+      const nextCore = semanticCore
+        ? semanticMergeKeywordRankings(semanticCore, payload)
+        : rankingCore;
+      setSemanticCore(nextCore);
+      setSemanticRankStatus(semanticCurrentPositionRows(nextCore).length ? "loaded" : "empty");
+      setSemanticCoreStatus((status) => (status === "idle" ? (payload.cached ? "cached" : "loaded") : status));
+      return nextCore;
+    } catch {
+      setSemanticRankStatus("error");
+      setSemanticCoreStatus((status) => (status === "idle" ? "unavailable" : status));
+      return null;
+    }
+  }
+
   useEffect(() => {
     let active = true;
     if (!semanticCore || semanticCore.rankingSource || !portal?.id || !card?.nmID) {
@@ -6368,6 +6495,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       active = false;
     };
   }, [semanticCore, portal?.id, card?.nmID]);
+
+  useEffect(() => {
+    if (activeTab !== "semantic" || semanticCore || semanticRankStatus !== "idle" || !portal?.id || !card?.nmID) {
+      return;
+    }
+    loadSemanticCurrentPositions({ forceRefresh: false });
+  }, [activeTab, semanticCore, semanticRankStatus, portal?.id, card?.nmID]);
 
   async function loadSemanticCore({ forceRefresh = false } = {}) {
     if (!portal?.id || !card?.nmID || !semanticSeedQuery.trim()) {
@@ -6486,6 +6620,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     if (!key || semanticCoreSelected.some((selected) => semanticQueryKey(selected) === key)) {
       return;
     }
+    if (new Set(activeSemanticPositionRows.map(semanticQueryKey)).has(key)) {
+      setSemanticCoreError("Этот запрос уже есть среди действующих позиций карточки и не попадет в добавление.");
+      return;
+    }
+    if (!semanticFrequencyValue(item)) {
+      setSemanticCoreError("У запроса нет частотности WB в MPStats, поэтому он не попадет в итоговую выгрузку.");
+      return;
+    }
+    setSemanticCoreError("");
     persistSemanticSelection([...semanticCoreSelected, item]);
   }
 
@@ -6549,7 +6692,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   async function reoptimizeContentFromSemanticCore() {
-    if (!semanticCoreSelected.length || approvalReadOnly) {
+    if (!activeSemanticNewRows.length || approvalReadOnly) {
       return;
     }
     setSemanticContentStatus("loading");
@@ -6561,8 +6704,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
           portalId: portal?.id,
           cardKey: draftCardKey,
           card,
-          selectedKeywords: semanticCoreSelected,
-          currentKeywords: activeSemanticCore?.current || [],
+          selectedKeywords: activeSemanticNewRows,
+          currentKeywords: activeSemanticPositionRows,
           draft: {
             title: draftTitle,
             description: draftDescription,
@@ -7358,57 +7501,25 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
   }
 
   function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore, suffix = "semantic-core" } = {}) {
-    const coreRowsByKey = new Map([
-      ...(Array.isArray(core?.current) ? core.current : []),
-      ...(Array.isArray(core?.recommended) ? core.recommended : []),
-      ...(Array.isArray(core?.missing) ? core.missing : []),
-      ...(Array.isArray(core?.allKeywords) ? core.allKeywords : []),
-      ...(Array.isArray(core?.rankedKeywords) ? core.rankedKeywords : []),
-    ].map((item) => [semanticQueryKey(item), item]).filter(([key]) => key));
-    const selectedRowsNormalized = normalizeSemanticSelection(selectedRows).map((item) => {
-      const source = coreRowsByKey.get(semanticQueryKey(item));
-      return source ? { ...source, ...item } : item;
-    });
-    const currentRows = (Array.isArray(core?.current) ? core.current : [])
-      .filter((item) => item?.status !== "selected")
-      .filter((item) => semanticQueryKey(item));
+    const currentRows = semanticCurrentPositionRows(core);
+    const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
     const rowCount = Math.max(currentRows.length, selectedRowsNormalized.length);
     downloadXlsx(`${exportFileBase}-${suffix}.xlsx`, [{
       name: "СЯ в работу",
       freezeRows: 1,
-      widths: [44, 16, 16, 16, 16, 16, 44, 16, 16, 16, 16, 16, 28, 34],
+      widths: [48, 18, 48, 18],
       rows: [
         [
-          "Действующие до подбора",
-          "Действ. частота WB",
-          "Органика",
-          "Средняя",
-          "Реклама",
-          "Найдено товаров",
-          "Добавленный ключ",
-          "Добавл. частота WB",
-          "Органика",
-          "Средняя",
-          "Реклама",
-          "Найдено товаров",
-          "Предмет",
-          "Кластер",
+          "Действующий запрос",
+          "Позиция карточки",
+          "Запрос к добавлению",
+          "Частотность",
         ],
         ...Array.from({ length: rowCount }, (_, index) => [
           currentRows[index]?.query || "",
-          semanticCountExportValue(currentRows[index]?.wbCount),
-          semanticRankExportValue(currentRows[index]?.orgPos),
-          semanticRankExportValue(currentRows[index]?.avgPos),
-          semanticRankExportValue(currentRows[index]?.adPos),
-          semanticCountExportValue(currentRows[index]?.totalFound),
+          semanticRankExportValue(currentRows[index]?.position),
           selectedRowsNormalized[index]?.query || "",
-          semanticCountExportValue(selectedRowsNormalized[index]?.wbCount),
-          semanticRankExportValue(selectedRowsNormalized[index]?.orgPos),
-          semanticRankExportValue(selectedRowsNormalized[index]?.avgPos),
-          semanticRankExportValue(selectedRowsNormalized[index]?.adPos),
-          semanticCountExportValue(selectedRowsNormalized[index]?.totalFound),
-          selectedRowsNormalized[index]?.prioritySubject || "",
-          selectedRowsNormalized[index]?.cluster || "",
+          semanticFrequencyValue(selectedRowsNormalized[index]),
         ]),
       ],
     }]);
@@ -7486,10 +7597,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 <div className="strip-head">
                   <div>
                     <h2>Семантическое ядро</h2>
-                    <p>Отдельный SEO-запрос MPStats: расширение запросов по стартовой фразе без запуска аудита.</p>
+                    <p>Действующие позиции карточки и новые запросы из MPStats для итогового SEO-файла.</p>
                   </div>
                   <Tag tone={activeSemanticCore ? "blue" : (semanticCoreStatus === "loading" ? "blue" : "amber")}>
-                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : semanticCoreSelected.length ? `${semanticCoreSelected.length} в финале` : activeSemanticCore ? "источник открыт" : "нет данных"}
+                    {semanticCoreStatus === "loading" ? "собираем" : semanticCoreStatus === "pending" ? "готовится" : activeSemanticNewRows.length ? `${activeSemanticNewRows.length} к добавлению` : activeSemanticPositionRows.length ? `${activeSemanticPositionRows.length} действующих` : "нет данных"}
                   </Tag>
                 </div>
                 <div className="semantic-query-bar">
@@ -7527,11 +7638,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                 ) : null}
                 <div className="semantic-final-bar">
                   <div>
-                    <span>Итоговое СЯ</span>
-                    <strong>{formatNumber(semanticCoreSelected.length)} {pluralRu(semanticCoreSelected.length, "ключ", "ключа", "ключей")}</strong>
-                    <em>{semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "источник", "источника", "источников")} MPStats` : "источников MPStats пока нет"}</em>
+                    <span>Действующие с позицией</span>
+                    <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
+                    <em>из отчета видимости MPStats</em>
                   </div>
-                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore && !semanticCoreSelected.length}>
+                  <div>
+                    <span>К добавлению с частотой</span>
+                    <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
+                    <em>{semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
+                  </div>
+                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticPositionRows.length && !activeSemanticNewRows.length}>
                     <Download size={17} />Скачать итоговый файл
                   </button>
                 </div>
@@ -7565,15 +7681,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   />
                 ) : (
                   <div className="empty-state">
-                    <strong>Семантическое ядро еще не собрано</strong>
-                    <span>Введите релевантный запрос и запустите подбор. MPStats вернет расширение запросов, кластеры, предметы и частотность.</span>
+                    <strong>Позиции карточки еще не загружены</strong>
+                    <span>MPStats вернет действующие запросы с позициями, затем можно собрать новые запросы по стартовой фразе.</span>
                   </div>
                 )}
                 <div className="tab-actions">
                   {semanticCoreError ? <span className="status-note">{semanticCoreError}</span> : null}
-                  {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем позиции действующих ключей...</span> : null}
-                  {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул позиции по действующим ключам.</span> : null}
-                  {semanticRankStatus === "error" ? <span className="status-note">СЯ собрано, но позиции ключей сейчас не загрузились.</span> : null}
+                  {semanticRankStatus === "loading" ? <span className="status-note">Подтягиваем действующие запросы и позиции карточки...</span> : null}
+                  {semanticRankStatus === "empty" ? <span className="status-note">MPStats не вернул действующие позиции карточки.</span> : null}
+                  {semanticRankStatus === "error" ? <span className="status-note">Подборка доступна, но позиции карточки сейчас не загрузились.</span> : null}
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем итоговое СЯ...</span> : null}
                   {semanticSaveStatus === "saved" ? <span className="status-note">Итоговое СЯ сохранено в карточке.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
@@ -7586,12 +7702,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     type="button"
                     onClick={reoptimizeContentFromSemanticCore}
                     disabled={!canReoptimizeContent}
-                    title={semanticCoreSelected.length ? "Переписать заголовок и описание с учетом выбранных запросов" : "Сначала добавьте запросы в работу"}
+                    title={activeSemanticNewRows.length ? "Переписать заголовок и описание с учетом новых запросов" : "Сначала добавьте новые запросы с частотностью"}
                   >
                     <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
-                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: Boolean(activeSemanticCore) })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
-                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : activeSemanticCore ? "Собрать еще" : "Подобрать запросы"}
+                  <button className="btn" type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID}>
+                    <RefreshCw size={17} />{semanticRankStatus === "loading" ? "Обновляем позиции" : "Обновить позиции"}
+                  </button>
+                  <button className="btn primary" type="button" onClick={() => loadSemanticCore({ forceRefresh: hasSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()}>
+                    <Search size={17} />{semanticCoreStatus === "loading" ? "Подбираем запросы" : semanticCoreStatus === "pending" ? "Повторить подбор" : hasSemanticExpansion ? "Собрать еще" : "Подобрать запросы"}
                   </button>
                 </div>
               </section>
@@ -9183,125 +9302,80 @@ function SemanticMetric({ active = false, label, value, hint, onClick }) {
 
 function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", onTakeKeyword = null, onRemoveKeyword = null }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
-  const recommended = Array.isArray(semanticCore?.recommended) ? semanticCore.recommended : [];
-  const missing = Array.isArray(semanticCore?.missing) ? semanticCore.missing : [];
-  const allKeywords = Array.isArray(semanticCore?.allKeywords) ? semanticCore.allKeywords : [];
-  const rankedKeywords = Array.isArray(semanticCore?.rankedKeywords) ? semanticCore.rankedKeywords : [];
-  const selectedItems = current.filter((item) => item.status === "selected");
-  const currentItems = current.filter((item) => item.status !== "selected");
-  const rankedCurrentItems = currentItems.filter(semanticHasKeywordRank);
-  const rankedCurrentCount = rankedCurrentItems.length;
-  const workItems = recommended.length ? recommended : missing;
+  const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
+  const positionItems = semanticCurrentPositionRows(semanticCore);
+  const existingKeys = new Set(positionItems.map(semanticQueryKey));
+  const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
+  const sourceItems = semanticCandidateSourceRows(semanticCore);
   const coverage = semanticCore?.coveragePercent;
   const selectedLimit = compact ? 4 : standalone ? 500 : 8;
   const currentLimit = compact ? 4 : standalone ? 120 : 8;
   const workLimit = compact ? 4 : standalone ? 250 : 8;
   const workPageSize = standalone ? 250 : workLimit;
-  const rankedCandidateLimit = compact ? 4 : standalone ? 250 : 8;
-  const rankedCandidatePageSize = standalone ? 250 : rankedCandidateLimit;
   const [visibleWorkLimit, setVisibleWorkLimit] = useState(workLimit);
-  const [visibleRankedCandidateLimit, setVisibleRankedCandidateLimit] = useState(rankedCandidateLimit);
   const [metricFilter, setMetricFilter] = useState("all");
   const searchText = String(search || "").trim().toLowerCase();
   const excludedWords = semanticFilterWords(excludeWords);
-  const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
-  const currentKeys = new Set(currentItems.map(semanticQueryKey));
-  const sourceItems = allKeywords.length ? allKeywords : workItems;
-  const allRankedItems = (rankedKeywords.length ? rankedKeywords : sourceItems).filter(semanticHasKeywordRank);
-  const reportTotal = semanticCore?.totalKeywords || sourceItems.length || current.length + missing.length;
+  const reportTotal = semanticCore?.totalKeywords || sourceItems.length || positionItems.length + selectedItems.length;
   const expansionPeriod = semanticPeriodLabel(semanticCore?.period);
   const rankingPeriod = semanticPeriodLabel(semanticCore?.rankingPeriod || semanticCore?.period);
+  const filteredPositionItems = positionItems
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
-  const filteredAllRankedItems = allRankedItems
-    .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
-    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
-  const seenRankedCandidateKeys = new Set();
-  const filteredAllRankedCandidateItems = filteredAllRankedItems.filter((item) => {
-    const key = semanticQueryKey(item);
-    if (!key || currentKeys.has(key) || selectedKeys.has(key) || seenRankedCandidateKeys.has(key)) {
-      return false;
-    }
-    seenRankedCandidateKeys.add(key);
-    return true;
-  });
   const filteredWorkItems = filteredSourceItems
-    .filter((item) => !selectedKeys.has(semanticQueryKey(item)));
+    .filter((item) => {
+      const key = semanticQueryKey(item);
+      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+    });
   useEffect(() => {
     setVisibleWorkLimit(workLimit);
   }, [workLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
   useEffect(() => {
-    setVisibleRankedCandidateLimit(rankedCandidateLimit);
-  }, [rankedCandidateLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
-  useEffect(() => {
     setMetricFilter("all");
   }, [semanticCore?.seedQuery, reportTotal]);
   const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
-  const visibleRankedCandidateCount = Math.min(visibleRankedCandidateLimit, filteredAllRankedCandidateItems.length);
   const toggleMetricFilter = (filter) => {
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
-  const displayedRankedCandidateItems = metricFilter === "allRanked" ? filteredAllRankedCandidateItems : [];
-  const displayedCurrentItems = metricFilter === "ranked"
-    ? rankedCurrentItems
-    : metricFilter === "current" || metricFilter === "all"
-      ? currentItems
-      : [];
-  const leftListTitle = metricFilter === "allRanked"
-    ? "Позиции MPStats к добавлению"
-    : metricFilter === "ranked"
-    ? "Действующие с позициями"
-    : metricFilter === "current"
-      ? "Действующие ключи"
-      : metricFilter === "selected"
+  const displayedCurrentItems = metricFilter === "positions" || metricFilter === "all" ? filteredPositionItems : [];
+  const leftListTitle = metricFilter === "positions"
+    ? "Действующие запросы с позициями"
+    : metricFilter === "selected"
         ? "Добавленные в работу"
-        : "Выбранные и добавленные";
+        : "Итоговый файл";
   const showWorkColumn = metricFilter === "all";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
         <strong>Семантическое ядро</strong>
-        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
+        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{positionItems.length ? `${formatNumber(positionItems.length)} позиций` : coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
       </div>
-      <p>{semanticCore?.reason || "MPStats анализирует текущий заголовок и описание по поисковым запросам карточки."}</p>
+      <p>{semanticCore?.reason || "MPStats собирает действующие позиции карточки и расширение по стартовой фразе."}</p>
       {standalone ? (
         <div className="semantic-core-metrics">
           <SemanticMetric
-            active={metricFilter === "current"}
+            active={metricFilter === "positions"}
             label="Действующие"
-            value={formatNumber(currentItems.length)}
-            hint="Запросы из SEO-отчета MPStats, все значимые слова которых уже есть в текущем названии или описании карточки."
-            onClick={() => toggleMetricFilter("current")}
-          />
-          <SemanticMetric
-            active={metricFilter === "ranked"}
-            label="Действ. с позициями"
-            value={formatNumber(rankedCurrentCount)}
-            hint={`Действующие запросы, которые совпали с отчетом позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}.`}
-            onClick={() => toggleMetricFilter("ranked")}
-          />
-          <SemanticMetric
-            label="Позиции карточки"
-            value={formatNumber(allRankedItems.length)}
-            hint={`Все запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. Это отдельный отчет, не расширение по стартовой фразе.`}
-            onClick={() => toggleMetricFilter("allRanked")}
-          />
-          <SemanticMetric
-            active={metricFilter === "allRanked"}
-            label="К добавлению из позиций"
-            value={formatNumber(filteredAllRankedCandidateItems.length)}
-            hint="Запросы из отчета позиций карточки, которых еще нет среди действующих ключей и добавленных в итоговое СЯ."
-            onClick={() => toggleMetricFilter("allRanked")}
+            value={formatNumber(positionItems.length)}
+            hint={`Запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. Они попадут в Excel с позицией карточки.`}
+            onClick={() => toggleMetricFilter("positions")}
           />
           <SemanticMetric
             active={metricFilter === "selected"}
-            label="Добавленные"
+            label="К добавлению"
             value={formatNumber(selectedItems.length)}
-            hint="Запросы, которые сотрудник уже добавил в рабочий набор для будущей оптимизации контента."
+            hint="Новые запросы, которых нет среди действующих позиций карточки. В Excel попадут только запросы с частотностью WB."
             onClick={() => toggleMetricFilter("selected")}
+          />
+          <SemanticMetric
+            label="Кандидаты"
+            value={formatNumber(filteredWorkItems.length)}
+            hint="Новые запросы из текущей подборки MPStats после фильтров, слов-исключений, дублей и действующих позиций."
+            onClick={() => setMetricFilter("all")}
           />
           <SemanticMetric
             label="Расширение MPStats"
@@ -9334,7 +9408,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
+                  <em>{semanticKeywordMeta(item) || "действующий запрос карточки"}</em>
                   {standalone ? (
                     <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
                       {semanticKeywordRankLabel(item)}
@@ -9344,43 +9418,12 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               </div>
             )) : null}
             {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} действующих. Полный список попадет в Excel.</p> : null}
-            {displayedRankedCandidateItems.length ? displayedRankedCandidateItems.slice(0, visibleRankedCandidateLimit).map((item) => (
-              <div className="semantic-keyword recommended" key={`ranked-candidate-${semanticQueryKey(item) || item.query}`}>
-                <div className="semantic-keyword-main">
-                  <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || item.reason || "есть позиция MPStats, нет в действующих"}</em>
-                  <span className="semantic-keyword-rank">{semanticKeywordRankLabel(item)}</span>
-                </div>
-                <div className="semantic-keyword-actions">
-                  {standalone && onTakeKeyword ? (
-                    <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)}>
-                      <Plus size={14} />В работу
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            )) : null}
-            {displayedRankedCandidateItems.length > visibleRankedCandidateLimit ? (
-              <div className="semantic-list-footer">
-                <p>Показано {formatNumber(visibleRankedCandidateCount)} из {formatNumber(displayedRankedCandidateItems.length)} запросов с позициями.</p>
-                {standalone ? (
-                  <div>
-                    <button className="btn mini" type="button" onClick={() => setVisibleRankedCandidateLimit((value) => Math.min(value + rankedCandidatePageSize, displayedRankedCandidateItems.length))}>
-                      Показать еще {formatNumber(Math.min(rankedCandidatePageSize, displayedRankedCandidateItems.length - visibleRankedCandidateCount))}
-                    </button>
-                    <button className="btn mini" type="button" onClick={() => setVisibleRankedCandidateLimit(displayedRankedCandidateItems.length)}>
-                      Показать все
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length && !displayedRankedCandidateItems.length ? <p>{metricFilter === "allRanked" ? "Новых запросов MPStats с позициями нет." : metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Действующих запросов с позициями нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
         <div>
-          <span>Найденные запросы MPStats · к добавлению {formatNumber(filteredWorkItems.length)}</span>
+          <span>Новые запросы MPStats · к добавлению {formatNumber(filteredWorkItems.length)}</span>
           <div className="semantic-keyword-list">
             {filteredWorkItems.slice(0, visibleWorkLimit).map((item) => (
               <div className="semantic-keyword recommended" key={`recommended-${item.query}`}>
@@ -9413,7 +9456,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             ) : null}
-            {!filteredWorkItems.length ? <p>По текущим фильтрам запросы не найдены.</p> : null}
+            {!filteredWorkItems.length ? <p>Новых запросов с частотностью по текущим фильтрам нет.</p> : null}
           </div>
         </div>
         ) : null}
