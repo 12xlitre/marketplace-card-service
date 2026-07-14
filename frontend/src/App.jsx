@@ -811,6 +811,7 @@ function approvalStatusTone(status) {
 }
 
 const workTypeOptions = [
+  { key: "semantic", label: "СЯ" },
   { key: "content", label: "Контент" },
   { key: "prices", label: "Цены" },
   { key: "stocks", label: "Остатки" },
@@ -6377,7 +6378,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
           </div>
           <label className="field-label">
             Комментарий
-            <textarea value={comment} onChange={updateComment} placeholder="Например: проверить заголовки и описание перед согласованием." />
+            <textarea value={comment} onChange={updateComment} placeholder="Например: собрать СЯ по списку артикулов или проверить заголовки перед согласованием." />
           </label>
         </div>
         <div className="modal-actions">
@@ -6401,8 +6402,8 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
     <section className="workspace-strip approval-workflow-strip">
       <div className="strip-head">
         <div>
-          <h2>Задачи и согласование</h2>
-          <p>Очередь карточек для технического специалиста, согласование и история решений по кабинету.</p>
+          <h2>Задачи</h2>
+          <p>Очередь карточек для технического специалиста. СЯ закрывается добавлением в итоговое СЯ, контент, цены и остатки идут через согласование.</p>
         </div>
         <Tag tone={activeTasks.length ? "amber" : "green"}>
           {status === "loading" ? "загрузка" : `${activeTasks.length} ${pluralRu(activeTasks.length, "задача", "задачи", "задач")}`}
@@ -6417,8 +6418,11 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
         {activeTasks.length ? activeTasks.map((task) => {
           const canOpen = cardKeys.has(task.cardKey);
           const assignee = findUser(task.assigneeLogin);
-          const author = findUser(task.submittedBy);
+          const taskAuthorLogin = task.batchCreatedBy || task.submittedBy;
+          const author = findUser(taskAuthorLogin);
+          const taskCreatedAt = task.batchCreatedAt || task.submittedAt;
           const labels = Array.isArray(task.workTypeLabels) && task.workTypeLabels.length ? task.workTypeLabels : workTypeLabels(task.workTypes);
+          const semanticOnlyTask = normalizeWorkTypes(task.workTypes).length === 1 && normalizeWorkTypes(task.workTypes)[0] === "semantic";
           return (
             <article className="approval-task-card" key={`${task.cardKey}-${task.status}`}>
               <div className="approval-task-main">
@@ -6433,15 +6437,15 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
                 {task.batchCardsCount ? <Tag tone="amber">{formatNumber(task.batchCardsCount)} в пачке</Tag> : null}
               </div>
               <div className="approval-task-meta">
-                <span>Автор: {author?.full_name || task.submittedBy || "не указан"}</span>
+                <span>Поставил: {author?.full_name || taskAuthorLogin || "не указан"}</span>
                 <span>Исполнитель: {assignee?.full_name || task.assigneeLogin || "техспециалист не задан"}</span>
-                <span>{task.submittedAt ? new Date(task.submittedAt).toLocaleString("ru-RU") : "без даты"}</span>
+                <span>{taskCreatedAt ? new Date(taskCreatedAt).toLocaleString("ru-RU") : "без даты"}</span>
               </div>
               {task.workComment ? <p className="approval-task-reason">{task.workComment}</p> : null}
               {task.returnReason ? <p className="approval-task-reason">{task.returnReason}</p> : null}
               <div className="approval-task-actions">
                 <button className="btn primary" type="button" onClick={() => onOpenTask(task)} disabled={!canOpen}>
-                  <Eye size={17} />{task.status === "draft" ? "Открыть карточку" : "Открыть изменения"}
+                  <Eye size={17} />{semanticOnlyTask ? "Открыть СЯ" : task.status === "draft" ? "Открыть карточку" : "Открыть изменения"}
                 </button>
               </div>
             </article>

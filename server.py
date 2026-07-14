@@ -2540,6 +2540,25 @@ def snapshot_card_lookup(snapshot_json):
   return lookup
 
 
+def semantic_core_final_exists(meta):
+  if not isinstance(meta, dict):
+    return False
+  final_export = meta.get("semanticCoreFinal")
+  if not isinstance(final_export, dict):
+    return False
+  semantic_core = final_export.get("semanticCore")
+  return isinstance(semantic_core, dict) and bool(semantic_core)
+
+
+def active_task_work_types(meta):
+  meta = meta if isinstance(meta, dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  work_types = normalize_work_types(batch.get("workTypes"))
+  if "semantic" in work_types and semantic_core_final_exists(meta):
+    work_types = [work_type for work_type in work_types if work_type != "semantic"]
+  return work_types
+
+
 def public_approval_task(row, snapshot_lookup):
   try:
     payload = json.loads(row["payload_json"])
@@ -2549,7 +2568,7 @@ def public_approval_task(row, snapshot_lookup):
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
-  work_types = normalize_work_types(batch.get("workTypes"))
+  work_types = active_task_work_types(meta)
   card = snapshot_lookup.get(row["card_key"], {})
   return {
     "portalId": str(row["portal_id"]),
@@ -2571,7 +2590,7 @@ def public_approval_task(row, snapshot_lookup):
     "batchCreatedAt": str(batch.get("createdAt") or ""),
     "batchCardsCount": int(batch.get("cardsCount") or 0),
     "workTypes": work_types,
-    "workTypeLabels": work_type_labels(work_types),
+    "workTypeLabels": [WORK_TYPE_LABELS.get(item, item) for item in work_types],
     "workComment": str(batch.get("comment") or "")[:700],
     "updatedAt": row["updated_at"] or "",
   }
@@ -2698,6 +2717,8 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
   approval_sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
   next_approval_sections = {**approval_sections}
   for work_type in work_types:
+    if work_type not in APPROVAL_SECTION_LABELS:
+      continue
     section = next_approval_sections.get(work_type) if isinstance(next_approval_sections.get(work_type), dict) else {}
     if str(section.get("status") or "draft") == "draft":
       next_approval_sections[work_type] = {
@@ -2870,7 +2891,11 @@ def approval_workflow(portal_id, user):
     ).fetchall()
     event_rows = all_event_rows[:50]
 
-  tasks = [public_approval_task(row, snapshot_lookup) for row in task_rows]
+  tasks = [
+    task
+    for task in (public_approval_task(row, snapshot_lookup) for row in task_rows)
+    if task.get("workTypes")
+  ]
   draft_tasks = [task for task in tasks if task["status"] == "draft"]
   submitted_tasks = [task for task in tasks if task["status"] == "submitted"]
   returned_tasks = [task for task in tasks if task["status"] == "changes_requested"]
@@ -3018,6 +3043,7 @@ APPROVAL_SECTION_LABELS = {
 
 
 WORK_TYPE_LABELS = {
+  "semantic": "СЯ",
   "content": "Контент",
   "prices": "Цены",
   "stocks": "Остатки",
