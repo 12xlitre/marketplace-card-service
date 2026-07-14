@@ -3849,6 +3849,20 @@ export default function App() {
     });
   }
 
+  function removeUserPortal(portalId) {
+    const normalizedPortalId = String(portalId || "");
+    if (!normalizedPortalId) {
+      return;
+    }
+    setUserPortals((items) => items.filter((item) => String(item.id) !== normalizedPortalId));
+    setPortalWorkSummaries((current) => {
+      const next = { ...current };
+      delete next[normalizedPortalId];
+      return next;
+    });
+    clearLocalDraftsForPortal(normalizedPortalId);
+  }
+
   async function setPortalActive(portal, isActive) {
     if (!canManagePortals || !portal) {
       return;
@@ -3856,6 +3870,10 @@ export default function App() {
     if (portal.isDemo) {
       localStorage.setItem("opticards-demo-archived", isActive ? "0" : "1");
       setDemoPortalArchived(!isActive);
+      if (isActive) {
+        setPortalStatusFilter("active");
+        setNotice("Кабинет восстановлен из архива.");
+      }
       if (!isActive && selectedPortalId === "demo-wb") {
         setScreen("cabinets");
       }
@@ -3872,8 +3890,46 @@ export default function App() {
       if (!isActive && String(selectedPortalId) === String(portal.id)) {
         setScreen("cabinets");
       }
+      if (isActive) {
+        setPortalStatusFilter("active");
+        setNotice("Кабинет восстановлен из архива.");
+      } else {
+        setNotice("Кабинет отправлен в архив.");
+      }
     } catch {
       setNotice("Не удалось изменить статус кабинета. Попробуйте повторить позже.");
+    }
+  }
+
+  async function deletePortal(portal) {
+    if (!canManagePortals || !portal || portal.isDemo) {
+      return;
+    }
+    if (portal.isActive !== false) {
+      setNotice("Сначала отправьте кабинет в архив, затем его можно удалить.");
+      return;
+    }
+    const displayName = portalDisplayName(portal);
+    const confirmed = window.confirm(
+      `Удалить кабинет "${displayName}" без восстановления? Будут удалены карточки, состав проекта, черновики, задачи, конкуренты и история отчетов по этому кабинету.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}`, {
+        method: "DELETE",
+      });
+      removeUserPortal(portal.id);
+      if (String(selectedPortalId) === String(portal.id)) {
+        setSelectedPortalId("demo-wb");
+        setScreen("cabinets");
+      }
+      setNotice("Кабинет удален.");
+    } catch (error) {
+      setNotice(error.message === "portal_must_be_archived"
+        ? "Сначала отправьте кабинет в архив, затем его можно удалить."
+        : "Не удалось удалить кабинет. Попробуйте повторить позже.");
     }
   }
 
@@ -4202,6 +4258,7 @@ export default function App() {
             onOpen={showSeller}
             onArchive={(portal) => setPortalActive(portal, false)}
             onRestore={(portal) => setPortalActive(portal, true)}
+            onDelete={deletePortal}
             helpEnabled={helpEnabled}
             onOpenModal={(mode) => {
               setPortalModalMode(mode);
@@ -4417,7 +4474,7 @@ function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNa
   );
 }
 
-function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onOpenModal, helpEnabled = false }) {
+function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onDelete, onOpenModal, helpEnabled = false }) {
   const apiCount = activePortals.filter((portal) => portal.apiConnected).length;
   const manualCount = activePortals.filter((portal) => !portal.apiConnected).length;
   const apiCardsCount = activePortals
@@ -4503,6 +4560,7 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
               onOpen={() => onOpen(portal)}
               onArchive={() => onArchive(portal)}
               onRestore={() => onRestore(portal)}
+              onDelete={() => onDelete(portal)}
             />
           ))}
           {statusFilter !== "inactive" ? (
@@ -4522,7 +4580,7 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
   );
 }
 
-function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onRestore }) {
+function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onRestore, onDelete }) {
   const inactive = portal.isActive === false;
   const displayName = portalDisplayName(portal);
   const creator = portalCreatorInfo(portal, findUser);
@@ -4558,7 +4616,12 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
         </Tag>
         <div className="portal-actions">
           {inactive ? (
-            canManage ? <button className="btn primary" type="button" onClick={onRestore}><RotateCcw size={16} />Вернуть</button> : null
+            canManage ? (
+              <>
+                <button className="btn primary" type="button" onClick={onRestore}><RotateCcw size={16} />Вернуть</button>
+                <button className="btn danger" type="button" onClick={onDelete}><Trash2 size={16} />Удалить</button>
+              </>
+            ) : null
           ) : (
             <>
               {canManage ? <button className="btn" type="button" onClick={onArchive}><Archive size={16} />В архив</button> : null}
@@ -9941,6 +10004,7 @@ const adminEventLabels = {
   portal_name_updated: "Переименован кабинет",
   portal_archived: "Кабинет отправлен в архив",
   portal_restored: "Кабинет восстановлен",
+  portal_deleted: "Кабинет удален",
   wb_token_replaced: "Заменен WB API ключ",
   service_integration_saved: "Сохранена интеграция",
 };

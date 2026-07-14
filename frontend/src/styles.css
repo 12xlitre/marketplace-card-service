@@ -475,6 +475,12 @@ a {
   border-color: var(--brand);
 }
 
+.btn.danger {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: #e9b9b9;
+}
+
 .btn.ghost {
   background: transparent;
   box-shadow: none;

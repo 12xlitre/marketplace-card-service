@@ -1500,6 +1500,60 @@ def set_portal_active(portal_id, is_active, actor=None):
   return get_portal_row(portal_id)
 
 
+def delete_portal(portal_id, actor=None):
+  init_db()
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  actor_login = actor["login"] if isinstance(actor, sqlite3.Row) else (actor or {}).get("login", "")
+  portal_details = {}
+  with connect_db() as db:
+    portal = db.execute(
+      """
+      SELECT id, name, marketplace, scope, status, is_active, api_connected,
+             card_count, problem_count, store_url, manual_source, created_by, created_at
+      FROM portals
+      WHERE id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      return None
+    if bool(portal["is_active"]):
+      raise ValueError("portal_must_be_archived")
+    portal_details = public_wb_value(dict(portal))
+    related_counts = {}
+    for table in (
+      "portal_members",
+      "portal_integrations",
+      "card_drafts",
+      "portal_workset_cards",
+      "card_approval_events",
+      "card_competitors",
+      "report_history",
+    ):
+      row = db.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE portal_id = ?", (numeric_portal_id,)).fetchone()
+      related_counts[table] = int(row["count"] or 0) if row else 0
+    db.execute(
+      """
+      INSERT INTO admin_events (actor_login, action, target_type, target_id, portal_id, details_json)
+      VALUES (?, 'portal_deleted', 'portal', ?, ?, ?)
+      """,
+      (
+        str(actor_login or "")[:120],
+        str(numeric_portal_id),
+        numeric_portal_id,
+        json.dumps(admin_event_details({
+          "portal": portal_details,
+          "relatedCounts": related_counts,
+        }), ensure_ascii=False, separators=(",", ":")),
+      ),
+    )
+    db.execute("DELETE FROM portals WHERE id = ?", (numeric_portal_id,))
+  return portal_details
+
+
 def update_portal_sync_stats(portal_id, snapshot):
   try:
     numeric_portal_id = int(portal_id)
@@ -10972,6 +11026,31 @@ class OpticardsHandler(BaseHTTPRequestHandler):
   def do_DELETE(self):
     parsed = urlparse(self.path)
     path = parsed.path
+    if path.startswith("/api/portals/"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      try:
+        deleted = delete_portal(portal_id, actor=user)
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": error_text})
+        return
+      if not deleted:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"deleted": True, "portal": deleted})
+      return
+
     if path == "/api/card-drafts":
       user = self.require_user()
       if not user:
