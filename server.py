@@ -1694,6 +1694,7 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
     raise ValueError("portal_not_found")
   if bool(row["api_connected"]):
     raise ValueError("portal_has_api")
+  existing_cards = wb_snapshot_cards_from_row(row)
   snapshot = build_mpstats_storefront_snapshot(
     row["name"],
     row["store_url"] or "",
@@ -1708,7 +1709,6 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
         row["store_url"] or "",
         row["manual_source"] or "",
       )
-      existing_cards = wb_snapshot_cards_from_row(row)
       if existing_cards and not snapshot_cards_match_wb_seller(existing_cards, seller_ids):
         loaded_at = utc_now().isoformat()
         source = bootstrap.get("source") if isinstance(bootstrap.get("source"), dict) else {}
@@ -1747,6 +1747,9 @@ def refresh_manual_portal_from_mpstats(portal_id, user):
     bootstrap = snapshot.get("manualBootstrap") or bootstrap
     if not snapshot.get("cards"):
       return row, bootstrap
+  if existing_cards and not (snapshot.get("manualBootstrap") or {}).get("replaceExisting"):
+    snapshot = merge_snapshot_with_existing_cards(row, snapshot)
+    bootstrap = snapshot.get("manualBootstrap") or bootstrap
   status = "MPStats витрина" if (snapshot.get("stats") or {}).get("sourceLabel") else "MPStats карточки"
   update_portal_manual_snapshot(portal_id, snapshot, status=status)
   updated_row = get_portal_row(portal_id, user)
