@@ -864,6 +864,8 @@ const taskSectionOptions = [
   { key: "stocks", label: "Остатки" },
 ];
 
+const workPeriodTaskOptions = taskSectionOptions;
+
 function taskWorkTypes(task) {
   return Array.isArray(task?.workTypes) && task.workTypes.length ? normalizeWorkTypes(task.workTypes) : [];
 }
@@ -888,6 +890,109 @@ function taskGroupStatus(tasks) {
   if (statuses.includes("changes_requested")) return "changes_requested";
   if (statuses.includes("approved")) return "approved";
   return "draft";
+}
+
+function normalizeWorkPeriodTaskKeys(value) {
+  const allowed = new Set(workPeriodTaskOptions.map((item) => item.key));
+  const output = [];
+  (Array.isArray(value) ? value : []).forEach((item) => {
+    const key = String(typeof item === "object" ? item?.key : item || "").trim();
+    if (allowed.has(key) && !output.includes(key)) {
+      output.push(key);
+    }
+  });
+  return output.length ? output : workPeriodTaskOptions.map((item) => item.key);
+}
+
+function normalizeWorkPeriodTask(task) {
+  const option = workPeriodTaskOptions.find((item) => item.key === task?.key) || workPeriodTaskOptions[0];
+  const status = ["planned", "done", "returned"].includes(task?.status) ? task.status : "planned";
+  return {
+    key: option.key,
+    label: task?.label || option.label,
+    status,
+    comment: task?.comment || "",
+    completedAt: task?.completedAt || "",
+    completedBy: task?.completedBy || "",
+    returnReason: task?.returnReason || "",
+    returnedAt: task?.returnedAt || "",
+    returnedBy: task?.returnedBy || "",
+    history: Array.isArray(task?.history) ? task.history : [],
+  };
+}
+
+function normalizeWorkPeriod(period) {
+  const tasks = (Array.isArray(period?.tasks) ? period.tasks : [])
+    .map(normalizeWorkPeriodTask)
+    .filter((task, index, items) => items.findIndex((item) => item.key === task.key) === index);
+  const cleanTasks = tasks.length ? tasks : workPeriodTaskOptions.map((item) => normalizeWorkPeriodTask(item));
+  const summary = period?.summary || {};
+  const done = Number(summary.done ?? cleanTasks.filter((task) => task.status === "done").length);
+  const returned = Number(summary.returned ?? cleanTasks.filter((task) => task.status === "returned").length);
+  const total = Number(summary.total || cleanTasks.length);
+  return {
+    id: String(period?.id || ""),
+    portalId: String(period?.portalId || ""),
+    title: period?.title || "",
+    period: {
+      start: period?.period?.start || period?.start || "",
+      end: period?.period?.end || period?.end || "",
+    },
+    status: period?.status || "active",
+    tasks: cleanTasks,
+    summary: {
+      total,
+      done,
+      returned,
+      planned: Number(summary.planned ?? Math.max(0, total - done - returned)),
+      progress: Number(summary.progress ?? (total ? Math.round((done / total) * 100) : 0)),
+    },
+    report: period?.report && typeof period.report === "object" ? period.report : {},
+    createdBy: period?.createdBy || "",
+    updatedBy: period?.updatedBy || "",
+    createdAt: period?.createdAt || "",
+    updatedAt: period?.updatedAt || "",
+  };
+}
+
+function normalizeWorkPeriods(value) {
+  return (Array.isArray(value) ? value : []).map(normalizeWorkPeriod);
+}
+
+function defaultWorkPeriodForm() {
+  const start = new Date();
+  const end = new Date(start);
+  end.setDate(end.getDate() + 29);
+  return {
+    title: "",
+    start: dateInputValue(start),
+    end: dateInputValue(end),
+    taskKeys: workPeriodTaskOptions.map((item) => item.key),
+  };
+}
+
+function workPeriodTaskStatusLabel(status) {
+  if (status === "done") return "выполнено";
+  if (status === "returned") return "возврат";
+  return "в плане";
+}
+
+function workPeriodTaskStatusTone(status) {
+  if (status === "done") return "green";
+  if (status === "returned") return "red";
+  return "blue";
+}
+
+function workPeriodStatus(period) {
+  if (period?.status === "reported") return { label: "отчет готов", tone: "blue" };
+  if (period?.summary?.total && period.summary.done >= period.summary.total) return { label: "выполнено", tone: "green" };
+  if (period?.summary?.returned) return { label: "есть возврат", tone: "red" };
+  return { label: "в работе", tone: "amber" };
+}
+
+function workPeriodTaskDate(task) {
+  const value = task.status === "done" ? task.completedAt : task.status === "returned" ? task.returnedAt : "";
+  return value ? new Date(value).toLocaleString("ru-RU") : "";
 }
 
 function buildTaskGroupsByType(tasks) {
@@ -5593,7 +5698,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <button className={sellerTab === "cabinet" ? "active" : ""} type="button" onClick={() => setSellerTab("cabinet")}>Кабинет</button>
               <button className={sellerTab === "tasks" ? "active" : ""} type="button" onClick={() => setSellerTab("tasks")}>Задачи</button>
               <button className={sellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
-              <button className="soon" type="button" disabled>Отчетный период <span>скоро</span></button>
+              <button className={sellerTab === "work-periods" ? "active" : ""} type="button" onClick={() => setSellerTab("work-periods")}>Отчетный период</button>
             </div>
             <HelpHint enabled={helpEnabled} title="Где что находится">
               Кабинет хранит общую информацию и список карточек. Задачи показывают пачки работ по СЯ, контенту, ценам и остаткам. Отчеты нужны для XLSX-выгрузок по кабинету.
@@ -5801,6 +5906,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             ) : null}
             {sellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
+            ) : null}
+            {sellerTab === "work-periods" ? (
+              <WorkPeriodsPanel portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
           </div>
         </div>
@@ -6053,6 +6161,367 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
         )}
       </section>
     </>
+  );
+}
+
+function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpEnabled = false }) {
+  const [periods, setPeriods] = useState([]);
+  const [status, setStatus] = useState("idle");
+  const [actionStatus, setActionStatus] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState(defaultWorkPeriodForm);
+  const [taskDrafts, setTaskDrafts] = useState({});
+  const canUseBackend = Boolean(portal?.id && !portal?.isDemo);
+  const activeCount = periods.filter((period) => period.status !== "reported" && period.summary.done < period.summary.total).length;
+  const reportedCount = periods.filter((period) => period.status === "reported").length;
+
+  useEffect(() => {
+    setForm(defaultWorkPeriodForm());
+    setTaskDrafts({});
+    loadPeriods();
+  }, [portal?.id]);
+
+  async function loadPeriods() {
+    if (!canUseBackend) {
+      setPeriods([]);
+      setStatus("unavailable");
+      return;
+    }
+    setStatus("loading");
+    try {
+      const payload = await apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}`);
+      setPeriods(normalizeWorkPeriods(payload.periods));
+      setStatus("loaded");
+    } catch {
+      setPeriods([]);
+      setStatus("error");
+    }
+  }
+
+  function upsertPeriod(period) {
+    const normalized = normalizeWorkPeriod(period);
+    setPeriods((current) => [normalized, ...current.filter((item) => String(item.id) !== String(normalized.id))]
+      .sort((left, right) => String(right.period.start || "").localeCompare(String(left.period.start || "")) || Number(right.id) - Number(left.id)));
+  }
+
+  function draftKey(period, task, type) {
+    return `${period.id}:${task.key}:${type}`;
+  }
+
+  function taskDraftValue(period, task, type) {
+    return taskDrafts[draftKey(period, task, type)] || "";
+  }
+
+  function updateTaskDraft(period, task, type, value) {
+    setTaskDrafts((current) => ({ ...current, [draftKey(period, task, type)]: value }));
+  }
+
+  async function createPeriod(nextForm) {
+    if (!canUseBackend || actionStatus === "creating") return;
+    if (!nextForm.start || !nextForm.end || nextForm.start > nextForm.end) {
+      onNotice?.("Выберите корректный период работ.");
+      return;
+    }
+    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys);
+    if (!taskKeys.length) {
+      onNotice?.("Выберите хотя бы один вид работ.");
+      return;
+    }
+    setActionStatus("creating");
+    try {
+      const payload = await apiRequest("/api/portal-work-periods", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          title: nextForm.title,
+          period: { start: nextForm.start, end: nextForm.end },
+          taskKeys,
+        }),
+      });
+      if (payload.period) {
+        upsertPeriod(payload.period);
+      }
+      setCreateOpen(false);
+      setForm(defaultWorkPeriodForm());
+      onNotice?.("Рабочий период создан.");
+    } catch {
+      onNotice?.("Не удалось создать рабочий период.");
+    } finally {
+      setActionStatus("");
+    }
+  }
+
+  async function runPeriodAction(period, body, successText, errorText) {
+    if (!canUseBackend || actionStatus) return;
+    const actionKey = `${period.id}:${body.action}:${body.taskKey || ""}`;
+    setActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/portal-work-periods", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          periodId: period.id,
+          ...body,
+        }),
+      });
+      if (payload.period) {
+        upsertPeriod(payload.period);
+      }
+      onNotice?.(successText);
+    } catch (error) {
+      onNotice?.(error.message === "work_period_return_reason_required" ? "Укажите причину возврата." : errorText);
+    } finally {
+      setActionStatus("");
+    }
+  }
+
+  function completeTask(period, task) {
+    const comment = taskDraftValue(period, task, "comment") || task.comment || "";
+    runPeriodAction(period, {
+      action: "complete_task",
+      taskKey: task.key,
+      comment,
+    }, "Пункт периода отмечен выполненным.", "Не удалось отметить выполнение.");
+  }
+
+  function returnTask(period, task) {
+    const reason = taskDraftValue(period, task, "reason") || task.returnReason || "";
+    if (!reason.trim()) {
+      onNotice?.("Укажите причину возврата.");
+      return;
+    }
+    runPeriodAction(period, {
+      action: "return_task",
+      taskKey: task.key,
+      reason,
+    }, "Пункт периода возвращен с причиной.", "Не удалось вернуть пункт периода.");
+  }
+
+  function generatePeriodReport(period) {
+    runPeriodAction(period, { action: "generate_report" }, "Итоговый отчет периода сформирован.", "Не удалось сформировать отчет периода.");
+  }
+
+  async function deletePeriod(period) {
+    if (!canUseBackend || actionStatus) return;
+    const confirmed = window.confirm(`Удалить рабочий период "${period.title || clientReportRangeLabel(period.period.start, period.period.end)}"?`);
+    if (!confirmed) return;
+    setActionStatus(`delete:${period.id}`);
+    try {
+      await apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}&period_id=${encodeURIComponent(period.id)}`, {
+        method: "DELETE",
+      });
+      setPeriods((current) => current.filter((item) => String(item.id) !== String(period.id)));
+      onNotice?.("Рабочий период удален.");
+    } catch {
+      onNotice?.("Не удалось удалить рабочий период.");
+    } finally {
+      setActionStatus("");
+    }
+  }
+
+  return (
+    <>
+      <section className="workspace-strip work-periods-strip">
+        <div className="strip-head">
+          <div>
+            <h2>Отчетные периоды отдела</h2>
+            <p>План работ по кабинету: период, выбранные направления, факт выполнения, возвраты и итог периода.</p>
+          </div>
+          <div className="strip-actions">
+            <Tag tone={status === "error" ? "amber" : activeCount ? "blue" : "green"}>
+              {status === "loading" ? "загрузка" : `${activeCount} в работе`}
+            </Tag>
+            <button className="btn primary" type="button" onClick={() => setCreateOpen(true)} disabled={!canUseBackend || actionStatus === "creating"}>
+              <Plus size={17} />Создать период
+            </button>
+          </div>
+        </div>
+        <HelpList
+          enabled={helpEnabled}
+          title="Как вести период"
+          items={[
+            "Создайте период с произвольными датами начала и окончания.",
+            "Выберите направления работ: семантика, контент, цены, остатки.",
+            "После выполнения пункта оставьте комментарий и нажмите Выполнено; возврат требует причину.",
+            "В конце периода сформируйте итоговый отчет: он покажет выполненное и невыполненное с причинами.",
+          ]}
+        />
+        <div className="summary-grid">
+          <Metric label="Периодов" value={formatNumber(periods.length)} hint={reportedCount ? `${reportedCount} с отчетом` : "отчетов пока нет"} />
+          <Metric label="Активных" value={formatNumber(activeCount)} hint="есть незакрытые пункты" />
+          <Metric label="Плановых работ" value={formatNumber(periods.reduce((sum, period) => sum + period.summary.total, 0))} />
+          <Metric label="Выполнено" value={formatNumber(periods.reduce((sum, period) => sum + period.summary.done, 0))} />
+        </div>
+        {!canUseBackend ? (
+          <div className="empty-state"><span>Рабочие периоды доступны в backend-кабинете.</span></div>
+        ) : null}
+        {status === "error" ? (
+          <div className="empty-state"><span>Не удалось загрузить рабочие периоды.</span></div>
+        ) : null}
+      </section>
+
+      <div className="work-period-grid">
+        {periods.map((period) => {
+          const statusInfo = workPeriodStatus(period);
+          const report = period.report || {};
+          const reportSummary = report.summary || period.summary;
+          return (
+            <article className="workspace-card work-period-card" key={period.id}>
+              <div className="card-head">
+                <div>
+                  <h2>{period.title || "Рабочий период"}</h2>
+                  <p>{clientReportRangeLabel(period.period.start, period.period.end)}</p>
+                </div>
+                <Tag tone={statusInfo.tone}>{statusInfo.label}</Tag>
+              </div>
+              <div className="work-period-progress">
+                <strong>{period.summary.progress}%</strong>
+                <span>{period.summary.done} из {period.summary.total} выполнено</span>
+              </div>
+              <div className="work-period-task-list">
+                {period.tasks.map((task) => {
+                  const actionBusy = actionStatus.includes(`${period.id}:`) && actionStatus.includes(task.key);
+                  const actor = findUser(task.status === "done" ? task.completedBy : task.returnedBy);
+                  const taskDate = workPeriodTaskDate(task);
+                  return (
+                    <div className={`work-period-task ${task.status}`} key={task.key}>
+                      <div className="work-period-task-main">
+                        <div>
+                          <strong>{task.label}</strong>
+                          <span>{taskDate ? `${taskDate} · ${actor?.full_name || task.completedBy || task.returnedBy || "пользователь"}` : "ожидает выполнения"}</span>
+                        </div>
+                        <Tag tone={workPeriodTaskStatusTone(task.status)}>{workPeriodTaskStatusLabel(task.status)}</Tag>
+                      </div>
+                      {task.comment ? <p className="work-period-note">{task.comment}</p> : null}
+                      {task.returnReason ? <p className="work-period-note return">Причина возврата: {task.returnReason}</p> : null}
+                      <textarea
+                        value={taskDraftValue(period, task, "comment")}
+                        onChange={(event) => updateTaskDraft(period, task, "comment", event.target.value)}
+                        placeholder={task.comment || "Комментарий к выполнению"}
+                        rows={2}
+                      />
+                      <div className="work-period-task-actions">
+                        <button className={loadingButtonClass("btn mini", actionBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)}>
+                          <CheckSquare size={14} />Выполнено
+                        </button>
+                        <input
+                          value={taskDraftValue(period, task, "reason")}
+                          onChange={(event) => updateTaskDraft(period, task, "reason", event.target.value)}
+                          placeholder="Причина возврата"
+                        />
+                        <button className="btn mini danger" type="button" onClick={() => returnTask(period, task)} disabled={Boolean(actionStatus)}>
+                          <RotateCcw size={14} />Вернуть
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {report.generatedAt ? (
+                <div className="work-period-report">
+                  <strong>Итоговый отчет</strong>
+                  <span>{new Date(report.generatedAt).toLocaleString("ru-RU")} · выполнено {reportSummary.done} из {reportSummary.total}</span>
+                  {Array.isArray(report.notCompleted) && report.notCompleted.length ? (
+                    <ul>
+                      {report.notCompleted.map((item) => (
+                        <li key={item.key}>{item.label}: {item.returnReason || "не выполнено"}</li>
+                      ))}
+                    </ul>
+                  ) : <p>Все пункты периода выполнены.</p>}
+                </div>
+              ) : null}
+              <div className="card-actions">
+                <button className={loadingButtonClass("btn primary", actionStatus === `${period.id}:generate_report:`)} type="button" onClick={() => generatePeriodReport(period)} disabled={Boolean(actionStatus)}>
+                  <FileText size={16} />Сформировать отчет
+                </button>
+                {canManage ? (
+                  <button className="btn danger" type="button" onClick={() => deletePeriod(period)} disabled={Boolean(actionStatus)}>
+                    <Trash2 size={16} />Удалить
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          );
+        })}
+        {canUseBackend ? (
+          <article className="workspace-card add-card work-period-add-card">
+            <div className="seller-logo">+</div>
+            <h2>Создать период</h2>
+            <p>Задайте даты и выберите план работ отдела по этому кабинету.</p>
+            <button className="btn primary" type="button" onClick={() => setCreateOpen(true)} disabled={actionStatus === "creating"}>
+              <Plus size={17} />Создать
+            </button>
+          </article>
+        ) : null}
+      </div>
+
+      {createOpen ? (
+        <WorkPeriodModal
+          value={form}
+          loading={actionStatus === "creating"}
+          onChange={setForm}
+          onClose={() => setCreateOpen(false)}
+          onSubmit={createPeriod}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function WorkPeriodModal({ value, loading, onChange, onClose, onSubmit }) {
+  const taskKeys = normalizeWorkPeriodTaskKeys(value.taskKeys);
+  function toggleTask(key) {
+    const nextKeys = taskKeys.includes(key)
+      ? taskKeys.filter((item) => item !== key)
+      : [...taskKeys, key];
+    onChange({ ...value, taskKeys: nextKeys.length ? nextKeys : taskKeys });
+  }
+  function submit(event) {
+    event.preventDefault();
+    onSubmit({ ...value, taskKeys });
+  }
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="modal work-period-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <h2>Создать отчетный период</h2>
+            <p>Период может начинаться с любой даты, не обязательно с первого числа месяца.</p>
+          </div>
+          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+        </div>
+        <div className="modal-body">
+          <label className="field-label">
+            Название
+            <input value={value.title} onChange={(event) => onChange({ ...value, title: event.target.value })} placeholder="Например: Июль, первая волна работ" maxLength={180} />
+          </label>
+          <div className="form-two">
+            <label className="field-label">
+              Дата начала
+              <input type="date" value={value.start} onChange={(event) => onChange({ ...value, start: event.target.value })} required />
+            </label>
+            <label className="field-label">
+              Дата окончания
+              <input type="date" value={value.end} onChange={(event) => onChange({ ...value, end: event.target.value })} required />
+            </label>
+          </div>
+          <div className="work-type-picker">
+            {workPeriodTaskOptions.map((option) => (
+              <label className={`work-type-option ${taskKeys.includes(option.key) ? "active" : ""}`} key={option.key}>
+                <input type="checkbox" checked={taskKeys.includes(option.key)} onChange={() => toggleTask(option.key)} />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !taskKeys.length} aria-busy={loading || undefined}>
+            {loading ? "Создаем" : "Создать период"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 

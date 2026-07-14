@@ -840,6 +840,136 @@ a {
   line-height: 1.35;
 }
 
+.work-period-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.work-period-card {
+  grid-template-rows: none;
+  align-content: start;
+}
+
+.work-period-add-card {
+  min-height: 320px;
+}
+
+.work-period-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.work-period-progress strong {
+  font-size: 22px;
+}
+
+.work-period-progress span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.work-period-task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.work-period-task {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: var(--surface-soft);
+}
+
+.work-period-task.done {
+  border-color: #b8d8c8;
+  background: #f3fbf6;
+}
+
+.work-period-task.returned {
+  border-color: #e7b0a8;
+  background: #fff6f4;
+}
+
+.work-period-task-main,
+.work-period-task-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.work-period-task-main strong,
+.work-period-task-main span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-period-task-main span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.work-period-task textarea,
+.work-period-task input {
+  width: 100%;
+}
+
+.work-period-task textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.work-period-task-actions {
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+}
+
+.work-period-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.work-period-note.return {
+  color: var(--red);
+}
+
+.work-period-report {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.work-period-report span,
+.work-period-report p,
+.work-period-report li {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.work-period-report p {
+  margin: 0;
+}
+
+.work-period-report ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 .filters {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 180px 180px;
@@ -5213,6 +5343,8 @@ tr:last-child td {
   .report-period-form,
   .report-template,
   .report-history-row,
+  .work-period-grid,
+  .work-period-task-actions,
   .cards-work-summary,
   .card-filters,
   .work-type-picker,

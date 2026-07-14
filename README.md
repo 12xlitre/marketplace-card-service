@@ -34,6 +34,7 @@ npm run frontend:check
 - главный экран `Кабинеты` с добавлением портала через API или вручную;
 - разделы левого меню `Кабинеты`, `Аудит`, `Настройки`;
 - кабинет селлера с обзором, источником данных, составом проекта и режимами охвата;
+- вкладку `Отчетный период` внутри кабинета селлера для плана работ отдела по произвольным датам, чек-листу задач и итоговому отчету выполнения;
 - детальную карточку с аудитом, полными полями WB API, вариантами заголовка и блоком `Было / стало`.
 - сессии:
   - авторизация через `POST /api/login`, восстановление через `GET /api/session`, выход через `POST /api/logout`;
@@ -84,13 +85,16 @@ GET /api/approval-workflow?portal_id=1
 GET /api/card-workset?portal_id=1
 GET /api/portal-card-drafts?portal_id=1
 GET /api/semantic-core-collections?portal_id=1
+GET /api/portal-work-periods?portal_id=1
 POST /api/card-audit
 POST /api/card-content-reoptimize
 POST /api/card-competitors/suggest
 POST /api/card-workset
 POST /api/card-workset/create-tasks
 POST /api/semantic-core-collections
+POST /api/portal-work-periods
 DELETE /api/semantic-core-collections?portal_id=1&collection_id=1
+DELETE /api/portal-work-periods?portal_id=1&period_id=1
 ```
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
@@ -120,6 +124,8 @@ SEO expansion MPStats отправляется не только с пользо
 `GET/POST /api/card-workset` хранит рабочий набор карточек кабинета в backend, а `POST /api/card-workset/create-tasks` создает внутренние задачи по выбранным типам работ (`СЯ`, `Контент`, `Цены`, `Остатки`). Задачи остаются в `card_drafts` и approval workflow; для СЯ задача считается закрытой после сохранения карточки в итоговое СЯ кабинета.
 
 `GET /api/portals/<portal_id>/wb-client-report` собирает данные для клиентского XLSX-отчета по выбранному периоду `start/end` в формате `YYYY-MM-DD`. Старый параметр `weeks` остается совместимым fallback, но UI использует сценарий `выбрать отчет -> выбрать период -> сформировать` во вкладке `Отчеты` внутри кабинета селлера. Маршрут проверяет доступ к кабинету, берет WB-токен только из backend-хранилища и не выполняет write-операции в WB.
+
+`GET/POST/DELETE /api/portal-work-periods` хранит отчетные периоды отдела внутри конкретного кабинета. Это не клиентский XLSX-отчет и не MPStats-период: пользователь создает произвольный период через даты начала/конца, выбирает план работ (`Семантика`, `Контент`, `Цены`, `Остатки`), отмечает выполнение с комментарием и датой, может вернуть задачу с причиной, а в конце сформировать сводный отчет по выполненным и невыполненным пунктам. Все операции проверяют доступ к `portal_id` и сохраняются в backend-таблице `portal_work_periods`.
 
 При повторном подключении того же WB кабинета `POST /api/portals` отвечает `409`: `portal_already_connected` для активного кабинета или `portal_already_archived`, если кабинет уже есть в архиве. Проверка идет по digest токена и fingerprint набора `nmID`, сам WB ключ в ответ не попадает.
 

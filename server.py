@@ -467,6 +467,21 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS portal_work_periods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        title TEXT NOT NULL DEFAULT '',
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        tasks_json TEXT NOT NULL DEFAULT '[]',
+        report_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS mpstats_characteristics_cache (
         cache_key TEXT PRIMARY KEY,
         report_type TEXT NOT NULL,
@@ -564,6 +579,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_report_history_portal
       ON report_history(portal_id, created_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_portal_work_periods_portal
+      ON portal_work_periods(portal_id, period_start, period_end)
       """
     )
     db.execute(
@@ -1846,6 +1867,7 @@ def delete_portal(portal_id, actor=None):
       "card_approval_events",
       "card_competitors",
       "report_history",
+      "portal_work_periods",
     ):
       row = db.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE portal_id = ?", (numeric_portal_id,)).fetchone()
       related_counts[table] = int(row["count"] or 0) if row else 0
@@ -3437,6 +3459,14 @@ WORK_TYPE_LABELS = {
 }
 
 
+WORK_PERIOD_TASK_LABELS = {
+  "semantic": "Семантика",
+  "content": "Контент",
+  "prices": "Цены",
+  "stocks": "Остатки",
+}
+
+
 def normalize_work_types(value):
   if isinstance(value, str):
     raw_items = re.split(r"[\s,;]+", value)
@@ -3456,6 +3486,423 @@ def normalize_work_types(value):
 
 def work_type_labels(work_types):
   return [WORK_TYPE_LABELS.get(item, item) for item in normalize_work_types(work_types)]
+
+
+def normalize_work_period_task_keys(value):
+  if isinstance(value, str):
+    raw_items = re.split(r"[\s,;]+", value)
+  elif isinstance(value, (list, tuple, set)):
+    raw_items = list(value)
+  else:
+    raw_items = []
+  output = []
+  seen = set()
+  for item in raw_items:
+    key = str(item.get("key") if isinstance(item, dict) else item or "").strip().lower()
+    if key in WORK_PERIOD_TASK_LABELS and key not in seen:
+      seen.add(key)
+      output.append(key)
+  return output or list(WORK_PERIOD_TASK_LABELS.keys())
+
+
+def clean_work_period_status(value):
+  status = str(value or "").strip().lower()
+  return status if status in {"active", "reported", "archived"} else "active"
+
+
+def clean_work_period_task_status(value):
+  status = str(value or "").strip().lower()
+  return status if status in {"planned", "done", "returned"} else "planned"
+
+
+def clean_work_period_note(value, limit=1200):
+  return str(value or "").strip()[:limit]
+
+
+def clean_work_period_history(items):
+  output = []
+  for item in items if isinstance(items, list) else []:
+    if not isinstance(item, dict):
+      continue
+    action = str(item.get("action") or "").strip()[:40]
+    if not action:
+      continue
+    output.append({
+      "action": action,
+      "at": str(item.get("at") or "")[:80],
+      "by": str(item.get("by") or "")[:120],
+      "comment": clean_work_period_note(item.get("comment"), 1000),
+      "reason": clean_work_period_note(item.get("reason"), 1000),
+    })
+  return output[-50:]
+
+
+def normalize_work_period_tasks(value):
+  raw_items = value if isinstance(value, list) else normalize_work_period_task_keys(value)
+  tasks = []
+  seen = set()
+  for item in raw_items:
+    if isinstance(item, dict):
+      key = str(item.get("key") or "").strip().lower()
+      raw_task = item
+    else:
+      key = str(item or "").strip().lower()
+      raw_task = {}
+    if key not in WORK_PERIOD_TASK_LABELS or key in seen:
+      continue
+    seen.add(key)
+    tasks.append({
+      "key": key,
+      "label": WORK_PERIOD_TASK_LABELS[key],
+      "status": clean_work_period_task_status(raw_task.get("status")),
+      "comment": clean_work_period_note(raw_task.get("comment")),
+      "completedAt": str(raw_task.get("completedAt") or "")[:80],
+      "completedBy": str(raw_task.get("completedBy") or "")[:120],
+      "returnReason": clean_work_period_note(raw_task.get("returnReason")),
+      "returnedAt": str(raw_task.get("returnedAt") or "")[:80],
+      "returnedBy": str(raw_task.get("returnedBy") or "")[:120],
+      "history": clean_work_period_history(raw_task.get("history")),
+    })
+  if not tasks:
+    tasks = normalize_work_period_tasks(list(WORK_PERIOD_TASK_LABELS.keys()))
+  return tasks
+
+
+def work_period_task_summary(tasks):
+  clean_tasks = normalize_work_period_tasks(tasks)
+  total = len(clean_tasks)
+  done = len([task for task in clean_tasks if task["status"] == "done"])
+  returned = len([task for task in clean_tasks if task["status"] == "returned"])
+  planned = max(0, total - done - returned)
+  return {
+    "total": total,
+    "done": done,
+    "returned": returned,
+    "planned": planned,
+    "progress": round(done / total * 100) if total else 0,
+  }
+
+
+def work_period_report_payload(period, tasks, user):
+  clean_tasks = normalize_work_period_tasks(tasks)
+  completed = []
+  not_completed = []
+  for task in clean_tasks:
+    payload = {
+      "key": task["key"],
+      "label": task["label"],
+      "status": task["status"],
+      "comment": task.get("comment") or "",
+      "completedAt": task.get("completedAt") or "",
+      "completedBy": task.get("completedBy") or "",
+      "returnReason": task.get("returnReason") or "",
+      "returnedAt": task.get("returnedAt") or "",
+      "returnedBy": task.get("returnedBy") or "",
+    }
+    if task["status"] == "done":
+      completed.append(payload)
+    else:
+      if not payload["returnReason"] and payload["comment"]:
+        payload["returnReason"] = payload["comment"]
+      if not payload["returnReason"]:
+        payload["returnReason"] = "не выполнено к моменту формирования отчета"
+      not_completed.append(payload)
+  return {
+    "generatedAt": utc_now().isoformat(),
+    "generatedBy": user["login"],
+    "period": {
+      "start": period.get("start") or "",
+      "end": period.get("end") or "",
+    },
+    "summary": work_period_task_summary(clean_tasks),
+    "completed": completed,
+    "notCompleted": not_completed,
+  }
+
+
+def parse_work_period_json(value, fallback):
+  try:
+    parsed = json.loads(value or "")
+  except (TypeError, json.JSONDecodeError):
+    return fallback
+  return parsed
+
+
+def public_portal_work_period(row):
+  tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
+  report = parse_work_period_json(row["report_json"], {})
+  if not isinstance(report, dict):
+    report = {}
+  return {
+    "id": str(row["id"]),
+    "portalId": str(row["portal_id"]),
+    "title": row["title"] or "",
+    "period": {
+      "start": row["period_start"] or "",
+      "end": row["period_end"] or "",
+    },
+    "status": clean_work_period_status(row["status"]),
+    "tasks": tasks,
+    "summary": work_period_task_summary(tasks),
+    "report": report,
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def validate_work_period_dates(start, end):
+  start = clean_report_date(start)
+  end = clean_report_date(end)
+  if not start or not end or start > end:
+    raise ValueError("invalid_work_period")
+  start_day = dt.date.fromisoformat(start)
+  end_day = dt.date.fromisoformat(end)
+  if (end_day - start_day).days > 370:
+    raise ValueError("work_period_too_long")
+  return start, end
+
+
+def list_portal_work_periods(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    rows = db.execute(
+      """
+      SELECT *
+      FROM portal_work_periods
+      WHERE portal_id = ?
+      ORDER BY period_start DESC, id DESC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {
+    "portalId": str(numeric_portal_id),
+    "periods": [public_portal_work_period(row) for row in rows],
+  }
+
+
+def create_portal_work_period(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  period = payload.get("period") if isinstance(payload.get("period"), dict) else {}
+  start, end = validate_work_period_dates(period.get("start") or payload.get("start"), period.get("end") or payload.get("end"))
+  title = clean_report_text(payload.get("title") or f"Рабочий период {start} - {end}", 180)
+  tasks = normalize_work_period_tasks(payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"))
+  init_db()
+  with connect_db() as db:
+    portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    cursor = db.execute(
+      """
+      INSERT INTO portal_work_periods (
+        portal_id, title, period_start, period_end, status, tasks_json, report_json,
+        created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, 'active', ?, '{}', ?, ?)
+      """,
+      (
+        numeric_portal_id,
+        title,
+        start,
+        end,
+        json.dumps(tasks, ensure_ascii=False, separators=(",", ":")),
+        user["login"],
+        user["login"],
+      ),
+    )
+    row = db.execute(
+      "SELECT * FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (numeric_portal_id, cursor.lastrowid),
+    ).fetchone()
+  record_admin_event(user, "portal_work_period_created", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "title": title,
+    "period": f"{start} - {end}",
+    "tasks": [task["key"] for task in tasks],
+  })
+  return public_portal_work_period(row)
+
+
+def update_portal_work_period(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  try:
+    period_id = int(payload.get("periodId") or payload.get("id") or 0)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_work_period") from exc
+  if period_id <= 0:
+    raise ValueError("invalid_work_period")
+  action = str(payload.get("action") or "update").strip().lower()
+  now = utc_now().isoformat()
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT * FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (numeric_portal_id, period_id),
+    ).fetchone()
+    if not row:
+      raise ValueError("work_period_not_found")
+    tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
+    report = parse_work_period_json(row["report_json"], {})
+    status = clean_work_period_status(row["status"])
+    title = row["title"] or ""
+    start = row["period_start"] or ""
+    end = row["period_end"] or ""
+
+    if action == "update":
+      period = payload.get("period") if isinstance(payload.get("period"), dict) else {}
+      next_start = period.get("start") or payload.get("start") or start
+      next_end = period.get("end") or payload.get("end") or end
+      start, end = validate_work_period_dates(next_start, next_end)
+      title = clean_report_text(payload.get("title") or title or f"Рабочий период {start} - {end}", 180)
+      if payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"):
+        incoming_keys = normalize_work_period_task_keys(payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"))
+        task_by_key = {task["key"]: task for task in tasks}
+        tasks = [task_by_key.get(key) or normalize_work_period_tasks([key])[0] for key in incoming_keys]
+    elif action in {"complete_task", "return_task"}:
+      task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
+      if task_key not in WORK_PERIOD_TASK_LABELS:
+        raise ValueError("invalid_work_period_task")
+      comment = clean_work_period_note(payload.get("comment"))
+      reason = clean_work_period_note(payload.get("reason") or payload.get("returnReason"))
+      next_tasks = []
+      changed = False
+      for task in tasks:
+        if task["key"] != task_key:
+          next_tasks.append(task)
+          continue
+        changed = True
+        history = clean_work_period_history(task.get("history"))
+        if action == "complete_task":
+          history.append({
+            "action": "completed",
+            "at": now,
+            "by": user["login"],
+            "comment": comment,
+            "reason": "",
+          })
+          task = {
+            **task,
+            "status": "done",
+            "comment": comment,
+            "completedAt": now,
+            "completedBy": user["login"],
+            "returnReason": "",
+            "returnedAt": task.get("returnedAt") or "",
+            "returnedBy": task.get("returnedBy") or "",
+            "history": clean_work_period_history(history),
+          }
+        else:
+          if not reason:
+            raise ValueError("work_period_return_reason_required")
+          history.append({
+            "action": "returned",
+            "at": now,
+            "by": user["login"],
+            "comment": "",
+            "reason": reason,
+          })
+          task = {
+            **task,
+            "status": "returned",
+            "returnReason": reason,
+            "returnedAt": now,
+            "returnedBy": user["login"],
+            "history": clean_work_period_history(history),
+          }
+        next_tasks.append(task)
+      if not changed:
+        raise ValueError("work_period_task_not_found")
+      tasks = next_tasks
+      report = {}
+      if status == "reported":
+        status = "active"
+    elif action == "generate_report":
+      report = work_period_report_payload({"start": start, "end": end}, tasks, user)
+      status = "reported"
+    else:
+      raise ValueError("invalid_work_period_action")
+
+    db.execute(
+      """
+      UPDATE portal_work_periods
+      SET title = ?, period_start = ?, period_end = ?, status = ?,
+          tasks_json = ?, report_json = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE portal_id = ? AND id = ?
+      """,
+      (
+        title,
+        start,
+        end,
+        status,
+        json.dumps(tasks, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(report if isinstance(report, dict) else {}, ensure_ascii=False, separators=(",", ":")),
+        user["login"],
+        numeric_portal_id,
+        period_id,
+      ),
+    )
+    row = db.execute("SELECT * FROM portal_work_periods WHERE portal_id = ? AND id = ?", (numeric_portal_id, period_id)).fetchone()
+  record_admin_event(user, f"portal_work_period_{action}", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "periodId": period_id,
+    "title": title,
+    "action": action,
+  })
+  return public_portal_work_period(row)
+
+
+def save_portal_work_period(portal_id, payload, user):
+  payload = payload if isinstance(payload, dict) else {}
+  if payload.get("periodId") or payload.get("id"):
+    return update_portal_work_period(portal_id, payload, user)
+  return create_portal_work_period(portal_id, payload, user)
+
+
+def delete_portal_work_period(portal_id, period_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+    numeric_period_id = int(period_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_work_period") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT id, title FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (numeric_portal_id, numeric_period_id),
+    ).fetchone()
+    if not row:
+      raise ValueError("work_period_not_found")
+    db.execute(
+      "DELETE FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (numeric_portal_id, numeric_period_id),
+    )
+  record_admin_event(user, "portal_work_period_deleted", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "periodId": numeric_period_id,
+    "title": row["title"] if row else "",
+  })
+  return True
 
 
 def approval_sections_from_payload(payload):
@@ -11598,6 +12045,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
+    if path == "/api/portal-work-periods":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      if not portal_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, list_portal_work_periods(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
+      return
+
     if path == "/api/card-drafts":
       user = self.require_user()
       if not user:
@@ -11968,6 +12432,27 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_semantic_collection"})
+        return
+      self.send_json(HTTPStatus.OK, {"deleted": deleted})
+      return
+
+    if path == "/api/portal-work-periods":
+      user = self.require_user()
+      if not user:
+        return
+      query = parse_qs(parsed.query)
+      portal_id = query.get("portal_id", [""])[0]
+      period_id = query.get("period_id", [""])[0] or query.get("id", [""])[0]
+      if not portal_id or not period_id:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_work_period"})
+        return
+      try:
+        deleted = delete_portal_work_period(portal_id, period_id, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_work_period"})
         return
       self.send_json(HTTPStatus.OK, {"deleted": deleted})
       return
@@ -12613,6 +13098,24 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/portal-work-periods":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json(MAX_DRAFT_JSON_BYTES) or {}
+      portal_id = payload.get("portalId") or payload.get("portal_id")
+      try:
+        period = save_portal_work_period(portal_id, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_work_period"})
+        return
+      status = HTTPStatus.OK if payload.get("periodId") or payload.get("id") else HTTPStatus.CREATED
+      self.send_json(status, {"period": period})
       return
 
     if path == "/api/card-workset":
