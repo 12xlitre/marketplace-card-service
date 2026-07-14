@@ -2640,6 +2640,11 @@ function semanticQueryKey(value) {
 }
 
 const semanticSelectionLimit = 2000;
+const semanticReportHistoryLimit = 2;
+const semanticCurrentRowsLimit = 600;
+const semanticRecommendedRowsLimit = 900;
+const semanticRankedRowsLimit = 600;
+const semanticSubjectOptionsLimit = 120;
 
 function semanticRankValue(value) {
   const number = Number(value);
@@ -2777,27 +2782,38 @@ function compactSemanticCore(core) {
       const key = semanticQueryKey(query);
       if (!query || seen.has(key) || output.length >= limit) return;
       seen.add(key);
-      output.push({
-        query: item.query || "",
-        cluster: item.cluster || "",
-        prioritySubject: item.prioritySubject || "",
-        prioritySubjectId: item.prioritySubjectId || "",
-        wbCount: Number(item.wbCount || 0),
-        ozonCount: Number(item.ozonCount || 0),
-        results: Number(item.results || 0),
-        orgPos: semanticRankValue(item.orgPos),
-        adPos: semanticRankValue(item.adPos),
-        avgPos: semanticRankValue(item.avgPos),
-        totalFound: Number(item.totalFound || 0),
-        frequency365: item.frequency365 || "",
-        uniqueDays: Number(item.uniqueDays || 0),
-        source: item.source || "mpstats-expanding",
-        rankPeriod: item.rankPeriod || "",
-        priority: item.priority || "",
-        field: item.field || "",
-        status: item.status || "",
-        reason: item.reason || "",
+      const compactItem = { query };
+      [
+        ["cluster", item.cluster],
+        ["prioritySubject", item.prioritySubject],
+        ["prioritySubjectId", item.prioritySubjectId],
+        ["frequency365", item.frequency365],
+        ["source", item.source && item.source !== "mpstats-expanding" ? item.source : ""],
+        ["priority", item.priority],
+        ["field", item.field],
+        ["status", item.status],
+        ["reason", item.reason],
+      ].forEach(([field, value]) => {
+        const text = String(value || "").trim();
+        if (text) compactItem[field] = text;
       });
+      [
+        ["wbCount", Number(item.wbCount || 0)],
+        ["ozonCount", Number(item.ozonCount || 0)],
+        ["results", Number(item.results || 0)],
+        ["totalFound", Number(item.totalFound || 0)],
+        ["uniqueDays", Number(item.uniqueDays || 0)],
+      ].forEach(([field, value]) => {
+        if (Number.isFinite(value) && value > 0) compactItem[field] = value;
+      });
+      [
+        ["orgPos", semanticRankValue(item.orgPos)],
+        ["adPos", semanticRankValue(item.adPos)],
+        ["avgPos", semanticRankValue(item.avgPos)],
+      ].forEach(([field, value]) => {
+        if (value) compactItem[field] = value;
+      });
+      output.push(compactItem);
     });
     return output;
   };
@@ -2809,9 +2825,9 @@ function compactSemanticCore(core) {
       ...(Array.isArray(core.current) ? core.current : []),
       ...(Array.isArray(recommendedSource) ? recommendedSource : []),
     ].filter(semanticHasKeywordRank);
-  const compactCurrent = compactItems(core.current, 800, { prioritizeRanked: true });
-  const compactRecommended = compactItems(recommendedSource, 1200);
-  const compactRankedKeywords = compactItems(rankedSource, 800, { prioritizeRanked: true });
+  const compactCurrent = compactItems(core.current, semanticCurrentRowsLimit, { prioritizeRanked: true });
+  const compactRecommended = compactItems(recommendedSource, semanticRecommendedRowsLimit);
+  const compactRankedKeywords = compactItems(rankedSource, semanticRankedRowsLimit, { prioritizeRanked: true });
   return {
     source: core.source || "mpstats-expanding",
     seedQuery: core.seedQuery || "",
@@ -2821,7 +2837,7 @@ function compactSemanticCore(core) {
     missing: [],
     allKeywords: [],
     rankedKeywords: compactRankedKeywords,
-    subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, 200),
+    subjectOptions: (Array.isArray(core.subjectOptions) ? core.subjectOptions : []).slice(0, semanticSubjectOptionsLimit),
     totalKeywords: Number(core.totalKeywords || 0),
     coveragePercent: core.coveragePercent ?? null,
     rankingSource: core.rankingSource || "",
@@ -2848,7 +2864,7 @@ function normalizeSemanticReports(reports) {
       };
     })
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, semanticReportHistoryLimit);
 }
 
 function semanticCoreWithSelection(core, selectedItems) {

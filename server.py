@@ -55,6 +55,7 @@ SESSION_TTL_SECONDS = 12 * 60 * 60
 SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 512 * 1024
+MAX_DRAFT_JSON_BYTES = int(os.environ.get("OPTICARDS_MAX_DRAFT_JSON_BYTES", str(4 * 1024 * 1024)))
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
 WB_PROVIDER = "wb"
 MPSTATS_PROVIDER = "mpstats"
@@ -10898,12 +10899,12 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(body)
 
-  def read_json(self):
+  def read_json(self, max_bytes=MAX_JSON_BYTES):
     try:
       length = int(self.headers.get("Content-Length", "0"))
     except ValueError:
       length = 0
-    if length <= 0 or length > MAX_JSON_BYTES:
+    if length <= 0 or length > max_bytes:
       return None
     try:
       return json.loads(self.rfile.read(length).decode("utf-8"))
@@ -11873,7 +11874,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       user = self.require_user()
       if not user:
         return
-      payload = self.read_json() or {}
+      payload = self.read_json(MAX_DRAFT_JSON_BYTES) or {}
       try:
         draft = save_card_draft(
           payload.get("portalId"),
