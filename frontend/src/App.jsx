@@ -9139,43 +9139,60 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const currentLimit = compact ? 4 : standalone ? 120 : 8;
   const workLimit = compact ? 4 : standalone ? 250 : 8;
   const workPageSize = standalone ? 250 : workLimit;
+  const rankedCandidateLimit = compact ? 4 : standalone ? 250 : 8;
+  const rankedCandidatePageSize = standalone ? 250 : rankedCandidateLimit;
   const [visibleWorkLimit, setVisibleWorkLimit] = useState(workLimit);
+  const [visibleRankedCandidateLimit, setVisibleRankedCandidateLimit] = useState(rankedCandidateLimit);
   const [metricFilter, setMetricFilter] = useState("all");
   const searchText = String(search || "").trim().toLowerCase();
   const excludedWords = semanticFilterWords(excludeWords);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
+  const currentKeys = new Set(currentItems.map(semanticQueryKey));
   const sourceItems = allKeywords.length ? allKeywords : workItems;
-  const allRankedItems = rankedKeywords.length ? rankedKeywords : sourceItems.filter(semanticHasKeywordRank);
+  const allRankedItems = (rankedKeywords.length ? rankedKeywords : sourceItems).filter(semanticHasKeywordRank);
   const reportTotal = semanticCore?.totalKeywords || sourceItems.length || current.length + missing.length;
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredAllRankedItems = allRankedItems
+    .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const seenRankedCandidateKeys = new Set();
+  const filteredAllRankedCandidateItems = filteredAllRankedItems.filter((item) => {
+    const key = semanticQueryKey(item);
+    if (!key || currentKeys.has(key) || selectedKeys.has(key) || seenRankedCandidateKeys.has(key)) {
+      return false;
+    }
+    seenRankedCandidateKeys.add(key);
+    return true;
+  });
   const filteredWorkItems = filteredSourceItems
     .filter((item) => !selectedKeys.has(semanticQueryKey(item)));
   useEffect(() => {
     setVisibleWorkLimit(workLimit);
   }, [workLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
   useEffect(() => {
+    setVisibleRankedCandidateLimit(rankedCandidateLimit);
+  }, [rankedCandidateLimit, subjectFilter, searchText, excludeWords, semanticCore?.seedQuery, reportTotal]);
+  useEffect(() => {
     setMetricFilter("all");
   }, [semanticCore?.seedQuery, reportTotal]);
   const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
+  const visibleRankedCandidateCount = Math.min(visibleRankedCandidateLimit, filteredAllRankedCandidateItems.length);
   const toggleMetricFilter = (filter) => {
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
-  const displayedCurrentItems = metricFilter === "allRanked"
-    ? filteredAllRankedItems
-    : metricFilter === "ranked"
+  const displayedRankedCandidateItems = metricFilter === "allRanked" ? filteredAllRankedCandidateItems : [];
+  const displayedCurrentItems = metricFilter === "ranked"
     ? rankedCurrentItems
     : metricFilter === "current" || metricFilter === "all"
       ? currentItems
       : [];
   const leftListTitle = metricFilter === "allRanked"
-    ? "Все запросы с позициями MPStats"
+    ? "Позиции MPStats к добавлению"
     : metricFilter === "ranked"
     ? "Действующие с позициями"
     : metricFilter === "current"
@@ -9210,8 +9227,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
           <SemanticMetric
             active={metricFilter === "allRanked"}
             label="Все позиции MPStats"
-            value={formatNumber(filteredAllRankedItems.length)}
-            hint="Все запросы с позициями из отдельного отчета MPStats по карточке, независимо от того, есть эти слова в текущем контенте или нет."
+            value={formatNumber(filteredAllRankedCandidateItems.length)}
+            hint="Запросы с позициями MPStats, которых еще нет среди действующих ключей и добавленных в работу."
             onClick={() => toggleMetricFilter("allRanked")}
           />
           <SemanticMetric
@@ -9258,7 +9275,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
               <div className="semantic-keyword" key={`current-${item.query}`}>
                 <div className="semantic-keyword-main">
                   <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || (metricFilter === "allRanked" ? "позиция MPStats" : "найдено в текущем контенте")}</em>
+                  <em>{semanticKeywordMeta(item) || "найдено в текущем контенте"}</em>
                   {standalone ? (
                     <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
                       {semanticKeywordRankLabel(item)}
@@ -9267,8 +9284,39 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
               </div>
             )) : null}
-            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} {metricFilter === "allRanked" ? "запросов с позициями" : "действующих"}. Полный список попадет в Excel.</p> : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "allRanked" ? "Запросов MPStats с позициями нет." : metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
+            {displayedCurrentItems.length > currentLimit ? <p>Показано {formatNumber(currentLimit)} из {formatNumber(displayedCurrentItems.length)} действующих. Полный список попадет в Excel.</p> : null}
+            {displayedRankedCandidateItems.length ? displayedRankedCandidateItems.slice(0, visibleRankedCandidateLimit).map((item) => (
+              <div className="semantic-keyword recommended" key={`ranked-candidate-${semanticQueryKey(item) || item.query}`}>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{semanticKeywordMeta(item) || item.reason || "есть позиция MPStats, нет в действующих"}</em>
+                  <span className="semantic-keyword-rank">{semanticKeywordRankLabel(item)}</span>
+                </div>
+                <div className="semantic-keyword-actions">
+                  {standalone && onTakeKeyword ? (
+                    <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)}>
+                      <Plus size={14} />В работу
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            )) : null}
+            {displayedRankedCandidateItems.length > visibleRankedCandidateLimit ? (
+              <div className="semantic-list-footer">
+                <p>Показано {formatNumber(visibleRankedCandidateCount)} из {formatNumber(displayedRankedCandidateItems.length)} запросов с позициями.</p>
+                {standalone ? (
+                  <div>
+                    <button className="btn mini" type="button" onClick={() => setVisibleRankedCandidateLimit((value) => Math.min(value + rankedCandidatePageSize, displayedRankedCandidateItems.length))}>
+                      Показать еще {formatNumber(Math.min(rankedCandidatePageSize, displayedRankedCandidateItems.length - visibleRankedCandidateCount))}
+                    </button>
+                    <button className="btn mini" type="button" onClick={() => setVisibleRankedCandidateLimit(displayedRankedCandidateItems.length)}>
+                      Показать все
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length && !displayedRankedCandidateItems.length ? <p>{metricFilter === "allRanked" ? "Новых запросов MPStats с позициями нет." : metricFilter === "ranked" ? "Действующих ключей с позициями нет." : "Пока нет выбранных запросов."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
