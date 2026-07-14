@@ -3917,8 +3917,9 @@ export default function App() {
       return;
     }
     try {
-      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}`, {
-        method: "DELETE",
+      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/delete`, {
+        method: "POST",
+        body: JSON.stringify({}),
       });
       removeUserPortal(portal.id);
       if (String(selectedPortalId) === String(portal.id)) {

@@ -784,6 +784,7 @@ def user_can_access_portal(user, portal_id):
       SELECT portals.id
       FROM portals
       WHERE portals.id = ?
+        AND portals.is_active = 1
         AND (
           portals.created_by = ?
           OR EXISTS (
@@ -1197,18 +1198,23 @@ def save_integration_token(portal_id, provider, token):
 def list_portals(user=None):
   init_db()
   params = []
-  access_filter = ""
+  filters = []
   if user is not None and not user_has_global_portal_access(user):
+    filters.append("portals.is_active = 1")
     access_filter = """
-      WHERE portals.created_by = ?
+      (
+        portals.created_by = ?
         OR EXISTS (
           SELECT 1
           FROM portal_members AS access_members
           WHERE access_members.portal_id = portals.id
             AND access_members.user_login = ?
         )
+      )
     """
+    filters.append(access_filter)
     params = [user["login"], user["login"]]
+  where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
   with connect_db() as db:
     rows = db.execute(
       f"""
@@ -1256,7 +1262,7 @@ def list_portals(user=None):
         FROM card_drafts
         GROUP BY portal_id
       ) AS draft_stats ON draft_stats.portal_id = portals.id
-      {access_filter}
+      {where_clause}
       GROUP BY portals.id
       ORDER BY portals.id
       """,
@@ -11796,6 +11802,32 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": error_text})
         return
       self.send_json(HTTPStatus.ACCEPTED, {"job": job})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/delete"):
+      user = self.require_user()
+      if not user:
+        return
+
+      portal_id_text = path[len("/api/portals/"):-len("/delete")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      try:
+        deleted = delete_portal(portal_id, actor=user)
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": error_text})
+        return
+      if not deleted:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"deleted": True, "portal": deleted})
       return
 
     if path.startswith("/api/portals/") and (path.endswith("/archive") or path.endswith("/restore")):
