@@ -9045,7 +9045,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                   <div className="semantic-collection-form">
                     <label className="field-label">
                       <span>Название подборки</span>
-                      <input value={semanticCollectionName} onChange={(event) => setSemanticCollectionName(event.target.value)} placeholder="очки женские" />
+                      <input value={semanticCollectionName} onChange={(event) => setSemanticCollectionName(event.target.value)} placeholder="Введите название" />
                     </label>
                     <button className={loadingButtonClass("btn primary", semanticCollectionActionStatus === "saving")} type="button" onClick={saveSemanticCollection} disabled={semanticCollectionActionStatus === "saving" || !semanticCollectionName.trim()} aria-busy={semanticCollectionActionStatus === "saving" || undefined}>
                       <Save size={16} />{semanticCollectionActionStatus === "saving" ? "Сохраняем" : "Сохранить подборку"}
