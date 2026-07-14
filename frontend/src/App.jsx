@@ -2222,50 +2222,6 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   };
 }
 
-function storedDraftPayload(storedDraft) {
-  return storedDraft?.draft && typeof storedDraft.draft === "object"
-    ? storedDraft.draft
-    : storedDraft || {};
-}
-
-function storedDraftMeta(storedDraft) {
-  const payload = storedDraftPayload(storedDraft);
-  return payload.meta && typeof payload.meta === "object" ? payload.meta : {};
-}
-
-function storedDraftTimestamp(storedDraft) {
-  const payload = storedDraftPayload(storedDraft);
-  return Date.parse(storedDraft?.updatedAt || storedDraft?.savedAt || payload.savedAt || "") || 0;
-}
-
-function storedDraftSemanticReports(storedDraft) {
-  return normalizeSemanticReports(storedDraftMeta(storedDraft).semanticCoreReports);
-}
-
-function mergeStoredDraftSemantics(primaryDraft, fallbackDraft) {
-  if (!primaryDraft || !fallbackDraft) return primaryDraft;
-  const primaryReports = storedDraftSemanticReports(primaryDraft);
-  const fallbackReports = storedDraftSemanticReports(fallbackDraft);
-  if (!fallbackReports.length) return primaryDraft;
-  const fallbackIsBetter = !primaryReports.length
-    || fallbackReports.length > primaryReports.length
-    || (storedDraftTimestamp(fallbackDraft) > storedDraftTimestamp(primaryDraft) && fallbackReports.length >= primaryReports.length);
-  if (!fallbackIsBetter) return primaryDraft;
-  const primaryPayload = storedDraftPayload(primaryDraft);
-  const fallbackMeta = storedDraftMeta(fallbackDraft);
-  const mergedPayload = {
-    ...primaryPayload,
-    meta: {
-      ...(primaryPayload.meta && typeof primaryPayload.meta === "object" ? primaryPayload.meta : {}),
-      semanticCoreSelected: normalizeSemanticSelection(fallbackMeta.semanticCoreSelected),
-      semanticCoreReports: fallbackReports,
-    },
-  };
-  return primaryDraft?.draft && typeof primaryDraft.draft === "object"
-    ? { ...primaryDraft, draft: mergedPayload }
-    : mergedPayload;
-}
-
 function countChangedDraftCharacteristics(drafts, rows) {
   return Object.entries(drafts || {}).filter(([key, draft]) => {
     const currentRow = rows.find((row) => row.key === key);
@@ -2367,6 +2323,13 @@ function semanticKeywordRankParts(item) {
 function semanticKeywordRankLabel(item) {
   const parts = semanticKeywordRankParts(item);
   return parts.length ? parts.join(" · ") : "позиция не получена";
+}
+
+function semanticPeriodLabel(period) {
+  if (!period || typeof period !== "object" || !period.d1 || !period.d2) {
+    return "";
+  }
+  return clientReportRangeLabel(period.d1, period.d2);
 }
 
 function semanticRankFields(item, period = null) {
@@ -6131,7 +6094,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     setDraftSavedAt("");
     setDraftSaveStatus("");
     setAuditCompetitorInput("");
-    let localStoredDraft = null;
     const applyDraft = (storedDraft) => {
       const normalized = contentFromStoredDraft(storedDraft, card);
       setDraftTitle(normalized.title);
@@ -6167,7 +6129,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     try {
       const saved = JSON.parse(localStorage.getItem(draftStorageKey) || "null");
       if (saved) {
-        localStoredDraft = saved;
         applyDraft(saved);
       } else {
         setDraftCharacteristics(characteristicDraftsFromRows(characteristicItems, "manual"));
@@ -6180,14 +6141,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
       apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(draftCardKey)}`)
         .then((payload) => {
           if (!active || !payload.draft) return;
-          const mergedDraft = mergeStoredDraftSemantics(payload.draft, localStoredDraft);
-          applyDraft(mergedDraft);
-          if (mergedDraft !== payload.draft) {
-            const repaired = contentFromStoredDraft(mergedDraft, card);
-            persistStructuredDraft(storedDraftPayload(mergedDraft), { auditDone: repaired.auditStatus === "done" }).catch(() => {});
-          } else {
-            setDraftSaveStatus("backend");
+          applyDraft(payload.draft);
+          try {
+            localStorage.setItem(draftStorageKey, JSON.stringify(payload.draft));
+          } catch {
+            // Backend remains the source of truth; local cache sync is best effort.
           }
+          setDraftSaveStatus("backend");
         })
         .catch(() => {
           if (active) {
@@ -6533,6 +6493,59 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
     const key = semanticQueryKey(item);
     if (!key) return;
     persistSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
+  }
+
+  async function persistSemanticReports(nextReports) {
+    const normalizedReports = normalizeSemanticReports(nextReports);
+    setSemanticCoreReports(normalizedReports);
+    setSemanticSaveStatus("saving");
+    const structuredDraft = buildStructuredCardDraft({
+      auditStatus,
+      auditHistory,
+      approval,
+      approvalSections,
+      title: draftTitle,
+      description: draftDescription,
+      titleSource: draftTitleSource,
+      descriptionSource: draftDescriptionSource,
+      titleReason: draftTitleReason,
+      descriptionReason: draftDescriptionReason,
+      characteristics: draftCharacteristics,
+      prices: draftPrices,
+      stocks: draftStocks,
+      semanticCoreSelected,
+      semanticCoreReports: normalizedReports,
+      card,
+    });
+    try {
+      await persistStructuredDraft(structuredDraft, { auditDone: auditStatus === "done" });
+      setSemanticSaveStatus("saved");
+    } catch {
+      setSemanticSaveStatus("error");
+    }
+  }
+
+  function removeSemanticReport(report) {
+    const reportId = report?.id;
+    if (!reportId) return;
+    const nextReports = semanticCoreReports.filter((item) => item.id !== reportId);
+    if (semanticActiveReportId === reportId) {
+      const nextActiveReport = nextReports[0] || null;
+      if (nextActiveReport) {
+        openSemanticReport(nextActiveReport);
+      } else {
+        setSemanticCore(null);
+        setSemanticActiveReportId("");
+        setSemanticSeedQuery(defaultSemanticSeedQuery(card));
+        setSemanticSubjectFilter("");
+        setSemanticSearch("");
+        setSemanticExcludeWords("");
+        setSemanticCoreStatus("idle");
+        setSemanticCoreError("");
+        setSemanticRankStatus("idle");
+      }
+    }
+    persistSemanticReports(nextReports);
   }
 
   async function reoptimizeContentFromSemanticCore() {
@@ -7518,7 +7531,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                     <strong>{formatNumber(semanticCoreSelected.length)} {pluralRu(semanticCoreSelected.length, "ключ", "ключа", "ключей")}</strong>
                     <em>{semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "источник", "источника", "источников")} MPStats` : "источников MPStats пока нет"}</em>
                   </div>
-                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore}>
+                  <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!activeSemanticCore && !semanticCoreSelected.length}>
                     <Download size={17} />Скачать итоговый файл
                   </button>
                 </div>
@@ -7533,6 +7546,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, onDraftSaved, onD
                         </div>
                         {report.id === semanticActiveReportId ? <Tag tone="green">открыт</Tag> : null}
                         <button className="btn mini" type="button" onClick={() => openSemanticReport(report)}>Открыть</button>
+                        <button className="btn mini danger" type="button" onClick={() => removeSemanticReport(report)}>
+                          <Trash2 size={14} />Удалить
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -9193,12 +9209,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const sourceItems = allKeywords.length ? allKeywords : workItems;
   const allRankedItems = (rankedKeywords.length ? rankedKeywords : sourceItems).filter(semanticHasKeywordRank);
   const reportTotal = semanticCore?.totalKeywords || sourceItems.length || current.length + missing.length;
+  const expansionPeriod = semanticPeriodLabel(semanticCore?.period);
+  const rankingPeriod = semanticPeriodLabel(semanticCore?.rankingPeriod || semanticCore?.period);
   const filteredSourceItems = sourceItems
     .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredAllRankedItems = allRankedItems
-    .filter((item) => !subjectFilter || item.prioritySubject === subjectFilter)
     .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const seenRankedCandidateKeys = new Set();
@@ -9263,14 +9280,20 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             active={metricFilter === "ranked"}
             label="Действ. с позициями"
             value={formatNumber(rankedCurrentCount)}
-            hint="Часть действующих запросов, для которых MPStats дополнительно отдал позицию карточки: органическую, среднюю или рекламную."
+            hint={`Действующие запросы, которые совпали с отчетом позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}.`}
             onClick={() => toggleMetricFilter("ranked")}
           />
           <SemanticMetric
+            label="Позиции карточки"
+            value={formatNumber(allRankedItems.length)}
+            hint={`Все запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. Это отдельный отчет, не расширение по стартовой фразе.`}
+            onClick={() => toggleMetricFilter("allRanked")}
+          />
+          <SemanticMetric
             active={metricFilter === "allRanked"}
-            label="Все позиции MPStats"
+            label="К добавлению из позиций"
             value={formatNumber(filteredAllRankedCandidateItems.length)}
-            hint="Запросы с позициями MPStats, которых еще нет среди действующих ключей и добавленных в работу."
+            hint="Запросы из отчета позиций карточки, которых еще нет среди действующих ключей и добавленных в итоговое СЯ."
             onClick={() => toggleMetricFilter("allRanked")}
           />
           <SemanticMetric
@@ -9281,15 +9304,9 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             onClick={() => toggleMetricFilter("selected")}
           />
           <SemanticMetric
-            label="По фильтрам"
-            value={formatNumber(filteredSourceItems.length)}
-            hint="Сколько запросов осталось после выбранного предмета, поиска по строке и слов-исключений."
-            onClick={() => setMetricFilter("all")}
-          />
-          <SemanticMetric
-            label="Отчет MPStats"
+            label="Расширение MPStats"
             value={formatNumber(reportTotal)}
-            hint="Общий размер SEO-отчета MPStats по стартовой фразе до фильтров и ручного отбора."
+            hint={`Общий размер SEO-расширения MPStats по стартовой фразе${expansionPeriod ? ` за ${expansionPeriod}` : ""}. Это не то же самое, что позиции карточки.`}
             onClick={() => setMetricFilter("all")}
           />
         </div>

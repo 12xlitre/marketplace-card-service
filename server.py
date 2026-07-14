@@ -2091,6 +2091,13 @@ def card_draft_semantic_items(payload, key):
   return items if isinstance(items, list) else []
 
 
+def card_draft_has_semantic_key(payload, key):
+  if not isinstance(payload, dict):
+    return False
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  return key in meta
+
+
 def merge_card_draft_semantics(next_payload, previous_payload):
   if not isinstance(next_payload, dict) or not isinstance(previous_payload, dict):
     return next_payload
@@ -2098,9 +2105,10 @@ def merge_card_draft_semantics(next_payload, previous_payload):
   previous_selected = card_draft_semantic_items(previous_payload, "semanticCoreSelected")
   if not previous_reports and not previous_selected:
     return next_payload
-  next_reports = card_draft_semantic_items(next_payload, "semanticCoreReports")
-  next_selected = card_draft_semantic_items(next_payload, "semanticCoreSelected")
-  if next_reports or next_selected:
+  if (
+    card_draft_has_semantic_key(next_payload, "semanticCoreReports")
+    or card_draft_has_semantic_key(next_payload, "semanticCoreSelected")
+  ):
     return next_payload
   next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
   merged_meta = {
