@@ -91,6 +91,7 @@ POST /api/card-content-reoptimize
 POST /api/card-competitors/suggest
 POST /api/card-workset
 POST /api/card-workset/create-tasks
+POST /api/card-workset/delete-tasks
 POST /api/semantic-core-collections
 POST /api/portal-work-periods
 DELETE /api/semantic-core-collections?portal_id=1&collection_id=1
@@ -121,7 +122,7 @@ SEO expansion MPStats отправляется не только с пользо
 
 `GET /api/portal-card-drafts` отдает сохраненные черновики карточек по одному кабинету после проверки доступа. Frontend использует его для кабинетных XLSX-выгрузок: итоговое СЯ по карточкам с сохраненным СЯ и итоговый контент только по карточкам, где секция `Контент` принята (`approved/exported`).
 
-`GET/POST /api/card-workset` хранит рабочий набор карточек кабинета в backend, а `POST /api/card-workset/create-tasks` создает внутренние задачи по выбранным типам работ (`СЯ`, `Контент`, `Цены`, `Остатки`). Задачи остаются в `card_drafts` и approval workflow; для СЯ задача считается закрытой после сохранения карточки в итоговое СЯ кабинета.
+`GET/POST /api/card-workset` хранит рабочий набор карточек кабинета в backend, а `POST /api/card-workset/create-tasks` создает внутренние задачи по выбранным типам работ (`СЯ`, `Контент`, `Цены`, `Остатки`). Задачей считается только draft с явным `meta.batch.workTypes`; обычное сохранение СЯ/черновика карточки без batch не должно появляться как задача `Контент`. `POST /api/card-workset/delete-tasks` удаляет рабочую задачу/тип работ из batch, но сохраняет результаты карточки в `card_drafts`; для СЯ задача считается закрытой после сохранения карточки в итоговое СЯ кабинета.
 
 `GET /api/portals/<portal_id>/wb-client-report` собирает данные для клиентского XLSX-отчета по выбранному периоду `start/end` в формате `YYYY-MM-DD`. Старый параметр `weeks` остается совместимым fallback, но UI использует сценарий `выбрать отчет -> выбрать период -> сформировать` во вкладке `Отчеты` внутри кабинета селлера. Маршрут проверяет доступ к кабинету, берет WB-токен только из backend-хранилища и не выполняет write-операции в WB.
 

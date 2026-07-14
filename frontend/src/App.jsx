@@ -5543,6 +5543,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
   const [teamSaving, setTeamSaving] = useState(false);
+  const [taskActionStatus, setTaskActionStatus] = useState("");
   const [importJob, setImportJob] = useState(null);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
 
@@ -5672,6 +5673,35 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     ));
     if (card) {
       onOpenCard(card);
+    }
+  }
+
+  async function deleteApprovalTaskGroup(group, workType) {
+    if (!portal?.id || portal.isDemo || taskActionStatus) return;
+    const cardsCount = group?.tasks?.length || 0;
+    const title = taskBatchGroupTitle(group);
+    const confirmed = window.confirm(`Удалить задачу "${title}" (${formatNumber(cardsCount)} ${pluralRu(cardsCount, "карточка", "карточки", "карточек")})? Сохраненные результаты карточек останутся.`);
+    if (!confirmed) return;
+    const actionKey = group.key || `${workType}:${group.batchId || ""}`;
+    setTaskActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/card-workset/delete-tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          batchId: group.batchId,
+          workType,
+          cardKeys: (group.tasks || []).map((task) => task.cardKey).filter(Boolean),
+        }),
+      });
+      if (payload.workflow) {
+        replaceApprovalWorkflow(payload.workflow);
+      }
+      onNotice?.("Задача удалена из кабинета.");
+    } catch {
+      onNotice?.("Не удалось удалить задачу.");
+    } finally {
+      setTaskActionStatus("");
     }
   }
 
@@ -6014,6 +6044,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 cards={cards}
                 findUser={findUser}
                 onOpenTask={openApprovalTask}
+                onDeleteTaskGroup={deleteApprovalTaskGroup}
+                taskActionStatus={taskActionStatus}
               />
             ) : null}
             {sellerTab === "reports" ? (
@@ -7236,7 +7268,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }) {
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "" }) {
   const tasks = workflow.tasks || [];
   const activeTasks = tasks.filter((task) => ["draft", "submitted", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
@@ -7295,6 +7327,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
                       const cardsLabel = originalCount && originalCount !== remainingCount
                         ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
                         : formatNumber(remainingCount);
+                      const actionBusy = taskActionStatus === group.key;
                       return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -7313,6 +7346,9 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask }
                           <div className="task-batch-actions">
                             <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask)} disabled={!canOpen}>
                               <Eye size={17} />Открыть первую
+                            </button>
+                            <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group, section.key)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
+                              <Trash2 size={16} />Удалить задачу
                             </button>
                           </div>
                           <details className="task-card-details">

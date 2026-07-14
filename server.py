@@ -2953,7 +2953,7 @@ def work_package_title(work_types, cards_count=0, comment=""):
 def active_task_work_types(meta):
   meta = meta if isinstance(meta, dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
-  work_types = normalize_work_types(batch.get("workTypes"))
+  work_types = normalize_optional_work_types(batch.get("workTypes"))
   if "semantic" in work_types and semantic_core_final_exists(meta):
     work_types = [work_type for work_type in work_types if work_type != "semantic"]
   return work_types
@@ -3245,6 +3245,146 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   }
 
 
+def delete_card_work_tasks(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  raw_work_types = payload.get("workTypes")
+  if raw_work_types is None:
+    raw_work_types = [payload.get("workType") or payload.get("work_type")]
+  work_types = normalize_optional_work_types(raw_work_types)
+  raw_card_keys = payload.get("cardKeys") if isinstance(payload.get("cardKeys"), list) else []
+  if payload.get("cardKey"):
+    raw_card_keys.append(payload.get("cardKey"))
+  card_keys = []
+  seen_card_keys = set()
+  for raw_key in raw_card_keys:
+    card_key = draft_card_key(raw_key)
+    if card_key and card_key not in seen_card_keys:
+      seen_card_keys.add(card_key)
+      card_keys.append(card_key)
+  if not batch_id and not card_keys:
+    raise ValueError("invalid_task_delete")
+
+  init_db()
+  updated = 0
+  matched = 0
+  removed_types = set()
+  now = utc_now().isoformat()
+  with connect_db() as db:
+    if batch_id:
+      rows = db.execute(
+        """
+        SELECT id, card_key, payload_json
+        FROM card_drafts
+        WHERE portal_id = ?
+          AND json_extract(payload_json, '$.meta.batch.id') = ?
+        """,
+        (numeric_portal_id, batch_id),
+      ).fetchall()
+    else:
+      placeholders = ",".join("?" for _ in card_keys)
+      rows = db.execute(
+        f"""
+        SELECT id, card_key, payload_json
+        FROM card_drafts
+        WHERE portal_id = ? AND card_key IN ({placeholders})
+        """,
+        [numeric_portal_id, *card_keys],
+      ).fetchall()
+
+    for row in rows:
+      try:
+        draft_payload = json.loads(row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        continue
+      draft_payload = normalize_card_draft_payload(draft_payload)
+      meta = draft_payload.get("meta") if isinstance(draft_payload.get("meta"), dict) else {}
+      batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+      current_work_types = normalize_optional_work_types(batch.get("workTypes"))
+      if not current_work_types:
+        continue
+      target_work_types = work_types or current_work_types
+      target_set = set(target_work_types)
+      row_removed_types = [work_type for work_type in current_work_types if work_type in target_set]
+      if not row_removed_types:
+        continue
+      matched += 1
+      removed_types.update(row_removed_types)
+      remaining_work_types = [work_type for work_type in current_work_types if work_type not in target_set]
+      approval_sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+      approval_sections = {
+        key: value
+        for key, value in approval_sections.items()
+        if key not in row_removed_types
+      }
+      if approval_sections:
+        meta["approvalSections"] = approval_sections
+      else:
+        meta.pop("approvalSections", None)
+
+      removal_history = meta.get("taskRemovalHistory") if isinstance(meta.get("taskRemovalHistory"), list) else []
+      removal_history.append({
+        "at": now,
+        "by": user["login"],
+        "batchId": batch.get("id") or "",
+        "cardKey": row["card_key"],
+        "workTypes": row_removed_types,
+      })
+      meta["taskRemovalHistory"] = removal_history[-50:]
+
+      if remaining_work_types:
+        previous_title = str(batch.get("title") or "")
+        previous_auto_title = work_package_title(current_work_types, batch.get("cardsCount"), batch.get("comment"))
+        batch = {
+          **batch,
+          "workTypes": remaining_work_types,
+          "workTypeLabels": [WORK_TYPE_LABELS.get(item, item) for item in remaining_work_types],
+        }
+        if not previous_title or previous_title == previous_auto_title:
+          batch["title"] = work_package_title(remaining_work_types, batch.get("cardsCount"), batch.get("comment"))
+        meta["batch"] = batch
+      else:
+        meta.pop("batch", None)
+
+      draft_payload["meta"] = meta
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, audit_status = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND portal_id = ?
+        """,
+        (
+          json.dumps(draft_payload, ensure_ascii=False, separators=(",", ":")),
+          draft_payload.get("auditStatus") or "idle",
+          user["login"],
+          row["id"],
+          numeric_portal_id,
+        ),
+      )
+      updated += 1
+
+  record_admin_event(user, "card_work_tasks_deleted", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "batchId": batch_id,
+    "cardKeys": card_keys[:50],
+    "workTypes": sorted(removed_types),
+    "matched": matched,
+    "updated": updated,
+  })
+  return {
+    "portalId": str(numeric_portal_id),
+    "deleted": updated,
+    "matched": matched,
+    "workTypes": sorted(removed_types),
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
 def event_minutes_between(start, end):
   if not start or not end:
     return None
@@ -3482,6 +3622,23 @@ def normalize_work_types(value):
       seen.add(key)
       output.append(key)
   return output or ["content"]
+
+
+def normalize_optional_work_types(value):
+  if isinstance(value, str):
+    raw_items = re.split(r"[\s,;]+", value)
+  elif isinstance(value, (list, tuple, set)):
+    raw_items = list(value)
+  else:
+    raw_items = []
+  output = []
+  seen = set()
+  for item in raw_items:
+    key = str(item or "").strip().lower()
+    if key in WORK_TYPE_LABELS and key not in seen:
+      seen.add(key)
+      output.append(key)
+  return output
 
 
 def work_type_labels(work_types):
@@ -13251,6 +13408,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_workset"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/delete-tasks":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = delete_card_work_tasks(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_delete"})
         return
       self.send_json(HTTPStatus.OK, result)
       return
