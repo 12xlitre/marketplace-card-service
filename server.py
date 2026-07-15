@@ -2983,15 +2983,31 @@ TASK_WORK_STATUS_PRIORITY = {
 }
 
 
+def row_value(row, key, default=""):
+  if row is None:
+    return default
+  try:
+    value = row[key]
+  except (IndexError, KeyError, TypeError):
+    return default
+  return default if value is None else value
+
+
+def approval_for_task_work_type(meta, work_type):
+  meta = meta if isinstance(meta, dict) else {}
+  sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+  section = sections.get(work_type) if isinstance(sections.get(work_type), dict) else None
+  if section is not None:
+    return section
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  return approval
+
+
 def task_work_type_status(meta, work_type):
   meta = meta if isinstance(meta, dict) else {}
   if work_type == "semantic":
     return "approved" if semantic_core_final_exists(meta) else "draft"
-  sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
-  section = sections.get(work_type) if isinstance(sections.get(work_type), dict) else None
-  if section is not None:
-    return approval_status_from_approval(section)
-  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  approval = approval_for_task_work_type(meta, work_type)
   return approval_status_from_approval(approval) if approval else "draft"
 
 
@@ -3006,17 +3022,92 @@ def task_status_for_work_types(meta, work_types):
   return sorted(statuses, key=lambda status: TASK_WORK_STATUS_PRIORITY.get(status, 0), reverse=True)[0]
 
 
-def public_approval_task(row, snapshot_lookup):
-  try:
-    payload = json.loads(row["payload_json"])
-  except (TypeError, json.JSONDecodeError):
-    payload = normalize_card_draft_payload({})
-  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+def task_work_completion_label(work_type, status):
+  if work_type == "semantic":
+    return "добавлено в итоговое СЯ"
+  if status == "submitted":
+    return "отправлено на согласование"
+  if status == "approved":
+    return "принято"
+  if status == "exported":
+    return "выгружено"
+  return "завершено"
+
+
+def completed_task_work_item(meta, work_type, row=None):
+  meta = meta if isinstance(meta, dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  if work_type == "semantic":
+    final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+    if not semantic_core_final_exists(meta):
+      return None
+    completed_at = str(
+      final_export.get("updatedAt")
+      or final_export.get("createdAt")
+      or row_value(row, "updated_at")
+      or ""
+    )
+    completed_by = str(
+      final_export.get("updatedBy")
+      or final_export.get("createdBy")
+      or row_value(row, "updated_by")
+      or row_value(row, "created_by")
+      or batch.get("assigneeLogin")
+      or batch.get("createdBy")
+      or ""
+    )
+    return {
+      "workType": work_type,
+      "status": "approved",
+      "completedAt": completed_at,
+      "completedBy": completed_by,
+      "completionLabel": task_work_completion_label(work_type, "approved"),
+    }
+
+  status = task_work_type_status(meta, work_type)
+  if status not in TASK_WORK_DONE_STATUSES:
+    return None
+  approval = approval_for_task_work_type(meta, work_type)
+  completed_at = str(
+    approval.get("submittedAt")
+    or approval.get("reviewedAt")
+    or row_value(row, "updated_at")
+    or ""
+  )
+  completed_by = str(
+    approval.get("submittedBy")
+    or approval.get("reviewedBy")
+    or row_value(row, "updated_by")
+    or row_value(row, "created_by")
+    or batch.get("assigneeLogin")
+    or batch.get("createdBy")
+    or ""
+  )
+  return {
+    "workType": work_type,
+    "status": status,
+    "completedAt": completed_at,
+    "completedBy": completed_by,
+    "completionLabel": task_work_completion_label(work_type, status),
+  }
+
+
+def completed_task_work_items(meta, row=None):
+  meta = meta if isinstance(meta, dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  work_types = normalize_optional_work_types(batch.get("workTypes"))
+  items = []
+  for work_type in work_types:
+    item = completed_task_work_item(meta, work_type, row)
+    if item:
+      items.append(item)
+  return items
+
+
+def approval_task_base(row, snapshot_lookup, meta, work_types):
   approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
-  work_types = active_task_work_types(meta)
-  status = task_status_for_work_types(meta, work_types)
   batch_title = str(batch.get("title") or work_package_title(work_types, batch.get("cardsCount"), batch.get("comment")) or "")[:180]
   card = snapshot_lookup.get(row["card_key"], {})
   return {
@@ -3026,7 +3117,6 @@ def public_approval_task(row, snapshot_lookup):
     "vendorCode": row["vendor_code"] or card_meta.get("vendorCode") or card.get("vendorCode") or "",
     "title": card.get("title") or card_meta.get("title") or row["vendor_code"] or row["nm_id"] or "Карточка WB",
     "subjectName": card.get("subjectName") or card_meta.get("subjectName") or "",
-    "status": status,
     "assigneeLogin": str(batch.get("assigneeLogin") or approval.get("assigneeLogin") or ""),
     "submittedBy": str(approval.get("submittedBy") or ""),
     "submittedAt": str(approval.get("submittedAt") or ""),
@@ -3044,6 +3134,43 @@ def public_approval_task(row, snapshot_lookup):
     "workComment": str(batch.get("comment") or "")[:700],
     "updatedAt": row["updated_at"] or "",
   }
+
+
+def public_approval_task(row, snapshot_lookup):
+  try:
+    payload = json.loads(row["payload_json"])
+  except (TypeError, json.JSONDecodeError):
+    payload = normalize_card_draft_payload({})
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  work_types = active_task_work_types(meta)
+  status = task_status_for_work_types(meta, work_types)
+  return {
+    **approval_task_base(row, snapshot_lookup, meta, work_types),
+    "status": status,
+  }
+
+
+def public_completed_approval_tasks(row, snapshot_lookup):
+  try:
+    payload = json.loads(row["payload_json"])
+  except (TypeError, json.JSONDecodeError):
+    payload = normalize_card_draft_payload({})
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  output = []
+  for item in completed_task_work_items(meta, row):
+    work_type = item["workType"]
+    task = {
+      **approval_task_base(row, snapshot_lookup, meta, [work_type]),
+      "status": item["status"],
+      "workType": work_type,
+      "workTypes": [work_type],
+      "workTypeLabels": [WORK_TYPE_LABELS.get(work_type, work_type)],
+      "completedAt": item["completedAt"],
+      "completedBy": item["completedBy"],
+      "completionLabel": item["completionLabel"],
+    }
+    output.append(task)
+  return output
 
 
 def normalize_workset_card(value):
@@ -3444,6 +3571,21 @@ def event_minutes_between(start, end):
   return max(0, int((end_dt - start_dt).total_seconds() // 60))
 
 
+def event_sort_timestamp(value):
+  text = str(value or "").strip()
+  if not text:
+    return 0
+  if " " in text and "T" not in text:
+    text = text.replace(" ", "T", 1)
+  try:
+    parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+  except ValueError:
+    return 0
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+  return parsed.timestamp()
+
+
 def approval_workflow(portal_id, user):
   try:
     numeric_portal_id = int(portal_id)
@@ -3465,7 +3607,7 @@ def approval_workflow(portal_id, user):
       SELECT *
       FROM card_drafts
       WHERE portal_id = ?
-        AND COALESCE(NULLIF(json_extract(payload_json, '$.meta.approval.status'), ''), 'draft') IN ('draft', 'submitted', 'changes_requested', 'approved')
+        AND COALESCE(NULLIF(json_extract(payload_json, '$.meta.approval.status'), ''), 'draft') IN ('draft', 'submitted', 'changes_requested', 'approved', 'exported')
       ORDER BY
         CASE COALESCE(NULLIF(json_extract(payload_json, '$.meta.approval.status'), ''), 'draft')
           WHEN 'submitted' THEN 1
@@ -3493,6 +3635,14 @@ def approval_workflow(portal_id, user):
     for task in (public_approval_task(row, snapshot_lookup) for row in task_rows)
     if task.get("workTypes")
   ]
+  completed_tasks = [
+    task
+    for row in task_rows
+    for task in public_completed_approval_tasks(row, snapshot_lookup)
+  ]
+  completed_tasks.sort(key=lambda task: event_sort_timestamp(task.get("completedAt") or task.get("updatedAt")), reverse=True)
+  completed_count = len(completed_tasks)
+  completed_tasks = completed_tasks[:200]
   draft_tasks = [task for task in tasks if task["status"] == "draft"]
   submitted_tasks = [task for task in tasks if task["status"] == "submitted"]
   returned_tasks = [task for task in tasks if task["status"] == "changes_requested"]
@@ -3536,11 +3686,13 @@ def approval_workflow(portal_id, user):
       "draftCount": len(draft_tasks),
       "returnedCount": len(returned_tasks),
       "approvedCount": len(approved_tasks),
+      "completedCount": completed_count,
       "eventCount": len(all_event_rows),
       "avgApprovalMinutes": round(sum(approval_minutes) / len(approval_minutes)) if approval_minutes else None,
       "avgPendingMinutes": round(sum(pending_minutes) / len(pending_minutes)) if pending_minutes else None,
       "lastEventAt": recent_events[0]["eventAt"] if recent_events else "",
     },
+    "completedTasks": completed_tasks,
     "recentEvents": recent_events,
   }
 

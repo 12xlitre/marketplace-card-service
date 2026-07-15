@@ -859,6 +859,7 @@ function approvalStatusLabel(status) {
     changes_requested: "на доработке",
     approved: "принято",
     exported: "выгружено",
+    completed: "завершено",
   }[status] || "черновик";
 }
 
@@ -1372,10 +1373,12 @@ function buildTaskGroupsByType(tasks) {
 function defaultApprovalWorkflow() {
   return {
     tasks: [],
+    completedTasks: [],
     analytics: {
       pendingCount: 0,
       returnedCount: 0,
       approvedCount: 0,
+      completedCount: 0,
       eventCount: 0,
       avgApprovalMinutes: null,
       avgPendingMinutes: null,
@@ -1389,10 +1392,12 @@ function normalizeApprovalWorkflow(value) {
   const analytics = value?.analytics || {};
   return {
     tasks: Array.isArray(value?.tasks) ? value.tasks : [],
+    completedTasks: Array.isArray(value?.completedTasks) ? value.completedTasks : [],
     analytics: {
       pendingCount: Number(analytics.pendingCount || 0),
       returnedCount: Number(analytics.returnedCount || 0),
       approvedCount: Number(analytics.approvedCount || 0),
+      completedCount: Number(analytics.completedCount || 0),
       eventCount: Number(analytics.eventCount || 0),
       avgApprovalMinutes: analytics.avgApprovalMinutes ?? null,
       avgPendingMinutes: analytics.avgPendingMinutes ?? null,
@@ -2818,6 +2823,8 @@ function normalizeSemanticFinalExport(value) {
     reportId: String(value.reportId || value.id || "").trim(),
     createdAt: value.createdAt || "",
     updatedAt: value.updatedAt || value.createdAt || "",
+    createdBy: String(value.createdBy || ""),
+    updatedBy: String(value.updatedBy || value.createdBy || ""),
     seedQuery: value.seedQuery || semanticCore.seedQuery || "",
     subjectFilter: value.subjectFilter || "",
     selected: normalizeSemanticSelection(value.selected),
@@ -2836,6 +2843,8 @@ function semanticFinalExportFromCore(core, selectedRows, options = {}) {
     reportId,
     createdAt,
     updatedAt: createdAt,
+    createdBy: options.createdBy || "",
+    updatedBy: options.updatedBy || options.createdBy || "",
     seedQuery: options.seedQuery || semanticCore.seedQuery || "",
     subjectFilter: options.subjectFilter || "",
     selected: normalizeSemanticSelection(selectedRows),
@@ -7812,12 +7821,32 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
 
 function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
+  const completedTasks = workflow.completedTasks || [];
+  const [completedSearch, setCompletedSearch] = useState("");
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
   const taskHasCard = (task) => Boolean(findCardForApprovalTask(cards, task));
   const groupsByType = buildTaskGroupsByType(activeTasks);
   const totalGroups = Object.values(groupsByType).reduce((sum, groups) => sum + groups.length, 0);
+  const completedSearchText = completedSearch.trim().toLowerCase();
+  const filteredCompletedTasks = completedTasks.filter((task) => {
+    if (!completedSearchText) return true;
+    const completedBy = findUser(task.completedBy);
+    return [
+      task.title,
+      task.nmID,
+      task.vendorCode,
+      task.subjectName,
+      taskSectionLabel(task.workType),
+      task.completionLabel,
+      approvalStatusLabel(task.status),
+      task.completedBy,
+      completedBy?.full_name,
+    ].map((value) => String(value || "").toLowerCase()).join(" ").includes(completedSearchText);
+  });
+  const visibleCompletedTasks = filteredCompletedTasks.slice(0, 80);
+  const completedTotal = Number(analytics.completedCount || completedTasks.length || 0);
   return (
     <section className="workspace-strip approval-workflow-strip">
       <div className="strip-head">
@@ -7935,6 +7964,70 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
       ) : (
           <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
       )}
+
+      <section className="task-completed-section">
+        <div className="task-completed-head">
+          <div>
+            <strong>Завершенные</strong>
+            <span>{completedTotal ? `${formatNumber(completedTotal)} ${pluralRu(completedTotal, "работа", "работы", "работ")} в архиве` : "здесь появятся закрытые работы по карточкам"}</span>
+          </div>
+          <label className="search-field task-completed-search">
+            <Search size={16} />
+            <input
+              type="search"
+              value={completedSearch}
+              onChange={(event) => setCompletedSearch(event.target.value)}
+              placeholder="Найти завершенную карточку"
+            />
+          </label>
+        </div>
+        {completedTasks.length ? (
+          filteredCompletedTasks.length ? (
+            <>
+              <div className="task-completed-list">
+                {visibleCompletedTasks.map((task) => {
+                  const rowCanOpen = taskHasCard(task);
+                  const completedBy = findUser(task.completedBy);
+                  const completedTime = Date.parse(task.completedAt || "");
+                  const completedAtLabel = Number.isFinite(completedTime)
+                    ? new Date(task.completedAt).toLocaleString("ru-RU")
+                    : task.completedAt || "без даты";
+                  return (
+                    <div className="task-completed-row" key={`${task.cardKey}-${task.workType}-${task.completedAt || task.updatedAt}`}>
+                      <div className="task-completed-main">
+                        <div className="task-completed-title">
+                          <strong>{task.title}</strong>
+                          <Tag tone={approvalStatusTone(task.status)}>{task.completionLabel || approvalStatusLabel(task.status)}</Tag>
+                        </div>
+                        <div className="task-completed-meta">
+                          <span>{taskSectionLabel(task.workType)}</span>
+                          <span>WB {textOrDash(task.nmID)}</span>
+                          <span>артикул {textOrDash(task.vendorCode)}</span>
+                          <span>{textOrDash(task.subjectName)}</span>
+                          <time>{completedAtLabel}</time>
+                          <span>завершил: {completedBy?.full_name || task.completedBy || "не указан"}</span>
+                        </div>
+                      </div>
+                      <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen}>
+                        <Eye size={14} />Открыть
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {filteredCompletedTasks.length > visibleCompletedTasks.length ? (
+                <div className="task-completed-more">
+                  Показано {formatNumber(visibleCompletedTasks.length)} из {formatNumber(filteredCompletedTasks.length)}. Уточните поиск, чтобы найти нужную карточку.
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="empty-state compact"><span>По этому поиску завершенных карточек нет.</span></div>
+          )
+        ) : (
+          <div className="empty-state compact"><span>{status === "loading" ? "Загружаем завершенные работы..." : "Завершенные работы появятся после отправки в итоговую выгрузку или на согласование."}</span></div>
+        )}
+      </section>
 
       <div className="approval-events">
         <div className="approval-events-head">
@@ -8191,6 +8284,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     seedQuery: semanticSeedForActiveCore,
     subjectFilter: semanticSubjectFilter,
     removalRows: semanticCoreRemoval,
+    createdBy: currentUser?.login || "",
+    updatedBy: currentUser?.login || "",
   });
   const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
   const semanticCurrentFinalSignature = semanticFinalExportSignature(currentSemanticFinalExport);

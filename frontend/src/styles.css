@@ -2275,6 +2275,81 @@ tr.selected-row td {
   padding: 8px 10px;
 }
 
+.task-completed-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.task-completed-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  align-items: center;
+  gap: 10px;
+}
+
+.task-completed-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.task-completed-head strong {
+  font-size: 16px;
+}
+
+.task-completed-head span,
+.task-completed-meta,
+.task-completed-more {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-completed-list {
+  display: grid;
+  gap: 6px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.task-completed-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 9px 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-completed-main {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.task-completed-title,
+.task-completed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.task-completed-title strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-completed-more {
+  text-align: center;
+}
+
 .empty-state.compact {
   min-height: 74px;
   padding: 12px;
@@ -5790,6 +5865,8 @@ tr:last-child td {
   .task-type-head,
   .task-batch-main,
   .task-card-row,
+  .task-completed-head,
+  .task-completed-row,
   .semantic-core-grid,
   .semantic-core-metrics,
   .semantic-query-bar,
