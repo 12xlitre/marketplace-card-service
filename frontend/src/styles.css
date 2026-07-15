@@ -385,6 +385,7 @@ a {
   min-height: 76px;
   padding: 18px 28px;
   display: flex;
+  flex-direction: row-reverse;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -394,7 +395,9 @@ a {
 }
 
 .title {
+  flex: 1;
   min-width: 0;
+  text-align: right;
 }
 
 .title h1 {
@@ -414,6 +417,7 @@ a {
 .seller-title-row {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   min-width: 0;
 }
@@ -451,6 +455,12 @@ a {
   justify-content: flex-end;
   gap: 9px;
   flex-wrap: wrap;
+}
+
+.topbar .toolbar,
+.topbar > .btn {
+  flex: 0 0 auto;
+  justify-content: flex-start;
 }
 
 .btn {
@@ -5839,9 +5849,23 @@ tr:last-child td {
     padding: 18px;
   }
 
+  .topbar .title {
+    width: 100%;
+    text-align: left;
+  }
+
+  .topbar .toolbar,
+  .topbar > .btn {
+    justify-content: flex-start;
+  }
+
   .seller-title-row,
   .seller-name-editor {
     width: 100%;
+  }
+
+  .seller-title-row {
+    justify-content: flex-start;
   }
 
   .seller-name-editor input {
