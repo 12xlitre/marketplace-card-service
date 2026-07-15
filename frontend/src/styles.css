@@ -4494,7 +4494,7 @@ tr:last-child td {
 
 .semantic-final-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
   gap: 12px;
   align-items: stretch;
   border: 1px solid var(--line);
@@ -4837,6 +4837,11 @@ tr:last-child td {
 .semantic-keyword.selected {
   border-color: #9fc5b4;
   background: #eef8f2;
+}
+
+.semantic-keyword.remove {
+  border-color: #e9b9b9;
+  background: #fff1ef;
 }
 
 .semantic-keyword-main {

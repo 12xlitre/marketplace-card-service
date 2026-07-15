@@ -2710,8 +2710,8 @@ function cardExportSheetName(card, draft, usedNames) {
   return safeSheetName(cardExportArticle(card, draft), `WB ${card?.nmID || draft?.nmID || "card"}`, usedNames);
 }
 
-function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, appendRows = 0) {
-  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length) + appendRows;
+function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, removalRows, appendRows = 0) {
+  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length, removalRows.length) + appendRows;
   return [
     [
       "Ключи в карточке (действующие)",
@@ -2719,7 +2719,10 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, app
       "Позиция ранжируемого ключа",
       "Ключ к добавлению",
       "Частота запроса ключа к добавлению",
-      "Согласование",
+      "Согласование добавления",
+      "Ключ к удалению из карточки",
+      "Причина удаления",
+      "Согласование удаления",
     ],
     ...Array.from({ length: rowCount }, (_, index) => [
       currentRows[index]?.query || "",
@@ -2728,28 +2731,37 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, app
       selectedRows[index]?.query || { value: "", style: 2 },
       selectedRows[index]?.query ? semanticFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
       selectedRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
+      removalRows[index]?.query || { value: "", style: 2 },
+      removalRows[index]?.query ? { value: semanticRemovalReason(removalRows[index]), style: 2 } : { value: "", style: 2 },
+      removalRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
     ]),
   ];
 }
 
-function buildSemanticCoreExportSheet(name, core, selectedRows) {
+function buildSemanticCoreExportSheet(name, core, selectedRows, removalRows = []) {
   const currentRows = semanticCurrentContentRows(core);
   const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
+  const removalRowsNormalized = semanticRemovalExportRows(removalRows, core);
   const rankingRows = semanticCurrentPositionRows(core);
-  if (!currentRows.length && !rankingRows.length && !selectedRowsNormalized.length) {
+  if (!currentRows.length && !rankingRows.length && !selectedRowsNormalized.length && !removalRowsNormalized.length) {
     return null;
   }
-  const tableRowCount = Math.max(currentRows.length, rankingRows.length, selectedRowsNormalized.length) + semanticManualAppendRows;
+  const tableRowCount = Math.max(currentRows.length, rankingRows.length, selectedRowsNormalized.length, removalRowsNormalized.length) + semanticManualAppendRows;
   const agreementEndRow = Math.max(tableRowCount + 1, 2);
   return {
     name,
     freezeRows: 1,
-    widths: [48, 48, 22, 48, 32, 18],
-    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized, semanticManualAppendRows),
+    widths: [48, 48, 22, 48, 32, 22, 48, 54, 22],
+    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized, removalRowsNormalized, semanticManualAppendRows),
     protected: true,
     dataValidations: tableRowCount ? [{
       type: "list",
       range: `F2:F${agreementEndRow}`,
+      formula1: '"Да,Нет"',
+      allowBlank: true,
+    }, {
+      type: "list",
+      range: `I2:I${agreementEndRow}`,
       formula1: '"Да,Нет"',
       allowBlank: true,
     }] : [],
@@ -2772,8 +2784,11 @@ function buildSemanticCoreInstructionSheet(card = null) {
       ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
       ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
       ["Частота запроса ключа к добавлению", "Частотность WB по запросу из MPStats."],
-      ["Согласование", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
-      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбце Согласование. Дополнительные ключи можно дописать в пустые строки столбцов Ключ к добавлению, Частота и Согласование."],
+      ["Согласование добавления", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
+      ["Ключ к удалению из карточки", "Действующий ключ, который специалист предлагает убрать из SEO карточки перед переоптимизацией."],
+      ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
+      ["Согласование удаления", "Да - после согласования специалист вручную удаляет ключ в SEO карточки WB и переоптимизирует текст без него. Нет - ключ оставить."],
+      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбцах согласования. Дополнительные ключи можно дописать в пустые строки блоков добавления или удаления."],
     ],
   };
 }
@@ -2790,6 +2805,7 @@ function normalizeSemanticFinalExport(value) {
     seedQuery: value.seedQuery || semanticCore.seedQuery || "",
     subjectFilter: value.subjectFilter || "",
     selected: normalizeSemanticSelection(value.selected),
+    removal: normalizeSemanticRemoval(value.removal || value.removed || value.toRemove),
     semanticCore,
   };
 }
@@ -2807,6 +2823,7 @@ function semanticFinalExportFromCore(core, selectedRows, options = {}) {
     seedQuery: options.seedQuery || semanticCore.seedQuery || "",
     subjectFilter: options.subjectFilter || "",
     selected: normalizeSemanticSelection(selectedRows),
+    removal: normalizeSemanticRemoval(options.removalRows),
     semanticCore,
   });
 }
@@ -2815,6 +2832,7 @@ function semanticFinalExportSignature(finalExport) {
   const normalized = normalizeSemanticFinalExport(finalExport);
   if (!normalized) return "";
   const selectedKeys = normalized.selected.map(semanticQueryKey).filter(Boolean).sort().join("|");
+  const removalKeys = normalized.removal.map(semanticQueryKey).filter(Boolean).sort().join("|");
   const core = normalized.semanticCore || {};
   const contentKeys = semanticCurrentContentRows(core).map(semanticQueryKey).filter(Boolean).sort().join("|");
   const rankingKeys = semanticCurrentPositionRows(core)
@@ -2837,6 +2855,7 @@ function semanticFinalExportSignature(finalExport) {
     normalized.reportId,
     normalized.seedQuery,
     selectedKeys,
+    removalKeys,
     contentKeys,
     rankingKeys,
     selectedExportKeys,
@@ -2847,11 +2866,12 @@ function semanticExportCoreFromDraft(draft, card) {
   const normalized = contentFromStoredDraft(draft, card);
   const finalExport = normalizeSemanticFinalExport(normalized.semanticCoreFinal);
   if (!finalExport) {
-    return { core: null, selected: [] };
+    return { core: null, selected: [], removal: [] };
   }
   const selected = normalizeSemanticSelection(finalExport.selected);
+  const removal = normalizeSemanticRemoval(finalExport.removal);
   const core = semanticCoreWithSelection(finalExport.semanticCore, selected);
-  return { core, selected };
+  return { core, selected, removal };
 }
 
 function buildPortalSemanticCoreSheets(cards, drafts) {
@@ -2862,8 +2882,8 @@ function buildPortalSemanticCoreSheets(cards, drafts) {
   const cardSheets = (Array.isArray(drafts) ? drafts : [])
     .map((draft) => {
       const card = cardsByKey.get(draft.cardKey) || cardsByNm.get(String(draft.nmID || "")) || cardsByVendor.get(String(draft.vendorCode || "")) || {};
-      const { core, selected } = semanticExportCoreFromDraft(draft, card);
-      return buildSemanticCoreExportSheet(cardExportSheetName(card, draft, usedNames), core, selected);
+      const { core, selected, removal } = semanticExportCoreFromDraft(draft, card);
+      return buildSemanticCoreExportSheet(cardExportSheetName(card, draft, usedNames), core, selected, removal);
     })
     .filter(Boolean);
   return cardSheets.length ? [buildSemanticCoreInstructionSheet(), ...cardSheets] : [];
@@ -3132,6 +3152,7 @@ function buildStructuredCardDraft({
   prices,
   stocks,
   semanticCoreSelected,
+  semanticCoreRemoval,
   semanticCoreReports,
   semanticCoreFinal,
   card,
@@ -3167,6 +3188,7 @@ function buildStructuredCardDraft({
       },
       auditHistory: sanitizeAuditHistory(auditHistory).slice(0, 20),
       semanticCoreSelected: normalizeSemanticSelection(semanticCoreSelected),
+      semanticCoreRemoval: normalizeSemanticRemoval(semanticCoreRemoval),
       semanticCoreReports: normalizeSemanticReports(semanticCoreReports),
       semanticCoreFinal: normalizeSemanticFinalExport(semanticCoreFinal),
       auditResult: sanitizeAuditResult(auditResult),
@@ -3192,6 +3214,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   const approvalSections = normalizeApprovalSections(meta.approvalSections, approval);
   const semanticCoreReports = normalizeSemanticReports(meta.semanticCoreReports);
   const semanticCoreFinal = normalizeSemanticFinalExport(meta.semanticCoreFinal);
+  const semanticCoreRemoval = normalizeSemanticRemoval(meta.semanticCoreRemoval || meta.semanticCoreRemoved || meta.semanticCoreToRemove);
   const semanticCoreSelected = normalizeSemanticSelection(
     Array.isArray(meta.semanticCoreSelected) && meta.semanticCoreSelected.length
       ? meta.semanticCoreSelected
@@ -3209,6 +3232,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
     semanticCoreSelected,
+    semanticCoreRemoval,
     semanticCoreReports,
     semanticCoreFinal,
     auditHistory: sanitizeAuditHistory(meta.auditHistory),
@@ -3420,6 +3444,29 @@ function normalizeSemanticSelection(items) {
       query,
       status: "selected",
       field: "work",
+    });
+  });
+  return output.slice(0, semanticSelectionLimit);
+}
+
+function semanticRemovalReason(item) {
+  return String(item?.removalReason || item?.reason || "предлагаем удалить из SEO карточки перед переоптимизацией").trim();
+}
+
+function normalizeSemanticRemoval(items) {
+  const output = [];
+  const seen = new Set();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const query = String(typeof item === "string" ? item : item?.query || "").trim();
+    const key = semanticQueryKey(query);
+    if (!query || seen.has(key)) return;
+    seen.add(key);
+    output.push({
+      ...(typeof item === "object" && item ? item : {}),
+      query,
+      status: "remove",
+      field: typeof item === "object" && item?.field ? item.field : "content",
+      removalReason: semanticRemovalReason(item),
     });
   });
   return output.slice(0, semanticSelectionLimit);
@@ -3650,6 +3697,30 @@ function semanticSelectedExportRows(selectedRows, core) {
     output.push(merged);
   });
   return output.sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+}
+
+function semanticRemovalExportRows(removalRows, core) {
+  const contentRows = semanticCurrentContentRows(core);
+  const contentByKey = new Map(contentRows.map((item, index) => [semanticQueryKey(item), { item, index }]));
+  const output = [];
+  const seen = new Set();
+  normalizeSemanticRemoval(removalRows).forEach((item, index) => {
+    const key = semanticQueryKey(item);
+    const source = contentByKey.get(key);
+    if (!key || seen.has(key) || (contentRows.length && !source)) return;
+    seen.add(key);
+    output.push({
+      ...(source?.item || {}),
+      ...item,
+      status: "remove",
+      field: "content",
+      removalReason: semanticRemovalReason(item),
+      _contentIndex: source?.index ?? index,
+    });
+  });
+  return output
+    .sort((left, right) => Number(left._contentIndex || 0) - Number(right._contentIndex || 0))
+    .map(({ _contentIndex, ...item }) => item);
 }
 
 function semanticCoreFromRankingPayload(payload) {
@@ -7909,6 +7980,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticDraftDirty, setSemanticDraftDirty] = useState(false);
   const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
+  const [semanticCoreRemoval, setSemanticCoreRemoval] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
   const [semanticCleared, setSemanticCleared] = useState(false);
@@ -8050,10 +8122,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
+  const activeSemanticRemovalRows = semanticRemovalExportRows(semanticCoreRemoval, activeSemanticCore);
+  const activeSemanticRemovalKeys = new Set(activeSemanticRemovalRows.map(semanticQueryKey).filter(Boolean));
+  const activeSemanticPositionRowsForOptimization = activeSemanticPositionRows.filter((item) => !activeSemanticRemovalKeys.has(semanticQueryKey(item)));
+  const activeSemanticContentRowsForCoverage = activeSemanticContentRows.filter((item) => !activeSemanticRemovalKeys.has(semanticQueryKey(item)));
   const descriptionKeywordRows = descriptionKeywordCandidates([
     { items: activeSemanticNewRows, origin: "selected", label: "к добавлению" },
-    { items: activeSemanticContentRows, origin: "content", label: "в карточке" },
-    { items: activeSemanticPositionRows, origin: "ranking", label: "ранжируется" },
+    { items: activeSemanticContentRowsForCoverage, origin: "content", label: "в карточке" },
+    { items: activeSemanticPositionRowsForOptimization, origin: "ranking", label: "ранжируется" },
   ]);
   const activeSemanticReport = semanticCoreReports.find((report) => report.id === semanticActiveReportId) || null;
   const activeSemanticSeedQuery = String(activeSemanticReport?.seedQuery || activeSemanticCore?.seedQuery || "").trim();
@@ -8090,7 +8166,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     return `${collection.name || ""} ${keywordText}`.toLowerCase().includes(semanticCollectionSearchText);
   });
   const autoSemanticCandidateRows = semanticAutoSelectCandidateRows();
-  const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving");
+  const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving" && !approvalReadOnly);
   const autoSemanticTitle = activeSemanticCore
     ? autoSemanticCandidateRows.length
       ? `Автоматически добавить ${formatNumber(autoSemanticCandidateRows.length)} ${pluralRu(autoSemanticCandidateRows.length, "подходящий запрос", "подходящих запроса", "подходящих запросов")} в работу.`
@@ -8100,20 +8176,23 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     reportId: semanticActiveReportId,
     seedQuery: semanticSeedForActiveCore,
     subjectFilter: semanticSubjectFilter,
+    removalRows: semanticCoreRemoval,
   });
   const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
   const semanticCurrentFinalSignature = semanticFinalExportSignature(currentSemanticFinalExport);
   const semanticStoredFinalSignature = semanticFinalExportSignature(semanticStoredFinal);
-  const semanticFinalHasRows = Boolean(activeSemanticContentRows.length || activeSemanticPositionRows.length || activeSemanticNewRows.length);
+  const semanticFinalHasRows = Boolean(activeSemanticContentRows.length || activeSemanticPositionRows.length || activeSemanticNewRows.length || activeSemanticRemovalRows.length);
   const semanticFinalMatchesCurrent = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && semanticStoredFinalSignature === semanticCurrentFinalSignature);
   const semanticFinalConflict = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && !semanticFinalMatchesCurrent);
   const semanticCurrentChoiceSaved = Boolean(semanticDraftSaved && !semanticDraftDirty && semanticSaveStatus !== "error");
-  const semanticSaveCurrentDisabled = !semanticDraftDirty || semanticSaveStatus === "saving";
-  const semanticSaveCurrentTitle = semanticDraftDirty
-    ? "Сохранить текущий подбор, выбранные ключи и источники MPStats в карточке без добавления в итоговую выгрузку."
-    : semanticCurrentChoiceSaved
-      ? "Текущий выбор уже сохранен в карточке."
-      : "Сначала подберите запросы или измените выбор ключей.";
+  const semanticSaveCurrentDisabled = approvalReadOnly || !semanticDraftDirty || semanticSaveStatus === "saving";
+  const semanticSaveCurrentTitle = approvalReadOnly
+    ? "Раздел находится на согласовании: менять текущий выбор нельзя."
+    : semanticDraftDirty
+      ? "Сохранить текущий подбор, выбранные ключи и источники MPStats в карточке без добавления в итоговую выгрузку."
+      : semanticCurrentChoiceSaved
+        ? "Текущий выбор уже сохранен в карточке."
+        : "Сначала подберите запросы или измените выбор ключей.";
   const semanticStoredFinalLabel = semanticStoredFinal
     ? [
       semanticStoredFinal.seedQuery || "без стартового запроса",
@@ -8325,6 +8404,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticDraftDirty(false);
     setSemanticDraftSaved(false);
     setSemanticCoreSelected([]);
+    setSemanticCoreRemoval([]);
     setSemanticCoreReports([]);
     setSemanticCoreFinal(null);
     setSemanticCleared(false);
@@ -8358,11 +8438,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setDraftPrices(normalized.prices);
       setDraftStocks(normalized.stocks);
       setSemanticCoreSelected(normalized.semanticCoreSelected);
+      setSemanticCoreRemoval(normalized.semanticCoreRemoval);
       setSemanticCoreReports(normalized.semanticCoreReports);
       setSemanticCoreFinal(normalized.semanticCoreFinal);
       setSemanticCleared(false);
       setSemanticDraftDirty(false);
-      setSemanticDraftSaved(Boolean(normalized.semanticCoreReports.length || normalized.semanticCoreSelected.length || normalized.semanticCoreFinal));
+      setSemanticDraftSaved(Boolean(normalized.semanticCoreReports.length || normalized.semanticCoreSelected.length || normalized.semanticCoreRemoval.length || normalized.semanticCoreFinal));
       setSemanticFinalStatus("");
       if (normalized.semanticCoreReports.length) {
         const latestReport = semanticPreferredReport(normalized.semanticCoreReports);
@@ -8816,8 +8897,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticSaveStatus("unsaved");
   }
 
+  function stageSemanticRemoval(nextRemoval) {
+    const normalizedRemoval = normalizeSemanticRemoval(nextRemoval);
+    setSemanticCoreRemoval(normalizedRemoval);
+    setSemanticCleared(false);
+    setSemanticDraftDirty(true);
+    setSemanticDraftSaved(false);
+    setSemanticSaveStatus("unsaved");
+    setSemanticFinalStatus("");
+  }
+
   async function saveSemanticCurrentSelection() {
     const normalizedSelection = normalizeSemanticSelection(semanticCoreSelected);
+    const normalizedRemoval = normalizeSemanticRemoval(semanticCoreRemoval);
     let reportSource = semanticCoreReports;
     let fallbackReport = null;
     const shouldCreateFallbackReport = activeSemanticCore
@@ -8831,7 +8923,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       reportSource = fallbackReport ? [fallbackReport, ...reportSource] : reportSource;
     }
     const nextReports = semanticReportsWithSelection(reportSource, normalizedSelection);
-    const nextFinal = !nextReports.length && !normalizedSelection.length ? null : semanticCoreFinal;
+    const nextFinal = !nextReports.length && !normalizedSelection.length && !normalizedRemoval.length ? null : semanticCoreFinal;
     const structuredDraft = buildStructuredCardDraft({
       auditStatus,
       auditHistory,
@@ -8847,11 +8939,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected: normalizedSelection,
+      semanticCoreRemoval: normalizedRemoval,
       semanticCoreReports: nextReports,
       semanticCoreFinal: nextFinal,
       card,
     });
     setSemanticCoreSelected(normalizedSelection);
+    setSemanticCoreRemoval(normalizedRemoval);
     setSemanticCoreReports(nextReports);
     setSemanticCoreFinal(nextFinal);
     if (!semanticActiveReportId && fallbackReport?.id) {
@@ -8864,8 +8958,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         throw new Error("semantic_save_failed");
       }
       setSemanticDraftDirty(false);
-      setSemanticDraftSaved(Boolean(nextReports.length || normalizedSelection.length || nextFinal));
-      setSemanticCleared(!nextReports.length && !normalizedSelection.length && !nextFinal);
+      setSemanticDraftSaved(Boolean(nextReports.length || normalizedSelection.length || normalizedRemoval.length || nextFinal));
+      setSemanticCleared(!nextReports.length && !normalizedSelection.length && !normalizedRemoval.length && !nextFinal);
       setSemanticSaveStatus("saved");
     } catch {
       setSemanticDraftDirty(true);
@@ -9094,6 +9188,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function takeSemanticKeyword(item) {
+    if (approvalReadOnly) return;
     const key = semanticQueryKey(item);
     if (!key || semanticCoreSelected.some((selected) => semanticQueryKey(selected) === key)) {
       return;
@@ -9167,9 +9262,31 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function removeSemanticKeyword(item) {
+    if (approvalReadOnly) return;
     const key = semanticQueryKey(item);
     if (!key) return;
     stageSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
+  }
+
+  function toggleSemanticRemovalKeyword(item) {
+    if (approvalReadOnly) return;
+    const key = semanticQueryKey(item);
+    if (!key) return;
+    const currentRemoval = normalizeSemanticRemoval(semanticCoreRemoval);
+    if (currentRemoval.some((removed) => semanticQueryKey(removed) === key)) {
+      stageSemanticRemoval(currentRemoval.filter((removed) => semanticQueryKey(removed) !== key));
+      return;
+    }
+    const source = activeSemanticContentRows.find((row) => semanticQueryKey(row) === key) || item;
+    stageSemanticRemoval([
+      ...currentRemoval,
+      {
+        ...source,
+        status: "remove",
+        field: source.field || "content",
+        removalReason: "ключ нерелевантен или не нужен в будущей переоптимизации",
+      },
+    ]);
   }
 
   function stageSemanticReports(nextReports) {
@@ -9232,7 +9349,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           cardKey: draftCardKey,
           card,
           selectedKeywords: activeSemanticNewRows,
-          currentKeywords: activeSemanticPositionRows,
+          currentKeywords: activeSemanticPositionRowsForOptimization,
+          removeKeywords: activeSemanticRemovalRows,
           draft: {
             title: draftTitle,
             description: draftDescription,
@@ -9260,6 +9378,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         prices: draftPrices,
         stocks: draftStocks,
         semanticCoreSelected,
+        semanticCoreRemoval,
         semanticCoreReports,
         semanticCoreFinal,
         card,
@@ -9363,6 +9482,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         prices: draftPrices,
         stocks: draftStocks,
         semanticCoreSelected,
+        semanticCoreRemoval,
         semanticCoreReports,
         semanticCoreFinal,
         card,
@@ -9444,6 +9564,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+        semanticCoreRemoval,
       semanticCoreReports,
       semanticCoreFinal,
       card,
@@ -9772,6 +9893,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         prices: draftPrices,
         stocks: draftStocks,
         semanticCoreSelected,
+        semanticCoreRemoval,
         semanticCoreReports,
         semanticCoreFinal,
         card,
@@ -9873,6 +9995,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+        semanticCoreRemoval,
       semanticCoreReports,
       semanticCoreFinal,
       card,
@@ -9897,6 +10020,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+        semanticCoreRemoval,
       semanticCoreReports,
       semanticCoreFinal,
       card,
@@ -10055,8 +10179,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
-  function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, core = activeSemanticCore } = {}) {
-    const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows);
+  function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, removalRows = semanticCoreRemoval, core = activeSemanticCore } = {}) {
+    const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows, removalRows);
     if (!sheet) return;
     downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [buildSemanticCoreInstructionSheet(card), sheet]);
   }
@@ -10080,6 +10204,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       prices: draftPrices,
       stocks: draftStocks,
       semanticCoreSelected,
+      semanticCoreRemoval,
       semanticCoreReports,
       semanticCoreFinal: nextFinal,
       card,
@@ -10372,15 +10497,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </div>
                 ) : null}
                 {activeSemanticCore ? (
-                  <SemanticCorePanel
-                    semanticCore={activeSemanticCore}
-                    standalone
-                    subjectFilter={semanticSubjectFilter}
-                    search={semanticSearch}
-                    excludeWords={semanticExcludeWords}
-                    onTakeKeyword={takeSemanticKeyword}
-                    onRemoveKeyword={removeSemanticKeyword}
-                  />
+	                  <SemanticCorePanel
+	                    semanticCore={activeSemanticCore}
+	                    standalone
+	                    subjectFilter={semanticSubjectFilter}
+	                    search={semanticSearch}
+	                    excludeWords={semanticExcludeWords}
+	                    removalRows={semanticCoreRemoval}
+	                    onTakeKeyword={takeSemanticKeyword}
+	                    onRemoveKeyword={removeSemanticKeyword}
+	                    onToggleRemoveKeyword={toggleSemanticRemovalKeyword}
+	                    readOnly={approvalReadOnly}
+	                  />
                 ) : (
                   <div className="empty-state">
                     <strong>Позиции карточки еще не загружены</strong>
@@ -10452,15 +10580,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     <strong>{formatNumber(activeSemanticPositionRows.length)} {pluralRu(activeSemanticPositionRows.length, "запрос", "запроса", "запросов")}</strong>
                     <em>{activeSemanticRankingPeriodLabel ? `MPStats за ${activeSemanticRankingPeriodLabel}` : "из отчета видимости MPStats"}</em>
                   </div>
-                  <div>
-                    <span>К добавлению с частотой</span>
-                    <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
-                    <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
-                  </div>
-                  <div className="semantic-final-actions">
-                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!semanticCurrentChoiceSaved || (!activeSemanticPositionRows.length && !activeSemanticNewRows.length)} title={semanticCurrentChoiceSaved ? "Скачать сохраненный текущий выбор СЯ по карточке." : "Сначала нажмите Сохранить текущий выбор."}>
-                      <Download size={17} />Скачать файл карточки
-                    </button>
+	                  <div>
+	                    <span>К добавлению с частотой</span>
+	                    <strong>{formatNumber(activeSemanticNewRows.length)} {pluralRu(activeSemanticNewRows.length, "запрос", "запроса", "запросов")}</strong>
+	                    <em>{activeSemanticExpansionPeriodLabel ? `подбор за ${activeSemanticExpansionPeriodLabel}` : semanticCoreReports.length ? `${formatNumber(semanticCoreReports.length)} ${pluralRu(semanticCoreReports.length, "подборка", "подборки", "подборок")}` : "подборок пока нет"}</em>
+	                  </div>
+	                  <div>
+	                    <span>К удалению</span>
+	                    <strong>{formatNumber(activeSemanticRemovalRows.length)} {pluralRu(activeSemanticRemovalRows.length, "ключ", "ключа", "ключей")}</strong>
+	                    <em>попадут в отчет на согласование</em>
+	                  </div>
+	                  <div className="semantic-final-actions">
+	                    <button className="btn" type="button" onClick={() => downloadSemanticCoreSelection()} disabled={!semanticCurrentChoiceSaved || (!activeSemanticPositionRows.length && !activeSemanticNewRows.length && !activeSemanticRemovalRows.length)} title={semanticCurrentChoiceSaved ? "Скачать сохраненный текущий выбор СЯ по карточке." : "Сначала нажмите Сохранить текущий выбор."}>
+	                      <Download size={17} />Скачать файл карточки
+	                    </button>
                     <button className={loadingButtonClass("btn primary", semanticFinalStatus === "saving")} type="button" onClick={addSemanticCoreToFinal} disabled={semanticFinalAddDisabled} aria-busy={semanticFinalStatus === "saving" || undefined} title={semanticFinalAddTitle}>
                       <CheckSquare size={17} />{semanticFinalMatchesCurrent ? "В итоговом СЯ" : "Добавить в итоговое СЯ"}
                     </button>
@@ -12272,13 +12405,16 @@ function SemanticMetric({ active = false, label, value, hint, onClick }) {
   );
 }
 
-function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", onTakeKeyword = null, onRemoveKeyword = null }) {
+function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", removalRows = [], onTakeKeyword = null, onRemoveKeyword = null, onToggleRemoveKeyword = null, readOnly = false }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
   const contentItems = semanticCurrentContentRows(semanticCore);
   const positionItems = semanticCurrentPositionRows(semanticCore);
+  const removalItems = semanticRemovalExportRows(removalRows, semanticCore);
   const existingKeys = semanticExistingQueryKeys(semanticCore);
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
+  const removalKeys = new Set(removalItems.map(semanticQueryKey).filter(Boolean));
+  const contentKeys = new Set(contentItems.map(semanticQueryKey).filter(Boolean));
   const sourceItems = semanticCandidateSourceRows(semanticCore);
   const coverage = semanticCore?.coveragePercent;
   const selectedLimit = compact ? 4 : standalone ? 100 : 8;
@@ -12299,6 +12435,8 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const filteredPositionItems = positionItems
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredContentItems = contentItems
+    .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
+  const filteredRemovalItems = removalItems
     .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText));
   const filteredPositionKeys = new Set(filteredPositionItems.map(semanticQueryKey).filter(Boolean));
   const filteredContentOnlyItems = filteredContentItems
@@ -12324,13 +12462,15 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
     setMetricFilter((currentFilter) => (currentFilter === filter ? "all" : filter));
   };
   const displayedSelectedItems = metricFilter === "selected" || metricFilter === "all" ? selectedItems : [];
-  const displayedCurrentItems = metricFilter === "positions"
-    ? filteredPositionItems
-    : metricFilter === "content"
-      ? filteredContentItems
-      : metricFilter === "all"
-        ? [...filteredPositionItems, ...filteredContentOnlyItems]
-        : [];
+  const displayedCurrentItems = metricFilter === "remove"
+    ? filteredRemovalItems
+    : metricFilter === "positions"
+      ? filteredPositionItems
+      : metricFilter === "content"
+        ? filteredContentItems
+        : metricFilter === "all"
+          ? [...filteredPositionItems, ...filteredContentOnlyItems]
+          : [];
   const visibleWorkCount = Math.min(visibleWorkLimit, filteredWorkItems.length);
   const visibleSelectedCount = Math.min(visibleSelectedLimit, displayedSelectedItems.length);
   const visibleCurrentCount = Math.min(visibleCurrentLimit, displayedCurrentItems.length);
@@ -12340,13 +12480,15 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       ? "Ключи в карточке (действующие)"
       : metricFilter === "selected"
         ? "Добавленные в работу"
-        : "Ключи в карточке и ранжирующиеся запросы";
+        : metricFilter === "remove"
+          ? "К удалению из карточки"
+          : "Ключи в карточке и ранжирующиеся запросы";
   const showWorkColumn = metricFilter === "all";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
         <strong>Семантическое ядро</strong>
-        <Tag tone={filteredWorkItems.length ? "amber" : "green"}>{positionItems.length ? `${formatNumber(positionItems.length)} ранж.` : coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
+        <Tag tone={removalItems.length ? "red" : filteredWorkItems.length ? "amber" : "green"}>{removalItems.length ? `${formatNumber(removalItems.length)} к удал.` : positionItems.length ? `${formatNumber(positionItems.length)} ранж.` : coverage === null || coverage === undefined ? "MPStats" : `${coverage}% покрытие`}</Tag>
       </div>
       <p>{semanticCore?.reason || "MPStats собирает действующие позиции карточки и расширение по стартовой фразе."}</p>
       {standalone ? (
@@ -12364,6 +12506,13 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             value={formatNumber(contentItems.length)}
             hint="Действующие ключи, которые уже заложены в заголовок или описание карточки. По ним может не быть позиции."
             onClick={() => toggleMetricFilter("content")}
+          />
+          <SemanticMetric
+            active={metricFilter === "remove"}
+            label="К удалению"
+            value={formatNumber(removalItems.length)}
+            hint="Действующие ключи карточки, которые попадут в отчет как предложение удалить перед переоптимизацией."
+            onClick={() => toggleMetricFilter("remove")}
           />
           <SemanticMetric
             active={metricFilter === "selected"}
@@ -12398,7 +12547,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                   {semanticHasKeywordRank(item) ? <span className="semantic-keyword-rank">{semanticKeywordRankLabel(item)}</span> : null}
                 </div>
                 {standalone && onRemoveKeyword ? (
-                  <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)}>
+                  <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)} disabled={readOnly}>
                     <X size={14} />Убрать
                   </button>
                 ) : null}
@@ -12419,19 +12568,34 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             ) : null}
-            {displayedCurrentItems.length ? displayedCurrentItems.slice(0, visibleCurrentLimit).map((item) => (
-              <div className="semantic-keyword" key={`current-${item.query}`}>
-                <div className="semantic-keyword-main">
-                  <strong>{item.query}</strong>
-                  <em>{semanticKeywordMeta(item) || (semanticHasKeywordRank(item) ? "ранжирующийся запрос карточки" : "действующий ключ в карточке")}</em>
-                  {standalone ? (
-                    <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
-                      {semanticKeywordRankLabel(item)}
-                    </span>
+            {displayedCurrentItems.length ? displayedCurrentItems.slice(0, visibleCurrentLimit).map((item) => {
+              const key = semanticQueryKey(item);
+              const markedForRemoval = removalKeys.has(key) || metricFilter === "remove";
+              const canToggleRemoval = standalone && onToggleRemoveKeyword && (contentKeys.has(key) || markedForRemoval);
+              return (
+                <div className={`semantic-keyword${markedForRemoval ? " remove" : ""}`} key={`current-${metricFilter}-${key || item.query}`}>
+                  <div className="semantic-keyword-main">
+                    <strong>{item.query}</strong>
+                    <em>{markedForRemoval ? semanticRemovalReason(item) : semanticKeywordMeta(item) || (semanticHasKeywordRank(item) ? "ранжирующийся запрос карточки" : "действующий ключ в карточке")}</em>
+                    {standalone ? (
+                      <span className={`semantic-keyword-rank ${semanticHasKeywordRank(item) ? "" : "muted"}`}>
+                        {semanticKeywordRankLabel(item)}
+                      </span>
+                    ) : null}
+                  </div>
+                  {standalone && (markedForRemoval || canToggleRemoval) ? (
+                    <div className="semantic-keyword-actions">
+                      {markedForRemoval ? <Tag tone="red">к удалению</Tag> : null}
+                      {canToggleRemoval ? (
+                        <button className={`btn mini${markedForRemoval ? "" : " danger"}`} type="button" onClick={() => onToggleRemoveKeyword(item)} disabled={readOnly}>
+                          {markedForRemoval ? <RotateCcw size={14} /> : <Trash2 size={14} />}{markedForRemoval ? "Оставить" : "К удалению"}
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
-              </div>
-            )) : null}
+              );
+            }) : null}
             {displayedCurrentItems.length > visibleCurrentLimit ? (
               <div className="semantic-list-footer">
                 <p>Показано {formatNumber(visibleCurrentCount)} из {formatNumber(displayedCurrentItems.length)} ключей.</p>
@@ -12447,7 +12611,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 ) : null}
               </div>
             ) : null}
-            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "content" ? "Действующих ключей в карточке пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
+            {!displayedSelectedItems.length && !displayedCurrentItems.length ? <p>{metricFilter === "positions" ? "Ранжирующихся запросов пока нет." : metricFilter === "content" ? "Действующих ключей в карточке пока нет." : metricFilter === "selected" ? "Новых запросов к добавлению пока нет." : metricFilter === "remove" ? "Ключей к удалению пока нет." : "Пока нет данных для итогового файла."}</p> : null}
           </div>
         </div>
         {showWorkColumn ? (
@@ -12467,7 +12631,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                     </Tag>
                   ) : null}
                   {standalone && onTakeKeyword ? (
-                    <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)}>
+                    <button className="btn mini" type="button" onClick={() => onTakeKeyword(item)} disabled={readOnly}>
                       <Plus size={14} />В работу
                     </button>
                   ) : null}

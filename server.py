@@ -2467,13 +2467,15 @@ def merge_card_draft_semantics(next_payload, previous_payload):
     return next_payload
   previous_reports = card_draft_semantic_items(previous_payload, "semanticCoreReports")
   previous_selected = card_draft_semantic_items(previous_payload, "semanticCoreSelected")
+  previous_removal = card_draft_semantic_items(previous_payload, "semanticCoreRemoval")
   previous_final = card_draft_semantic_dict(previous_payload, "semanticCoreFinal")
-  if not previous_reports and not previous_selected and not previous_final:
+  if not previous_reports and not previous_selected and not previous_removal and not previous_final:
     return next_payload
   has_reports = card_draft_has_semantic_key(next_payload, "semanticCoreReports")
   has_selected = card_draft_has_semantic_key(next_payload, "semanticCoreSelected")
+  has_removal = card_draft_has_semantic_key(next_payload, "semanticCoreRemoval")
   has_final = card_draft_has_semantic_key(next_payload, "semanticCoreFinal")
-  if has_reports and has_selected and has_final:
+  if has_reports and has_selected and has_removal and has_final:
     return next_payload
   next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
   merged_meta = {
@@ -2483,6 +2485,8 @@ def merge_card_draft_semantics(next_payload, previous_payload):
     merged_meta["semanticCoreReports"] = previous_reports
   if previous_selected and not has_selected:
     merged_meta["semanticCoreSelected"] = previous_selected
+  if previous_removal and not has_removal:
+    merged_meta["semanticCoreRemoval"] = previous_removal
   if previous_final and not has_final:
     merged_meta["semanticCoreFinal"] = previous_final
   return {
@@ -7022,6 +7026,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - используй только факты из evidenceBundle;
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
 - новые ключевые запросы нужно включить естественно, без переспама и повторов;
+- запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
 - заголовок должен быть готовым названием карточки WB длиной до 60 символов;
 - описание должно быть готовым текстом карточки, а не советом специалисту;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
@@ -10299,6 +10304,7 @@ def content_keywords_from_payload(items, limit=80):
       "prioritySubject": audit_str(source.get("prioritySubject") or "", 120) if isinstance(source, dict) else "",
       "wbCount": audit_int(source.get("wbCount"), 0) if isinstance(source, dict) else 0,
       "priority": audit_str(source.get("priority") or "", 20) if isinstance(source, dict) else "",
+      "reason": audit_str(source.get("removalReason") or source.get("reason") or "", 160) if isinstance(source, dict) else "",
     })
     if len(output) >= limit:
       break
@@ -10323,9 +10329,10 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, draft=None):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, draft=None):
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=80)
+  remove = content_keywords_from_payload(remove_keywords, limit=80)
   if not selected:
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
@@ -10356,6 +10363,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "semanticCore": {
       "selectedKeywords": selected,
       "currentKeywords": current,
+      "removeKeywords": remove,
     },
     "constraints": {
       "titleMaxChars": 60,
@@ -10391,6 +10399,11 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     for item in selected
     if audit_contains_phrase(combined_text, item["query"])
   ][:80]
+  remove_keywords_still_present = [
+    item["query"]
+    for item in remove
+    if audit_contains_phrase(combined_text, item["query"])
+  ][:80]
   title_reason = audit_str(title_block.get("reason") or "Заголовок переписан с учетом выбранных запросов СЯ.", 500)
   description_reason = audit_str(description_block.get("reason") or "Описание переписано с учетом выбранных запросов СЯ.", 700)
   return {
@@ -10414,8 +10427,10 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "model": model,
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
+      "removeKeywords": len(remove),
       "usedKeywords": used_keywords,
       "unusedKeywords": [item["query"] for item in selected if item["query"] not in used_keywords][:80],
+      "removeKeywordsStillPresent": remove_keywords_still_present,
       "titleLength": len(next_title),
       "descriptionLength": len(next_description),
       "warnings": parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else [],
@@ -13138,6 +13153,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           raw_card,
           selected_keywords=payload.get("selectedKeywords") or payload.get("semanticCoreSelected"),
           current_keywords=payload.get("currentKeywords") or payload.get("semanticCoreCurrent"),
+          remove_keywords=payload.get("removeKeywords") or payload.get("semanticCoreRemoval"),
           draft=payload.get("draft"),
         )
       except ValueError as exc:
