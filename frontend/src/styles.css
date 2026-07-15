@@ -1028,13 +1028,17 @@ a {
 
 .work-period-task-actions {
   display: grid;
-  grid-template-columns: minmax(150px, .8fr) auto minmax(180px, 1fr) auto;
+  grid-template-columns: minmax(160px, .8fr) minmax(150px, max-content) minmax(180px, 1fr) minmax(82px, max-content);
   align-items: end;
   gap: 8px;
 }
 
 .work-period-task-actions .field-label {
   min-width: 0;
+}
+
+.work-period-task-actions .btn {
+  min-width: max-content;
 }
 
 .work-period-attachments,
@@ -5826,6 +5830,10 @@ tr:last-child td {
   .content-audit-card,
   .content-audit-card:nth-child(n + 4) {
     grid-column: span 1;
+  }
+
+  .work-period-task-actions {
+    grid-template-columns: minmax(180px, 1fr) minmax(150px, max-content);
   }
 
   .competitor-grid {
