@@ -1732,6 +1732,22 @@ function approvalTaskForCard(card, lookup) {
   return null;
 }
 
+function cardMatchesApprovalTask(card, task) {
+  if (!card || !task) return false;
+  const taskCardKey = normalizeDraftKeyValue(task.cardKey);
+  const taskNmId = normalizeDraftKeyValue(task.nmID);
+  const taskVendorCode = normalizeDraftKeyValue(task.vendorCode);
+  return Boolean(
+    (taskCardKey && cardMatchesDraftKey(card, taskCardKey))
+    || (taskNmId && cardNmIdValue(card) === taskNmId)
+    || (taskVendorCode && cardVendorCodeValue(card) === taskVendorCode)
+  );
+}
+
+function findCardForApprovalTask(cards, task) {
+  return (Array.isArray(cards) ? cards : []).find((card) => cardMatchesApprovalTask(card, task)) || null;
+}
+
 function normalizedCardSearchText(card) {
   return [
     card?.title,
@@ -6004,13 +6020,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   }
 
   function openApprovalTask(task) {
-    const card = cards.find((item) => (
-      cardDraftKey(item) === task.cardKey
-      || String(item?.nmID || "") === String(task.nmID || "")
-      || String(item?.vendorCode || "") === String(task.vendorCode || "")
-    ));
+    const card = findCardForApprovalTask(cards, task);
     if (card) {
       onOpenCard(card, { sellerTab: "tasks", backLabel: "Задачи" });
+    } else {
+      onNotice?.("Карточка задачи не найдена в текущем списке кабинета.");
     }
   }
 
@@ -7801,7 +7815,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   const activeTasks = tasks.filter((task) => ["draft", "submitted", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
-  const cardKeys = new Set(cards.map(cardDraftKey));
+  const taskHasCard = (task) => Boolean(findCardForApprovalTask(cards, task));
   const groupsByType = buildTaskGroupsByType(activeTasks);
   const totalGroups = Object.values(groupsByType).reduce((sum, groups) => sum + groups.length, 0);
   return (
@@ -7859,8 +7873,8 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                       const remainingCount = group.tasks.length;
                       const assignee = findUser(group.assigneeLogin);
                       const author = findUser(group.createdBy);
-                      const openableTask = group.tasks.find((task) => cardKeys.has(task.cardKey)) || firstTask;
-                      const canOpen = Boolean(openableTask?.cardKey && cardKeys.has(openableTask.cardKey));
+                      const openableTask = group.tasks.find(taskHasCard) || firstTask;
+                      const canOpen = Boolean(openableTask && taskHasCard(openableTask));
                       const cardsLabel = originalCount && originalCount !== remainingCount
                         ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
                         : formatNumber(remainingCount);
@@ -7892,7 +7906,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                             <summary>Карточки в задаче</summary>
                             <div className="task-card-list">
                               {group.tasks.map((task) => {
-                                const rowCanOpen = cardKeys.has(task.cardKey);
+                                const rowCanOpen = taskHasCard(task);
                                 return (
                                   <div className="task-card-row" key={`${group.key}-${task.cardKey}`}>
                                     <div>
