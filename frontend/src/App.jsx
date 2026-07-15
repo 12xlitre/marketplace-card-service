@@ -7812,7 +7812,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
 
 function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
-  const activeTasks = tasks.filter((task) => ["draft", "submitted", "changes_requested"].includes(task.status));
+  const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
   const taskHasCard = (task) => Boolean(findCardForApprovalTask(cards, task));

@@ -1601,10 +1601,10 @@ def portal_work_task_summaries(portal_ids):
     except (TypeError, json.JSONDecodeError):
       continue
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    if not active_task_work_types(meta):
+    work_types = active_task_work_types(meta)
+    if not work_types:
       continue
-    approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
-    status = str(approval.get("status") or "draft").strip() or "draft"
+    status = task_status_for_work_types(meta, work_types)
     if status not in {"draft", "submitted", "changes_requested", "approved"}:
       continue
     summary["taskTotalCount"] += 1
@@ -2966,9 +2966,44 @@ def active_task_work_types(meta):
   meta = meta if isinstance(meta, dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
   work_types = normalize_optional_work_types(batch.get("workTypes"))
-  if "semantic" in work_types and semantic_core_final_exists(meta):
-    work_types = [work_type for work_type in work_types if work_type != "semantic"]
-  return work_types
+  return [
+    work_type
+    for work_type in work_types
+    if not task_work_type_done(meta, work_type)
+  ]
+
+
+TASK_WORK_DONE_STATUSES = {"submitted", "approved", "exported"}
+TASK_WORK_STATUS_PRIORITY = {
+  "changes_requested": 4,
+  "submitted": 3,
+  "draft": 2,
+  "approved": 1,
+  "exported": 1,
+}
+
+
+def task_work_type_status(meta, work_type):
+  meta = meta if isinstance(meta, dict) else {}
+  if work_type == "semantic":
+    return "approved" if semantic_core_final_exists(meta) else "draft"
+  sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+  section = sections.get(work_type) if isinstance(sections.get(work_type), dict) else None
+  if section is not None:
+    return approval_status_from_approval(section)
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  return approval_status_from_approval(approval) if approval else "draft"
+
+
+def task_work_type_done(meta, work_type):
+  return task_work_type_status(meta, work_type) in TASK_WORK_DONE_STATUSES
+
+
+def task_status_for_work_types(meta, work_types):
+  statuses = [task_work_type_status(meta, work_type) for work_type in work_types]
+  if not statuses:
+    return "draft"
+  return sorted(statuses, key=lambda status: TASK_WORK_STATUS_PRIORITY.get(status, 0), reverse=True)[0]
 
 
 def public_approval_task(row, snapshot_lookup):
@@ -2981,6 +3016,7 @@ def public_approval_task(row, snapshot_lookup):
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
   work_types = active_task_work_types(meta)
+  status = task_status_for_work_types(meta, work_types)
   batch_title = str(batch.get("title") or work_package_title(work_types, batch.get("cardsCount"), batch.get("comment")) or "")[:180]
   card = snapshot_lookup.get(row["card_key"], {})
   return {
@@ -2990,7 +3026,7 @@ def public_approval_task(row, snapshot_lookup):
     "vendorCode": row["vendor_code"] or card_meta.get("vendorCode") or card.get("vendorCode") or "",
     "title": card.get("title") or card_meta.get("title") or row["vendor_code"] or row["nm_id"] or "Карточка WB",
     "subjectName": card.get("subjectName") or card_meta.get("subjectName") or "",
-    "status": str(approval.get("status") or "draft"),
+    "status": status,
     "assigneeLogin": str(batch.get("assigneeLogin") or approval.get("assigneeLogin") or ""),
     "submittedBy": str(approval.get("submittedBy") or ""),
     "submittedAt": str(approval.get("submittedAt") or ""),
