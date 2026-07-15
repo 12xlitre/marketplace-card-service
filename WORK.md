@@ -103,6 +103,7 @@ npm run frontend:check
 - `git diff --check`;
 - SQLite-smoke на временной базе: техспециалист может отправить блок на согласование, не может принять блок (`approval_forbidden`), аккаунт-менеджер может принять, старый общий `meta.approval` без секций не блокирует отправку.
 - audit-чеклист перед деплоем: новых секретов, внешних вызовов и расширения прав нет; `/api/card-drafts` остается за `require_user` + `user_can_access_portal`, принятие/возврат остаются только за менеджером проекта или админом.
+- Прод задеплоен коммитом `2654bb9`; `https://opticards.weboptai.ru/healthz` отвечает `ok`, серверная рабочая копия на commit `2654bb9`, контейнер `opticards-web-1 Up`, `/api/card-drafts` без сессии отвечает `401`, `.git/config`/`WORK.md`/`docs/deployment.md`/`document/test-users.csv` снаружи отвечают `404`, логи без `Traceback`/`ERROR`/`Exception`.
 
 ## Статус на 2026-07-14
 
