@@ -8720,14 +8720,10 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
     event.dataTransfer.dropEffect = "move";
     moveDraggedGroupTask(group, draggingTaskKey, taskOrderKey(task));
   };
-  const dropTaskDrag = async (event, group, workType, task) => {
+  const dropTaskDrag = (event, group) => {
     if (orderingGroupKey !== group.key) return;
     event.preventDefault();
-    const nextTasks = currentGroupTasks(group);
     setDraggingTaskKey("");
-    if (isGroupOrderDirty(group) || nextTasks !== group.tasks) {
-      await saveGroupOrder(group, workType, nextTasks);
-    }
   };
   const renderCompletedTaskRows = (sectionTasks, limit = 30) => {
     const visibleTasks = sectionTasks.slice(0, limit);
@@ -8931,7 +8927,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                          </div>
                           <details className="task-card-details" open={isOrdering || undefined}>
                             <summary>Карточки в задаче</summary>
-                            {isOrdering ? <p className="task-order-hint">Перетащите карточку мышкой за строку или используйте кнопки выше/ниже. Сохранение пройдет одним запросом.</p> : null}
+                            {isOrdering ? <p className="task-order-hint">Перетащите карточку мышкой или используйте кнопки выше/ниже. Когда порядок готов, нажмите Сохранить порядок.</p> : null}
                             <div className="task-card-list">
                               {groupTasks.map((task, taskIndex) => {
                                 const rowCanOpen = taskHasCard(task);
@@ -8945,7 +8941,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                                     onDragStart={(event) => startTaskDrag(event, group, task)}
                                     onDragEnter={(event) => hoverTaskDrag(event, group, task)}
                                     onDragOver={(event) => hoverTaskDrag(event, group, task)}
-                                    onDrop={(event) => dropTaskDrag(event, group, section.key, task)}
+                                    onDrop={(event) => dropTaskDrag(event, group)}
                                     onDragEnd={() => setDraggingTaskKey("")}
                                   >
                                     <div className="task-card-row-main">
