@@ -3450,6 +3450,7 @@ const semanticFrequencyHighThreshold = 1000;
 const semanticFrequencyMediumThreshold = 300;
 const semanticAutoAddTotalLimit = 36;
 const semanticAutoAddBucketLimit = 12;
+const semanticExcludeWordsLimit = 10;
 
 function semanticRankValue(value) {
   const number = Number(value);
@@ -8570,6 +8571,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const semanticCollectionBusy = ["saving", "updating", "deleting", "loading"].includes(semanticCollectionActionStatus);
   const canSaveSemanticCollection = Boolean(backendDraftEnabled && activeSemanticNewRows.length && !semanticCollectionBusy);
   const canAppendSemanticCollection = Boolean(backendDraftEnabled && semanticAppliedCollection && activeSemanticNewRows.length && !semanticCollectionBusy);
+  const semanticExcludeWordCount = semanticFilterWords(semanticExcludeWords).length;
   const semanticCollectionSearchText = semanticCollectionSearch.trim().toLowerCase();
   const filteredSemanticCollections = semanticCollections.filter((collection) => {
     if (!semanticCollectionSearchText) return true;
@@ -10795,8 +10797,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     <input value={semanticSearch} onChange={(event) => setSemanticSearch(event.target.value)} placeholder="рибана, хлопок, розовая" disabled={!activeSemanticCore} />
                   </label>
                   <label className="field-label">
-                    <span>Слова исключения</span>
-                    <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} />
+                    <span>Слова исключения · {formatNumber(semanticExcludeWordCount)}/{formatNumber(semanticExcludeWordsLimit)}</span>
+                    <input value={semanticExcludeWords} onChange={(event) => setSemanticExcludeWords(event.target.value)} placeholder="шорты, костюм" disabled={!activeSemanticCore} title={`Можно указать до ${formatNumber(semanticExcludeWordsLimit)} слов через пробел, запятую или точку с запятой.`} />
                   </label>
                 </div>
                 <HelpList
@@ -12684,10 +12686,18 @@ function semanticKeywordMeta(item) {
 }
 
 function semanticFilterWords(value) {
-  return String(value || "")
+  const words = [];
+  const seen = new Set();
+  String(value || "")
     .split(/[\s,;\n]+/)
     .map((item) => normalizedCharacteristicOption(item))
-    .filter(Boolean);
+    .filter(Boolean)
+    .forEach((word) => {
+      if (seen.has(word) || words.length >= semanticExcludeWordsLimit) return;
+      seen.add(word);
+      words.push(word);
+    });
+  return words;
 }
 
 function semanticExclusionStem(value) {
