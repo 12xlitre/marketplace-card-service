@@ -3096,6 +3096,8 @@ def completed_task_work_items(meta, row=None):
   meta = meta if isinstance(meta, dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
   work_types = normalize_optional_work_types(batch.get("workTypes"))
+  if not work_types and semantic_core_final_exists(meta):
+    work_types = ["semantic"]
   items = []
   for work_type in work_types:
     item = completed_task_work_item(meta, work_type, row)
