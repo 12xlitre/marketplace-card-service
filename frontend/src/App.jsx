@@ -432,6 +432,16 @@ function downloadXlsx(filename, sheets) {
   URL.revokeObjectURL(url);
 }
 
+function downloadDataUrl(filename, dataUrl) {
+  if (!dataUrl) return;
+  const link = document.createElement("a");
+  link.href = dataUrl;
+  link.download = safeDownloadFileName(filename);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function isEmptyValue(value) {
   if (value === null || value === undefined) {
     return true;
@@ -956,6 +966,8 @@ const legacyWorkPeriodTaskOptions = taskSectionOptions.map((item) => ({
 }));
 const allWorkPeriodTaskOptions = [...workPeriodTaskOptions, ...legacyWorkPeriodTaskOptions];
 const defaultWorkPeriodTaskKeys = workPeriodTaskOptions.map((item) => item.key);
+const manualWorkPeriodTaskPrefix = "manual:";
+const workPeriodAttachmentMaxBytes = 2 * 1024 * 1024;
 
 function taskWorkTypes(task) {
   return Array.isArray(task?.workTypes) && task.workTypes.length ? normalizeWorkTypes(task.workTypes) : [];
@@ -995,12 +1007,91 @@ function normalizeWorkPeriodTaskKeys(value, fallbackKeys = defaultWorkPeriodTask
   return output.length ? output : fallbackKeys;
 }
 
+function cleanAttachmentFileName(value) {
+  return String(value || "work-file")
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "-")
+    .trim()
+    .slice(0, 160) || "work-file";
+}
+
+function safeDownloadFileName(value) {
+  return cleanAttachmentFileName(value).replace(/^\.+/, "") || "work-file";
+}
+
+function attachmentSizeLabel(size) {
+  const bytes = Number(size) || 0;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toLocaleString("ru-RU", { maximumFractionDigits: 1 })} МБ`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024).toLocaleString("ru-RU")} КБ`;
+  return `${formatNumber(bytes)} Б`;
+}
+
+function normalizeWorkPeriodAttachment(attachment) {
+  if (!attachment || typeof attachment !== "object") return null;
+  const dataUrl = String(attachment.dataUrl || "");
+  const name = cleanAttachmentFileName(attachment.name);
+  const size = Math.max(0, Math.min(Number(attachment.size) || 0, workPeriodAttachmentMaxBytes));
+  if (!dataUrl.startsWith("data:") || !name) return null;
+  return {
+    id: String(attachment.id || `attachment-${Date.now()}`).slice(0, 80),
+    name,
+    type: String(attachment.type || "application/octet-stream").slice(0, 120),
+    size,
+    dataUrl,
+    uploadedAt: attachment.uploadedAt || "",
+    uploadedBy: attachment.uploadedBy || "",
+  };
+}
+
+function normalizeWorkPeriodAttachments(value) {
+  return (Array.isArray(value) ? value : [])
+    .map(normalizeWorkPeriodAttachment)
+    .filter(Boolean)
+    .slice(0, 1);
+}
+
+function workPeriodAttachmentNames(task) {
+  return normalizeWorkPeriodAttachments(task?.attachments).map((item) => item.name).join("; ");
+}
+
+function manualWorkPeriodTaskKey() {
+  return `${manualWorkPeriodTaskPrefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isManualWorkPeriodTask(task) {
+  return Boolean(task?.manual) || String(task?.key || "").startsWith(manualWorkPeriodTaskPrefix);
+}
+
+function normalizeWorkPeriodManualTasks(value) {
+  const seen = new Set();
+  return (Array.isArray(value) ? value : [])
+    .map((task) => {
+      const key = String(task?.key || "").startsWith(manualWorkPeriodTaskPrefix) ? String(task.key) : manualWorkPeriodTaskKey();
+      const label = String(task?.label || "").trim().slice(0, 180) || "Внеплановая работа";
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        key,
+        label,
+        manual: true,
+        description: String(task?.description || "").trim().slice(0, 1600),
+      };
+    })
+    .filter(Boolean);
+}
+
 function normalizeWorkPeriodTask(task) {
-  const option = allWorkPeriodTaskOptions.find((item) => item.key === task?.key) || workPeriodTaskOptions[0];
+  const key = String(task?.key || "").trim();
+  const option = allWorkPeriodTaskOptions.find((item) => item.key === key);
+  const manualTask = !option && key.startsWith(manualWorkPeriodTaskPrefix);
+  const fallbackOption = option || workPeriodTaskOptions[0];
   const status = ["planned", "done", "returned", "excluded"].includes(task?.status) ? task.status : "planned";
   return {
-    key: option.key,
-    label: task?.label || option.label,
+    key: manualTask ? key : fallbackOption.key,
+    label: manualTask ? (String(task?.label || "").trim() || "Внеплановая работа") : (task?.label || fallbackOption.label),
+    manual: manualTask || Boolean(task?.manual),
+    description: String(task?.description || "").trim(),
     status,
     comment: task?.comment || "",
     completedAt: task?.completedAt || "",
@@ -1013,6 +1104,7 @@ function normalizeWorkPeriodTask(task) {
     excludedBy: task?.excludedBy || "",
     linkedTaskIds: Array.isArray(task?.linkedTaskIds) ? task.linkedTaskIds.map(String).filter(Boolean) : [],
     linkedBatchIds: Array.isArray(task?.linkedBatchIds) ? task.linkedBatchIds.map(String).filter(Boolean) : [],
+    attachments: normalizeWorkPeriodAttachments(task?.attachments),
     history: Array.isArray(task?.history) ? task.history : [],
   };
 }
@@ -1067,6 +1159,7 @@ function defaultWorkPeriodForm() {
     start: dateInputValue(start),
     end: dateInputValue(end),
     taskKeys: defaultWorkPeriodTaskKeys,
+    manualTasks: [],
   };
 }
 
@@ -1076,6 +1169,7 @@ function workPeriodTaskGroupMeta(groupKey) {
 }
 
 function workPeriodTaskGroupKey(task) {
+  if (isManualWorkPeriodTask(task)) return "other";
   const option = allWorkPeriodTaskOptions.find((item) => item.key === task?.key);
   return option?.group || "other";
 }
@@ -1104,7 +1198,10 @@ function workPeriodFormFromPeriod(period) {
     title: normalized.title,
     start: normalized.period.start,
     end: normalized.period.end,
-    taskKeys: normalized.tasks.filter((task) => task.status !== "excluded").map((task) => task.key),
+    taskKeys: normalized.tasks
+      .filter((task) => task.status !== "excluded" && !isManualWorkPeriodTask(task))
+      .map((task) => task.key),
+    manualTasks: normalizeWorkPeriodManualTasks(normalized.tasks.filter((task) => task.status !== "excluded" && isManualWorkPeriodTask(task))),
   };
 }
 
@@ -1161,6 +1258,10 @@ function workPeriodTaskExportReason(task) {
   if (task.status === "excluded") return task.exclusionReason || "исключено при корректировке плана";
   if (task.status === "planned") return "не выполнено к моменту выгрузки";
   return "";
+}
+
+function workPeriodTaskExportComment(task) {
+  return [task.description, task.comment].map((item) => String(item || "").trim()).filter(Boolean).join("\n");
 }
 
 function workPeriodTaskExportDate(task) {
@@ -1226,21 +1327,22 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
     ["Исключено из плана", normalized.summary.excluded || 0],
     ...(mode === "final" ? [["Итог", workPeriodReportStatusText(normalized)]] : []),
     [],
-    ["Раздел", "Пункт плана", "Статус", "Дата действия", "Комментарий", "Причина / пояснение", "Связанные задачи"],
+    ["Раздел", "Пункт плана", "Статус", "Дата действия", "Описание / комментарий", "Причина / пояснение", "Связанные задачи", "Файл"],
     ...normalized.tasks.map((task) => [
       workPeriodTaskExportGroupLabel(task),
       task.label,
       workPeriodTaskStatusLabel(task.status),
       workPeriodTaskExportDate(task),
-      task.comment || "",
+      workPeriodTaskExportComment(task),
       workPeriodTaskExportReason(task),
       workPeriodLinkedLabel(task),
+      workPeriodAttachmentNames(task),
     ]),
   ];
   const sheets = [{
     name: mode === "final" ? "Итоговый отчет" : "План работ",
     freezeRows: mode === "final" ? 12 : 11,
-    widths: [30, 42, 18, 24, 52, 52, 28],
+    widths: [30, 42, 18, 24, 52, 52, 28, 34],
     rows,
   }];
   if (mode === "final") {
@@ -1279,50 +1381,53 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
     sheets.push({
       name: "Не выполнено",
       freezeRows: 1,
-      widths: [34, 48, 18, 28, 72, 40],
+      widths: [34, 48, 18, 28, 72, 40, 34],
       rows: [
-        ["Раздел", "Пункт", "Статус", "Дата", "Причина / пояснение", "Комментарий"],
+        ["Раздел", "Пункт", "Статус", "Дата", "Причина / пояснение", "Описание / комментарий", "Файл"],
         ...(notCompletedTasks.length ? notCompletedTasks : []).map((task) => [
           workPeriodTaskExportGroupLabel(task),
           task.label,
           workPeriodTaskStatusLabel(task.status),
           workPeriodTaskExportDate(task),
           workPeriodTaskExportReason(task),
-          task.comment || "",
+          workPeriodTaskExportComment(task),
+          workPeriodAttachmentNames(task),
         ]),
-        ...(!notCompletedTasks.length ? [["", "Все активные пункты выполнены", "", "", "", ""]] : []),
+        ...(!notCompletedTasks.length ? [["", "Все активные пункты выполнены", "", "", "", "", ""]] : []),
       ],
     });
     sheets.push({
       name: "Выполнено",
       freezeRows: 1,
-      widths: [34, 48, 24, 32, 64],
+      widths: [34, 48, 24, 32, 64, 34],
       rows: [
-        ["Раздел", "Пункт", "Дата выполнения", "Исполнитель", "Комментарий"],
+        ["Раздел", "Пункт", "Дата выполнения", "Исполнитель", "Описание / комментарий", "Файл"],
         ...(completedTasks.length ? completedTasks : []).map((task) => [
           workPeriodTaskExportGroupLabel(task),
           task.label,
           workPeriodTaskExportDate(task),
           task.completedBy || "",
-          task.comment || "",
+          workPeriodTaskExportComment(task),
+          workPeriodAttachmentNames(task),
         ]),
-        ...(!completedTasks.length ? [["", "Нет выполненных пунктов", "", "", ""]] : []),
+        ...(!completedTasks.length ? [["", "Нет выполненных пунктов", "", "", "", ""]] : []),
       ],
     });
     sheets.push({
       name: "Исключено",
       freezeRows: 1,
-      widths: [34, 48, 24, 32, 72],
+      widths: [34, 48, 24, 32, 72, 52],
       rows: [
-        ["Раздел", "Пункт", "Дата исключения", "Кто исключил", "Причина"],
+        ["Раздел", "Пункт", "Дата исключения", "Кто исключил", "Причина", "Описание"],
         ...(excludedTasks.length ? excludedTasks : []).map((task) => [
           workPeriodTaskExportGroupLabel(task),
           task.label,
           workPeriodTaskExportDate(task),
           task.excludedBy || "",
           workPeriodTaskExportReason(task),
+          task.description || "",
         ]),
-        ...(!excludedTasks.length ? [["", "Исключенных пунктов нет", "", "", ""]] : []),
+        ...(!excludedTasks.length ? [["", "Исключенных пунктов нет", "", "", "", ""]] : []),
       ],
     });
   }
@@ -6797,6 +6902,14 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     return taskDrafts[draftKey(period, task, type)] || "";
   }
 
+  function taskDraftAttachments(period, task) {
+    const key = draftKey(period, task, "attachments");
+    if (Object.prototype.hasOwnProperty.call(taskDrafts, key)) {
+      return normalizeWorkPeriodAttachments(taskDrafts[key]);
+    }
+    return normalizeWorkPeriodAttachments(task.attachments);
+  }
+
   function updateTaskDraft(period, task, type, value) {
     setTaskDrafts((current) => ({ ...current, [draftKey(period, task, type)]: value }));
   }
@@ -6806,8 +6919,40 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       const next = { ...current };
       delete next[draftKey(period, task, "comment")];
       delete next[draftKey(period, task, "reason")];
+      delete next[draftKey(period, task, "attachments")];
       return next;
     });
+  }
+
+  function attachTaskFile(period, task, file) {
+    if (!file) return;
+    if (file.size > workPeriodAttachmentMaxBytes) {
+      onNotice?.("Файл больше 2 МБ. Приложите более легкую версию.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const attachment = normalizeWorkPeriodAttachment({
+        id: `attachment-${Date.now().toString(36)}`,
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        dataUrl: String(reader.result || ""),
+        uploadedAt: new Date().toISOString(),
+      });
+      if (!attachment) {
+        onNotice?.("Не удалось прочитать файл.");
+        return;
+      }
+      updateTaskDraft(period, task, "attachments", [attachment]);
+      onNotice?.("Файл приложен. Нажмите Выполнено, чтобы сохранить его в периоде.");
+    };
+    reader.onerror = () => onNotice?.("Не удалось прочитать файл.");
+    reader.readAsDataURL(file);
+  }
+
+  function removeTaskAttachment(period, task) {
+    updateTaskDraft(period, task, "attachments", []);
   }
 
   function expandedTaskKey(period, task) {
@@ -6840,7 +6985,8 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       return;
     }
     const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys, []);
-    if (!taskKeys.length) {
+    const manualTasks = normalizeWorkPeriodManualTasks(nextForm.manualTasks);
+    if (!taskKeys.length && !manualTasks.length) {
       onNotice?.("Выберите хотя бы один вид работ.");
       return;
     }
@@ -6853,6 +6999,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
           title: nextForm.title,
           period: { start: nextForm.start, end: nextForm.end },
           taskKeys,
+          manualTasks,
         }),
       });
       if (payload.period) {
@@ -6875,7 +7022,8 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       return;
     }
     const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys, []);
-    if (!taskKeys.length) {
+    const manualTasks = normalizeWorkPeriodManualTasks(nextForm.manualTasks);
+    if (!taskKeys.length && !manualTasks.length) {
       onNotice?.("Оставьте хотя бы один активный пункт плана.");
       return;
     }
@@ -6890,6 +7038,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
           title: nextForm.title,
           period: { start: nextForm.start, end: nextForm.end },
           taskKeys,
+          manualTasks,
         }),
       });
       if (payload.period) {
@@ -6938,10 +7087,12 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 
   async function completeTask(period, task) {
     const comment = taskDraftValue(period, task, "comment") || task.comment || "";
+    const attachments = taskDraftAttachments(period, task);
     const updated = await runPeriodAction(period, {
       action: "complete_task",
       taskKey: task.key,
       comment,
+      attachments,
     }, "Пункт периода отмечен выполненным.", "Не удалось отметить выполнение.");
     if (updated) {
       clearTaskDrafts(period, task);
@@ -7114,6 +7265,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                           const taskDate = workPeriodTaskDate(task);
                           const actorLabel = actor?.full_name || task.completedBy || task.returnedBy || task.excludedBy || "пользователь";
                           const linkedLabel = workPeriodLinkedLabel(task);
+                          const attachments = taskDraftAttachments(period, task);
                           return (
                             <div className={`work-period-task ${task.status} ${taskExpanded ? "expanded" : ""}`} key={task.key}>
                               <div className="work-period-task-main">
@@ -7122,6 +7274,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                                   <span>{taskDate ? `${taskDate} · ${actorLabel}` : "ожидает выполнения"}</span>
                                 </button>
                                 <div className="work-period-task-side">
+                                  {isManualWorkPeriodTask(task) ? <Tag tone="amber">вне плана</Tag> : null}
                                   <Tag tone={workPeriodTaskStatusTone(task.status)}>{workPeriodTaskStatusLabel(task.status)}</Tag>
                                   {task.status !== "excluded" ? (
                                     <button className="btn mini" type="button" onClick={() => toggleTaskExpanded(period, task)}>
@@ -7130,9 +7283,23 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                                   ) : null}
                                 </div>
                               </div>
+                              {task.description ? <p className="work-period-note">{task.description}</p> : null}
                               {task.comment ? <p className="work-period-note">{task.comment}</p> : null}
                               {task.returnReason ? <p className="work-period-note return">Причина возврата: {task.returnReason}</p> : null}
                               {task.exclusionReason ? <p className="work-period-note return">Исключено из плана: {task.exclusionReason}</p> : null}
+                              {attachments.length ? (
+                                <div className="work-period-attachments">
+                                  {attachments.map((attachment) => (
+                                    <div className="work-period-attachment" key={attachment.id || attachment.name}>
+                                      <FileText size={15} />
+                                      <span>{attachment.name} · {attachmentSizeLabel(attachment.size)}</span>
+                                      <button className="btn mini" type="button" onClick={() => downloadDataUrl(attachment.name, attachment.dataUrl)}>
+                                        <Download size={14} />Скачать
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
                               {taskExpanded || linkedLabel !== "не привязано" ? <p className="work-period-note">Задачи кабинета: {linkedLabel}</p> : null}
                               {taskExpanded && task.status !== "excluded" ? (
                                 <div className="work-period-task-editor">
@@ -7145,6 +7312,25 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                                       rows={2}
                                     />
                                   </label>
+                                  <div className="work-period-attachment-editor">
+                                    <div className="work-period-attachment-actions">
+                                      <label className="btn mini">
+                                        <Upload size={14} />Приложить файл
+                                        <input
+                                          type="file"
+                                          onChange={(event) => {
+                                            attachTaskFile(period, task, event.target.files?.[0]);
+                                            event.target.value = "";
+                                          }}
+                                        />
+                                      </label>
+                                      {attachments.length ? (
+                                        <button className="btn mini ghost" type="button" onClick={() => removeTaskAttachment(period, task)}>
+                                          <Trash2 size={14} />Убрать файл
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </div>
                                   <div className="work-period-task-actions">
                                     <button className={loadingButtonClass("btn mini primary", completeBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)} aria-busy={completeBusy || undefined}>
                                       <CheckSquare size={14} />Выполнено
@@ -7233,12 +7419,15 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 
 function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, onSubmit }) {
   const taskKeys = normalizeWorkPeriodTaskKeys(value.taskKeys, []);
+  const manualTasks = normalizeWorkPeriodManualTasks(value.manualTasks);
   const isEdit = mode === "edit";
   const hasLegacyTasks = legacyWorkPeriodTaskOptions.some((option) => taskKeys.includes(option.key));
   const visibleGroups = hasLegacyTasks
     ? [...workPeriodTaskGroups, { key: "legacy", label: "Старые укрупненные пункты" }]
     : workPeriodTaskGroups;
   const selectedCount = taskKeys.filter((key) => defaultWorkPeriodTaskKeys.includes(key)).length;
+  const activeCount = taskKeys.length + manualTasks.length;
+  const [manualDraft, setManualDraft] = useState({ label: "", description: "" });
 
   function groupOptions(groupKey) {
     const source = groupKey === "legacy"
@@ -7267,9 +7456,35 @@ function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, o
     const groupKeys = new Set(groupOptions(groupKey).map((option) => option.key));
     onChange({ ...value, taskKeys: taskKeys.filter((key) => !groupKeys.has(key)) });
   }
+  function addManualTask() {
+    const label = manualDraft.label.trim();
+    if (!label) return;
+    onChange({
+      ...value,
+      manualTasks: [
+        ...manualTasks,
+        {
+          key: manualWorkPeriodTaskKey(),
+          label,
+          manual: true,
+          description: manualDraft.description.trim(),
+        },
+      ],
+    });
+    setManualDraft({ label: "", description: "" });
+  }
+  function updateManualTask(key, patch) {
+    onChange({
+      ...value,
+      manualTasks: manualTasks.map((task) => (task.key === key ? { ...task, ...patch } : task)),
+    });
+  }
+  function removeManualTask(key) {
+    onChange({ ...value, manualTasks: manualTasks.filter((task) => task.key !== key) });
+  }
   function submit(event) {
     event.preventDefault();
-    onSubmit({ ...value, taskKeys });
+    onSubmit({ ...value, taskKeys, manualTasks });
   }
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -7337,11 +7552,51 @@ function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, o
               );
             })}
           </div>
-          {!taskKeys.length ? <p className="form-error">Выберите хотя бы одну работу для периода.</p> : null}
+          <section className="work-period-manual-section">
+            <div className="work-period-task-group-head">
+              <div>
+                <strong>Внеплановые работы</strong>
+                <span>{manualTasks.length} {pluralRu(manualTasks.length, "задача", "задачи", "задач")}</span>
+              </div>
+            </div>
+            <div className="work-period-manual-form">
+              <label className="field-label compact">
+                Название
+                <input value={manualDraft.label} onChange={(event) => setManualDraft({ ...manualDraft, label: event.target.value })} placeholder="Например: Срочно поправить карточку клиента" maxLength={180} />
+              </label>
+              <label className="field-label compact">
+                Описание
+                <textarea value={manualDraft.description} onChange={(event) => setManualDraft({ ...manualDraft, description: event.target.value })} placeholder="Что именно нужно сделать" rows={2} maxLength={1600} />
+              </label>
+              <button className="btn mini" type="button" onClick={addManualTask} disabled={!manualDraft.label.trim()}>
+                <Plus size={14} />Добавить
+              </button>
+            </div>
+            {manualTasks.length ? (
+              <div className="work-period-manual-list">
+                {manualTasks.map((task) => (
+                  <div className="work-period-manual-row" key={task.key}>
+                    <label className="field-label compact">
+                      Название
+                      <input value={task.label} onChange={(event) => updateManualTask(task.key, { label: event.target.value })} maxLength={180} />
+                    </label>
+                    <label className="field-label compact">
+                      Описание
+                      <textarea value={task.description} onChange={(event) => updateManualTask(task.key, { description: event.target.value })} rows={2} maxLength={1600} />
+                    </label>
+                    <button className="btn mini danger" type="button" onClick={() => removeManualTask(task.key)}>
+                      <Trash2 size={14} />Убрать
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+          {!activeCount ? <p className="form-error">Выберите хотя бы одну работу для периода.</p> : null}
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !taskKeys.length} aria-busy={loading || undefined}>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !activeCount} aria-busy={loading || undefined}>
             {loading ? (isEdit ? "Сохраняем" : "Создаем") : (isEdit ? "Сохранить план" : "Создать период")}
           </button>
         </div>

@@ -1027,6 +1027,41 @@ a {
   min-width: 0;
 }
 
+.work-period-attachments,
+.work-period-attachment-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.work-period-attachment,
+.work-period-attachment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.work-period-attachment {
+  justify-content: space-between;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 7px 8px;
+}
+
+.work-period-attachment span {
+  flex: 1;
+  min-width: 160px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.work-period-attachment-actions input[type="file"] {
+  display: none;
+}
+
 .work-period-note {
   margin: 0;
   color: var(--muted);
@@ -5665,6 +5700,33 @@ tr:last-child td {
   overflow-wrap: anywhere;
 }
 
+.work-period-manual-section {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.work-period-manual-form,
+.work-period-manual-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, 1.4fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.work-period-manual-list {
+  display: grid;
+  gap: 8px;
+}
+
+.work-period-manual-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px;
+}
+
 .work-type-picker {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5856,6 +5918,8 @@ tr:last-child td {
   .work-period-task-options,
   .work-period-task-main,
   .work-period-task-actions,
+  .work-period-manual-form,
+  .work-period-manual-row,
   .cards-work-summary,
   .card-filters,
   .work-type-picker,

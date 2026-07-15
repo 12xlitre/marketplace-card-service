@@ -56,6 +56,8 @@ SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 512 * 1024
 MAX_DRAFT_JSON_BYTES = int(os.environ.get("OPTICARDS_MAX_DRAFT_JSON_BYTES", str(4 * 1024 * 1024)))
+WORK_PERIOD_ATTACHMENT_MAX_BYTES = int(os.environ.get("OPTICARDS_WORK_PERIOD_ATTACHMENT_MAX_BYTES", str(2 * 1024 * 1024)))
+WORK_PERIOD_ATTACHMENT_MAX_DATA_URL_BYTES = int(WORK_PERIOD_ATTACHMENT_MAX_BYTES * 4 / 3) + 4096
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
 WB_PROVIDER = "wb"
 MPSTATS_PROVIDER = "mpstats"
@@ -3932,6 +3934,7 @@ DEFAULT_WORK_PERIOD_TASK_KEYS = [
   for key in WORK_PERIOD_TASK_LABELS
   if key not in {"semantic", "content", "prices", "stocks"}
 ]
+MANUAL_WORK_PERIOD_TASK_PREFIX = "manual:"
 
 
 def normalize_work_types(value):
@@ -3972,7 +3975,7 @@ def work_type_labels(work_types):
   return [WORK_TYPE_LABELS.get(item, item) for item in normalize_work_types(work_types)]
 
 
-def normalize_work_period_task_keys(value):
+def normalize_work_period_task_keys(value, fallback_keys=None):
   if isinstance(value, str):
     raw_items = re.split(r"[\s,;]+", value)
   elif isinstance(value, (list, tuple, set)):
@@ -3986,7 +3989,76 @@ def normalize_work_period_task_keys(value):
     if key in WORK_PERIOD_TASK_LABELS and key not in seen:
       seen.add(key)
       output.append(key)
-  return output or list(DEFAULT_WORK_PERIOD_TASK_KEYS)
+  if output:
+    return output
+  return list(DEFAULT_WORK_PERIOD_TASK_KEYS if fallback_keys is None else fallback_keys)
+
+
+def clean_manual_work_period_task_key(value):
+  key = str(value or "").strip().lower()
+  if not key.startswith(MANUAL_WORK_PERIOD_TASK_PREFIX):
+    return ""
+  suffix = re.sub(r"[^a-z0-9_-]+", "-", key[len(MANUAL_WORK_PERIOD_TASK_PREFIX):]).strip("-")[:80]
+  return f"{MANUAL_WORK_PERIOD_TASK_PREFIX}{suffix}" if suffix else ""
+
+
+def clean_work_period_attachment_name(value):
+  name = str(value or "work-file").split("/")[-1].split("\\")[-1].strip()
+  name = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "-", name).strip(". -")
+  return name[:160] or "work-file"
+
+
+def clean_work_period_attachments(items):
+  output = []
+  for item in items if isinstance(items, list) else []:
+    if not isinstance(item, dict):
+      continue
+    data_url = str(item.get("dataUrl") or "").strip()
+    if not data_url or len(data_url) > WORK_PERIOD_ATTACHMENT_MAX_DATA_URL_BYTES:
+      continue
+    if not data_url.startswith("data:") or ";base64," not in data_url[:200]:
+      continue
+    header, encoded = data_url.split(";base64,", 1)
+    content_type = header[5:].strip()[:120] or "application/octet-stream"
+    try:
+      decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+      continue
+    if len(decoded) > WORK_PERIOD_ATTACHMENT_MAX_BYTES:
+      continue
+    try:
+      size = int(item.get("size") or len(decoded))
+    except (TypeError, ValueError):
+      size = len(decoded)
+    output.append({
+      "id": str(item.get("id") or f"attachment-{uuid.uuid4().hex[:12]}")[:80],
+      "name": clean_work_period_attachment_name(item.get("name")),
+      "type": content_type,
+      "size": max(0, min(size, WORK_PERIOD_ATTACHMENT_MAX_BYTES)),
+      "dataUrl": f"data:{content_type};base64,{encoded}",
+      "uploadedAt": str(item.get("uploadedAt") or "")[:80],
+      "uploadedBy": str(item.get("uploadedBy") or "")[:120],
+    })
+    break
+  return output
+
+
+def work_period_payload_has_tasks(payload):
+  return any(key in payload for key in ("tasks", "workTypes", "taskKeys", "manualTasks"))
+
+
+def work_period_payload_task_items(payload, default_if_missing=False):
+  payload = payload if isinstance(payload, dict) else {}
+  output = []
+  if isinstance(payload.get("tasks"), list):
+    output.extend(payload.get("tasks"))
+  elif "workTypes" in payload or "taskKeys" in payload:
+    output.extend(normalize_work_period_task_keys(payload.get("workTypes") if "workTypes" in payload else payload.get("taskKeys"), fallback_keys=[]))
+  elif default_if_missing:
+    output.extend(DEFAULT_WORK_PERIOD_TASK_KEYS)
+  if isinstance(payload.get("manualTasks"), list):
+    output.extend(payload.get("manualTasks"))
+  return output
 
 
 def clean_work_period_status(value):
@@ -4035,7 +4107,7 @@ def clean_work_period_links(items, limit=200):
   return output
 
 
-def normalize_work_period_tasks(value):
+def normalize_work_period_tasks(value, fallback_default=True):
   raw_items = value if isinstance(value, list) else normalize_work_period_task_keys(value)
   tasks = []
   seen = set()
@@ -4046,12 +4118,21 @@ def normalize_work_period_tasks(value):
     else:
       key = str(item or "").strip().lower()
       raw_task = {}
-    if key not in WORK_PERIOD_TASK_LABELS or key in seen:
+    manual = False
+    if key in WORK_PERIOD_TASK_LABELS:
+      label = WORK_PERIOD_TASK_LABELS[key]
+    else:
+      key = clean_manual_work_period_task_key(key)
+      label = clean_report_text(raw_task.get("label"), 180)
+      manual = True
+    if not key or not label or key in seen:
       continue
     seen.add(key)
     tasks.append({
       "key": key,
-      "label": WORK_PERIOD_TASK_LABELS[key],
+      "label": label,
+      "manual": manual,
+      "description": clean_work_period_note(raw_task.get("description"), 1600),
       "status": clean_work_period_task_status(raw_task.get("status")),
       "comment": clean_work_period_note(raw_task.get("comment")),
       "completedAt": str(raw_task.get("completedAt") or "")[:80],
@@ -4064,10 +4145,11 @@ def normalize_work_period_tasks(value):
       "excludedBy": str(raw_task.get("excludedBy") or "")[:120],
       "linkedTaskIds": clean_work_period_links(raw_task.get("linkedTaskIds")),
       "linkedBatchIds": clean_work_period_links(raw_task.get("linkedBatchIds")),
+      "attachments": clean_work_period_attachments(raw_task.get("attachments")),
       "history": clean_work_period_history(raw_task.get("history")),
     })
-  if not tasks:
-    tasks = normalize_work_period_tasks(list(DEFAULT_WORK_PERIOD_TASK_KEYS))
+  if not tasks and fallback_default:
+    tasks = normalize_work_period_tasks(list(DEFAULT_WORK_PERIOD_TASK_KEYS), fallback_default=False)
   return tasks
 
 
@@ -4098,6 +4180,8 @@ def work_period_report_payload(period, tasks, user):
     payload = {
       "key": task["key"],
       "label": task["label"],
+      "manual": bool(task.get("manual")),
+      "description": task.get("description") or "",
       "status": task["status"],
       "comment": task.get("comment") or "",
       "completedAt": task.get("completedAt") or "",
@@ -4110,6 +4194,7 @@ def work_period_report_payload(period, tasks, user):
       "excludedBy": task.get("excludedBy") or "",
       "linkedTaskIds": clean_work_period_links(task.get("linkedTaskIds")),
       "linkedBatchIds": clean_work_period_links(task.get("linkedBatchIds")),
+      "attachments": clean_work_period_attachments(task.get("attachments")),
     }
     if task["status"] == "excluded":
       if not payload["exclusionReason"]:
@@ -4227,7 +4312,12 @@ def create_portal_work_period(portal_id, payload, user):
   period = payload.get("period") if isinstance(payload.get("period"), dict) else {}
   start, end = validate_work_period_dates(period.get("start") or payload.get("start"), period.get("end") or payload.get("end"))
   title = clean_report_text(payload.get("title") or f"Рабочий период {start} - {end}", 180)
-  tasks = normalize_work_period_tasks(payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"))
+  if work_period_payload_has_tasks(payload):
+    tasks = normalize_work_period_tasks(work_period_payload_task_items(payload, default_if_missing=False), fallback_default=False)
+    if not tasks:
+      raise ValueError("invalid_work_period_task")
+  else:
+    tasks = normalize_work_period_tasks(work_period_payload_task_items(payload, default_if_missing=True))
   init_db()
   with connect_db() as db:
     portal = db.execute("SELECT id, name FROM portals WHERE id = ?", (numeric_portal_id,)).fetchone()
@@ -4259,6 +4349,7 @@ def create_portal_work_period(portal_id, payload, user):
     "title": title,
     "period": f"{start} - {end}",
     "tasks": [task["key"] for task in tasks],
+    "manualTasks": len([task for task in tasks if task.get("manual")]),
   })
   return public_portal_work_period(row)
 
@@ -4300,13 +4391,24 @@ def update_portal_work_period(portal_id, payload, user):
       next_end = period.get("end") or payload.get("end") or end
       start, end = validate_work_period_dates(next_start, next_end)
       title = clean_report_text(payload.get("title") or title or f"Рабочий период {start} - {end}", 180)
-      if payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"):
-        incoming_keys = normalize_work_period_task_keys(payload.get("tasks") or payload.get("workTypes") or payload.get("taskKeys"))
+      if work_period_payload_has_tasks(payload):
+        incoming_tasks = normalize_work_period_tasks(work_period_payload_task_items(payload, default_if_missing=False), fallback_default=False)
+        if not incoming_tasks:
+          raise ValueError("invalid_work_period_task")
+        incoming_keys = [task["key"] for task in incoming_tasks]
+        incoming_by_key = {task["key"]: task for task in incoming_tasks}
         task_by_key = {task["key"]: task for task in tasks}
         next_tasks = []
         for key in incoming_keys:
+          incoming_task = incoming_by_key[key]
           task = task_by_key.get(key)
           if task:
+            task = {
+              **task,
+              "label": incoming_task["label"],
+              "manual": bool(incoming_task.get("manual")),
+              "description": incoming_task.get("description") or "",
+            }
             if task["status"] == "excluded":
               history = clean_work_period_history(task.get("history"))
               history.append({
@@ -4326,7 +4428,7 @@ def update_portal_work_period(portal_id, payload, user):
               }
             next_tasks.append(task)
           else:
-            task = normalize_work_period_tasks([key])[0]
+            task = incoming_task
             task["history"] = clean_work_period_history([{
               "action": "added",
               "at": now,
@@ -4360,8 +4462,9 @@ def update_portal_work_period(portal_id, payload, user):
         if status == "reported":
           status = "active"
     elif action in {"complete_task", "return_task"}:
-      task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
-      if task_key not in WORK_PERIOD_TASK_LABELS:
+      raw_task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
+      task_key = raw_task_key if raw_task_key in WORK_PERIOD_TASK_LABELS else clean_manual_work_period_task_key(raw_task_key)
+      if not task_key:
         raise ValueError("invalid_work_period_task")
       comment = clean_work_period_note(payload.get("comment"))
       reason = clean_work_period_note(payload.get("reason") or payload.get("returnReason"))
@@ -4376,6 +4479,15 @@ def update_portal_work_period(portal_id, payload, user):
         changed = True
         history = clean_work_period_history(task.get("history"))
         if action == "complete_task":
+          attachments = clean_work_period_attachments(payload.get("attachments")) if "attachments" in payload else clean_work_period_attachments(task.get("attachments"))
+          attachments = [
+            {
+              **attachment,
+              "uploadedAt": attachment.get("uploadedAt") or now,
+              "uploadedBy": attachment.get("uploadedBy") or user["login"],
+            }
+            for attachment in attachments
+          ]
           history.append({
             "action": "completed",
             "at": now,
@@ -4392,6 +4504,7 @@ def update_portal_work_period(portal_id, payload, user):
             "returnReason": "",
             "returnedAt": task.get("returnedAt") or "",
             "returnedBy": task.get("returnedBy") or "",
+            "attachments": attachments,
             "history": clean_work_period_history(history),
           }
         else:
