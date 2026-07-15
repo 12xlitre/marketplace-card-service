@@ -1069,6 +1069,34 @@ function defaultWorkPeriodForm() {
   };
 }
 
+function workPeriodTaskGroupMeta(groupKey) {
+  if (groupKey === "legacy") return { key: "legacy", label: "Старые укрупненные пункты" };
+  return workPeriodTaskGroups.find((group) => group.key === groupKey) || { key: "other", label: "Прочие работы" };
+}
+
+function workPeriodTaskGroupKey(task) {
+  const option = allWorkPeriodTaskOptions.find((item) => item.key === task?.key);
+  return option?.group || "other";
+}
+
+function workPeriodGroupedTasks(tasks) {
+  const buckets = new Map();
+  (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+    const groupKey = workPeriodTaskGroupKey(task);
+    const group = workPeriodTaskGroupMeta(groupKey);
+    if (!buckets.has(group.key)) {
+      buckets.set(group.key, { ...group, tasks: [] });
+    }
+    buckets.get(group.key).tasks.push(task);
+  });
+  const order = [...workPeriodTaskGroups.map((group) => group.key), "legacy", "other"];
+  return Array.from(buckets.values()).sort((left, right) => {
+    const leftIndex = order.includes(left.key) ? order.indexOf(left.key) : order.length;
+    const rightIndex = order.includes(right.key) ? order.indexOf(right.key) : order.length;
+    return leftIndex - rightIndex;
+  });
+}
+
 function workPeriodFormFromPeriod(period) {
   const normalized = normalizeWorkPeriod(period);
   return {
@@ -6446,6 +6474,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
   const [editingPeriod, setEditingPeriod] = useState(null);
   const [form, setForm] = useState(defaultWorkPeriodForm);
   const [taskDrafts, setTaskDrafts] = useState({});
+  const [expandedTasks, setExpandedTasks] = useState({});
   const canUseBackend = Boolean(portal?.id && !portal?.isDemo);
   const activeCount = periods.filter((period) => period.status !== "reported" && period.summary.done < period.summary.total).length;
   const reportedCount = periods.filter((period) => period.status === "reported").length;
@@ -6454,6 +6483,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 	    setForm(defaultWorkPeriodForm());
 	    setEditingPeriod(null);
 	    setTaskDrafts({});
+	    setExpandedTasks({});
 	    loadPeriods();
 	  }, [portal?.id]);
 
@@ -6490,6 +6520,38 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 
   function updateTaskDraft(period, task, type, value) {
     setTaskDrafts((current) => ({ ...current, [draftKey(period, task, type)]: value }));
+  }
+
+  function clearTaskDrafts(period, task) {
+    setTaskDrafts((current) => {
+      const next = { ...current };
+      delete next[draftKey(period, task, "comment")];
+      delete next[draftKey(period, task, "reason")];
+      return next;
+    });
+  }
+
+  function expandedTaskKey(period, task) {
+    return `${period.id}:${task.key}`;
+  }
+
+  function isTaskExpanded(period, task) {
+    return Boolean(expandedTasks[expandedTaskKey(period, task)]);
+  }
+
+  function toggleTaskExpanded(period, task) {
+    const key = expandedTaskKey(period, task);
+    setExpandedTasks((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  function collapseTask(period, task) {
+    const key = expandedTaskKey(period, task);
+    setExpandedTasks((current) => {
+      if (!current[key]) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
   }
 
   async function createPeriod(nextForm) {
@@ -6595,26 +6657,34 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     }
   }
 
-  function completeTask(period, task) {
+  async function completeTask(period, task) {
     const comment = taskDraftValue(period, task, "comment") || task.comment || "";
-    runPeriodAction(period, {
+    const updated = await runPeriodAction(period, {
       action: "complete_task",
       taskKey: task.key,
       comment,
     }, "Пункт периода отмечен выполненным.", "Не удалось отметить выполнение.");
+    if (updated) {
+      clearTaskDrafts(period, task);
+      collapseTask(period, task);
+    }
   }
 
-  function returnTask(period, task) {
+  async function returnTask(period, task) {
     const reason = taskDraftValue(period, task, "reason") || task.returnReason || "";
     if (!reason.trim()) {
       onNotice?.("Укажите причину возврата.");
       return;
     }
-    runPeriodAction(period, {
+    const updated = await runPeriodAction(period, {
       action: "return_task",
       taskKey: task.key,
       reason,
     }, "Пункт периода возвращен с причиной.", "Не удалось вернуть пункт периода.");
+    if (updated) {
+      clearTaskDrafts(period, task);
+      collapseTask(period, task);
+    }
   }
 
 	  function openCreatePeriod() {
@@ -6720,6 +6790,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
           const periodClosed = workPeriodIsClosed(period);
           const report = period.report || {};
           const reportSummary = report.summary || period.summary;
+          const taskGroups = workPeriodGroupedTasks(period.tasks);
           return (
             <article className="workspace-card work-period-card" key={period.id}>
               <div className="card-head">
@@ -6733,48 +6804,91 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                 <strong>{period.summary.progress}%</strong>
                 <span>{period.summary.done} из {period.summary.total} выполнено</span>
               </div>
-              <div className="work-period-task-list">
-                {period.tasks.map((task) => {
-                  const actionBusy = actionStatus.includes(`${period.id}:`) && actionStatus.includes(task.key);
-                  const actor = findUser(task.status === "done" ? task.completedBy : task.status === "excluded" ? task.excludedBy : task.returnedBy);
-                  const taskDate = workPeriodTaskDate(task);
+              <div className="work-period-task-board">
+                {taskGroups.map((group) => {
+                  const activeTasks = group.tasks.filter((task) => task.status !== "excluded");
+                  const groupDone = activeTasks.filter((task) => task.status === "done").length;
+                  const groupReturned = activeTasks.filter((task) => task.status === "returned").length;
+                  const groupExcluded = group.tasks.length - activeTasks.length;
+                  const groupTotal = activeTasks.length;
+                  const groupProgress = groupTotal ? Math.round((groupDone / groupTotal) * 100) : 0;
+                  const groupTone = groupReturned ? "red" : groupTotal && groupDone >= groupTotal ? "green" : "blue";
                   return (
-                    <div className={`work-period-task ${task.status}`} key={task.key}>
-                      <div className="work-period-task-main">
+                    <section className="work-period-task-section" key={group.key}>
+                      <div className="work-period-section-head">
                         <div>
-                          <strong>{task.label}</strong>
-                          <span>{taskDate ? `${taskDate} · ${actor?.full_name || task.completedBy || task.returnedBy || task.excludedBy || "пользователь"}` : "ожидает выполнения"}</span>
+                          <strong>{group.label}</strong>
+                          <span>
+                            {groupDone} из {groupTotal} выполнено
+                            {groupReturned ? ` · ${groupReturned} возврат` : ""}
+                            {groupExcluded ? ` · ${groupExcluded} исключено` : ""}
+                          </span>
                         </div>
-                        <Tag tone={workPeriodTaskStatusTone(task.status)}>{workPeriodTaskStatusLabel(task.status)}</Tag>
+                        <Tag tone={groupTone}>{groupProgress}%</Tag>
                       </div>
-                      {task.comment ? <p className="work-period-note">{task.comment}</p> : null}
-                      {task.returnReason ? <p className="work-period-note return">Причина возврата: {task.returnReason}</p> : null}
-                      {task.exclusionReason ? <p className="work-period-note return">Исключено из плана: {task.exclusionReason}</p> : null}
-                      <p className="work-period-note">Задачи кабинета: {workPeriodLinkedLabel(task)}</p>
-                      {task.status !== "excluded" ? (
-                        <>
-                          <textarea
-                            value={taskDraftValue(period, task, "comment")}
-                            onChange={(event) => updateTaskDraft(period, task, "comment", event.target.value)}
-                            placeholder={task.comment || "Комментарий к выполнению"}
-                            rows={2}
-                          />
-                          <div className="work-period-task-actions">
-                            <button className={loadingButtonClass("btn mini", actionBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)}>
-                              <CheckSquare size={14} />Выполнено
-                            </button>
-                            <input
-                              value={taskDraftValue(period, task, "reason")}
-                              onChange={(event) => updateTaskDraft(period, task, "reason", event.target.value)}
-                              placeholder="Причина возврата"
-                            />
-                            <button className="btn mini danger" type="button" onClick={() => returnTask(period, task)} disabled={Boolean(actionStatus)}>
-                              <RotateCcw size={14} />Вернуть
-                            </button>
-                          </div>
-                        </>
-                      ) : null}
-                    </div>
+                      <div className="work-period-task-list">
+                        {group.tasks.map((task) => {
+                          const completeBusy = actionStatus === `${period.id}:complete_task:${task.key}`;
+                          const returnBusy = actionStatus === `${period.id}:return_task:${task.key}`;
+                          const taskExpanded = isTaskExpanded(period, task);
+                          const actor = findUser(task.status === "done" ? task.completedBy : task.status === "excluded" ? task.excludedBy : task.returnedBy);
+                          const taskDate = workPeriodTaskDate(task);
+                          const actorLabel = actor?.full_name || task.completedBy || task.returnedBy || task.excludedBy || "пользователь";
+                          const linkedLabel = workPeriodLinkedLabel(task);
+                          return (
+                            <div className={`work-period-task ${task.status} ${taskExpanded ? "expanded" : ""}`} key={task.key}>
+                              <div className="work-period-task-main">
+                                <button className="work-period-task-title" type="button" onClick={() => toggleTaskExpanded(period, task)}>
+                                  <strong>{task.label}</strong>
+                                  <span>{taskDate ? `${taskDate} · ${actorLabel}` : "ожидает выполнения"}</span>
+                                </button>
+                                <div className="work-period-task-side">
+                                  <Tag tone={workPeriodTaskStatusTone(task.status)}>{workPeriodTaskStatusLabel(task.status)}</Tag>
+                                  {task.status !== "excluded" ? (
+                                    <button className="btn mini" type="button" onClick={() => toggleTaskExpanded(period, task)}>
+                                      {taskExpanded ? "Скрыть" : "Работать"}
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </div>
+                              {task.comment ? <p className="work-period-note">{task.comment}</p> : null}
+                              {task.returnReason ? <p className="work-period-note return">Причина возврата: {task.returnReason}</p> : null}
+                              {task.exclusionReason ? <p className="work-period-note return">Исключено из плана: {task.exclusionReason}</p> : null}
+                              {taskExpanded || linkedLabel !== "не привязано" ? <p className="work-period-note">Задачи кабинета: {linkedLabel}</p> : null}
+                              {taskExpanded && task.status !== "excluded" ? (
+                                <div className="work-period-task-editor">
+                                  <label className="field-label compact">
+                                    Комментарий к выполнению
+                                    <textarea
+                                      value={taskDraftValue(period, task, "comment")}
+                                      onChange={(event) => updateTaskDraft(period, task, "comment", event.target.value)}
+                                      placeholder={task.comment || "Что сделали по этому пункту"}
+                                      rows={2}
+                                    />
+                                  </label>
+                                  <div className="work-period-task-actions">
+                                    <button className={loadingButtonClass("btn mini primary", completeBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)} aria-busy={completeBusy || undefined}>
+                                      <CheckSquare size={14} />Выполнено
+                                    </button>
+                                    <label className="field-label compact">
+                                      Причина возврата
+                                      <input
+                                        value={taskDraftValue(period, task, "reason")}
+                                        onChange={(event) => updateTaskDraft(period, task, "reason", event.target.value)}
+                                        placeholder="Что нужно исправить"
+                                      />
+                                    </label>
+                                    <button className={loadingButtonClass("btn mini danger", returnBusy)} type="button" onClick={() => returnTask(period, task)} disabled={Boolean(actionStatus)} aria-busy={returnBusy || undefined}>
+                                      <RotateCcw size={14} />Вернуть
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
                   );
                 })}
               </div>

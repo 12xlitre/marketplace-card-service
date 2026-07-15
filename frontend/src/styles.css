@@ -878,7 +878,50 @@ a {
 
 .work-period-task-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+}
+
+.work-period-task-board {
+  display: grid;
+  gap: 12px;
+}
+
+.work-period-task-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.work-period-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+  padding: 10px 12px;
+}
+
+.work-period-section-head div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.work-period-section-head strong {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.work-period-section-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.work-period-task-section .work-period-task-list {
+  padding: 8px;
 }
 
 .work-period-task {
@@ -888,6 +931,11 @@ a {
   display: grid;
   gap: 8px;
   background: var(--surface-soft);
+}
+
+.work-period-task.expanded {
+  border-color: #bfd6ed;
+  background: #f8fbff;
 }
 
 .work-period-task.done {
@@ -906,25 +954,56 @@ a {
   background: #f7f8fb;
 }
 
-.work-period-task-main,
-.work-period-task-actions {
+.work-period-task-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
 }
 
-.work-period-task-main strong,
-.work-period-task-main span {
+.work-period-task-title {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.work-period-task-title strong,
+.work-period-task-title span {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.work-period-task-main span {
+.work-period-task-title strong {
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.work-period-task-title span {
   color: var(--muted);
   font-size: 12px;
-  margin-top: 2px;
+  line-height: 1.35;
+}
+
+.work-period-task-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.work-period-task-editor {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  display: grid;
+  gap: 8px;
 }
 
 .work-period-task textarea,
@@ -938,7 +1017,14 @@ a {
 }
 
 .work-period-task-actions {
-  grid-template-columns: auto minmax(120px, 1fr) auto;
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.work-period-task-actions .field-label {
+  min-width: 0;
 }
 
 .work-period-note {
@@ -5615,6 +5701,7 @@ tr:last-child td {
   .report-history-row,
   .work-period-grid,
   .work-period-task-options,
+  .work-period-task-main,
   .work-period-task-actions,
   .cards-work-summary,
   .card-filters,
@@ -5677,6 +5764,10 @@ tr:last-child td {
   .report-card-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .work-period-task-side {
+    justify-content: flex-start;
   }
 
   .admin-user-actions {
