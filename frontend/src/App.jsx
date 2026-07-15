@@ -1261,11 +1261,62 @@ function workPeriodIsClosed(period, currentDate = new Date()) {
   return today.getTime() >= endDate.getTime();
 }
 
+function workPeriodTodayKey(currentDate = new Date()) {
+  return new Date(currentDate).toISOString().slice(0, 10);
+}
+
+function workPeriodLinkCandidates(periods, currentDate = new Date()) {
+  const today = workPeriodTodayKey(currentDate);
+  const active = normalizeWorkPeriods(periods)
+    .filter((period) => period.status === "active" && !workPeriodIsClosed(period, currentDate));
+  const current = active.filter((period) => {
+    const start = period.period.start || "";
+    return !start || start <= today;
+  });
+  return current.length ? current : active;
+}
+
+function workPeriodTaskLinkOptions(periods) {
+  return workPeriodLinkCandidates(periods).flatMap((period) => (
+    period.tasks
+      .filter((task) => task.status !== "excluded")
+      .map((task) => ({
+        period,
+        task,
+        value: `${period.id}:${task.key}`,
+        label: `${period.title || "Отчетный период"} · ${task.label}`,
+      }))
+  ));
+}
+
+function parseWorkPeriodTaskLinkValue(value) {
+  const [periodId, ...taskParts] = String(value || "").split(":");
+  return { periodId, taskKey: taskParts.join(":") };
+}
+
 function workPeriodLinkedLabel(task) {
   const taskCount = task.linkedTaskIds?.length || 0;
   const batchCount = task.linkedBatchIds?.length || 0;
   if (!taskCount && !batchCount) return "не привязано";
   return [`${taskCount} задач`, `${batchCount} пачек`].filter((item) => !item.startsWith("0 ")).join(", ");
+}
+
+function workPeriodTaskHasTaskLink(task, taskIds = [], batchIds = []) {
+  const linkedTaskIds = new Set(task?.linkedTaskIds || []);
+  const linkedBatchIds = new Set(task?.linkedBatchIds || []);
+  return taskIds.some((item) => linkedTaskIds.has(item)) || batchIds.some((item) => linkedBatchIds.has(item));
+}
+
+function workPeriodLinkLabelForGroup(periods, group) {
+  const taskIds = [group?.key].filter(Boolean);
+  const batchIds = taskIds.length ? [] : [group?.batchId].filter(Boolean);
+  for (const period of normalizeWorkPeriods(periods)) {
+    const linkedTask = period.tasks.find((task) => workPeriodTaskHasTaskLink(task, taskIds, batchIds));
+    if (linkedTask) {
+      return `${period.title || "Отчетный период"} · ${linkedTask.label}`;
+    }
+  }
+  return "";
 }
 
 function workPeriodEndDateLabel(period) {
@@ -6046,6 +6097,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
+  const [workPeriods, setWorkPeriods] = useState([]);
+  const [workPeriodsStatus, setWorkPeriodsStatus] = useState("idle");
   const activeSellerTab = normalizeSellerTab(sellerTab);
   const setSellerTab = onSellerTabChange || (() => {});
   const [nameEditing, setNameEditing] = useState(false);
@@ -6067,6 +6120,32 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       setNameDraft(displayName);
     }
   }, [displayName, nameEditing]);
+
+  useEffect(() => {
+    let active = true;
+    if (!portal?.id || portal.isDemo) {
+      setWorkPeriods([]);
+      setWorkPeriodsStatus("idle");
+      return () => {
+        active = false;
+      };
+    }
+    setWorkPeriodsStatus("loading");
+    apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}`)
+      .then((payload) => {
+        if (!active) return;
+        setWorkPeriods(normalizeWorkPeriods(payload.periods));
+        setWorkPeriodsStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkPeriods([]);
+        setWorkPeriodsStatus("error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [portal?.id, portal?.isDemo, activeSellerTab]);
 
   useEffect(() => {
     setImportJob(null);
@@ -6180,6 +6259,47 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       onOpenCard(card, { sellerTab: "tasks", backLabel: "Задачи" });
     } else {
       onNotice?.("Карточка задачи не найдена в текущем списке кабинета.");
+    }
+  }
+
+  function replaceSellerWorkPeriod(period) {
+    if (!period?.id) return;
+    const normalized = normalizeWorkPeriod(period);
+    setWorkPeriods((current) => {
+      const exists = current.some((item) => String(item.id) === normalized.id);
+      if (!exists) {
+        return [normalized, ...current];
+      }
+      return current.map((item) => (String(item.id) === normalized.id ? normalized : item));
+    });
+    setWorkPeriodsStatus("loaded");
+  }
+
+  async function linkApprovalTaskGroupToWorkPeriod(group, workType, target) {
+    if (!portal?.id || portal.isDemo || taskActionStatus || !target?.periodId || !target?.taskKey) return;
+    const actionKey = `link:${group.key || `${workType}:${group.batchId || ""}`}`;
+    setTaskActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/portal-work-periods", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          periodId: target.periodId,
+          action: "link_task",
+          taskKey: target.taskKey,
+          linkedTaskIds: [group.key].filter(Boolean),
+          linkedBatchIds: [group.batchId].filter(Boolean),
+          comment: taskBatchGroupTitle(group),
+        }),
+      });
+      if (payload.period) {
+        replaceSellerWorkPeriod(payload.period);
+      }
+      onNotice?.("Задача привязана к пункту отчетного периода.");
+    } catch {
+      onNotice?.("Не удалось привязать задачу к отчетному периоду.");
+    } finally {
+      setTaskActionStatus("");
     }
   }
 
@@ -6558,16 +6678,19 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 </div>
                 <Tag tone={portal.scope === "selected" ? "blue" : "amber"}>{portal.scope === "selected" ? "выборочно" : "полный магазин"}</Tag>
               </div>
-              <HelpHint enabled={helpEnabled} title="Как открыть аудит карточки">
-                Найдите карточку по артикулу или WB ID и нажмите Открыть. Внутри карточки перейдите на вкладку Рыночный аудит или Товарный аудит в зависимости от задачи.
-              </HelpHint>
-              <CardsTable
-                cards={cards}
-                portal={portal}
-                workflow={approvalWorkflow}
-                onOpenCard={(card) => onOpenCard(card, { sellerTab: "cabinet", backLabel: "Карточки" })}
-                onWorkflowChange={replaceApprovalWorkflow}
-              />
+	              <HelpHint enabled={helpEnabled} title="Как открыть аудит карточки">
+	                Найдите карточку по артикулу или WB ID и нажмите Открыть. Внутри карточки перейдите на вкладку Рыночный аудит или Товарный аудит в зависимости от задачи.
+	              </HelpHint>
+	              <CardsTable
+	                cards={cards}
+	                portal={portal}
+	                workflow={approvalWorkflow}
+	                workPeriods={workPeriods}
+	                workPeriodsStatus={workPeriodsStatus}
+	                onOpenCard={(card) => onOpenCard(card, { sellerTab: "cabinet", backLabel: "Карточки" })}
+	                onWorkflowChange={replaceApprovalWorkflow}
+	                onWorkPeriodChange={replaceSellerWorkPeriod}
+	              />
             </section>
               </>
             ) : null}
@@ -6575,12 +6698,15 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <ApprovalWorkflowPanel
                 workflow={approvalWorkflow}
                 status={approvalWorkflowStatus}
-                cards={cards}
+	                cards={cards}
 	                findUser={findUser}
 	                onOpenTask={openApprovalTask}
 	                onDeleteTaskGroup={deleteApprovalTaskGroup}
+	                onLinkTaskGroup={linkApprovalTaskGroupToWorkPeriod}
 	                onDeleteCompletedTask={deleteCompletedApprovalTask}
 	                taskActionStatus={taskActionStatus}
+	                workPeriods={workPeriods}
+	                workPeriodsStatus={workPeriodsStatus}
 	                helpEnabled={helpEnabled}
 	              />
             ) : null}
@@ -7686,7 +7812,11 @@ function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, o
   );
 }
 
-function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpenCard, onWorkflowChange }) {
+function defaultWorkPackageForm() {
+  return { workTypes: ["content"], title: "", comment: "", workPeriodLink: "" };
+}
+
+function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workPeriods = [], workPeriodsStatus = "idle", onOpenCard, onWorkflowChange, onWorkPeriodChange }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
   const [bulkFilterText, setBulkFilterText] = useState("");
@@ -7695,7 +7825,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedKeys, setSelectedKeys] = useState(() => readCardWorkset(storageKey));
   const [workPackageOpen, setWorkPackageOpen] = useState(false);
-  const [workPackageForm, setWorkPackageForm] = useState({ workTypes: ["content"], title: "", comment: "" });
+  const [workPackageForm, setWorkPackageForm] = useState(defaultWorkPackageForm);
   const [worksetLoaded, setWorksetLoaded] = useState(Boolean(portal?.isDemo));
   const [worksetStatus, setWorksetStatus] = useState("idle");
   const [batchStatus, setBatchStatus] = useState("idle");
@@ -7704,7 +7834,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   useEffect(() => {
     setSelectedKeys(readCardWorkset(storageKey));
     setWorkPackageOpen(false);
-    setWorkPackageForm({ workTypes: ["content"], title: "", comment: "" });
+    setWorkPackageForm(defaultWorkPackageForm());
     setWorksetLoaded(Boolean(portal?.isDemo));
     setWorksetStatus("idle");
     setBatchStatus("idle");
@@ -7902,27 +8032,33 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
       return;
     }
     const workTypes = normalizeWorkTypes(options.workTypes);
+    const linkTarget = parseWorkPeriodTaskLinkValue(options.workPeriodLink);
     setBatchStatus("saving");
-    try {
-      const payload = await apiRequest("/api/card-workset/create-tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          portalId: portal.id,
-          cards: selectedCards.map(cardWorksetPayload),
-          workTypes,
-          title: String(options.title || "").trim(),
-          comment: String(options.comment || "").trim(),
-        }),
-      });
-      if (payload.workflow && onWorkflowChange) {
-        onWorkflowChange(payload.workflow);
-      }
-      const keys = (payload.workset?.cards || []).map((card) => String(card.cardKey || "")).filter(Boolean);
-      if (keys.length) {
-        setSelectedKeys(keys);
-      }
-      setWorkPackageOpen(false);
-      setWorkPackageForm({ workTypes: ["content"], title: "", comment: "" });
+	    try {
+	      const payload = await apiRequest("/api/card-workset/create-tasks", {
+	        method: "POST",
+	        body: JSON.stringify({
+	          portalId: portal.id,
+	          cards: selectedCards.map(cardWorksetPayload),
+	          workTypes,
+	          title: String(options.title || "").trim(),
+	          comment: String(options.comment || "").trim(),
+	          workPeriodId: linkTarget.periodId,
+	          workPeriodTaskKey: linkTarget.taskKey,
+	        }),
+	      });
+	      if (payload.workflow && onWorkflowChange) {
+	        onWorkflowChange(payload.workflow);
+	      }
+	      if (payload.workPeriod) {
+	        onWorkPeriodChange?.(payload.workPeriod);
+	      }
+	      const keys = (payload.workset?.cards || []).map((card) => String(card.cardKey || "")).filter(Boolean);
+	      if (keys.length) {
+	        setSelectedKeys(keys);
+	      }
+	      setWorkPackageOpen(false);
+	      setWorkPackageForm(defaultWorkPackageForm());
       setBatchStatus("created");
     } catch {
       setBatchStatus("error");
@@ -8049,6 +8185,8 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
         <WorkPackageModal
           selectedCount={selectedCards.length}
           value={workPackageForm}
+          workPeriods={workPeriods}
+          workPeriodsStatus={workPeriodsStatus}
           loading={batchStatus === "saving"}
           onChange={setWorkPackageForm}
           onClose={() => setWorkPackageOpen(false)}
@@ -8121,10 +8259,12 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), onOpe
   );
 }
 
-function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, onSubmit }) {
+function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit }) {
   const workTypes = normalizeWorkTypes(value.workTypes);
   const title = value.title || "";
   const comment = value.comment || "";
+  const workPeriodLink = value.workPeriodLink || "";
+  const periodTaskOptions = workPeriodTaskLinkOptions(workPeriods);
   const toggleType = (key) => {
     if (workTypes.length === 1 && workTypes.includes(key)) {
       return;
@@ -8140,9 +8280,12 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   const updateTitle = (event) => {
     onChange({ ...value, title: event.target.value });
   };
+  const updateWorkPeriodLink = (event) => {
+    onChange({ ...value, workPeriodLink: event.target.value });
+  };
   const submit = (event) => {
     event.preventDefault();
-    onSubmit({ workTypes, title, comment });
+    onSubmit({ workTypes, title, comment, workPeriodLink });
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -8168,6 +8311,18 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
             <input value={title} onChange={updateTitle} placeholder="Например: СЯ Оптимист, 40 артикулов" maxLength={180} />
           </label>
           <label className="field-label">
+            Пункт отчетного периода
+            <select className="select" value={workPeriodLink} onChange={updateWorkPeriodLink} disabled={workPeriodsStatus === "loading"}>
+              <option value="">Не привязывать к плану</option>
+              {periodTaskOptions.map((option) => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          {!periodTaskOptions.length ? (
+            <p className="status-note">{workPeriodsStatus === "loading" ? "Загружаем отчетные периоды..." : "Активного отчетного периода с пунктами плана пока нет."}</p>
+          ) : null}
+          <label className="field-label">
             Комментарий
             <textarea value={comment} onChange={updateComment} placeholder="Например: собрать СЯ по списку артикулов или проверить заголовки перед согласованием." />
           </label>
@@ -8183,10 +8338,61 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onDeleteCompletedTask, taskActionStatus = "", helpEnabled = false }) {
+function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriodsStatus = "idle", loading, onClose, onSubmit }) {
+  const periodTaskOptions = workPeriodTaskLinkOptions(workPeriods);
+  const groupTaskIds = [group?.key].filter(Boolean);
+  const groupBatchIds = groupTaskIds.length ? [] : [group?.batchId].filter(Boolean);
+  const currentOption = periodTaskOptions.find((option) => workPeriodTaskHasTaskLink(option.task, groupTaskIds, groupBatchIds));
+  const [selectedValue, setSelectedValue] = useState(currentOption?.value || periodTaskOptions[0]?.value || "");
+  const optionSignature = periodTaskOptions.map((option) => option.value).join("|");
+  useEffect(() => {
+    if (!selectedValue && periodTaskOptions[0]?.value) {
+      setSelectedValue(periodTaskOptions[0].value);
+    }
+  }, [optionSignature, selectedValue]);
+  const submit = (event) => {
+    event.preventDefault();
+    onSubmit(parseWorkPeriodTaskLinkValue(selectedValue));
+  };
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="modal work-package-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <h2>Привязать к плану</h2>
+            <p>{taskBatchGroupTitle(group)} · {taskSectionLabel(workType)}</p>
+          </div>
+          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+        </div>
+        <div className="modal-body">
+          <label className="field-label">
+            Пункт отчетного периода
+            <select className="select" value={selectedValue} onChange={(event) => setSelectedValue(event.target.value)} disabled={loading || workPeriodsStatus === "loading" || !periodTaskOptions.length}>
+              {periodTaskOptions.map((option) => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          {!periodTaskOptions.length ? (
+            <p className="status-note">{workPeriodsStatus === "loading" ? "Загружаем отчетные периоды..." : "Нет активного отчетного периода с пунктами плана."}</p>
+          ) : null}
+        </div>
+        <div className="modal-actions">
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !selectedValue} aria-busy={loading || undefined}>
+            {loading ? "Привязываем" : "Привязать"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onLinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
   const [completedSearch, setCompletedSearch] = useState("");
+  const [linkingGroup, setLinkingGroup] = useState(null);
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
@@ -8211,6 +8417,11 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   });
   const visibleCompletedTasks = filteredCompletedTasks.slice(0, 80);
   const completedTotal = Number(analytics.completedCount || completedTasks.length || 0);
+  const submitTaskLink = async (target) => {
+    if (!linkingGroup) return;
+    await onLinkTaskGroup?.(linkingGroup.group, linkingGroup.workType, target);
+    setLinkingGroup(null);
+  };
   return (
     <section className="workspace-strip approval-workflow-strip">
       <div className="strip-head">
@@ -8222,15 +8433,16 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
           {status === "loading" ? "загрузка" : `${totalGroups} ${pluralRu(totalGroups, "задача", "задачи", "задач")}`}
         </Tag>
       </div>
-      <HelpList
-        enabled={helpEnabled}
-        title="Как работать с задачами"
-        items={[
-          "Откройте задачу кнопкой Открыть первую или конкретную строку в списке карточек: после возврата вы снова попадете во вкладку Задачи.",
-          "Удалить задачу нужно только для ошибочных или неактуальных пачек. Сохраненные результаты карточек останутся в черновиках.",
-          "Если задача по СЯ закрыта, добавьте выбранные ключи в итоговое СЯ карточки: после этого кабинетная выгрузка соберет их в общий файл.",
-        ]}
-      />
+	      <HelpList
+	        enabled={helpEnabled}
+	        title="Как работать с задачами"
+	        items={[
+	          "Откройте задачу кнопкой Открыть первую или конкретную строку в списке карточек: после возврата вы снова попадете во вкладку Задачи.",
+	          "Кнопка Привязать к плану связывает пачку с пунктом текущего отчетного периода и переводит этот пункт в работу.",
+	          "Удалить задачу нужно только для ошибочных или неактуальных пачек. Сохраненные результаты карточек останутся в черновиках.",
+	          "Если задача по СЯ закрыта, добавьте выбранные ключи в итоговое СЯ карточки: после этого кабинетная выгрузка соберет их в общий файл.",
+	        ]}
+	      />
 
       {status === "error" ? (
         <div className="empty-state"><span>Не удалось загрузить задачи согласования</span></div>
@@ -8275,11 +8487,13 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                       const author = findUser(group.createdBy);
                       const openableTask = group.tasks.find(taskHasCard) || firstTask;
                       const canOpen = Boolean(openableTask && taskHasCard(openableTask));
-                      const cardsLabel = originalCount && originalCount !== remainingCount
-                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
-                        : formatNumber(remainingCount);
-                      const actionBusy = taskActionStatus === group.key;
-                      return (
+	                      const cardsLabel = originalCount && originalCount !== remainingCount
+	                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
+	                        : formatNumber(remainingCount);
+	                      const actionBusy = taskActionStatus === group.key;
+	                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
+	                      const linkedPlanLabel = workPeriodLinkLabelForGroup(workPeriods, group);
+	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
                             <div>
@@ -8288,20 +8502,24 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                             </div>
                             <Tag tone={approvalStatusTone(statusValue)}>{approvalStatusLabel(statusValue)}</Tag>
                           </div>
-                          <div className="approval-task-meta">
-                            <span>Поставил: {author?.full_name || group.createdBy || "не указан"}</span>
-                            <span>Исполнитель: {assignee?.full_name || group.assigneeLogin || "техспециалист не задан"}</span>
-                            <span>{group.createdAt ? new Date(group.createdAt).toLocaleString("ru-RU") : "без даты"}</span>
-                          </div>
-                          {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
-                          <div className="task-batch-actions">
-                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask)} disabled={!canOpen}>
-                              <Eye size={17} />Открыть первую
-                            </button>
-                            <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group, section.key)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
-                              <Trash2 size={16} />Удалить задачу
-                            </button>
-                          </div>
+	                          <div className="approval-task-meta">
+	                            <span>Поставил: {author?.full_name || group.createdBy || "не указан"}</span>
+	                            <span>Исполнитель: {assignee?.full_name || group.assigneeLogin || "техспециалист не задан"}</span>
+	                            <span>{group.createdAt ? new Date(group.createdAt).toLocaleString("ru-RU") : "без даты"}</span>
+	                            <span>План: {linkedPlanLabel || "не привязано"}</span>
+	                          </div>
+	                          {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
+	                          <div className="task-batch-actions">
+	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask)} disabled={!canOpen}>
+	                              <Eye size={17} />Открыть первую
+	                            </button>
+	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
+	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
+	                            </button>
+	                            <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group, section.key)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
+	                              <Trash2 size={16} />Удалить задачу
+	                            </button>
+	                          </div>
                           <details className="task-card-details">
                             <summary>Карточки в задаче</summary>
                             <div className="task-card-list">
@@ -8332,11 +8550,23 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
             );
           })}
         </div>
-      ) : (
-          <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
-      )}
+	      ) : (
+	        <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
+	      )}
 
-      <section className="task-completed-section">
+	      {linkingGroup ? (
+	        <WorkPeriodTaskLinkModal
+	          group={linkingGroup.group}
+	          workType={linkingGroup.workType}
+	          workPeriods={workPeriods}
+	          workPeriodsStatus={workPeriodsStatus}
+	          loading={Boolean(taskActionStatus)}
+	          onClose={() => setLinkingGroup(null)}
+	          onSubmit={submitTaskLink}
+	        />
+	      ) : null}
+
+	      <section className="task-completed-section">
         <div className="task-completed-head">
           <div>
             <strong>Завершенные</strong>

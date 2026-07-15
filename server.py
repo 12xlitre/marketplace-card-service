@@ -3348,6 +3348,11 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   work_types = normalize_work_types(options.get("workTypes"))
   comment = str(options.get("comment") or "").strip()[:700]
   title = str(options.get("title") or "").strip()[:180]
+  link_period_id, link_task_key = ensure_work_period_link_target(
+    numeric_portal_id,
+    options.get("workPeriodId") or options.get("periodId"),
+    options.get("workPeriodTaskKey") or options.get("taskKey"),
+  )
   team = portal_team_roles(numeric_portal_id)
   assignee_login = str(options.get("assigneeLogin") or team.get("tech") or "").strip()[:120]
   workset = save_portal_workset(numeric_portal_id, raw_cards, user)
@@ -3409,7 +3414,17 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
         kept += 1
       else:
         created += 1
-  return {
+  linked_period = None
+  if link_period_id and link_task_key:
+    linked_period = update_portal_work_period(numeric_portal_id, {
+      "periodId": link_period_id,
+      "action": "link_task",
+      "taskKey": link_task_key,
+      "linkedTaskIds": work_period_task_link_ids(batch_id, work_types),
+      "linkedBatchIds": [batch_id],
+      "comment": title or comment or work_package_title(work_types, len(cards), comment),
+    }, user)
+  result = {
     "portalId": str(numeric_portal_id),
     "batchId": batch_id,
     "workTypes": work_types,
@@ -3422,6 +3437,9 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
     "workset": list_portal_workset(numeric_portal_id, user),
     "workflow": approval_workflow(numeric_portal_id, user),
   }
+  if linked_period:
+    result["workPeriod"] = linked_period
+  return result
 
 
 def delete_card_work_tasks(portal_id, payload, user):
@@ -4107,6 +4125,28 @@ def clean_work_period_links(items, limit=200):
   return output
 
 
+def clean_work_period_task_key(value):
+  raw_key = str(value or "").strip().lower()
+  return raw_key if raw_key in WORK_PERIOD_TASK_LABELS else clean_manual_work_period_task_key(raw_key)
+
+
+def work_period_task_link_ids(batch_id, work_types):
+  clean_batch_id = str(batch_id or "").strip()[:120]
+  if not clean_batch_id:
+    return []
+  return clean_work_period_links([
+    f"{work_type}:{clean_batch_id}"
+    for work_type in normalize_work_types(work_types)
+  ])
+
+
+def work_period_task_ids_reference_batch(task_ids, batch_id):
+  clean_batch_id = str(batch_id or "").strip()
+  if not clean_batch_id:
+    return False
+  return any(str(task_id or "").endswith(f":{clean_batch_id}") for task_id in task_ids)
+
+
 def normalize_work_period_tasks(value, fallback_default=True):
   raw_items = value if isinstance(value, list) else normalize_work_period_task_keys(value)
   tasks = []
@@ -4284,6 +4324,36 @@ def work_period_is_closed(end):
     return False
   end_day = dt.date.fromisoformat(end)
   return utc_now().date() >= end_day
+
+
+def ensure_work_period_link_target(portal_id, period_id, task_key):
+  if not period_id and not task_key:
+    return "", ""
+  if not period_id or not task_key:
+    raise ValueError("invalid_work_period_link")
+  try:
+    numeric_portal_id = int(portal_id)
+    numeric_period_id = int(period_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_work_period") from exc
+  clean_task_key = clean_work_period_task_key(task_key)
+  if numeric_period_id <= 0 or not clean_task_key:
+    raise ValueError("invalid_work_period_link")
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT tasks_json FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (numeric_portal_id, numeric_period_id),
+    ).fetchone()
+  if not row:
+    raise ValueError("work_period_not_found")
+  tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
+  target = next((task for task in tasks if task["key"] == clean_task_key), None)
+  if not target:
+    raise ValueError("work_period_task_not_found")
+  if target["status"] == "excluded":
+    raise ValueError("work_period_task_excluded")
+  return str(numeric_period_id), clean_task_key
 
 
 def list_portal_work_periods(portal_id, user):
@@ -4474,8 +4544,7 @@ def update_portal_work_period(portal_id, payload, user):
         if status == "reported":
           status = "active"
     elif action in {"complete_task", "return_task", "update_task_status"}:
-      raw_task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
-      task_key = raw_task_key if raw_task_key in WORK_PERIOD_TASK_LABELS else clean_manual_work_period_task_key(raw_task_key)
+      task_key = clean_work_period_task_key(payload.get("taskKey") or payload.get("task"))
       if not task_key:
         raise ValueError("invalid_work_period_task")
       comment = clean_work_period_note(payload.get("comment"))
@@ -4546,6 +4615,58 @@ def update_portal_work_period(portal_id, payload, user):
             "history": clean_work_period_history(history),
           }
         next_tasks.append(task)
+      if not changed:
+        raise ValueError("work_period_task_not_found")
+      tasks = next_tasks
+      report = {}
+      if status == "reported":
+        status = "active"
+    elif action == "link_task":
+      task_key = clean_work_period_task_key(payload.get("taskKey") or payload.get("task"))
+      if not task_key:
+        raise ValueError("invalid_work_period_task")
+      linked_task_ids = clean_work_period_links(payload.get("linkedTaskIds") or payload.get("taskIds"))
+      linked_batch_ids = clean_work_period_links(payload.get("linkedBatchIds") or payload.get("batchIds"))
+      if not linked_task_ids and not linked_batch_ids:
+        raise ValueError("invalid_work_period_link")
+      comment = clean_work_period_note(payload.get("comment"), 1000)
+      next_tasks = []
+      changed = False
+      for task in tasks:
+        current_task_ids = [item for item in clean_work_period_links(task.get("linkedTaskIds")) if item not in linked_task_ids]
+        current_batch_ids = [
+          item
+          for item in clean_work_period_links(task.get("linkedBatchIds"))
+          if item not in linked_batch_ids or work_period_task_ids_reference_batch(current_task_ids, item)
+        ]
+        if task["key"] != task_key:
+          next_tasks.append({
+            **task,
+            "linkedTaskIds": current_task_ids,
+            "linkedBatchIds": current_batch_ids,
+          })
+          continue
+        if task["status"] == "excluded":
+          raise ValueError("work_period_task_excluded")
+        changed = True
+        history = clean_work_period_history(task.get("history"))
+        history.append({
+          "action": "linked_task",
+          "at": now,
+          "by": user["login"],
+          "comment": comment,
+          "reason": ", ".join(linked_task_ids or linked_batch_ids)[:1000],
+        })
+        task_status = "in_progress" if task["status"] == "planned" else task["status"]
+        next_tasks.append({
+          **task,
+          "status": task_status,
+          "statusUpdatedAt": now if task_status != task["status"] else task.get("statusUpdatedAt", ""),
+          "statusUpdatedBy": user["login"] if task_status != task["status"] else task.get("statusUpdatedBy", ""),
+          "linkedTaskIds": clean_work_period_links([*current_task_ids, *linked_task_ids]),
+          "linkedBatchIds": clean_work_period_links([*current_batch_ids, *linked_batch_ids]),
+          "history": clean_work_period_history(history),
+        })
       if not changed:
         raise ValueError("work_period_task_not_found")
       tasks = next_tasks
@@ -13899,6 +14020,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           "title": payload.get("title"),
           "comment": payload.get("comment"),
           "assigneeLogin": payload.get("assigneeLogin"),
+          "workPeriodId": payload.get("workPeriodId") or payload.get("periodId"),
+          "workPeriodTaskKey": payload.get("workPeriodTaskKey") or payload.get("taskKey"),
         })
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
