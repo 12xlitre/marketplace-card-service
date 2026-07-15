@@ -3608,11 +3608,53 @@ WORK_TYPE_LABELS = {
 
 
 WORK_PERIOD_TASK_LABELS = {
+  "supplier_matrix_analysis": "Анализ матрицы поставщика",
+  "semantic_core_collection": "Сбор семантического ядра с ключевыми словами",
+  "optimized_product_title": "Составление оптимизированного наименования товара",
+  "optimized_characteristics": "Заполнение оптимизированных характеристик для каждой карточки товаров",
+  "optimized_description": "Подготовка описаний с учетом ключевых слов и ограничений по объему",
+  "infographic_preparation": "Подготовка инфографики для карточки товара",
+  "review_reply_templates": "Разработка шаблона ответа на отзывы",
+  "reviews_questions_monitoring": "Отслеживание отзывов и вопросов покупателей",
+  "marketplace_promo_alerts": "Своевременное оповещение о предстоящих акциях на маркетплейсе",
+  "internal_ads_recommendations": "Составление рекомендаций по внутренней рекламе",
+  "external_ads_recommendations": "Составление рекомендаций по внешней рекламе",
+  "ad_bids_monitoring": "Корректировка и мониторинг ставок рекламной кампании",
+  "infographic_ab_test": "A/B тест инфографики",
+  "rich_content_proposal": "Предложение по подготовке Рич-контента",
+  "external_ads_plan_launch": "Рекомендации и запуск внешней рекламы",
+  "recommendations_block_setup": "Подготовка рекомендаций по настройке блока «с товаром рекомендуют»",
+  "video_content_recommendations": "Составление рекомендаций по видео-контенту",
+  "warehouse_supply_recommendations": "Составление рекомендаций по поставкам на склад",
+  "storefront_design_recommendations": "Рекомендации по оформлению витрины магазина",
+  "store_banner_preparation": "Подготовка баннера для магазина",
+  "rich_content_preparation": "Подготовка Rich-контента для карточки товара",
+  "margin_calculation": "Расчет маржинальности",
+  "stock_monitoring": "Мониторинг остатков",
+  "review_points_proposal": "Предложение по подключению инструмента «Баллы за отзывы»",
+  "abc_analysis": "ABC-анализ",
+  "supply_proposal": "Предложение по поставке",
+  "ad_campaign_report": "Составление отчета по рекламной кампании",
+  "external_ads_proposal": "Предложение по внешней рекламе",
+  "external_ads_connection": "Подключение внешней рекламы",
+  "external_ads_report": "Составление отчета по внешней рекламе",
+  "wb_guru_article_recommendations": "Подготовка рекомендаций по статье",
+  "wb_guru_article_content": "Подготовка визуала и текстового контента для статьи",
+  "keyword_positions_report": "Составление отчета по позициям ключевых запросов в карточках товара",
+  "self_purchase_recommendations": "Рекомендации по самовыкупам",
+  "sales_report": "Составление отчета о продажах",
+  "work_done_report": "Составление отчета о проделанной работе",
   "semantic": "Семантика",
   "content": "Контент",
   "prices": "Цены",
   "stocks": "Остатки",
 }
+
+DEFAULT_WORK_PERIOD_TASK_KEYS = [
+  key
+  for key in WORK_PERIOD_TASK_LABELS
+  if key not in {"semantic", "content", "prices", "stocks"}
+]
 
 
 def normalize_work_types(value):
@@ -3667,7 +3709,7 @@ def normalize_work_period_task_keys(value):
     if key in WORK_PERIOD_TASK_LABELS and key not in seen:
       seen.add(key)
       output.append(key)
-  return output or list(WORK_PERIOD_TASK_LABELS.keys())
+  return output or list(DEFAULT_WORK_PERIOD_TASK_KEYS)
 
 
 def clean_work_period_status(value):
@@ -3748,7 +3790,7 @@ def normalize_work_period_tasks(value):
       "history": clean_work_period_history(raw_task.get("history")),
     })
   if not tasks:
-    tasks = normalize_work_period_tasks(list(WORK_PERIOD_TASK_LABELS.keys()))
+    tasks = normalize_work_period_tasks(list(DEFAULT_WORK_PERIOD_TASK_KEYS))
   return tasks
 
 

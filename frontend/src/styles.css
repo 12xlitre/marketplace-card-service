@@ -5338,6 +5338,95 @@ tr:last-child td {
   width: min(620px, 100%);
 }
 
+.work-period-modal {
+  width: min(960px, 100%);
+}
+
+.work-period-task-picker-head,
+.work-period-task-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.work-period-task-picker-head {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.work-period-task-picker-head > div,
+.work-period-task-group-head > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.work-period-task-picker-head span,
+.work-period-task-group-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.work-period-task-picker-head > div:last-child,
+.work-period-task-group-head > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.work-period-task-picker {
+  display: grid;
+  gap: 12px;
+}
+
+.work-period-task-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.work-period-task-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.work-period-task-option {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.work-period-task-option.active {
+  border-color: #c8d6ff;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.work-period-task-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.work-period-task-option span {
+  overflow-wrap: anywhere;
+}
+
 .work-type-picker {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5525,6 +5614,7 @@ tr:last-child td {
   .report-template,
   .report-history-row,
   .work-period-grid,
+  .work-period-task-options,
   .work-period-task-actions,
   .cards-work-summary,
   .card-filters,

@@ -900,7 +900,61 @@ const taskSectionOptions = [
   { key: "stocks", label: "Остатки" },
 ];
 
-const workPeriodTaskOptions = taskSectionOptions;
+const workPeriodTaskGroups = [
+  { key: "analysis", label: "Аналитика и стратегия" },
+  { key: "card-content", label: "Карточки и контент" },
+  { key: "reputation", label: "Отзывы и лояльность" },
+  { key: "ads", label: "Реклама и трафик" },
+  { key: "storefront", label: "Витрина и продвижение магазина" },
+  { key: "operations", label: "Поставки, остатки и экономика" },
+  { key: "reports", label: "Отчеты" },
+];
+
+const workPeriodTaskOptions = [
+  { key: "supplier_matrix_analysis", label: "Анализ матрицы поставщика", group: "analysis" },
+  { key: "semantic_core_collection", label: "Сбор семантического ядра с ключевыми словами", group: "card-content" },
+  { key: "optimized_product_title", label: "Составление оптимизированного наименования товара", group: "card-content" },
+  { key: "optimized_characteristics", label: "Заполнение оптимизированных характеристик для каждой карточки товаров", group: "card-content" },
+  { key: "optimized_description", label: "Подготовка описаний с учетом ключевых слов и ограничений по объему", group: "card-content" },
+  { key: "infographic_preparation", label: "Подготовка инфографики для карточки товара", group: "card-content" },
+  { key: "review_reply_templates", label: "Разработка шаблона ответа на отзывы", group: "reputation" },
+  { key: "reviews_questions_monitoring", label: "Отслеживание отзывов и вопросов покупателей", group: "reputation" },
+  { key: "marketplace_promo_alerts", label: "Своевременное оповещение о предстоящих акциях на маркетплейсе", group: "storefront" },
+  { key: "internal_ads_recommendations", label: "Составление рекомендаций по внутренней рекламе", group: "ads" },
+  { key: "external_ads_recommendations", label: "Составление рекомендаций по внешней рекламе", group: "ads" },
+  { key: "ad_bids_monitoring", label: "Корректировка и мониторинг ставок рекламной кампании", group: "ads" },
+  { key: "infographic_ab_test", label: "A/B тест инфографики", group: "card-content" },
+  { key: "rich_content_proposal", label: "Предложение по подготовке Рич-контента", group: "card-content" },
+  { key: "external_ads_plan_launch", label: "Рекомендации и запуск внешней рекламы", group: "ads" },
+  { key: "recommendations_block_setup", label: "Подготовка рекомендаций по настройке блока «с товаром рекомендуют»", group: "storefront" },
+  { key: "video_content_recommendations", label: "Составление рекомендаций по видео-контенту", group: "card-content" },
+  { key: "warehouse_supply_recommendations", label: "Составление рекомендаций по поставкам на склад", group: "operations" },
+  { key: "storefront_design_recommendations", label: "Рекомендации по оформлению витрины магазина", group: "storefront" },
+  { key: "store_banner_preparation", label: "Подготовка баннера для магазина", group: "storefront" },
+  { key: "rich_content_preparation", label: "Подготовка Rich-контента для карточки товара", group: "card-content" },
+  { key: "margin_calculation", label: "Расчет маржинальности", group: "operations" },
+  { key: "stock_monitoring", label: "Мониторинг остатков", group: "operations" },
+  { key: "review_points_proposal", label: "Предложение по подключению инструмента «Баллы за отзывы»", group: "reputation" },
+  { key: "abc_analysis", label: "ABC-анализ", group: "analysis" },
+  { key: "supply_proposal", label: "Предложение по поставке", group: "operations" },
+  { key: "ad_campaign_report", label: "Составление отчета по рекламной кампании", group: "ads" },
+  { key: "external_ads_proposal", label: "Предложение по внешней рекламе", group: "ads" },
+  { key: "external_ads_connection", label: "Подключение внешней рекламы", group: "ads" },
+  { key: "external_ads_report", label: "Составление отчета по внешней рекламе", group: "ads" },
+  { key: "wb_guru_article_recommendations", label: "Подготовка рекомендаций по статье", group: "storefront" },
+  { key: "wb_guru_article_content", label: "Подготовка визуала и текстового контента для статьи", group: "storefront" },
+  { key: "keyword_positions_report", label: "Составление отчета по позициям ключевых запросов в карточках товара", group: "reports" },
+  { key: "self_purchase_recommendations", label: "Рекомендации по самовыкупам", group: "ads" },
+  { key: "sales_report", label: "Составление отчета о продажах", group: "reports" },
+  { key: "work_done_report", label: "Составление отчета о проделанной работе", group: "reports" },
+];
+
+const legacyWorkPeriodTaskOptions = taskSectionOptions.map((item) => ({
+  ...item,
+  group: "legacy",
+}));
+const allWorkPeriodTaskOptions = [...workPeriodTaskOptions, ...legacyWorkPeriodTaskOptions];
+const defaultWorkPeriodTaskKeys = workPeriodTaskOptions.map((item) => item.key);
 
 function taskWorkTypes(task) {
   return Array.isArray(task?.workTypes) && task.workTypes.length ? normalizeWorkTypes(task.workTypes) : [];
@@ -928,8 +982,8 @@ function taskGroupStatus(tasks) {
   return "draft";
 }
 
-function normalizeWorkPeriodTaskKeys(value) {
-  const allowed = new Set(workPeriodTaskOptions.map((item) => item.key));
+function normalizeWorkPeriodTaskKeys(value, fallbackKeys = defaultWorkPeriodTaskKeys) {
+  const allowed = new Set(allWorkPeriodTaskOptions.map((item) => item.key));
   const output = [];
   (Array.isArray(value) ? value : []).forEach((item) => {
     const key = String(typeof item === "object" ? item?.key : item || "").trim();
@@ -937,11 +991,11 @@ function normalizeWorkPeriodTaskKeys(value) {
       output.push(key);
     }
   });
-  return output.length ? output : workPeriodTaskOptions.map((item) => item.key);
+  return output.length ? output : fallbackKeys;
 }
 
 function normalizeWorkPeriodTask(task) {
-  const option = workPeriodTaskOptions.find((item) => item.key === task?.key) || workPeriodTaskOptions[0];
+  const option = allWorkPeriodTaskOptions.find((item) => item.key === task?.key) || workPeriodTaskOptions[0];
   const status = ["planned", "done", "returned", "excluded"].includes(task?.status) ? task.status : "planned";
   return {
     key: option.key,
@@ -966,7 +1020,7 @@ function normalizeWorkPeriod(period) {
   const tasks = (Array.isArray(period?.tasks) ? period.tasks : [])
     .map(normalizeWorkPeriodTask)
     .filter((task, index, items) => items.findIndex((item) => item.key === task.key) === index);
-  const cleanTasks = tasks.length ? tasks : workPeriodTaskOptions.map((item) => normalizeWorkPeriodTask(item));
+  const cleanTasks = tasks.length ? tasks : defaultWorkPeriodTaskKeys.map((key) => normalizeWorkPeriodTask({ key }));
   const activeTasks = cleanTasks.filter((task) => task.status !== "excluded");
   const summary = period?.summary || {};
   const done = Number(summary.done ?? activeTasks.filter((task) => task.status === "done").length);
@@ -1011,7 +1065,7 @@ function defaultWorkPeriodForm() {
     title: "",
     start: dateInputValue(start),
     end: dateInputValue(end),
-    taskKeys: workPeriodTaskOptions.map((item) => item.key),
+    taskKeys: defaultWorkPeriodTaskKeys,
   };
 }
 
@@ -6444,7 +6498,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       onNotice?.("Выберите корректный период работ.");
       return;
     }
-    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys);
+    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys, []);
     if (!taskKeys.length) {
       onNotice?.("Выберите хотя бы один вид работ.");
       return;
@@ -6479,7 +6533,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       onNotice?.("Выберите корректный период работ.");
       return;
     }
-    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys);
+    const taskKeys = normalizeWorkPeriodTaskKeys(nextForm.taskKeys, []);
     if (!taskKeys.length) {
       onNotice?.("Оставьте хотя бы один активный пункт плана.");
       return;
@@ -6641,7 +6695,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
           title="Как вести период"
           items={[
             "Создайте период с произвольными датами начала и окончания.",
-            "Выберите направления работ: семантика, контент, цены, остатки.",
+            "Выберите конкретные работы из общего списка Wildberries: аналитика, карточки, реклама, витрина, поставки и отчеты.",
             "После выполнения пункта оставьте комментарий и нажмите Выполнено; возврат требует причину.",
             "В конце периода сформируйте итоговый отчет: он покажет выполненное и невыполненное с причинами.",
           ]}
@@ -6790,13 +6844,40 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 }
 
 function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, onSubmit }) {
-  const taskKeys = normalizeWorkPeriodTaskKeys(value.taskKeys);
+  const taskKeys = normalizeWorkPeriodTaskKeys(value.taskKeys, []);
   const isEdit = mode === "edit";
+  const hasLegacyTasks = legacyWorkPeriodTaskOptions.some((option) => taskKeys.includes(option.key));
+  const visibleGroups = hasLegacyTasks
+    ? [...workPeriodTaskGroups, { key: "legacy", label: "Старые укрупненные пункты" }]
+    : workPeriodTaskGroups;
+  const selectedCount = taskKeys.filter((key) => defaultWorkPeriodTaskKeys.includes(key)).length;
+
+  function groupOptions(groupKey) {
+    const source = groupKey === "legacy"
+      ? legacyWorkPeriodTaskOptions
+      : workPeriodTaskOptions.filter((option) => option.group === groupKey);
+    return groupKey === "legacy" ? source.filter((option) => taskKeys.includes(option.key)) : source;
+  }
+
   function toggleTask(key) {
     const nextKeys = taskKeys.includes(key)
       ? taskKeys.filter((item) => item !== key)
       : [...taskKeys, key];
-    onChange({ ...value, taskKeys: nextKeys.length ? nextKeys : taskKeys });
+    onChange({ ...value, taskKeys: nextKeys });
+  }
+  function selectAllTasks() {
+    onChange({ ...value, taskKeys: defaultWorkPeriodTaskKeys });
+  }
+  function clearAllTasks() {
+    onChange({ ...value, taskKeys: [] });
+  }
+  function selectGroup(groupKey) {
+    const groupKeys = groupOptions(groupKey).map((option) => option.key);
+    onChange({ ...value, taskKeys: [...new Set([...taskKeys, ...groupKeys])] });
+  }
+  function clearGroup(groupKey) {
+    const groupKeys = new Set(groupOptions(groupKey).map((option) => option.key));
+    onChange({ ...value, taskKeys: taskKeys.filter((key) => !groupKeys.has(key)) });
   }
   function submit(event) {
     event.preventDefault();
@@ -6827,14 +6908,48 @@ function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, o
               <input type="date" value={value.end} onChange={(event) => onChange({ ...value, end: event.target.value })} required />
             </label>
           </div>
-          <div className="work-type-picker">
-            {workPeriodTaskOptions.map((option) => (
-              <label className={`work-type-option ${taskKeys.includes(option.key) ? "active" : ""}`} key={option.key}>
-                <input type="checkbox" checked={taskKeys.includes(option.key)} onChange={() => toggleTask(option.key)} />
-                <span>{option.label}</span>
-              </label>
-            ))}
+          <div className="work-period-task-picker-head">
+            <div>
+              <strong>Работы на период</strong>
+              <span>{selectedCount} из {workPeriodTaskOptions.length} выбрано</span>
+            </div>
+            <div>
+              <button className="btn mini" type="button" onClick={selectAllTasks}>Выбрать все</button>
+              <button className="btn mini" type="button" onClick={clearAllTasks}>Снять все</button>
+            </div>
           </div>
+          <div className="work-period-task-picker">
+            {visibleGroups.map((group) => {
+              const options = groupOptions(group.key);
+              const groupSelected = options.filter((option) => taskKeys.includes(option.key)).length;
+              if (!options.length) return null;
+              return (
+                <section className="work-period-task-group" key={group.key}>
+                  <div className="work-period-task-group-head">
+                    <div>
+                      <strong>{group.label}</strong>
+                      <span>{groupSelected} из {options.length}</span>
+                    </div>
+                    {group.key !== "legacy" ? (
+                      <div>
+                        <button className="btn mini" type="button" onClick={() => selectGroup(group.key)}>Все</button>
+                        <button className="btn mini" type="button" onClick={() => clearGroup(group.key)}>Ничего</button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="work-period-task-options">
+                    {options.map((option) => (
+                      <label className={`work-period-task-option ${taskKeys.includes(option.key) ? "active" : ""}`} key={option.key}>
+                        <input type="checkbox" checked={taskKeys.includes(option.key)} onChange={() => toggleTask(option.key)} />
+                        <span>{option.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+          {!taskKeys.length ? <p className="form-error">Выберите хотя бы одну работу для периода.</p> : null}
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
