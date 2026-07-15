@@ -1028,7 +1028,7 @@ a {
 
 .work-period-task-actions {
   display: grid;
-  grid-template-columns: minmax(160px, .8fr) minmax(150px, max-content) minmax(180px, 1fr) minmax(82px, max-content);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
   gap: 8px;
 }
@@ -1038,7 +1038,10 @@ a {
 }
 
 .work-period-task-actions .btn {
-  min-width: max-content;
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+  line-height: 1.2;
 }
 
 .work-period-attachments,
@@ -5830,10 +5833,6 @@ tr:last-child td {
   .content-audit-card,
   .content-audit-card:nth-child(n + 4) {
     grid-column: span 1;
-  }
-
-  .work-period-task-actions {
-    grid-template-columns: minmax(180px, 1fr) minmax(150px, max-content);
   }
 
   .competitor-grid {
