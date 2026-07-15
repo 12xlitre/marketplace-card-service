@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import {
   Archive,
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   ChevronLeft,
   ChevronRight,
   CheckSquare,
@@ -1000,6 +1002,36 @@ function taskGroupStatus(tasks) {
   return "draft";
 }
 
+function taskBatchPosition(task, fallback = 0) {
+  const value = Number(task?.batchPosition ?? task?.taskPosition ?? task?.position);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function taskTimestamp(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function orderedTaskItems(tasks) {
+  return [...(Array.isArray(tasks) ? tasks : [])].sort((left, right) => (
+    taskBatchPosition(left, 999999) - taskBatchPosition(right, 999999)
+    || taskTimestamp(left.batchCreatedAt || left.submittedAt || left.updatedAt) - taskTimestamp(right.batchCreatedAt || right.submittedAt || right.updatedAt)
+    || String(left.cardKey || "").localeCompare(String(right.cardKey || ""))
+  ));
+}
+
+function moveArrayItem(items, index, delta) {
+  const source = Array.isArray(items) ? items : [];
+  const targetIndex = index + delta;
+  if (index < 0 || targetIndex < 0 || index >= source.length || targetIndex >= source.length) {
+    return source;
+  }
+  const next = [...source];
+  const [item] = next.splice(index, 1);
+  next.splice(targetIndex, 0, item);
+  return next;
+}
+
 function normalizeWorkPeriodTaskKeys(value, fallbackKeys = defaultWorkPeriodTaskKeys) {
   const allowed = new Set(allWorkPeriodTaskOptions.map((item) => item.key));
   const output = [];
@@ -1573,6 +1605,9 @@ function buildTaskGroupsByType(tasks) {
     });
   });
   Object.values(groupsByType).forEach((groups) => {
+    groups.forEach((group) => {
+      group.tasks = orderedTaskItems(group.tasks);
+    });
     groups.sort((left, right) => Date.parse(right.createdAt || "") - Date.parse(left.createdAt || ""));
   });
   return groupsByType;
@@ -6451,6 +6486,34 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function reorderApprovalTaskGroup(group, workType, orderedTasks) {
+    if (!portal?.id || portal.isDemo || taskActionStatus || !group?.batchId) return false;
+    const cardKeys = (orderedTasks || []).map((task) => task.cardKey).filter(Boolean);
+    if (cardKeys.length < 2) return false;
+    const actionKey = `reorder:${group.key || `${workType}:${group.batchId || ""}`}`;
+    setTaskActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/card-workset/reorder-tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          batchId: group.batchId,
+          workType,
+          cardKeys,
+        }),
+      });
+      if (payload.workflow) {
+        replaceApprovalWorkflow(payload.workflow);
+      }
+      return true;
+    } catch {
+      onNotice?.("Не удалось сохранить порядок задач.");
+      return false;
+    } finally {
+      setTaskActionStatus("");
+    }
+  }
+
   async function deleteCompletedApprovalTask(task) {
     if (!portal?.id || portal.isDemo || taskActionStatus) return;
     const confirmed = window.confirm(`Убрать завершенную СЯ "${task.title || task.cardKey}" из задач кабинета? Итоговая СЯ по этой карточке будет удалена, но черновик и подборки останутся.`);
@@ -6821,6 +6884,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                findUser={findUser}
 	                onOpenTask={openApprovalTask}
 	                onDeleteTaskGroup={deleteApprovalTaskGroup}
+	                onReorderTaskGroup={reorderApprovalTaskGroup}
 	                onLinkTaskGroup={linkApprovalTaskGroupToWorkPeriod}
 	                onUnlinkTaskGroup={unlinkApprovalTaskGroupFromWorkPeriod}
 	                onDeleteCompletedTask={deleteCompletedApprovalTask}
@@ -8541,11 +8605,13 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onReorderTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
   const [completedSearch, setCompletedSearch] = useState("");
   const [linkingGroup, setLinkingGroup] = useState(null);
+  const [orderingGroupKey, setOrderingGroupKey] = useState("");
+  const [localTaskOrders, setLocalTaskOrders] = useState({});
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
@@ -8568,12 +8634,98 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
       completedBy?.full_name,
     ].map((value) => String(value || "").toLowerCase()).join(" ").includes(completedSearchText);
   });
-  const visibleCompletedTasks = filteredCompletedTasks.slice(0, 80);
   const completedTotal = Number(analytics.completedCount || completedTasks.length || 0);
   const submitTaskLink = async (target) => {
     if (!linkingGroup) return;
     await onLinkTaskGroup?.(linkingGroup.group, linkingGroup.workType, target);
     setLinkingGroup(null);
+  };
+  const currentGroupTasks = (group) => localTaskOrders[group.key] || group.tasks || [];
+  const toggleGroupOrdering = (group) => {
+    if (orderingGroupKey === group.key) {
+      setOrderingGroupKey("");
+      setLocalTaskOrders((current) => {
+        const next = { ...current };
+        delete next[group.key];
+        return next;
+      });
+      return;
+    }
+    setOrderingGroupKey(group.key);
+    setLocalTaskOrders((current) => ({ ...current, [group.key]: currentGroupTasks(group) }));
+  };
+  const moveGroupTask = async (group, workType, index, delta) => {
+    if (taskActionStatus) return;
+    const source = currentGroupTasks(group);
+    const nextTasks = moveArrayItem(source, index, delta);
+    if (nextTasks === source) return;
+    setLocalTaskOrders((current) => ({ ...current, [group.key]: nextTasks }));
+    const saved = await onReorderTaskGroup?.({ ...group, tasks: nextTasks }, workType, nextTasks);
+    if (saved === false) {
+      setLocalTaskOrders((current) => {
+        const next = { ...current };
+        delete next[group.key];
+        return next;
+      });
+      return;
+    }
+    setLocalTaskOrders((current) => {
+      const next = { ...current };
+      delete next[group.key];
+      return next;
+    });
+  };
+  const renderCompletedTaskRows = (sectionTasks, limit = 30) => {
+    const visibleTasks = sectionTasks.slice(0, limit);
+    return (
+      <>
+        <div className="task-completed-list compact">
+          {visibleTasks.map((task) => {
+            const rowCanOpen = taskHasCard(task);
+            const completedBy = findUser(task.completedBy);
+            const canDeleteCompleted = !task.batchId && task.workType === "semantic";
+            const deleteActionKey = `completed:${task.cardKey}:${task.workType}`;
+            const deleteBusy = taskActionStatus === deleteActionKey;
+            const completedTime = Date.parse(task.completedAt || "");
+            const completedAtLabel = Number.isFinite(completedTime)
+              ? new Date(task.completedAt).toLocaleString("ru-RU")
+              : task.completedAt || "без даты";
+            return (
+              <div className="task-completed-row" key={`${task.cardKey}-${task.workType}-${task.completedAt || task.updatedAt}`}>
+                <div className="task-completed-main">
+                  <div className="task-completed-title">
+                    <strong>{task.title}</strong>
+                    <Tag tone={approvalStatusTone(task.status)}>{task.completionLabel || approvalStatusLabel(task.status)}</Tag>
+                  </div>
+                  <div className="task-completed-meta">
+                    <span>WB {textOrDash(task.nmID)}</span>
+                    <span>артикул {textOrDash(task.vendorCode)}</span>
+                    <span>{textOrDash(task.subjectName)}</span>
+                    <time>{completedAtLabel}</time>
+                    <span>завершил: {completedBy?.full_name || task.completedBy || "не указан"}</span>
+                  </div>
+                </div>
+                <div className="task-completed-actions">
+                  <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen || deleteBusy}>
+                    <Eye size={14} />Открыть
+                  </button>
+                  {canDeleteCompleted ? (
+                    <button className={loadingButtonClass("btn danger mini", deleteBusy)} type="button" onClick={() => onDeleteCompletedTask?.(task)} disabled={Boolean(taskActionStatus)} aria-busy={deleteBusy || undefined}>
+                      <Trash2 size={14} />Убрать
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {sectionTasks.length > visibleTasks.length ? (
+          <div className="task-completed-more">
+            Показано {formatNumber(visibleTasks.length)} из {formatNumber(sectionTasks.length)}. Уточните поиск, чтобы найти нужную карточку.
+          </div>
+        ) : null}
+      </>
+    );
   };
   return (
     <section className="workspace-strip approval-workflow-strip">
@@ -8616,16 +8768,41 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
         })}
       </div>
 
-      {activeTasks.length ? (
+      {completedTotal ? (
+        <div className="task-completed-filter">
+          <div>
+            <strong>Завершенные работы</strong>
+            <span>{formatNumber(completedTotal)} {pluralRu(completedTotal, "работа", "работы", "работ")} разложены по разделам ниже</span>
+          </div>
+          <label className="search-field task-completed-search">
+            <Search size={16} />
+            <input
+              type="search"
+              value={completedSearch}
+              onChange={(event) => setCompletedSearch(event.target.value)}
+              placeholder="Найти завершенную карточку"
+            />
+          </label>
+        </div>
+      ) : null}
+
+      {status === "loading" && !activeTasks.length && !completedTasks.length ? (
+        <div className="empty-state"><span>Загружаем задачи...</span></div>
+      ) : (
         <div className="task-section-list">
           {taskSectionOptions.map((section) => {
             const groups = groupsByType[section.key] || [];
+            const sectionCompletedAll = completedTasks.filter((task) => task.workType === section.key);
+            const sectionCompleted = filteredCompletedTasks.filter((task) => task.workType === section.key);
             return (
               <section className="task-type-section" key={section.key}>
                 <div className="task-type-head">
                   <div>
                     <h3>{section.label}</h3>
-                    <span>{groups.length ? `${groups.length} ${pluralRu(groups.length, "пачка", "пачки", "пачек")} в работе` : "нет активных задач"}</span>
+                    <span>
+                      {groups.length ? `${groups.length} ${pluralRu(groups.length, "пачка", "пачки", "пачек")} в работе` : "нет активных задач"}
+                      {sectionCompletedAll.length ? ` · ${formatNumber(sectionCompletedAll.length)} завершено` : ""}
+                    </span>
                   </div>
                   <Tag tone={groups.length ? "blue" : "green"}>{formatNumber(groups.reduce((sum, group) => sum + group.tasks.length, 0))} карточек</Tag>
                 </div>
@@ -8633,21 +8810,24 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                   <div className="task-batch-list">
                     {groups.map((group) => {
                       const firstTask = group.tasks[0] || {};
+                      const groupTasks = currentGroupTasks(group);
                       const statusValue = taskGroupStatus(group.tasks);
                       const originalCount = Number(firstTask.batchCardsCount || group.tasks.length || 0);
-                      const remainingCount = group.tasks.length;
+                      const remainingCount = groupTasks.length;
                       const assignee = findUser(group.assigneeLogin);
                       const author = findUser(group.createdBy);
-                      const openableTask = group.tasks.find(taskHasCard) || firstTask;
+                      const openableTask = groupTasks.find(taskHasCard) || firstTask;
                       const canOpen = Boolean(openableTask && taskHasCard(openableTask));
 	                      const cardsLabel = originalCount && originalCount !== remainingCount
 	                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
 	                        : formatNumber(remainingCount);
 		                      const actionBusy = taskActionStatus === group.key;
+		                      const reorderBusy = taskActionStatus === `reorder:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const unlinkBusy = taskActionStatus === `unlink:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkedPlan = workPeriodLinkForGroup(workPeriods, group);
 		                      const linkedPlanLabel = linkedPlan?.label || "";
+		                      const isOrdering = orderingGroupKey === group.key;
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -8668,6 +8848,9 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, group, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
+	                            <button className={loadingButtonClass("btn", reorderBusy)} type="button" onClick={() => toggleGroupOrdering(group)} disabled={Boolean(taskActionStatus && !reorderBusy) || groupTasks.length < 2 || !group.batchId} aria-busy={reorderBusy || undefined}>
+	                              <ArrowUp size={16} />{isOrdering ? "Готово" : "Поменять порядок"}
+	                            </button>
 	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
 	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
 	                            </button>
@@ -8680,20 +8863,32 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                              <Trash2 size={16} />Удалить задачу
 	                            </button>
 	                          </div>
-                          <details className="task-card-details">
+                          <details className="task-card-details" open={isOrdering || undefined}>
                             <summary>Карточки в задаче</summary>
                             <div className="task-card-list">
-                              {group.tasks.map((task) => {
+                              {groupTasks.map((task, taskIndex) => {
                                 const rowCanOpen = taskHasCard(task);
                                 return (
-                                  <div className="task-card-row" key={`${group.key}-${task.cardKey}`}>
+                                  <div className={`task-card-row ${isOrdering ? "ordering" : ""}`} key={`${group.key}-${task.cardKey}`}>
                                     <div>
                                       <strong>{task.title}</strong>
                                       <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
                                     </div>
-                                    <button className="btn mini" type="button" onClick={() => onOpenTask(task, group, section.key)} disabled={!rowCanOpen}>
-                                      Открыть
-                                    </button>
+                                    <div className="task-card-row-actions">
+                                      {isOrdering ? (
+                                        <>
+                                          <button className={loadingButtonClass("btn mini", reorderBusy)} type="button" onClick={() => moveGroupTask(group, section.key, taskIndex, -1)} disabled={Boolean(taskActionStatus) || taskIndex === 0} aria-busy={reorderBusy || undefined} title="Поднять выше">
+                                            <ArrowUp size={14} />Выше
+                                          </button>
+                                          <button className={loadingButtonClass("btn mini", reorderBusy)} type="button" onClick={() => moveGroupTask(group, section.key, taskIndex, 1)} disabled={Boolean(taskActionStatus) || taskIndex === groupTasks.length - 1} aria-busy={reorderBusy || undefined} title="Опустить ниже">
+                                            <ArrowDown size={14} />Ниже
+                                          </button>
+                                        </>
+                                      ) : null}
+                                      <button className="btn mini" type="button" onClick={() => onOpenTask(task, group, section.key)} disabled={!rowCanOpen}>
+                                        Открыть
+                                      </button>
+                                    </div>
                                   </div>
                                 );
                               })}
@@ -8706,12 +8901,21 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                 ) : (
                   <div className="empty-state compact"><span>Активных задач в разделе нет.</span></div>
                 )}
+                <div className="task-section-completed">
+                  <div className="task-section-completed-head">
+                    <strong>Завершенные {section.label.toLowerCase()}</strong>
+                    <span>{sectionCompletedAll.length ? `${formatNumber(sectionCompletedAll.length)} ${pluralRu(sectionCompletedAll.length, "работа", "работы", "работ")}` : "пока пусто"}</span>
+                  </div>
+                  {sectionCompleted.length ? renderCompletedTaskRows(sectionCompleted) : (
+                    <div className="empty-state compact">
+                      <span>{sectionCompletedAll.length && completedSearchText ? "По этому поиску завершенных карточек нет." : "Завершенных задач в этом разделе пока нет."}</span>
+                    </div>
+                  )}
+                </div>
               </section>
             );
           })}
         </div>
-	      ) : (
-	        <div className="empty-state"><span>{status === "loading" ? "Загружаем задачи..." : "Нет карточек, ожидающих решения"}</span></div>
 	      )}
 
 	      {linkingGroup ? (
@@ -8725,80 +8929,6 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	          onSubmit={submitTaskLink}
 	        />
 	      ) : null}
-
-	      <section className="task-completed-section">
-        <div className="task-completed-head">
-          <div>
-            <strong>Завершенные</strong>
-            <span>{completedTotal ? `${formatNumber(completedTotal)} ${pluralRu(completedTotal, "работа", "работы", "работ")} в архиве` : "здесь появятся закрытые работы по карточкам"}</span>
-          </div>
-          <label className="search-field task-completed-search">
-            <Search size={16} />
-            <input
-              type="search"
-              value={completedSearch}
-              onChange={(event) => setCompletedSearch(event.target.value)}
-              placeholder="Найти завершенную карточку"
-            />
-          </label>
-        </div>
-        {completedTasks.length ? (
-          filteredCompletedTasks.length ? (
-            <>
-              <div className="task-completed-list">
-                {visibleCompletedTasks.map((task) => {
-                  const rowCanOpen = taskHasCard(task);
-                  const completedBy = findUser(task.completedBy);
-                  const canDeleteCompleted = !task.batchId && task.workType === "semantic";
-                  const deleteActionKey = `completed:${task.cardKey}:${task.workType}`;
-                  const deleteBusy = taskActionStatus === deleteActionKey;
-                  const completedTime = Date.parse(task.completedAt || "");
-                  const completedAtLabel = Number.isFinite(completedTime)
-                    ? new Date(task.completedAt).toLocaleString("ru-RU")
-                    : task.completedAt || "без даты";
-                  return (
-                    <div className="task-completed-row" key={`${task.cardKey}-${task.workType}-${task.completedAt || task.updatedAt}`}>
-                      <div className="task-completed-main">
-                        <div className="task-completed-title">
-                          <strong>{task.title}</strong>
-                          <Tag tone={approvalStatusTone(task.status)}>{task.completionLabel || approvalStatusLabel(task.status)}</Tag>
-                        </div>
-                        <div className="task-completed-meta">
-                          <span>{taskSectionLabel(task.workType)}</span>
-                          <span>WB {textOrDash(task.nmID)}</span>
-                          <span>артикул {textOrDash(task.vendorCode)}</span>
-                          <span>{textOrDash(task.subjectName)}</span>
-                          <time>{completedAtLabel}</time>
-                          <span>завершил: {completedBy?.full_name || task.completedBy || "не указан"}</span>
-                        </div>
-                      </div>
-                      <div className="task-completed-actions">
-                        <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen || deleteBusy}>
-                          <Eye size={14} />Открыть
-                        </button>
-                        {canDeleteCompleted ? (
-                          <button className={loadingButtonClass("btn danger mini", deleteBusy)} type="button" onClick={() => onDeleteCompletedTask?.(task)} disabled={Boolean(taskActionStatus)} aria-busy={deleteBusy || undefined}>
-                            <Trash2 size={14} />Убрать
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              {filteredCompletedTasks.length > visibleCompletedTasks.length ? (
-                <div className="task-completed-more">
-                  Показано {formatNumber(visibleCompletedTasks.length)} из {formatNumber(filteredCompletedTasks.length)}. Уточните поиск, чтобы найти нужную карточку.
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="empty-state compact"><span>По этому поиску завершенных карточек нет.</span></div>
-          )
-        ) : (
-          <div className="empty-state compact"><span>{status === "loading" ? "Загружаем завершенные работы..." : "Завершенные работы появятся после отправки в итоговую выгрузку или на согласование."}</span></div>
-        )}
-      </section>
 
       <div className="approval-events">
         <div className="approval-events-head">

@@ -3113,6 +3113,10 @@ def approval_task_base(row, snapshot_lookup, meta, work_types):
   card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
   batch_title = str(batch.get("title") or work_package_title(work_types, batch.get("cardsCount"), batch.get("comment")) or "")[:180]
+  try:
+    batch_position = int(batch.get("position") or 0)
+  except (TypeError, ValueError):
+    batch_position = 0
   card = snapshot_lookup.get(row["card_key"], {})
   return {
     "portalId": str(row["portal_id"]),
@@ -3133,6 +3137,7 @@ def approval_task_base(row, snapshot_lookup, meta, work_types):
     "batchCreatedAt": str(batch.get("createdAt") or ""),
     "batchTitle": batch_title,
     "batchCardsCount": int(batch.get("cardsCount") or 0),
+    "batchPosition": batch_position,
     "workTypes": work_types,
     "workTypeLabels": [WORK_TYPE_LABELS.get(item, item) for item in work_types],
     "workComment": str(batch.get("comment") or "")[:700],
@@ -3286,6 +3291,7 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
   assignee_login = str(batch_options.get("assigneeLogin") or "").strip()[:120]
   created_at = batch_options.get("createdAt") or utc_now().isoformat()
   cards_count = int(batch_options.get("cardsCount") or 0)
+  position = int(batch_options.get("position") or 0)
   if not title:
     title = work_package_title(work_types, cards_count, comment)
   payload = normalize_card_draft_payload(existing_payload or {})
@@ -3329,6 +3335,7 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
       "title": title,
       "assigneeLogin": assignee_login,
       "cardsCount": cards_count,
+      "position": position,
       "workTypes": work_types,
       "workTypeLabels": work_type_labels(work_types),
       "comment": comment,
@@ -3371,7 +3378,7 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   kept = 0
   init_db()
   with connect_db() as db:
-    for card in cards:
+    for position, card in enumerate(cards):
       previous = db.execute(
         "SELECT payload_json FROM card_drafts WHERE portal_id = ? AND card_key = ?",
         (numeric_portal_id, card["cardKey"]),
@@ -3382,7 +3389,10 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
           previous_payload = json.loads(previous["payload_json"])
         except (TypeError, json.JSONDecodeError):
           previous_payload = None
-      payload = workset_batch_draft_payload(card, user, batch_id, previous_payload, batch_options)
+      payload = workset_batch_draft_payload(card, user, batch_id, previous_payload, {
+        **batch_options,
+        "position": position,
+      })
       payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
       cursor = db.execute(
         """
@@ -3591,6 +3601,119 @@ def delete_card_work_tasks(portal_id, payload, user):
     "workTypes": sorted(removed_types),
     "workflow": approval_workflow(numeric_portal_id, user),
     "workPeriods": updated_work_periods,
+  }
+
+
+def reorder_card_work_tasks(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  raw_card_keys = payload.get("cardKeys") if isinstance(payload.get("cardKeys"), list) else []
+  card_keys = []
+  seen_card_keys = set()
+  for raw_key in raw_card_keys:
+    card_key = draft_card_key(raw_key)
+    if card_key and card_key not in seen_card_keys:
+      seen_card_keys.add(card_key)
+      card_keys.append(card_key)
+  if not batch_id or len(card_keys) < 2:
+    raise ValueError("invalid_task_order")
+
+  init_db()
+  updated = 0
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT id, card_key, payload_json, created_at, updated_at
+      FROM card_drafts
+      WHERE portal_id = ?
+        AND json_extract(payload_json, '$.meta.batch.id') = ?
+      """,
+      (numeric_portal_id, batch_id),
+    ).fetchall()
+    if not rows:
+      raise ValueError("task_batch_not_found")
+
+    rows_by_key = {row["card_key"]: row for row in rows}
+    ordered_keys = [card_key for card_key in card_keys if card_key in rows_by_key]
+    if len(ordered_keys) < 2:
+      raise ValueError("invalid_task_order")
+
+    def row_position(row):
+      try:
+        draft_payload = json.loads(row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        return len(rows)
+      meta = draft_payload.get("meta") if isinstance(draft_payload.get("meta"), dict) else {}
+      batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+      try:
+        return int(batch.get("position"))
+      except (TypeError, ValueError):
+        return len(rows)
+
+    tail_rows = [
+      row
+      for row in rows
+      if row["card_key"] not in set(ordered_keys)
+    ]
+    tail_rows.sort(key=lambda row: (row_position(row), row["created_at"] or "", row["card_key"]))
+    next_keys = [*ordered_keys, *[row["card_key"] for row in tail_rows]]
+    positions = {card_key: index for index, card_key in enumerate(next_keys)}
+
+    for row in rows:
+      try:
+        draft_payload = json.loads(row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        continue
+      draft_payload = normalize_card_draft_payload(draft_payload)
+      meta = draft_payload.get("meta") if isinstance(draft_payload.get("meta"), dict) else {}
+      batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+      if str(batch.get("id") or "") != batch_id:
+        continue
+      next_position = positions.get(row["card_key"])
+      if next_position is None:
+        continue
+      previous_position = batch.get("position")
+      try:
+        previous_position = int(previous_position)
+      except (TypeError, ValueError):
+        previous_position = None
+      if previous_position == next_position:
+        continue
+      batch["position"] = next_position
+      meta["batch"] = batch
+      draft_payload["meta"] = meta
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, audit_status = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND portal_id = ?
+        """,
+        (
+          json.dumps(draft_payload, ensure_ascii=False, separators=(",", ":")),
+          draft_payload.get("auditStatus") or "idle",
+          user_login_value(user) or None,
+          row["id"],
+          numeric_portal_id,
+        ),
+      )
+      updated += 1
+
+  record_admin_event(user, "card_work_tasks_reordered", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "batchId": batch_id,
+    "cardKeys": card_keys[:200],
+    "updated": updated,
+  })
+  return {
+    "portalId": str(numeric_portal_id),
+    "batchId": batch_id,
+    "updated": updated,
+    "workflow": approval_workflow(numeric_portal_id, user),
   }
 
 
@@ -14456,6 +14579,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_delete"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/reorder-tasks":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = reorder_card_work_tasks(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_order"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

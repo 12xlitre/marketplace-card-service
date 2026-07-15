@@ -2319,6 +2319,13 @@ tr.selected-row td {
   flex-wrap: wrap;
 }
 
+.task-card-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .task-card-details {
   border-top: 1px solid var(--line);
   padding-top: 8px;
@@ -2344,6 +2351,12 @@ tr.selected-row td {
   padding: 8px 10px;
 }
 
+.task-card-row.ordering {
+  border-color: rgba(37, 99, 235, 0.32);
+  background: rgba(37, 99, 235, 0.05);
+}
+
+.task-section-completed,
 .task-completed-section {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2353,6 +2366,12 @@ tr.selected-row td {
   gap: 10px;
 }
 
+.task-section-completed {
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.task-section-completed-head,
+.task-completed-filter,
 .task-completed-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
@@ -2360,16 +2379,32 @@ tr.selected-row td {
   gap: 10px;
 }
 
-.task-completed-head > div {
+.task-section-completed-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.task-completed-filter {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.task-completed-head > div,
+.task-completed-filter > div {
   min-width: 0;
   display: grid;
   gap: 3px;
 }
 
-.task-completed-head strong {
+.task-section-completed-head strong,
+.task-completed-head strong,
+.task-completed-filter strong {
   font-size: 16px;
 }
 
+.task-section-completed-head span,
+.task-completed-filter span,
 .task-completed-head span,
 .task-completed-meta,
 .task-completed-more {
@@ -2383,6 +2418,10 @@ tr.selected-row td {
   max-height: 420px;
   overflow: auto;
   padding-right: 2px;
+}
+
+.task-completed-list.compact {
+  max-height: 280px;
 }
 
 .task-completed-row {
@@ -6119,6 +6158,8 @@ tr:last-child td {
   .task-type-head,
   .task-batch-main,
   .task-card-row,
+  .task-section-completed-head,
+  .task-completed-filter,
   .task-completed-head,
   .task-completed-row,
   .semantic-core-grid,
