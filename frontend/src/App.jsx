@@ -1169,10 +1169,50 @@ function workPeriodTaskExportDate(task) {
   return "";
 }
 
+function workPeriodTaskExportGroupLabel(task) {
+  return workPeriodTaskGroupMeta(workPeriodTaskGroupKey(task)).label;
+}
+
+function workPeriodGroupSummary(group) {
+  const activeTasks = group.tasks.filter((task) => task.status !== "excluded");
+  const done = activeTasks.filter((task) => task.status === "done").length;
+  const returned = activeTasks.filter((task) => task.status === "returned").length;
+  const planned = activeTasks.filter((task) => task.status === "planned").length;
+  const excluded = group.tasks.length - activeTasks.length;
+  const total = activeTasks.length;
+  return {
+    ...group,
+    total,
+    done,
+    returned,
+    planned,
+    excluded,
+    progress: total ? Math.round((done / total) * 100) : 0,
+    notCompleted: activeTasks.filter((task) => task.status !== "done"),
+    completed: activeTasks.filter((task) => task.status === "done"),
+  };
+}
+
+function workPeriodReportGroupSummaries(period) {
+  return workPeriodGroupedTasks(normalizeWorkPeriod(period).tasks).map(workPeriodGroupSummary);
+}
+
+function workPeriodReportStatusText(period) {
+  const normalized = normalizeWorkPeriod(period);
+  if (!normalized.summary.total) return "Нет активных работ";
+  if (normalized.summary.done >= normalized.summary.total) return "Все активные работы выполнены";
+  if (normalized.summary.returned) return "Есть возвраты и невыполненные пункты";
+  return "Есть невыполненные пункты";
+}
+
 function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
   const normalized = normalizeWorkPeriod(period);
   const generatedAt = new Date();
   const activeTasks = normalized.tasks.filter((task) => task.status !== "excluded");
+  const groupSummaries = workPeriodReportGroupSummaries(normalized);
+  const notCompletedTasks = activeTasks.filter((task) => task.status !== "done");
+  const completedTasks = activeTasks.filter((task) => task.status === "done");
+  const excludedTasks = normalized.tasks.filter((task) => task.status === "excluded");
   const rows = [
     [mode === "final" ? "Итоговый отчет по плану работ" : "План работ по кабинету", ""],
     ["Кабинет", portalDisplayName(portal)],
@@ -1183,9 +1223,11 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
     ["Выполнено", normalized.summary.done],
     ["Возвраты", normalized.summary.returned],
     ["Исключено из плана", normalized.summary.excluded || 0],
+    ...(mode === "final" ? [["Итог", workPeriodReportStatusText(normalized)]] : []),
     [],
-    ["Пункт плана", "Статус", "Дата действия", "Комментарий", "Причина / пояснение", "Связанные задачи"],
+    ["Раздел", "Пункт плана", "Статус", "Дата действия", "Комментарий", "Причина / пояснение", "Связанные задачи"],
     ...normalized.tasks.map((task) => [
+      workPeriodTaskExportGroupLabel(task),
       task.label,
       workPeriodTaskStatusLabel(task.status),
       workPeriodTaskExportDate(task),
@@ -1196,15 +1238,15 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
   ];
   const sheets = [{
     name: mode === "final" ? "Итоговый отчет" : "План работ",
-    freezeRows: 11,
-    widths: [28, 22, 24, 52, 52, 28],
+    freezeRows: mode === "final" ? 12 : 11,
+    widths: [30, 42, 18, 24, 52, 52, 28],
     rows,
   }];
   if (mode === "final") {
     sheets.push({
       name: "Сводка",
       freezeRows: 1,
-      widths: [32, 18, 64],
+      widths: [34, 18, 72],
       rows: [
         ["Показатель", "Значение", "Комментарий"],
         ["Работ в плане", activeTasks.length, "Исключенные при корректировке пункты не входят в активный план."],
@@ -1212,6 +1254,74 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
         ["Не выполнено", Math.max(0, normalized.summary.total - normalized.summary.done), "Плановые и возвращенные пункты на момент выгрузки."],
         ["Возвраты", normalized.summary.returned, "Пункты, возвращенные с причиной."],
         ["Исключено", normalized.summary.excluded || 0, "Пункты, убранные из плана в процессе периода."],
+        ["Итог", workPeriodReportStatusText(normalized), "Короткий статус периода для руководителя."],
+      ],
+    });
+    sheets.push({
+      name: "По разделам",
+      freezeRows: 1,
+      widths: [34, 16, 16, 16, 16, 16, 16, 72],
+      rows: [
+        ["Раздел", "В плане", "Выполнено", "Не выполнено", "Возвраты", "Исключено", "Прогресс", "Причины / комментарии"],
+        ...groupSummaries.map((group) => [
+          group.label,
+          group.total,
+          group.done,
+          Math.max(0, group.total - group.done),
+          group.returned,
+          group.excluded,
+          `${group.progress}%`,
+          group.notCompleted.map((task) => `${task.label}: ${workPeriodTaskExportReason(task)}`).join("; "),
+        ]),
+      ],
+    });
+    sheets.push({
+      name: "Не выполнено",
+      freezeRows: 1,
+      widths: [34, 48, 18, 28, 72, 40],
+      rows: [
+        ["Раздел", "Пункт", "Статус", "Дата", "Причина / пояснение", "Комментарий"],
+        ...(notCompletedTasks.length ? notCompletedTasks : []).map((task) => [
+          workPeriodTaskExportGroupLabel(task),
+          task.label,
+          workPeriodTaskStatusLabel(task.status),
+          workPeriodTaskExportDate(task),
+          workPeriodTaskExportReason(task),
+          task.comment || "",
+        ]),
+        ...(!notCompletedTasks.length ? [["", "Все активные пункты выполнены", "", "", "", ""]] : []),
+      ],
+    });
+    sheets.push({
+      name: "Выполнено",
+      freezeRows: 1,
+      widths: [34, 48, 24, 32, 64],
+      rows: [
+        ["Раздел", "Пункт", "Дата выполнения", "Исполнитель", "Комментарий"],
+        ...(completedTasks.length ? completedTasks : []).map((task) => [
+          workPeriodTaskExportGroupLabel(task),
+          task.label,
+          workPeriodTaskExportDate(task),
+          task.completedBy || "",
+          task.comment || "",
+        ]),
+        ...(!completedTasks.length ? [["", "Нет выполненных пунктов", "", "", ""]] : []),
+      ],
+    });
+    sheets.push({
+      name: "Исключено",
+      freezeRows: 1,
+      widths: [34, 48, 24, 32, 72],
+      rows: [
+        ["Раздел", "Пункт", "Дата исключения", "Кто исключил", "Причина"],
+        ...(excludedTasks.length ? excludedTasks : []).map((task) => [
+          workPeriodTaskExportGroupLabel(task),
+          task.label,
+          workPeriodTaskExportDate(task),
+          task.excludedBy || "",
+          workPeriodTaskExportReason(task),
+        ]),
+        ...(!excludedTasks.length ? [["", "Исключенных пунктов нет", "", "", ""]] : []),
       ],
     });
   }
@@ -6466,6 +6576,53 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   );
 }
 
+function WorkPeriodFinalReportPreview({ period, report, reportSummary, findUser }) {
+  const groupSummaries = workPeriodReportGroupSummaries(period);
+  const generatedBy = findUser(report.generatedBy);
+  const generatedAt = report.generatedAt ? new Date(report.generatedAt).toLocaleString("ru-RU") : "";
+  const notCompletedTotal = Math.max(0, (reportSummary?.total || 0) - (reportSummary?.done || 0));
+  return (
+    <div className="work-period-report">
+      <div className="work-period-report-head">
+        <div>
+          <strong>Итоговый отчет</strong>
+          <span>
+            {generatedAt || "без даты"}
+            {report.generatedBy ? ` · ${generatedBy?.full_name || report.generatedBy}` : ""}
+          </span>
+        </div>
+        <Tag tone={notCompletedTotal ? "amber" : "green"}>{workPeriodReportStatusText(period)}</Tag>
+      </div>
+      <div className="work-period-report-stats">
+        <div><span>Выполнено</span><strong>{reportSummary.done}/{reportSummary.total}</strong></div>
+        <div><span>Не выполнено</span><strong>{formatNumber(notCompletedTotal)}</strong></div>
+        <div><span>Возвраты</span><strong>{formatNumber(reportSummary.returned || 0)}</strong></div>
+        <div><span>Исключено</span><strong>{formatNumber(reportSummary.excluded || 0)}</strong></div>
+      </div>
+      <div className="work-period-report-groups">
+        {groupSummaries.map((group) => (
+          <div className="work-period-report-group" key={group.key}>
+            <div>
+              <strong>{group.label}</strong>
+              <span>{group.done} из {group.total} выполнено · {group.progress}%</span>
+            </div>
+            {group.notCompleted.length ? (
+              <ul>
+                {group.notCompleted.slice(0, 3).map((task) => (
+                  <li key={task.key}>{task.label}: {workPeriodTaskExportReason(task)}</li>
+                ))}
+                {group.notCompleted.length > 3 ? <li>Еще {group.notCompleted.length - 3} {pluralRu(group.notCompleted.length - 3, "пункт", "пункта", "пунктов")} в XLSX.</li> : null}
+              </ul>
+            ) : (
+              <p>Все активные пункты раздела выполнены.</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpEnabled = false }) {
   const [periods, setPeriods] = useState([]);
   const [status, setStatus] = useState("idle");
@@ -6893,17 +7050,12 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                 })}
               </div>
               {report.generatedAt ? (
-                <div className="work-period-report">
-                  <strong>Итоговый отчет</strong>
-                  <span>{new Date(report.generatedAt).toLocaleString("ru-RU")} · выполнено {reportSummary.done} из {reportSummary.total}</span>
-                  {Array.isArray(report.notCompleted) && report.notCompleted.length ? (
-                    <ul>
-                      {report.notCompleted.map((item) => (
-                        <li key={item.key}>{item.label}: {item.returnReason || "не выполнено"}</li>
-                      ))}
-                    </ul>
-                  ) : <p>Все пункты периода выполнены.</p>}
-                </div>
+                <WorkPeriodFinalReportPreview
+                  period={period}
+                  report={report}
+                  reportSummary={reportSummary}
+                  findUser={findUser}
+                />
               ) : null}
               <div className="card-actions">
                 <button className="btn" type="button" onClick={() => openEditPeriod(period)} disabled={Boolean(actionStatus)}>
