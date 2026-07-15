@@ -3562,6 +3562,89 @@ def delete_card_work_tasks(portal_id, payload, user):
   }
 
 
+def delete_completed_approval_task(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  work_type = str(payload.get("workType") or payload.get("work_type") or "").strip()
+  if not card_key or work_type != "semantic":
+    raise ValueError("invalid_completed_task_delete")
+
+  init_db()
+  removed = 0
+  now = utc_now().isoformat()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT id, card_key, payload_json
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if not row:
+      raise ValueError("completed_task_not_found")
+    try:
+      draft_payload = json.loads(row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+      draft_payload = normalize_card_draft_payload({})
+    draft_payload = normalize_card_draft_payload(draft_payload)
+    meta = draft_payload.get("meta") if isinstance(draft_payload.get("meta"), dict) else {}
+    batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+    if batch:
+      raise ValueError("completed_task_has_batch")
+    final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+    if not semantic_core_final_exists(meta):
+      raise ValueError("completed_task_not_found")
+
+    removal_history = meta.get("completedTaskRemovalHistory") if isinstance(meta.get("completedTaskRemovalHistory"), list) else []
+    removal_history.append({
+      "at": now,
+      "by": user_login_value(user),
+      "cardKey": row["card_key"],
+      "workType": work_type,
+      "completedAt": final_export.get("updatedAt") or final_export.get("createdAt") or "",
+      "completedBy": final_export.get("updatedBy") or final_export.get("createdBy") or "",
+      "reason": str(payload.get("reason") or "removed_from_completed_tasks")[:400],
+    })
+    meta["completedTaskRemovalHistory"] = removal_history[-50:]
+    meta.pop("semanticCoreFinal", None)
+    draft_payload["meta"] = meta
+    db.execute(
+      """
+      UPDATE card_drafts
+      SET payload_json = ?, audit_status = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND portal_id = ?
+      """,
+      (
+        json.dumps(draft_payload, ensure_ascii=False, separators=(",", ":")),
+        draft_payload.get("auditStatus") or "idle",
+        user_login_value(user) or None,
+        row["id"],
+        numeric_portal_id,
+      ),
+    )
+    removed = 1
+
+  record_admin_event(user, "completed_task_deleted", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "cardKey": card_key,
+    "workType": work_type,
+    "removed": removed,
+  })
+  return {
+    "portalId": str(numeric_portal_id),
+    "deleted": removed,
+    "cardKey": card_key,
+    "workType": work_type,
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
 def event_minutes_between(start, end):
   if not start or not end:
     return None
@@ -13705,6 +13788,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_delete"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/delete-completed-task":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = delete_completed_approval_task(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_completed_task_delete"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

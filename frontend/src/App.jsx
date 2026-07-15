@@ -6066,6 +6066,33 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function deleteCompletedApprovalTask(task) {
+    if (!portal?.id || portal.isDemo || taskActionStatus) return;
+    const confirmed = window.confirm(`Убрать завершенную СЯ "${task.title || task.cardKey}" из задач кабинета? Итоговая СЯ по этой карточке будет удалена, но черновик и подборки останутся.`);
+    if (!confirmed) return;
+    const actionKey = `completed:${task.cardKey}:${task.workType}`;
+    setTaskActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/card-workset/delete-completed-task", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          cardKey: task.cardKey,
+          workType: task.workType,
+          reason: "wrong_card_opened_from_task_batch",
+        }),
+      });
+      if (payload.workflow) {
+        replaceApprovalWorkflow(payload.workflow);
+      }
+      onNotice?.("Завершенная задача убрана из кабинета.");
+    } catch {
+      onNotice?.("Не удалось убрать завершенную задачу.");
+    } finally {
+      setTaskActionStatus("");
+    }
+  }
+
   async function startFullImport() {
     if (!isManual || !canRefreshSource || importJob?.status === "queued" || importJob?.status === "running") {
       return;
@@ -6403,12 +6430,13 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 workflow={approvalWorkflow}
                 status={approvalWorkflowStatus}
                 cards={cards}
-                findUser={findUser}
-                onOpenTask={openApprovalTask}
-                onDeleteTaskGroup={deleteApprovalTaskGroup}
-                taskActionStatus={taskActionStatus}
-                helpEnabled={helpEnabled}
-              />
+	                findUser={findUser}
+	                onOpenTask={openApprovalTask}
+	                onDeleteTaskGroup={deleteApprovalTaskGroup}
+	                onDeleteCompletedTask={deleteCompletedApprovalTask}
+	                taskActionStatus={taskActionStatus}
+	                helpEnabled={helpEnabled}
+	              />
             ) : null}
             {activeSellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
@@ -7819,7 +7847,7 @@ function WorkPackageModal({ selectedCount, value, loading, onChange, onClose, on
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, taskActionStatus = "", helpEnabled = false }) {
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onDeleteCompletedTask, taskActionStatus = "", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
   const [completedSearch, setCompletedSearch] = useState("");
@@ -7995,6 +8023,9 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                 {visibleCompletedTasks.map((task) => {
                   const rowCanOpen = taskHasCard(task);
                   const completedBy = findUser(task.completedBy);
+                  const canDeleteCompleted = !task.batchId && task.workType === "semantic";
+                  const deleteActionKey = `completed:${task.cardKey}:${task.workType}`;
+                  const deleteBusy = taskActionStatus === deleteActionKey;
                   const completedTime = Date.parse(task.completedAt || "");
                   const completedAtLabel = Number.isFinite(completedTime)
                     ? new Date(task.completedAt).toLocaleString("ru-RU")
@@ -8015,9 +8046,16 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                           <span>завершил: {completedBy?.full_name || task.completedBy || "не указан"}</span>
                         </div>
                       </div>
-                      <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen}>
-                        <Eye size={14} />Открыть
-                      </button>
+                      <div className="task-completed-actions">
+                        <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen || deleteBusy}>
+                          <Eye size={14} />Открыть
+                        </button>
+                        {canDeleteCompleted ? (
+                          <button className={loadingButtonClass("btn danger mini", deleteBusy)} type="button" onClick={() => onDeleteCompletedTask?.(task)} disabled={Boolean(taskActionStatus)} aria-busy={deleteBusy || undefined}>
+                            <Trash2 size={14} />Убрать
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                   );
                 })}

@@ -2341,6 +2341,13 @@ tr.selected-row td {
   gap: 6px 10px;
 }
 
+.task-completed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .task-completed-title strong {
   min-width: 0;
   overflow-wrap: anywhere;
