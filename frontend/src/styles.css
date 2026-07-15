@@ -2354,6 +2354,44 @@ tr.selected-row td {
 .task-card-row.ordering {
   border-color: rgba(37, 99, 235, 0.32);
   background: rgba(37, 99, 235, 0.05);
+  cursor: grab;
+}
+
+.task-card-row.dragging {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.task-card-row-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.task-drag-handle {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: grab;
+}
+
+.task-card-row.ordering:active,
+.task-drag-handle:active {
+  cursor: grabbing;
+}
+
+.task-order-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .task-section-completed,

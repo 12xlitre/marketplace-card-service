@@ -10,6 +10,7 @@ import {
   CheckSquare,
   ClipboardList,
   FileText,
+  GripVertical,
   Download,
   Eye,
   ExternalLink,
@@ -8612,6 +8613,8 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   const [linkingGroup, setLinkingGroup] = useState(null);
   const [orderingGroupKey, setOrderingGroupKey] = useState("");
   const [localTaskOrders, setLocalTaskOrders] = useState({});
+  const [dirtyOrderKeys, setDirtyOrderKeys] = useState({});
+  const [draggingTaskKey, setDraggingTaskKey] = useState("");
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
@@ -8641,39 +8644,90 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
     setLinkingGroup(null);
   };
   const currentGroupTasks = (group) => localTaskOrders[group.key] || group.tasks || [];
-  const toggleGroupOrdering = (group) => {
-    if (orderingGroupKey === group.key) {
-      setOrderingGroupKey("");
-      setLocalTaskOrders((current) => {
-        const next = { ...current };
-        delete next[group.key];
-        return next;
-      });
-      return;
-    }
-    setOrderingGroupKey(group.key);
-    setLocalTaskOrders((current) => ({ ...current, [group.key]: currentGroupTasks(group) }));
-  };
-  const moveGroupTask = async (group, workType, index, delta) => {
-    if (taskActionStatus) return;
-    const source = currentGroupTasks(group);
-    const nextTasks = moveArrayItem(source, index, delta);
-    if (nextTasks === source) return;
+  const taskOrderKey = (task) => taskRunItemKey(task) || String(task?.cardKey || "");
+  const isGroupOrderDirty = (group) => Boolean(dirtyOrderKeys[group.key]);
+  const setGroupDraftOrder = (group, nextTasks, dirty = true) => {
     setLocalTaskOrders((current) => ({ ...current, [group.key]: nextTasks }));
-    const saved = await onReorderTaskGroup?.({ ...group, tasks: nextTasks }, workType, nextTasks);
-    if (saved === false) {
-      setLocalTaskOrders((current) => {
-        const next = { ...current };
-        delete next[group.key];
-        return next;
-      });
-      return;
+    if (dirty) {
+      setDirtyOrderKeys((current) => ({ ...current, [group.key]: true }));
     }
+  };
+  const clearGroupDraftOrder = (group) => {
     setLocalTaskOrders((current) => {
       const next = { ...current };
       delete next[group.key];
       return next;
     });
+    setDirtyOrderKeys((current) => {
+      const next = { ...current };
+      delete next[group.key];
+      return next;
+    });
+  };
+  const startGroupOrdering = (group) => {
+    setOrderingGroupKey(group.key);
+    setGroupDraftOrder(group, currentGroupTasks(group), false);
+  };
+  const cancelGroupOrdering = (group) => {
+    setOrderingGroupKey("");
+    setDraggingTaskKey("");
+    clearGroupDraftOrder(group);
+  };
+  const saveGroupOrder = async (group, workType, orderedTasks = currentGroupTasks(group), options = {}) => {
+    if (taskActionStatus || !group?.batchId) return false;
+    const tasksToSave = Array.isArray(orderedTasks) ? orderedTasks : currentGroupTasks(group);
+    if (tasksToSave.length < 2) {
+      cancelGroupOrdering(group);
+      return false;
+    }
+    const saved = await onReorderTaskGroup?.({ ...group, tasks: tasksToSave }, workType, tasksToSave);
+    if (saved === false) return false;
+    clearGroupDraftOrder(group);
+    setDraggingTaskKey("");
+    if (options.close !== false) {
+      setOrderingGroupKey("");
+    }
+    return true;
+  };
+  const moveGroupTask = (group, index, delta) => {
+    if (taskActionStatus) return;
+    const source = currentGroupTasks(group);
+    const nextTasks = moveArrayItem(source, index, delta);
+    if (nextTasks === source) return;
+    setGroupDraftOrder(group, nextTasks);
+  };
+  const moveDraggedGroupTask = (group, sourceKey, targetKey) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey || taskActionStatus) return null;
+    const source = currentGroupTasks(group);
+    const fromIndex = source.findIndex((task) => taskOrderKey(task) === sourceKey);
+    const targetIndex = source.findIndex((task) => taskOrderKey(task) === targetKey);
+    if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return null;
+    const nextTasks = moveArrayItem(source, fromIndex, targetIndex - fromIndex);
+    if (nextTasks === source) return null;
+    setGroupDraftOrder(group, nextTasks);
+    return nextTasks;
+  };
+  const startTaskDrag = (event, group, task) => {
+    if (!orderingGroupKey || orderingGroupKey !== group.key || taskActionStatus) return;
+    const key = taskOrderKey(task);
+    setDraggingTaskKey(key);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", key);
+  };
+  const hoverTaskDrag = (event, group, task) => {
+    if (!draggingTaskKey || orderingGroupKey !== group.key || taskActionStatus) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    moveDraggedGroupTask(group, draggingTaskKey, taskOrderKey(task));
+  };
+  const dropTaskDrag = async (event, group, workType, task) => {
+    if (orderingGroupKey !== group.key) return;
+    event.preventDefault();
+    const nextTasks = currentGroupTasks(group);
+    setDraggingTaskKey("");
+    if (isGroupOrderDirty(group) || nextTasks !== group.tasks) {
+      await saveGroupOrder(group, workType, nextTasks);
+    }
   };
   const renderCompletedTaskRows = (sectionTasks, limit = 30) => {
     const visibleTasks = sectionTasks.slice(0, limit);
@@ -8828,6 +8882,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 		                      const linkedPlan = workPeriodLinkForGroup(workPeriods, group);
 		                      const linkedPlanLabel = linkedPlan?.label || "";
 		                      const isOrdering = orderingGroupKey === group.key;
+		                      const orderDirty = isGroupOrderDirty(group);
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -8848,9 +8903,20 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, group, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
-	                            <button className={loadingButtonClass("btn", reorderBusy)} type="button" onClick={() => toggleGroupOrdering(group)} disabled={Boolean(taskActionStatus && !reorderBusy) || groupTasks.length < 2 || !group.batchId} aria-busy={reorderBusy || undefined}>
-	                              <ArrowUp size={16} />{isOrdering ? "Готово" : "Поменять порядок"}
-	                            </button>
+	                            {isOrdering ? (
+	                              <>
+	                                <button className={loadingButtonClass("btn primary", reorderBusy)} type="button" onClick={() => (orderDirty ? saveGroupOrder(group, section.key) : cancelGroupOrdering(group))} disabled={Boolean(taskActionStatus && !reorderBusy)} aria-busy={reorderBusy || undefined}>
+	                                  <Save size={16} />{orderDirty ? "Сохранить порядок" : "Готово"}
+	                                </button>
+	                                <button className="btn ghost" type="button" onClick={() => cancelGroupOrdering(group)} disabled={Boolean(taskActionStatus)}>
+	                                  Отмена
+	                                </button>
+	                              </>
+	                            ) : (
+	                              <button className="btn" type="button" onClick={() => startGroupOrdering(group)} disabled={Boolean(taskActionStatus) || groupTasks.length < 2 || !group.batchId}>
+	                                <GripVertical size={16} />Поменять порядок
+	                              </button>
+	                            )}
 	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
 	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
 	                            </button>
@@ -8865,22 +8931,37 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                          </div>
                           <details className="task-card-details" open={isOrdering || undefined}>
                             <summary>Карточки в задаче</summary>
+                            {isOrdering ? <p className="task-order-hint">Перетащите карточку мышкой за строку или используйте кнопки выше/ниже. Сохранение пройдет одним запросом.</p> : null}
                             <div className="task-card-list">
                               {groupTasks.map((task, taskIndex) => {
                                 const rowCanOpen = taskHasCard(task);
+                                const rowKey = taskOrderKey(task);
+                                const dragging = isOrdering && draggingTaskKey === rowKey;
                                 return (
-                                  <div className={`task-card-row ${isOrdering ? "ordering" : ""}`} key={`${group.key}-${task.cardKey}`}>
-                                    <div>
-                                      <strong>{task.title}</strong>
-                                      <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
+                                  <div
+                                    className={`task-card-row ${isOrdering ? "ordering" : ""} ${dragging ? "dragging" : ""}`}
+                                    key={`${group.key}-${task.cardKey}`}
+                                    draggable={isOrdering}
+                                    onDragStart={(event) => startTaskDrag(event, group, task)}
+                                    onDragEnter={(event) => hoverTaskDrag(event, group, task)}
+                                    onDragOver={(event) => hoverTaskDrag(event, group, task)}
+                                    onDrop={(event) => dropTaskDrag(event, group, section.key, task)}
+                                    onDragEnd={() => setDraggingTaskKey("")}
+                                  >
+                                    <div className="task-card-row-main">
+                                      {isOrdering ? <span className="task-drag-handle" title="Перетащить"><GripVertical size={16} /></span> : null}
+                                      <div>
+                                        <strong>{task.title}</strong>
+                                        <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
+                                      </div>
                                     </div>
                                     <div className="task-card-row-actions">
                                       {isOrdering ? (
                                         <>
-                                          <button className={loadingButtonClass("btn mini", reorderBusy)} type="button" onClick={() => moveGroupTask(group, section.key, taskIndex, -1)} disabled={Boolean(taskActionStatus) || taskIndex === 0} aria-busy={reorderBusy || undefined} title="Поднять выше">
+                                          <button className="btn mini" type="button" onClick={() => moveGroupTask(group, taskIndex, -1)} disabled={Boolean(taskActionStatus) || taskIndex === 0} title="Поднять выше">
                                             <ArrowUp size={14} />Выше
                                           </button>
-                                          <button className={loadingButtonClass("btn mini", reorderBusy)} type="button" onClick={() => moveGroupTask(group, section.key, taskIndex, 1)} disabled={Boolean(taskActionStatus) || taskIndex === groupTasks.length - 1} aria-busy={reorderBusy || undefined} title="Опустить ниже">
+                                          <button className="btn mini" type="button" onClick={() => moveGroupTask(group, taskIndex, 1)} disabled={Boolean(taskActionStatus) || taskIndex === groupTasks.length - 1} title="Опустить ниже">
                                             <ArrowDown size={14} />Ниже
                                           </button>
                                         </>
