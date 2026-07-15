@@ -2904,14 +2904,14 @@ function buildSemanticCoreInstructionSheet(card = null) {
     widths: [34, 100],
     rows: [
       ["Раздел", "Описание"],
-      ["Файл", `Семантическое ядро ${target}. Файл нужен для согласования новых ключей перед обновлением контента.`],
+      ["Файл", `Семантическое ядро ${target}. Файл нужен для согласования новых ключей и запросов к исключению перед обновлением контента.`],
       ["Ключи в карточке (действующие)", "Ключи, которые уже заложены в текущий заголовок или описание карточки. По ним карточка может не иметь позиции."],
       ["Ранжируемые ключи", "Запросы из MPStats, по которым карточка уже ранжируется."],
       ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
       ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
       ["Частота запроса ключа к добавлению", "Частотность WB по запросу из MPStats."],
       ["Согласование добавления", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
-      ["Ключ к удалению из карточки", "Действующий ключ, который специалист предлагает убрать из SEO карточки перед переоптимизацией."],
+      ["Ключ к удалению из карточки", "Действующий ключ или ранжирующийся запрос, который специалист предлагает исключить перед переоптимизацией."],
       ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
       ["Согласование удаления", "Да - после согласования специалист вручную удаляет ключ в SEO карточки WB и переоптимизирует текст без него. Нет - ключ оставить."],
       ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбцах согласования. Дополнительные ключи можно дописать в пустые строки блоков добавления или удаления."],
@@ -3831,26 +3831,31 @@ function semanticSelectedExportRows(selectedRows, core) {
 
 function semanticRemovalExportRows(removalRows, core) {
   const contentRows = semanticCurrentContentRows(core);
-  const contentByKey = new Map(contentRows.map((item, index) => [semanticQueryKey(item), { item, index }]));
+  const contentKeys = new Set(contentRows.map(semanticQueryKey).filter(Boolean));
+  const rankingOnlyRows = semanticCurrentPositionRows(core)
+    .filter((item) => !contentKeys.has(semanticQueryKey(item)));
+  const sourceRows = [...contentRows, ...rankingOnlyRows];
+  const sourceByKey = new Map(sourceRows.map((item, index) => [semanticQueryKey(item), { item, index }]));
   const output = [];
   const seen = new Set();
   normalizeSemanticRemoval(removalRows).forEach((item, index) => {
     const key = semanticQueryKey(item);
-    const source = contentByKey.get(key);
-    if (!key || seen.has(key) || (contentRows.length && !source)) return;
+    const source = sourceByKey.get(key);
+    if (!key || seen.has(key) || (sourceRows.length && !source)) return;
     seen.add(key);
+    const sourceField = source?.item?.field || (contentKeys.has(key) ? "content" : "ranking");
     output.push({
       ...(source?.item || {}),
       ...item,
       status: "remove",
-      field: "content",
+      field: item.field && item.field !== "content" ? item.field : sourceField,
       removalReason: semanticRemovalReason(item),
-      _contentIndex: source?.index ?? index,
+      _sourceIndex: source?.index ?? index,
     });
   });
   return output
-    .sort((left, right) => Number(left._contentIndex || 0) - Number(right._contentIndex || 0))
-    .map(({ _contentIndex, ...item }) => item);
+    .sort((left, right) => Number(left._sourceIndex || 0) - Number(right._sourceIndex || 0))
+    .map(({ _sourceIndex, ...item }) => item);
 }
 
 function semanticCoreFromRankingPayload(payload) {
@@ -8417,6 +8422,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
   const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
+  const [cardDescriptionOpen, setCardDescriptionOpen] = useState(false);
   const [cardCharacteristicsOpen, setCardCharacteristicsOpen] = useState(false);
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
@@ -8665,7 +8671,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
   const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
   const semanticContentRunning = semanticContentStatus === "loading";
-  const canReoptimizeContent = Boolean(activeSemanticNewRows.length && semanticCurrentChoiceSaved && !approvalReadOnly && !semanticContentRunning);
+  const semanticHasOptimizationChanges = Boolean(activeSemanticNewRows.length || activeSemanticRemovalRows.length);
+  const canReoptimizeContent = Boolean(semanticHasOptimizationChanges && semanticCurrentChoiceSaved && !approvalReadOnly && !semanticContentRunning);
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
   const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
     || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
@@ -8781,6 +8788,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticEditingCollectionId("");
     setSemanticEditingCollectionName("");
     setSemanticEditingKeywords([]);
+    setCardDescriptionOpen(false);
     setCardCharacteristicsOpen(false);
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
@@ -9686,13 +9694,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       stageSemanticRemoval(currentRemoval.filter((removed) => semanticQueryKey(removed) !== key));
       return;
     }
-    const source = activeSemanticContentRows.find((row) => semanticQueryKey(row) === key) || item;
+    const contentSource = activeSemanticContentRows.find((row) => semanticQueryKey(row) === key);
+    const rankingSource = activeSemanticPositionRows.find((row) => semanticQueryKey(row) === key);
+    const source = contentSource || rankingSource || item;
     stageSemanticRemoval([
       ...currentRemoval,
       {
         ...source,
         status: "remove",
-        field: source.field || "content",
+        field: source.field || (contentSource ? "content" : "ranking"),
         removalReason: "ключ нерелевантен или не нужен в будущей переоптимизации",
       },
     ]);
@@ -9745,7 +9755,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function reoptimizeContentFromSemanticCore() {
-    if (!activeSemanticNewRows.length || approvalReadOnly) {
+    if (!semanticHasOptimizationChanges || approvalReadOnly) {
       return;
     }
     setSemanticContentStatus("loading");
@@ -10697,7 +10707,20 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                 <div className="list-row"><span>Артикул продавца</span><strong>{valueSummary(card?.vendorCode)}</strong></div>
                 <div className="list-row"><span>Категория</span><strong>{valueSummary(card?.subjectName)}</strong></div>
                 <div className="list-row"><span>Бренд</span><strong>{valueSummary(card?.brand)}</strong></div>
-                <div className="list-row"><span>Описание</span><strong>{isEmptyValue(description) ? "Пусто" : "есть"}</strong></div>
+                <div className="list-row expandable-row">
+                  <span>Описание</span>
+                  <div className="row-action">
+                    <strong>{isEmptyValue(description) ? "Пусто" : "есть"}</strong>
+                    <button className="icon-mini" type="button" onClick={() => setCardDescriptionOpen((value) => !value)} disabled={isEmptyValue(description)} title={cardDescriptionOpen ? "Свернуть текущее описание" : "Раскрыть текущее описание"} aria-label={cardDescriptionOpen ? "Свернуть текущее описание" : "Раскрыть текущее описание"}>
+                      {cardDescriptionOpen ? <X size={14} /> : <Plus size={14} />}
+                    </button>
+                  </div>
+                </div>
+                {cardDescriptionOpen && !isEmptyValue(description) ? (
+                  <div className="description-inline-box">
+                    <p>{description}</p>
+                  </div>
+                ) : null}
                 <div className="list-row expandable-row">
                   <span>Характеристики</span>
                   <div className="row-action">
@@ -10964,7 +10987,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     onClick={reoptimizeContentFromSemanticCore}
                     disabled={!canReoptimizeContent}
                     aria-busy={semanticContentRunning || undefined}
-                    title={activeSemanticNewRows.length ? (semanticCurrentChoiceSaved ? "Переписать заголовок и описание с учетом новых запросов" : "Сначала нажмите Сохранить текущий выбор.") : "Сначала добавьте новые запросы с частотностью"}
+                    title={semanticHasOptimizationChanges ? (semanticCurrentChoiceSaved ? "Переписать заголовок и описание с учетом добавлений и запросов к удалению" : "Сначала нажмите Сохранить текущий выбор.") : "Сначала добавьте новые запросы или отметьте лишние к удалению"}
                   >
                     <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
@@ -12824,6 +12847,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const selectedKeys = new Set(selectedItems.map(semanticQueryKey));
   const removalKeys = new Set(removalItems.map(semanticQueryKey).filter(Boolean));
   const contentKeys = new Set(contentItems.map(semanticQueryKey).filter(Boolean));
+  const positionKeys = new Set(positionItems.map(semanticQueryKey).filter(Boolean));
   const sourceItems = semanticCandidateSourceRows(semanticCore);
   const coverage = semanticCore?.coveragePercent;
   const selectedLimit = compact ? 4 : standalone ? 100 : 8;
@@ -12920,7 +12944,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             active={metricFilter === "remove"}
             label="К удалению"
             value={formatNumber(removalItems.length)}
-            hint="Действующие ключи карточки, которые попадут в отчет как предложение удалить перед переоптимизацией."
+            hint="Ключи карточки и ранжирующиеся запросы, которые попадут в отчет как предложение исключить перед переоптимизацией."
             onClick={() => toggleMetricFilter("remove")}
           />
           <SemanticMetric
@@ -12980,7 +13004,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             {displayedCurrentItems.length ? displayedCurrentItems.slice(0, visibleCurrentLimit).map((item) => {
               const key = semanticQueryKey(item);
               const markedForRemoval = removalKeys.has(key) || metricFilter === "remove";
-              const canToggleRemoval = standalone && onToggleRemoveKeyword && (contentKeys.has(key) || markedForRemoval);
+              const canToggleRemoval = standalone && onToggleRemoveKeyword && (contentKeys.has(key) || positionKeys.has(key) || markedForRemoval);
               return (
                 <div className={`semantic-keyword${markedForRemoval ? " remove" : ""}`} key={`current-${metricFilter}-${key || item.query}`}>
                   <div className="semantic-keyword-main">

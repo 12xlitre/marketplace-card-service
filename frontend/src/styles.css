@@ -1721,6 +1721,23 @@ tr.selected-row td {
   opacity: 0.45;
 }
 
+.description-inline-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.description-inline-box p {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .characteristics-inline-list {
   border: 1px solid var(--line);
   border-radius: 8px;

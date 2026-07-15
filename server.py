@@ -7411,7 +7411,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 Правила:
 - используй только факты из evidenceBundle;
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
-- новые ключевые запросы нужно включить естественно, без переспама и повторов;
+- если новые ключевые запросы переданы, включи их естественно, без переспама и повторов;
 - запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
 - заголовок должен быть готовым названием карточки WB длиной до 60 символов;
 - описание должно быть готовым текстом карточки, а не советом специалисту;
@@ -10719,7 +10719,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=80)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
-  if not selected:
+  if not selected and not remove:
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
     raise ValueError("llm_key_missing")
