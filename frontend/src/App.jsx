@@ -3,6 +3,8 @@ import {
   Archive,
   AlertTriangle,
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
   CheckSquare,
   ClipboardList,
   FileText,
@@ -1957,6 +1959,42 @@ function cardMatchesApprovalTask(card, task) {
 
 function findCardForApprovalTask(cards, task) {
   return (Array.isArray(cards) ? cards : []).find((card) => cardMatchesApprovalTask(card, task)) || null;
+}
+
+function taskRunItemKey(item) {
+  return item?.cardKey || item?.nmID || item?.vendorCode || "";
+}
+
+function buildTaskRunContext(cards, group, workType, startTask) {
+  const taskItems = Array.isArray(group?.tasks) ? group.tasks : [];
+  const seen = new Set();
+  const items = taskItems.map((task) => {
+    const card = findCardForApprovalTask(cards, task);
+    if (!card) return null;
+    const key = cardDraftKey(card) || task.cardKey || String(task.nmID || task.vendorCode || "");
+    if (!key || seen.has(key)) return null;
+    seen.add(key);
+    return {
+      cardKey: key,
+      nmID: cardNmIdValue(card) || task.nmID || "",
+      vendorCode: cardVendorCodeValue(card) || task.vendorCode || "",
+      title: card.title || task.title || "Карточка",
+      subjectName: card.subjectName || task.subjectName || "",
+    };
+  }).filter(Boolean);
+  if (!items.length) return null;
+  const startCard = findCardForApprovalTask(cards, startTask);
+  const startKey = startCard ? cardDraftKey(startCard) : normalizeDraftKeyValue(startTask?.cardKey);
+  const currentIndex = Math.max(0, items.findIndex((item) => taskRunItemKey(item) === startKey));
+  return {
+    title: taskBatchGroupTitle(group),
+    workType,
+    workTypeLabel: taskSectionLabel(workType),
+    batchId: group?.batchId || "",
+    total: items.length,
+    currentIndex,
+    items,
+  };
 }
 
 function normalizedCardSearchText(card) {
@@ -4903,6 +4941,7 @@ export default function App() {
     sellerTab: normalizeSellerTab(initialView.sellerTab),
     label: sellerBackLabel(normalizeSellerTab(initialView.sellerTab)),
   }));
+  const [taskRun, setTaskRun] = useState(null);
   const [selectedCardKey, setSelectedCardKey] = useState(initialView.cardKey || cardDraftKey(demoCards[0]));
   const [selectedCard, setSelectedCard] = useState(
     demoCards.find((card) => cardDraftKey(card) === initialView.cardKey) || demoCards[0],
@@ -5562,19 +5601,47 @@ export default function App() {
 
   function openCard(card, context = {}) {
     const nextSellerTab = normalizeSellerTab(context.sellerTab || sellerTab);
+    const nextTaskRun = context.taskRun?.items?.length ? {
+      ...context.taskRun,
+      currentIndex: Math.max(0, Math.min(Number(context.taskRun.currentIndex || 0), context.taskRun.items.length - 1)),
+      total: context.taskRun.items.length,
+    } : null;
     setSelectedCard(card);
     setSelectedCardKey(cardDraftKey(card));
     setCardReturnTarget({
       sellerTab: nextSellerTab,
       label: context.backLabel || sellerBackLabel(nextSellerTab),
     });
+    setTaskRun(nextTaskRun);
     setScreen("card");
   }
 
   function backFromCard() {
     const nextSellerTab = normalizeSellerTab(cardReturnTarget.sellerTab);
+    setTaskRun(null);
     setSellerTab(nextSellerTab);
     setScreen("seller");
+  }
+
+  function navigateTaskRun(delta) {
+    if (!taskRun?.items?.length) {
+      return;
+    }
+    const nextIndex = Math.max(0, Math.min(taskRun.currentIndex + delta, taskRun.items.length - 1));
+    if (nextIndex === taskRun.currentIndex) {
+      return;
+    }
+    const item = taskRun.items[nextIndex];
+    const cards = cardsForPortal(currentPortal);
+    const nextCard = cards.find((card) => cardMatchesDraftKey(card, item.cardKey)) || null;
+    if (!nextCard) {
+      setNotice("Карточка из пачки не найдена в текущем списке кабинета.");
+      return;
+    }
+    setSelectedCard(nextCard);
+    setSelectedCardKey(cardDraftKey(nextCard));
+    setTaskRun((current) => current ? { ...current, currentIndex: nextIndex } : current);
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }
 
   async function createPortal(payload) {
@@ -5763,6 +5830,8 @@ export default function App() {
             currentUser={currentUser}
             onBack={backFromCard}
             backLabel={cardReturnTarget.label}
+            taskRun={taskRun}
+            onTaskRunNavigate={navigateTaskRun}
             onDraftSaved={refreshPortals}
             onDraftActivity={(payload) => markPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal), payload)}
             onDraftReset={() => resetPortalWorkActivity(currentPortal.id, cardDraftKey(selectedCardFromPortal))}
@@ -6268,10 +6337,14 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
-  function openApprovalTask(task) {
+  function openApprovalTask(task, group = null, workType = "") {
     const card = findCardForApprovalTask(cards, task);
     if (card) {
-      onOpenCard(card, { sellerTab: "tasks", backLabel: "Задачи" });
+      onOpenCard(card, {
+        sellerTab: "tasks",
+        backLabel: "Задачи",
+        taskRun: group ? buildTaskRunContext(cards, group, workType, task) : null,
+      });
     } else {
       onNotice?.("Карточка задачи не найдена в текущем списке кабинета.");
     }
@@ -8515,10 +8588,10 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
       </div>
 	      <HelpList
 	        enabled={helpEnabled}
-	        title="Как работать с задачами"
-	        items={[
-	          "Откройте задачу кнопкой Открыть первую или конкретную строку в списке карточек: после возврата вы снова попадете во вкладку Задачи.",
-	          "Кнопки Привязать к плану и Отвязать от плана управляют связью пачки с пунктом текущего отчетного периода.",
+		        title="Как работать с задачами"
+		        items={[
+		          "Откройте пачку кнопкой Начать работу или конкретную строку: карточка откроется с прогрессом пачки и кнопками Предыдущая/Следующая.",
+		          "Кнопки Привязать к плану и Отвязать от плана управляют связью пачки с пунктом текущего отчетного периода.",
 	          "Удалить задачу нужно только для ошибочных или неактуальных пачек. Сохраненные результаты карточек останутся в черновиках.",
 	          "Если задача по СЯ закрыта, добавьте выбранные ключи в итоговое СЯ карточки: после этого кабинетная выгрузка соберет их в общий файл.",
 	        ]}
@@ -8592,8 +8665,8 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                          </div>
 	                          {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
 	                          <div className="task-batch-actions">
-	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask)} disabled={!canOpen}>
-	                              <Eye size={17} />Открыть первую
+	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, group, section.key)} disabled={!canOpen}>
+	                              <Eye size={17} />Начать работу
 	                            </button>
 	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
 	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
@@ -8618,7 +8691,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                                       <strong>{task.title}</strong>
                                       <span>WB {textOrDash(task.nmID)} · артикул {textOrDash(task.vendorCode)} · {textOrDash(task.subjectName)}</span>
                                     </div>
-                                    <button className="btn mini" type="button" onClick={() => onOpenTask(task)} disabled={!rowCanOpen}>
+                                    <button className="btn mini" type="button" onClick={() => onOpenTask(task, group, section.key)} disabled={!rowCanOpen}>
                                       Открыть
                                     </button>
                                   </div>
@@ -8752,7 +8825,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   );
 }
 
-function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Карточки", onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
+function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Карточки", taskRun = null, onTaskRunNavigate, onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
   const [activeTab, setActiveTab] = useState("card");
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
@@ -8820,6 +8893,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const portalName = portalDisplayName(portal);
+  const taskRunItems = Array.isArray(taskRun?.items) ? taskRun.items : [];
+  const taskRunTotal = taskRunItems.length;
+  const taskRunIndex = taskRunTotal ? Math.max(0, Math.min(Number(taskRun.currentIndex || 0), taskRunTotal - 1)) : 0;
+  const taskRunCurrent = taskRunItems[taskRunIndex] || null;
+  const taskRunPrevious = taskRunIndex > 0 ? taskRunItems[taskRunIndex - 1] : null;
+  const taskRunNext = taskRunIndex < taskRunTotal - 1 ? taskRunItems[taskRunIndex + 1] : null;
   const titleLength = currentTitle.length;
   const cardIssueReasons = cardProblemReasons(card);
   const issueCount = cardIssueReasons.length || Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
@@ -9608,6 +9687,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       return;
     }
     onBack();
+  }
+
+  function navigateTaskRunCard(delta) {
+    if (activeTab === "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    onTaskRunNavigate?.(delta);
   }
 
   function handleSemanticSeedKeyDown(event) {
@@ -11086,6 +11172,27 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           <Tag tone={approvalStatusTone(approval.status)}>{approvalStatusLabel(approval.status)}</Tag>
         </div>
       </header>
+
+      {taskRunTotal ? (
+        <section className="task-run-strip">
+          <div className="task-run-copy">
+            <span>{taskRun.workTypeLabel || "Задача"} · {formatNumber(taskRunIndex + 1)} из {formatNumber(taskRunTotal)}</span>
+            <strong>{taskRun.title || "Пачка задач"}</strong>
+            <p>{taskRunCurrent?.title || currentTitle} · WB {textOrDash(taskRunCurrent?.nmID || card?.nmID)} · артикул {textOrDash(taskRunCurrent?.vendorCode || card?.vendorCode)}</p>
+          </div>
+          <div className="task-run-progress" aria-label={`Карточка ${taskRunIndex + 1} из ${taskRunTotal}`}>
+            <span style={{ width: `${Math.round(((taskRunIndex + 1) / taskRunTotal) * 100)}%` }} />
+          </div>
+          <div className="task-run-actions">
+            <button className="btn" type="button" onClick={() => navigateTaskRunCard(-1)} disabled={!taskRunPrevious} title={taskRunPrevious ? taskRunPrevious.title : "Это первая карточка"}>
+              <ChevronLeft size={17} />Предыдущая
+            </button>
+            <button className="btn primary" type="button" onClick={() => navigateTaskRunCard(1)} disabled={!taskRunNext} title={taskRunNext ? taskRunNext.title : "Это последняя карточка"}>
+              Следующая<ChevronRight size={17} />
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <div className="content">
         <div className={`detail-layout ${activeTab === "changes" || activeTab === "competitors" ? "wide-changes" : ""}`}>
