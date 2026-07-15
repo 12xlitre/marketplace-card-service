@@ -21,6 +21,7 @@ import {
   Settings,
   Tags,
   Trash2,
+  Unlink,
   Upload,
   WandSparkles,
   Warehouse,
@@ -1307,16 +1308,24 @@ function workPeriodTaskHasTaskLink(task, taskIds = [], batchIds = []) {
   return taskIds.some((item) => linkedTaskIds.has(item)) || batchIds.some((item) => linkedBatchIds.has(item));
 }
 
-function workPeriodLinkLabelForGroup(periods, group) {
+function workPeriodLinkForGroup(periods, group) {
   const taskIds = [group?.key].filter(Boolean);
   const batchIds = taskIds.length ? [] : [group?.batchId].filter(Boolean);
   for (const period of normalizeWorkPeriods(periods)) {
     const linkedTask = period.tasks.find((task) => workPeriodTaskHasTaskLink(task, taskIds, batchIds));
     if (linkedTask) {
-      return `${period.title || "Отчетный период"} · ${linkedTask.label}`;
+      return {
+        period,
+        task: linkedTask,
+        label: `${period.title || "Отчетный период"} · ${linkedTask.label}`,
+      };
     }
   }
-  return "";
+  return null;
+}
+
+function workPeriodLinkLabelForGroup(periods, group) {
+  return workPeriodLinkForGroup(periods, group)?.label || "";
 }
 
 function workPeriodEndDateLabel(period) {
@@ -6303,6 +6312,34 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function unlinkApprovalTaskGroupFromWorkPeriod(group, workType, linkedPlan) {
+    if (!portal?.id || portal.isDemo || taskActionStatus || !linkedPlan?.period?.id || !linkedPlan?.task?.key) return;
+    const actionKey = `unlink:${group.key || `${workType}:${group.batchId || ""}`}`;
+    setTaskActionStatus(actionKey);
+    try {
+      const payload = await apiRequest("/api/portal-work-periods", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          periodId: linkedPlan.period.id,
+          action: "unlink_task",
+          taskKey: linkedPlan.task.key,
+          linkedTaskIds: [group.key].filter(Boolean),
+          linkedBatchIds: [group.batchId].filter(Boolean),
+          comment: taskBatchGroupTitle(group),
+        }),
+      });
+      if (payload.period) {
+        replaceSellerWorkPeriod(payload.period);
+      }
+      onNotice?.("Задача отвязана от пункта отчетного периода.");
+    } catch {
+      onNotice?.("Не удалось отвязать задачу от отчетного периода.");
+    } finally {
+      setTaskActionStatus("");
+    }
+  }
+
   async function deleteApprovalTaskGroup(group, workType) {
     if (!portal?.id || portal.isDemo || taskActionStatus) return;
     const cardsCount = group?.tasks?.length || 0;
@@ -6323,6 +6360,9 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       });
       if (payload.workflow) {
         replaceApprovalWorkflow(payload.workflow);
+      }
+      if (Array.isArray(payload.workPeriods)) {
+        payload.workPeriods.forEach(replaceSellerWorkPeriod);
       }
       onNotice?.("Задача удалена из кабинета.");
     } catch {
@@ -6703,6 +6743,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                onOpenTask={openApprovalTask}
 	                onDeleteTaskGroup={deleteApprovalTaskGroup}
 	                onLinkTaskGroup={linkApprovalTaskGroupToWorkPeriod}
+	                onUnlinkTaskGroup={unlinkApprovalTaskGroupFromWorkPeriod}
 	                onDeleteCompletedTask={deleteCompletedApprovalTask}
 	                taskActionStatus={taskActionStatus}
 	                workPeriods={workPeriods}
@@ -8388,7 +8429,7 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onLinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
+function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
   const [completedSearch, setCompletedSearch] = useState("");
@@ -8438,7 +8479,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	        title="Как работать с задачами"
 	        items={[
 	          "Откройте задачу кнопкой Открыть первую или конкретную строку в списке карточек: после возврата вы снова попадете во вкладку Задачи.",
-	          "Кнопка Привязать к плану связывает пачку с пунктом текущего отчетного периода и переводит этот пункт в работу.",
+	          "Кнопки Привязать к плану и Отвязать от плана управляют связью пачки с пунктом текущего отчетного периода.",
 	          "Удалить задачу нужно только для ошибочных или неактуальных пачек. Сохраненные результаты карточек останутся в черновиках.",
 	          "Если задача по СЯ закрыта, добавьте выбранные ключи в итоговое СЯ карточки: после этого кабинетная выгрузка соберет их в общий файл.",
 	        ]}
@@ -8490,9 +8531,11 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                      const cardsLabel = originalCount && originalCount !== remainingCount
 	                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
 	                        : formatNumber(remainingCount);
-	                      const actionBusy = taskActionStatus === group.key;
-	                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
-	                      const linkedPlanLabel = workPeriodLinkLabelForGroup(workPeriods, group);
+		                      const actionBusy = taskActionStatus === group.key;
+		                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
+		                      const unlinkBusy = taskActionStatus === `unlink:${group.key || `${section.key}:${group.batchId || ""}`}`;
+		                      const linkedPlan = workPeriodLinkForGroup(workPeriods, group);
+		                      const linkedPlanLabel = linkedPlan?.label || "";
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -8516,6 +8559,11 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
 	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
 	                            </button>
+	                            {linkedPlan ? (
+	                              <button className={loadingButtonClass("btn", unlinkBusy)} type="button" onClick={() => onUnlinkTaskGroup?.(group, section.key, linkedPlan)} disabled={Boolean(taskActionStatus)} aria-busy={unlinkBusy || undefined}>
+	                                <Unlink size={16} />Отвязать от плана
+	                              </button>
+	                            ) : null}
 	                            <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group, section.key)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
 	                              <Trash2 size={16} />Удалить задачу
 	                            </button>
