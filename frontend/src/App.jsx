@@ -968,6 +968,8 @@ const allWorkPeriodTaskOptions = [...workPeriodTaskOptions, ...legacyWorkPeriodT
 const defaultWorkPeriodTaskKeys = workPeriodTaskOptions.map((item) => item.key);
 const manualWorkPeriodTaskPrefix = "manual:";
 const workPeriodAttachmentMaxBytes = 2 * 1024 * 1024;
+const workPeriodActiveTaskStatuses = ["planned", "in_progress", "review", "done"];
+const workPeriodTaskStatuses = [...workPeriodActiveTaskStatuses, "returned", "excluded"];
 
 function taskWorkTypes(task) {
   return Array.isArray(task?.workTypes) && task.workTypes.length ? normalizeWorkTypes(task.workTypes) : [];
@@ -1086,7 +1088,7 @@ function normalizeWorkPeriodTask(task) {
   const option = allWorkPeriodTaskOptions.find((item) => item.key === key);
   const manualTask = !option && key.startsWith(manualWorkPeriodTaskPrefix);
   const fallbackOption = option || workPeriodTaskOptions[0];
-  const status = ["planned", "done", "returned", "excluded"].includes(task?.status) ? task.status : "planned";
+  const status = workPeriodTaskStatuses.includes(task?.status) ? task.status : "planned";
   return {
     key: manualTask ? key : fallbackOption.key,
     label: manualTask ? (String(task?.label || "").trim() || "Внеплановая работа") : (task?.label || fallbackOption.label),
@@ -1094,6 +1096,8 @@ function normalizeWorkPeriodTask(task) {
     description: String(task?.description || "").trim(),
     status,
     comment: task?.comment || "",
+    statusUpdatedAt: task?.statusUpdatedAt || "",
+    statusUpdatedBy: task?.statusUpdatedBy || "",
     completedAt: task?.completedAt || "",
     completedBy: task?.completedBy || "",
     returnReason: task?.returnReason || "",
@@ -1117,6 +1121,8 @@ function normalizeWorkPeriod(period) {
   const activeTasks = cleanTasks.filter((task) => task.status !== "excluded");
   const summary = period?.summary || {};
   const done = Number(summary.done ?? activeTasks.filter((task) => task.status === "done").length);
+  const inProgress = Number(summary.inProgress ?? activeTasks.filter((task) => task.status === "in_progress").length);
+  const review = Number(summary.review ?? activeTasks.filter((task) => task.status === "review").length);
   const returned = Number(summary.returned ?? activeTasks.filter((task) => task.status === "returned").length);
   const excluded = Number(summary.excluded ?? cleanTasks.filter((task) => task.status === "excluded").length);
   const total = Number(summary.total ?? activeTasks.length);
@@ -1133,9 +1139,11 @@ function normalizeWorkPeriod(period) {
     summary: {
       total,
       done,
+      inProgress,
+      review,
       returned,
       excluded,
-      planned: Number(summary.planned ?? Math.max(0, total - done - returned)),
+      planned: Number(summary.planned ?? activeTasks.filter((task) => task.status === "planned").length),
       progress: Number(summary.progress ?? (total ? Math.round((done / total) * 100) : 0)),
     },
     report: period?.report && typeof period.report === "object" ? period.report : {},
@@ -1206,6 +1214,8 @@ function workPeriodFormFromPeriod(period) {
 }
 
 function workPeriodTaskStatusLabel(status) {
+  if (status === "in_progress") return "в работе";
+  if (status === "review") return "на согласовании";
   if (status === "done") return "выполнено";
   if (status === "returned") return "возврат";
   if (status === "excluded") return "исключено";
@@ -1214,6 +1224,8 @@ function workPeriodTaskStatusLabel(status) {
 
 function workPeriodTaskStatusTone(status) {
   if (status === "done") return "green";
+  if (status === "review") return "violet";
+  if (status === "in_progress") return "amber";
   if (status === "returned") return "red";
   if (status === "excluded") return "amber";
   return "blue";
@@ -1223,11 +1235,19 @@ function workPeriodStatus(period) {
   if (period?.status === "reported") return { label: "отчет готов", tone: "blue" };
   if (period?.summary?.total && period.summary.done >= period.summary.total) return { label: "выполнено", tone: "green" };
   if (period?.summary?.returned) return { label: "есть возврат", tone: "red" };
+  if (period?.summary?.review) return { label: "на согласовании", tone: "violet" };
+  if (period?.summary?.inProgress) return { label: "в работе", tone: "amber" };
   return { label: "в работе", tone: "amber" };
 }
 
 function workPeriodTaskDate(task) {
-  const value = task.status === "done" ? task.completedAt : task.status === "returned" ? task.returnedAt : task.status === "excluded" ? task.excludedAt : "";
+  const value = task.status === "done"
+    ? task.completedAt
+    : task.status === "returned"
+      ? task.returnedAt
+      : task.status === "excluded"
+        ? task.excludedAt
+        : task.statusUpdatedAt;
   return value ? new Date(value).toLocaleString("ru-RU") : "";
 }
 
@@ -1256,6 +1276,8 @@ function workPeriodEndDateLabel(period) {
 function workPeriodTaskExportReason(task) {
   if (task.status === "returned") return task.returnReason || "возвращено без причины";
   if (task.status === "excluded") return task.exclusionReason || "исключено при корректировке плана";
+  if (task.status === "in_progress") return "взято в работу";
+  if (task.status === "review") return "ожидает согласования";
   if (task.status === "planned") return "не выполнено к моменту выгрузки";
   return "";
 }
@@ -1268,6 +1290,7 @@ function workPeriodTaskExportDate(task) {
   if (task.status === "done") return task.completedAt ? new Date(task.completedAt).toLocaleString("ru-RU") : "";
   if (task.status === "returned") return task.returnedAt ? new Date(task.returnedAt).toLocaleString("ru-RU") : "";
   if (task.status === "excluded") return task.excludedAt ? new Date(task.excludedAt).toLocaleString("ru-RU") : "";
+  if (["in_progress", "review", "planned"].includes(task.status)) return task.statusUpdatedAt ? new Date(task.statusUpdatedAt).toLocaleString("ru-RU") : "";
   return "";
 }
 
@@ -1278,6 +1301,8 @@ function workPeriodTaskExportGroupLabel(task) {
 function workPeriodGroupSummary(group) {
   const activeTasks = group.tasks.filter((task) => task.status !== "excluded");
   const done = activeTasks.filter((task) => task.status === "done").length;
+  const inProgress = activeTasks.filter((task) => task.status === "in_progress").length;
+  const review = activeTasks.filter((task) => task.status === "review").length;
   const returned = activeTasks.filter((task) => task.status === "returned").length;
   const planned = activeTasks.filter((task) => task.status === "planned").length;
   const excluded = group.tasks.length - activeTasks.length;
@@ -1286,6 +1311,8 @@ function workPeriodGroupSummary(group) {
     ...group,
     total,
     done,
+    inProgress,
+    review,
     returned,
     planned,
     excluded,
@@ -1304,6 +1331,8 @@ function workPeriodReportStatusText(period) {
   if (!normalized.summary.total) return "Нет активных работ";
   if (normalized.summary.done >= normalized.summary.total) return "Все активные работы выполнены";
   if (normalized.summary.returned) return "Есть возвраты и невыполненные пункты";
+  if (normalized.summary.review) return "Есть пункты на согласовании";
+  if (normalized.summary.inProgress) return "Есть пункты в работе";
   return "Есть невыполненные пункты";
 }
 
@@ -1323,6 +1352,8 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
     ["Дата выгрузки", generatedAt.toLocaleString("ru-RU")],
     ["Всего в плане", normalized.summary.total],
     ["Выполнено", normalized.summary.done],
+    ["В работе", normalized.summary.inProgress || 0],
+    ["На согласовании", normalized.summary.review || 0],
     ["Возвраты", normalized.summary.returned],
     ["Исключено из плана", normalized.summary.excluded || 0],
     ...(mode === "final" ? [["Итог", workPeriodReportStatusText(normalized)]] : []),
@@ -1341,7 +1372,7 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
   ];
   const sheets = [{
     name: mode === "final" ? "Итоговый отчет" : "План работ",
-    freezeRows: mode === "final" ? 12 : 11,
+    freezeRows: mode === "final" ? 14 : 13,
     widths: [30, 42, 18, 24, 52, 52, 28, 34],
     rows,
   }];
@@ -1354,7 +1385,9 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
         ["Показатель", "Значение", "Комментарий"],
         ["Работ в плане", activeTasks.length, "Исключенные при корректировке пункты не входят в активный план."],
         ["Выполнено", normalized.summary.done, "Пункты со статусом выполнено."],
-        ["Не выполнено", Math.max(0, normalized.summary.total - normalized.summary.done), "Плановые и возвращенные пункты на момент выгрузки."],
+        ["В работе", normalized.summary.inProgress || 0, "Пункты со статусом в работе."],
+        ["На согласовании", normalized.summary.review || 0, "Пункты, ожидающие согласования."],
+        ["Не выполнено", Math.max(0, normalized.summary.total - normalized.summary.done), "Плановые, рабочие, согласуемые и возвращенные пункты на момент выгрузки."],
         ["Возвраты", normalized.summary.returned, "Пункты, возвращенные с причиной."],
         ["Исключено", normalized.summary.excluded || 0, "Пункты, убранные из плана в процессе периода."],
         ["Итог", workPeriodReportStatusText(normalized), "Короткий статус периода для руководителя."],
@@ -1363,13 +1396,15 @@ function buildWorkPeriodWorkbookSheets(portal, period, mode = "plan") {
     sheets.push({
       name: "По разделам",
       freezeRows: 1,
-      widths: [34, 16, 16, 16, 16, 16, 16, 72],
+      widths: [34, 16, 16, 16, 16, 16, 16, 16, 16, 72],
       rows: [
-        ["Раздел", "В плане", "Выполнено", "Не выполнено", "Возвраты", "Исключено", "Прогресс", "Причины / комментарии"],
+        ["Раздел", "В плане", "Выполнено", "В работе", "На согласовании", "Не выполнено", "Возвраты", "Исключено", "Прогресс", "Причины / комментарии"],
         ...groupSummaries.map((group) => [
           group.label,
           group.total,
           group.done,
+          group.inProgress || 0,
+          group.review || 0,
           Math.max(0, group.total - group.done),
           group.returned,
           group.excluded,
@@ -6828,6 +6863,8 @@ function WorkPeriodFinalReportPreview({ period, report, reportSummary, findUser 
       </div>
       <div className="work-period-report-stats">
         <div><span>Выполнено</span><strong>{reportSummary.done}/{reportSummary.total}</strong></div>
+        <div><span>В работе</span><strong>{formatNumber(reportSummary.inProgress || 0)}</strong></div>
+        <div><span>На согласовании</span><strong>{formatNumber(reportSummary.review || 0)}</strong></div>
         <div><span>Не выполнено</span><strong>{formatNumber(notCompletedTotal)}</strong></div>
         <div><span>Возвраты</span><strong>{formatNumber(reportSummary.returned || 0)}</strong></div>
         <div><span>Исключено</span><strong>{formatNumber(reportSummary.excluded || 0)}</strong></div>
@@ -6916,6 +6953,15 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     return normalizeWorkPeriodAttachments(task.attachments);
   }
 
+  function taskDraftStatus(period, task) {
+    const draftStatus = taskDraftValue(period, task, "status");
+    return workPeriodActiveTaskStatuses.includes(draftStatus)
+      ? draftStatus
+      : workPeriodActiveTaskStatuses.includes(task.status)
+        ? task.status
+        : "planned";
+  }
+
   function updateTaskDraft(period, task, type, value) {
     setTaskDrafts((current) => ({ ...current, [draftKey(period, task, type)]: value }));
   }
@@ -6926,6 +6972,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
       delete next[draftKey(period, task, "comment")];
       delete next[draftKey(period, task, "reason")];
       delete next[draftKey(period, task, "attachments")];
+      delete next[draftKey(period, task, "status")];
       return next;
     });
   }
@@ -6951,7 +6998,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
         return;
       }
       updateTaskDraft(period, task, "attachments", [attachment]);
-      onNotice?.("Файл приложен. Нажмите Выполнено, чтобы сохранить его в периоде.");
+      onNotice?.("Файл приложен. Нажмите Сохранить статус, чтобы сохранить его в периоде.");
     };
     reader.onerror = () => onNotice?.("Не удалось прочитать файл.");
     reader.readAsDataURL(file);
@@ -7091,18 +7138,22 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     }
   }
 
-  async function completeTask(period, task) {
+  async function updateTaskStatus(period, task, nextStatus = "") {
+    const taskStatus = workPeriodActiveTaskStatuses.includes(nextStatus) ? nextStatus : taskDraftStatus(period, task);
     const comment = taskDraftValue(period, task, "comment") || task.comment || "";
     const attachments = taskDraftAttachments(period, task);
     const updated = await runPeriodAction(period, {
-      action: "complete_task",
+      action: "update_task_status",
       taskKey: task.key,
+      taskStatus,
       comment,
       attachments,
-    }, "Пункт периода отмечен выполненным.", "Не удалось отметить выполнение.");
+    }, `Статус пункта изменен: ${workPeriodTaskStatusLabel(taskStatus)}.`, "Не удалось сохранить статус пункта.");
     if (updated) {
       clearTaskDrafts(period, task);
-      collapseTask(period, task);
+      if (taskStatus === "done") {
+        collapseTask(period, task);
+      }
     }
   }
 
@@ -7202,7 +7253,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
           items={[
             "Создайте период с произвольными датами начала и окончания.",
             "Выберите конкретные работы из общего списка Wildberries: аналитика, карточки, реклама, витрина, поставки и отчеты.",
-            "После выполнения пункта оставьте комментарий и нажмите Выполнено; возврат требует причину.",
+            "Внутри пункта меняйте статус: в плане, в работе, на согласовании или выполнено; возврат требует причину.",
             "В конце периода сформируйте итоговый отчет: он покажет выполненное и невыполненное с причинами.",
           ]}
         />
@@ -7244,11 +7295,13 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                 {taskGroups.map((group) => {
                   const activeTasks = group.tasks.filter((task) => task.status !== "excluded");
                   const groupDone = activeTasks.filter((task) => task.status === "done").length;
+                  const groupInProgress = activeTasks.filter((task) => task.status === "in_progress").length;
+                  const groupReview = activeTasks.filter((task) => task.status === "review").length;
                   const groupReturned = activeTasks.filter((task) => task.status === "returned").length;
                   const groupExcluded = group.tasks.length - activeTasks.length;
                   const groupTotal = activeTasks.length;
                   const groupProgress = groupTotal ? Math.round((groupDone / groupTotal) * 100) : 0;
-                  const groupTone = groupReturned ? "red" : groupTotal && groupDone >= groupTotal ? "green" : "blue";
+                  const groupTone = groupReturned ? "red" : groupReview ? "violet" : groupInProgress ? "amber" : groupTotal && groupDone >= groupTotal ? "green" : "blue";
                   return (
                     <section className="work-period-task-section" key={group.key}>
                       <div className="work-period-section-head">
@@ -7256,6 +7309,8 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                           <strong>{group.label}</strong>
                           <span>
                             {groupDone} из {groupTotal} выполнено
+                            {groupInProgress ? ` · ${groupInProgress} в работе` : ""}
+                            {groupReview ? ` · ${groupReview} на согл.` : ""}
                             {groupReturned ? ` · ${groupReturned} возврат` : ""}
                             {groupExcluded ? ` · ${groupExcluded} исключено` : ""}
                           </span>
@@ -7264,20 +7319,28 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                       </div>
                       <div className="work-period-task-list">
                         {group.tasks.map((task) => {
-                          const completeBusy = actionStatus === `${period.id}:complete_task:${task.key}`;
+                          const statusBusy = actionStatus === `${period.id}:update_task_status:${task.key}`;
                           const returnBusy = actionStatus === `${period.id}:return_task:${task.key}`;
                           const taskExpanded = isTaskExpanded(period, task);
-                          const actor = findUser(task.status === "done" ? task.completedBy : task.status === "excluded" ? task.excludedBy : task.returnedBy);
+                          const actorLogin = task.status === "done"
+                            ? task.completedBy
+                            : task.status === "excluded"
+                              ? task.excludedBy
+                              : task.status === "returned"
+                                ? task.returnedBy
+                                : task.statusUpdatedBy;
+                          const actor = findUser(actorLogin);
                           const taskDate = workPeriodTaskDate(task);
-                          const actorLabel = actor?.full_name || task.completedBy || task.returnedBy || task.excludedBy || "пользователь";
+                          const actorLabel = actor?.full_name || actorLogin || "пользователь";
                           const linkedLabel = workPeriodLinkedLabel(task);
                           const attachments = taskDraftAttachments(period, task);
+                          const selectedTaskStatus = taskDraftStatus(period, task);
                           return (
                             <div className={`work-period-task ${task.status} ${taskExpanded ? "expanded" : ""}`} key={task.key}>
                               <div className="work-period-task-main">
                                 <button className="work-period-task-title" type="button" onClick={() => toggleTaskExpanded(period, task)}>
                                   <strong>{task.label}</strong>
-                                  <span>{taskDate ? `${taskDate} · ${actorLabel}` : "ожидает выполнения"}</span>
+                                  <span>{taskDate ? `${taskDate} · ${actorLabel}` : workPeriodTaskStatusLabel(task.status)}</span>
                                 </button>
                                 <div className="work-period-task-side">
                                   {isManualWorkPeriodTask(task) ? <Tag tone="amber">вне плана</Tag> : null}
@@ -7338,8 +7401,20 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
                                     </div>
                                   </div>
                                   <div className="work-period-task-actions">
-                                    <button className={loadingButtonClass("btn mini primary", completeBusy)} type="button" onClick={() => completeTask(period, task)} disabled={Boolean(actionStatus)} aria-busy={completeBusy || undefined}>
-                                      <CheckSquare size={14} />Выполнено
+                                    <label className="field-label compact">
+                                      Статус работы
+                                      <select
+                                        className="select"
+                                        value={selectedTaskStatus}
+                                        onChange={(event) => updateTaskDraft(period, task, "status", event.target.value)}
+                                      >
+                                        {workPeriodActiveTaskStatuses.map((statusKey) => (
+                                          <option value={statusKey} key={statusKey}>{workPeriodTaskStatusLabel(statusKey)}</option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                    <button className={loadingButtonClass("btn mini primary", statusBusy)} type="button" onClick={() => updateTaskStatus(period, task)} disabled={Boolean(actionStatus)} aria-busy={statusBusy || undefined}>
+                                      <Save size={14} />Сохранить статус
                                     </button>
                                     <label className="field-label compact">
                                       Причина возврата

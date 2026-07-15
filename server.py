@@ -4068,7 +4068,7 @@ def clean_work_period_status(value):
 
 def clean_work_period_task_status(value):
   status = str(value or "").strip().lower()
-  return status if status in {"planned", "done", "returned", "excluded"} else "planned"
+  return status if status in {"planned", "in_progress", "review", "done", "returned", "excluded"} else "planned"
 
 
 def clean_work_period_note(value, limit=1200):
@@ -4135,6 +4135,8 @@ def normalize_work_period_tasks(value, fallback_default=True):
       "description": clean_work_period_note(raw_task.get("description"), 1600),
       "status": clean_work_period_task_status(raw_task.get("status")),
       "comment": clean_work_period_note(raw_task.get("comment")),
+      "statusUpdatedAt": str(raw_task.get("statusUpdatedAt") or "")[:80],
+      "statusUpdatedBy": str(raw_task.get("statusUpdatedBy") or "")[:120],
       "completedAt": str(raw_task.get("completedAt") or "")[:80],
       "completedBy": str(raw_task.get("completedBy") or "")[:120],
       "returnReason": clean_work_period_note(raw_task.get("returnReason")),
@@ -4158,12 +4160,16 @@ def work_period_task_summary(tasks):
   active_tasks = [task for task in clean_tasks if task["status"] != "excluded"]
   total = len(active_tasks)
   done = len([task for task in active_tasks if task["status"] == "done"])
+  in_progress = len([task for task in active_tasks if task["status"] == "in_progress"])
+  review = len([task for task in active_tasks if task["status"] == "review"])
   returned = len([task for task in active_tasks if task["status"] == "returned"])
   excluded = len([task for task in clean_tasks if task["status"] == "excluded"])
-  planned = max(0, total - done - returned)
+  planned = len([task for task in active_tasks if task["status"] == "planned"])
   return {
     "total": total,
     "done": done,
+    "inProgress": in_progress,
+    "review": review,
     "returned": returned,
     "excluded": excluded,
     "planned": planned,
@@ -4184,6 +4190,8 @@ def work_period_report_payload(period, tasks, user):
       "description": task.get("description") or "",
       "status": task["status"],
       "comment": task.get("comment") or "",
+      "statusUpdatedAt": task.get("statusUpdatedAt") or "",
+      "statusUpdatedBy": task.get("statusUpdatedBy") or "",
       "completedAt": task.get("completedAt") or "",
       "completedBy": task.get("completedBy") or "",
       "returnReason": task.get("returnReason") or "",
@@ -4206,7 +4214,11 @@ def work_period_report_payload(period, tasks, user):
       if not payload["returnReason"] and payload["comment"]:
         payload["returnReason"] = payload["comment"]
       if not payload["returnReason"]:
-        payload["returnReason"] = "не выполнено к моменту формирования отчета"
+        payload["returnReason"] = {
+          "in_progress": "в работе к моменту формирования отчета",
+          "review": "на согласовании к моменту формирования отчета",
+          "planned": "не начато к моменту формирования отчета",
+        }.get(task["status"], "не выполнено к моменту формирования отчета")
       not_completed.append(payload)
   return {
     "generatedAt": utc_now().isoformat(),
@@ -4461,13 +4473,16 @@ def update_portal_work_period(portal_id, payload, user):
         report = {}
         if status == "reported":
           status = "active"
-    elif action in {"complete_task", "return_task"}:
+    elif action in {"complete_task", "return_task", "update_task_status"}:
       raw_task_key = str(payload.get("taskKey") or payload.get("task") or "").strip().lower()
       task_key = raw_task_key if raw_task_key in WORK_PERIOD_TASK_LABELS else clean_manual_work_period_task_key(raw_task_key)
       if not task_key:
         raise ValueError("invalid_work_period_task")
       comment = clean_work_period_note(payload.get("comment"))
       reason = clean_work_period_note(payload.get("reason") or payload.get("returnReason"))
+      next_task_status = clean_work_period_task_status(payload.get("taskStatus") or payload.get("status"))
+      if action == "update_task_status" and next_task_status in {"returned", "excluded"}:
+        raise ValueError("invalid_work_period_task_status")
       next_tasks = []
       changed = False
       for task in tasks:
@@ -4478,7 +4493,7 @@ def update_portal_work_period(portal_id, payload, user):
           raise ValueError("work_period_task_excluded")
         changed = True
         history = clean_work_period_history(task.get("history"))
-        if action == "complete_task":
+        if action in {"complete_task", "update_task_status"}:
           attachments = clean_work_period_attachments(payload.get("attachments")) if "attachments" in payload else clean_work_period_attachments(task.get("attachments"))
           attachments = [
             {
@@ -4488,22 +4503,27 @@ def update_portal_work_period(portal_id, payload, user):
             }
             for attachment in attachments
           ]
+          target_status = "done" if action == "complete_task" else next_task_status
           history.append({
-            "action": "completed",
+            "action": "completed" if target_status == "done" else f"status:{target_status}",
             "at": now,
             "by": user["login"],
             "comment": comment,
             "reason": "",
           })
+          completed_at = now if target_status == "done" else ""
+          completed_by = user["login"] if target_status == "done" else ""
           task = {
             **task,
-            "status": "done",
+            "status": target_status,
             "comment": comment,
-            "completedAt": now,
-            "completedBy": user["login"],
+            "statusUpdatedAt": now,
+            "statusUpdatedBy": user["login"],
+            "completedAt": completed_at,
+            "completedBy": completed_by,
             "returnReason": "",
-            "returnedAt": task.get("returnedAt") or "",
-            "returnedBy": task.get("returnedBy") or "",
+            "returnedAt": "",
+            "returnedBy": "",
             "attachments": attachments,
             "history": clean_work_period_history(history),
           }
