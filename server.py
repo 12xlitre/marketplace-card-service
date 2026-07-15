@@ -4159,6 +4159,273 @@ def work_period_task_ids_reference_batch(task_ids, batch_id):
   return any(str(task_id or "").endswith(f":{clean_batch_id}") for task_id in task_ids)
 
 
+def parse_work_period_task_link_id(value):
+  text = str(value or "").strip()
+  if ":" not in text:
+    return "", ""
+  work_type, batch_id = text.split(":", 1)
+  work_type = normalize_optional_work_types([work_type])
+  clean_batch_id = str(batch_id or "").strip()[:120]
+  return (work_type[0] if work_type else ""), clean_batch_id
+
+
+def work_period_status_for_task_work_status(work_type, status):
+  if work_type == "semantic":
+    return "done" if status == "approved" else "in_progress"
+  if status in {"approved", "exported"}:
+    return "done"
+  if status == "submitted":
+    return "review"
+  return "in_progress"
+
+
+def work_period_status_context_for_payload(payload, work_type, row=None):
+  meta = payload.get("meta") if isinstance(payload, dict) and isinstance(payload.get("meta"), dict) else {}
+  status = task_work_type_status(meta, work_type)
+  period_status = work_period_status_for_task_work_status(work_type, status)
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  if work_type == "semantic":
+    final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+    return {
+      "status": period_status,
+      "sourceStatus": status,
+      "at": str(final_export.get("updatedAt") or final_export.get("createdAt") or row_value(row, "updated_at") or utc_now().isoformat())[:80],
+      "by": str(final_export.get("updatedBy") or final_export.get("createdBy") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or "")[:120],
+      "reason": "",
+    }
+  approval = approval_for_task_work_type(meta, work_type)
+  event_at = (
+    approval.get("reviewedAt") if status in {"approved", "exported", "changes_requested"} else ""
+  ) or approval.get("submittedAt") or row_value(row, "updated_at") or utc_now().isoformat()
+  actor = (
+    approval.get("reviewedBy") if status in {"approved", "exported", "changes_requested"} else ""
+  ) or approval.get("submittedBy") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or ""
+  return {
+    "status": period_status,
+    "sourceStatus": status,
+    "at": str(event_at)[:80],
+    "by": str(actor)[:120],
+    "reason": clean_work_period_note(approval.get("returnReason"), 1000) if status == "changes_requested" else "",
+  }
+
+
+def aggregate_batch_work_period_status(db, portal_id, batch_id, work_type):
+  clean_batch_id = str(batch_id or "").strip()[:120]
+  work_type = normalize_optional_work_types([work_type])
+  if not clean_batch_id or not work_type:
+    return None
+  work_type = work_type[0]
+  rows = db.execute(
+    """
+    SELECT payload_json, updated_at, updated_by, created_by
+    FROM card_drafts
+    WHERE portal_id = ?
+      AND json_extract(payload_json, '$.meta.batch.id') = ?
+    """,
+    (portal_id, clean_batch_id),
+  ).fetchall()
+  contexts = []
+  for row in rows:
+    try:
+      payload = normalize_card_draft_payload(json.loads(row["payload_json"]))
+    except (TypeError, json.JSONDecodeError):
+      continue
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+    if work_type not in normalize_optional_work_types(batch.get("workTypes")):
+      continue
+    contexts.append(work_period_status_context_for_payload(payload, work_type, row))
+  if not contexts:
+    return None
+  priority = {"in_progress": 3, "review": 2, "done": 1}
+  target_status = sorted(contexts, key=lambda item: priority.get(item["status"], 0), reverse=True)[0]["status"]
+  candidates = [item for item in contexts if item["status"] == target_status]
+  reason_candidates = [item for item in candidates if item.get("reason")]
+  selected = sorted(reason_candidates or candidates, key=lambda item: item.get("at") or "", reverse=True)[0]
+  return {
+    "status": target_status,
+    "at": selected.get("at") or utc_now().isoformat(),
+    "by": selected.get("by") or "",
+    "reason": selected.get("reason") or "",
+    "sourceStatus": selected.get("sourceStatus") or "",
+  }
+
+
+def aggregate_work_period_task_link_status(db, portal_id, task):
+  link_ids = clean_work_period_links(task.get("linkedTaskIds"))
+  links = [parse_work_period_task_link_id(item) for item in link_ids]
+  links = [(work_type, batch_id) for work_type, batch_id in links if work_type and batch_id]
+  if not links:
+    return None
+  contexts = [
+    aggregate_batch_work_period_status(db, portal_id, batch_id, work_type)
+    for work_type, batch_id in links
+  ]
+  contexts = [item for item in contexts if item]
+  if not contexts:
+    return None
+  priority = {"in_progress": 3, "review": 2, "done": 1}
+  target_status = sorted(contexts, key=lambda item: priority.get(item["status"], 0), reverse=True)[0]["status"]
+  candidates = [item for item in contexts if item["status"] == target_status]
+  reason_candidates = [item for item in candidates if item.get("reason")]
+  selected = sorted(reason_candidates or candidates, key=lambda item: item.get("at") or "", reverse=True)[0]
+  return {
+    "status": target_status,
+    "at": selected.get("at") or utc_now().isoformat(),
+    "by": selected.get("by") or "",
+    "reason": selected.get("reason") or "",
+    "sourceStatus": selected.get("sourceStatus") or "",
+  }
+
+
+def work_period_auto_status_comment(status):
+  if status == "done":
+    return "связанная задача выполнена"
+  if status == "review":
+    return "связанная задача на согласовании"
+  return "связанная задача в работе"
+
+
+def apply_work_period_auto_status(task, context, fallback_user):
+  target_status = clean_work_period_task_status(context.get("status"))
+  if task.get("status") == "excluded" or target_status in {"returned", "excluded"}:
+    return task, False
+  changed = task.get("status") != target_status
+  reason = clean_work_period_note(context.get("reason"), 1000)
+  if target_status == "in_progress" and reason and task.get("returnReason") != reason:
+    changed = True
+  if not changed:
+    return task, False
+  event_at = str(context.get("at") or utc_now().isoformat())[:80]
+  actor = str(context.get("by") or user_login_value(fallback_user) or "")[:120]
+  history = clean_work_period_history(task.get("history"))
+  history.append({
+    "action": f"auto_status:{target_status}",
+    "at": event_at,
+    "by": actor,
+    "comment": work_period_auto_status_comment(target_status),
+    "reason": reason,
+  })
+  next_task = {
+    **task,
+    "status": target_status,
+    "statusUpdatedAt": event_at,
+    "statusUpdatedBy": actor,
+    "history": clean_work_period_history(history),
+  }
+  if target_status == "done":
+    next_task = {
+      **next_task,
+      "completedAt": event_at,
+      "completedBy": actor,
+      "returnReason": "",
+      "returnedAt": "",
+      "returnedBy": "",
+    }
+  elif target_status == "review":
+    next_task = {
+      **next_task,
+      "completedAt": "",
+      "completedBy": "",
+      "returnReason": "",
+      "returnedAt": "",
+      "returnedBy": "",
+    }
+  else:
+    next_task = {
+      **next_task,
+      "completedAt": "",
+      "completedBy": "",
+    }
+    if reason:
+      next_task = {
+        **next_task,
+        "returnReason": reason,
+        "returnedAt": event_at,
+        "returnedBy": actor,
+      }
+  return next_task, True
+
+
+def sync_work_period_task_statuses_for_batch_in_db(db, portal_id, batch_id, user=None):
+  clean_batch_id = str(batch_id or "").strip()[:120]
+  if not clean_batch_id:
+    return []
+  rows = db.execute(
+    """
+    SELECT *
+    FROM portal_work_periods
+    WHERE portal_id = ? AND status != 'archived'
+    ORDER BY period_start DESC, id DESC
+    """,
+    (portal_id,),
+  ).fetchall()
+  updated_periods = []
+  for row in rows:
+    tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
+    next_tasks = []
+    changed = False
+    for task in tasks:
+      linked_task_ids = clean_work_period_links(task.get("linkedTaskIds"))
+      if not any(parse_work_period_task_link_id(item)[1] == clean_batch_id for item in linked_task_ids):
+        next_tasks.append(task)
+        continue
+      context = aggregate_work_period_task_link_status(db, portal_id, task)
+      if not context:
+        next_tasks.append(task)
+        continue
+      next_task, task_changed = apply_work_period_auto_status(task, context, user)
+      next_tasks.append(next_task)
+      changed = changed or task_changed
+    if not changed:
+      continue
+    next_status = clean_work_period_status(row["status"])
+    if next_status == "reported":
+      next_status = "active"
+    db.execute(
+      """
+      UPDATE portal_work_periods
+      SET status = ?, tasks_json = ?, report_json = '{}', updated_by = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE portal_id = ? AND id = ?
+      """,
+      (
+        next_status,
+        json.dumps(next_tasks, ensure_ascii=False, separators=(",", ":")),
+        user_login_value(user),
+        portal_id,
+        row["id"],
+      ),
+    )
+    updated_row = db.execute(
+      "SELECT * FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      (portal_id, row["id"]),
+    ).fetchone()
+    if updated_row:
+      updated_periods.append(public_portal_work_period(updated_row))
+  return updated_periods
+
+
+def sync_work_period_task_statuses_for_draft_in_db(db, portal_id, payload, previous_payload, user=None):
+  meta = payload.get("meta") if isinstance(payload, dict) and isinstance(payload.get("meta"), dict) else {}
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload, dict) and isinstance(previous_payload.get("meta"), dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  previous_batch = previous_meta.get("batch") if isinstance(previous_meta.get("batch"), dict) else {}
+  batch_id = str(batch.get("id") or previous_batch.get("id") or "").strip()[:120]
+  if not batch_id:
+    return []
+  work_types = normalize_optional_work_types(batch.get("workTypes") or previous_batch.get("workTypes"))
+  if not work_types:
+    return []
+  changed = False
+  for work_type in work_types:
+    if task_work_type_status(meta, work_type) != task_work_type_status(previous_meta, work_type):
+      changed = True
+      break
+  if not changed:
+    return []
+  return sync_work_period_task_statuses_for_batch_in_db(db, portal_id, batch_id, user)
+
+
 def normalize_work_period_tasks(value, fallback_default=True):
   raw_items = value if isinstance(value, list) else normalize_work_period_task_keys(value)
   tasks = []
@@ -5170,6 +5437,7 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
   if not user_can_access_portal(user, numeric_portal_id):
     raise PermissionError("forbidden")
   normalized_payload = normalize_card_draft_payload(payload)
+  updated_work_periods = []
   with connect_db() as db:
     previous = db.execute(
       """
@@ -5224,7 +5492,17 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
         card_key,
         event,
       )
-  return get_card_draft(numeric_portal_id, card_key, user)
+    updated_work_periods = sync_work_period_task_statuses_for_draft_in_db(
+      db,
+      numeric_portal_id,
+      normalized_payload,
+      previous_payload,
+      user,
+    )
+  draft = get_card_draft(numeric_portal_id, card_key, user)
+  if draft is not None:
+    draft["_workPeriods"] = updated_work_periods
+  return draft
 
 
 def parse_competitor_nm_id(value):
@@ -13943,7 +14221,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
         return
-      self.send_json(HTTPStatus.OK, {"draft": draft})
+      work_periods = []
+      if isinstance(draft, dict):
+        work_periods = draft.pop("_workPeriods", [])
+      self.send_json(HTTPStatus.OK, {"draft": draft, "workPeriods": work_periods})
       return
 
     if path == "/api/semantic-core-collections":

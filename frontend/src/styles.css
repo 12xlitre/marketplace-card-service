@@ -5645,6 +5645,73 @@ tr:last-child td {
   width: min(620px, 100%);
 }
 
+.work-period-link-picker {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.work-period-link-option {
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.work-period-link-option:hover:not(:disabled) {
+  border-color: #b8c7ef;
+  background: var(--surface-soft);
+}
+
+.work-period-link-option.active {
+  border-color: #8fa8e8;
+  background: var(--brand-soft);
+}
+
+.work-period-link-option:disabled {
+  cursor: not-allowed;
+  opacity: .72;
+}
+
+.work-period-link-check {
+  width: 18px;
+  height: 18px;
+  color: var(--brand);
+  display: grid;
+  place-items: center;
+}
+
+.work-period-link-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.work-period-link-copy strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.work-period-link-copy span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .work-period-modal {
   width: min(960px, 100%);
 }
@@ -5966,6 +6033,7 @@ tr:last-child td {
   .work-period-task-options,
   .work-period-task-main,
   .work-period-task-actions,
+  .work-period-link-option,
   .work-period-manual-form,
   .work-period-manual-row,
   .cards-work-summary,

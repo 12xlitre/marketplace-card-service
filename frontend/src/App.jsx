@@ -1328,6 +1328,12 @@ function workPeriodLinkLabelForGroup(periods, group) {
   return workPeriodLinkForGroup(periods, group)?.label || "";
 }
 
+function workPeriodRangeLabel(period) {
+  const start = period?.period?.start || "";
+  const end = period?.period?.end || "";
+  return [start ? clientReportDateLabel(`${start}T00:00:00`) : "", end ? clientReportDateLabel(`${end}T00:00:00`) : ""].filter(Boolean).join(" - ");
+}
+
 function workPeriodEndDateLabel(period) {
   const end = period?.period?.end || period?.end || "";
   return end ? clientReportDateLabel(`${end}T00:00:00`) : "окончания периода";
@@ -8300,6 +8306,37 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
   );
 }
 
+function WorkPeriodTaskLinkPicker({ options = [], value = "", disabled = false, allowEmpty = false, emptyLabel = "Не привязывать к плану", emptyDescription = "Можно связать задачу с пунктом позднее.", onChange }) {
+  const allOptions = allowEmpty
+    ? [{ value: "", label: emptyLabel, empty: true, description: emptyDescription }, ...options]
+    : options;
+  return (
+    <div className="work-period-link-picker" role="radiogroup" aria-label="Пункт отчетного периода">
+      {allOptions.map((option) => {
+        const selected = String(value || "") === String(option.value || "");
+        const rangeLabel = option.empty ? "" : workPeriodRangeLabel(option.period);
+        return (
+          <button
+            className={`work-period-link-option ${selected ? "active" : ""} ${option.empty ? "empty" : ""}`}
+            type="button"
+            key={option.value || "empty"}
+            onClick={() => onChange?.(option.value || "")}
+            disabled={disabled}
+            aria-pressed={selected}
+          >
+            <span className="work-period-link-check">{selected ? <CheckSquare size={16} /> : null}</span>
+            <span className="work-period-link-copy">
+              <strong>{option.empty ? option.label : option.task?.label || option.label}</strong>
+              <span>{option.empty ? option.description : `${option.period?.title || "Отчетный период"}${rangeLabel ? ` · ${rangeLabel}` : ""}`}</span>
+            </span>
+            {!option.empty ? <Tag tone={workPeriodTaskStatusTone(option.task?.status)}>{workPeriodTaskStatusLabel(option.task?.status)}</Tag> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit }) {
   const workTypes = normalizeWorkTypes(value.workTypes);
   const title = value.title || "";
@@ -8351,15 +8388,16 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
             Название задачи
             <input value={title} onChange={updateTitle} placeholder="Например: СЯ Оптимист, 40 артикулов" maxLength={180} />
           </label>
-          <label className="field-label">
-            Пункт отчетного периода
-            <select className="select" value={workPeriodLink} onChange={updateWorkPeriodLink} disabled={workPeriodsStatus === "loading"}>
-              <option value="">Не привязывать к плану</option>
-              {periodTaskOptions.map((option) => (
-                <option value={option.value} key={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </label>
+          <div className="field-label">
+            <span>Пункт отчетного периода</span>
+            <WorkPeriodTaskLinkPicker
+              options={periodTaskOptions}
+              value={workPeriodLink}
+              onChange={(nextValue) => updateWorkPeriodLink({ target: { value: nextValue } })}
+              disabled={workPeriodsStatus === "loading"}
+              allowEmpty
+            />
+          </div>
           {!periodTaskOptions.length ? (
             <p className="status-note">{workPeriodsStatus === "loading" ? "Загружаем отчетные периоды..." : "Активного отчетного периода с пунктами плана пока нет."}</p>
           ) : null}
@@ -8406,14 +8444,15 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
-          <label className="field-label">
-            Пункт отчетного периода
-            <select className="select" value={selectedValue} onChange={(event) => setSelectedValue(event.target.value)} disabled={loading || workPeriodsStatus === "loading" || !periodTaskOptions.length}>
-              {periodTaskOptions.map((option) => (
-                <option value={option.value} key={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </label>
+          <div className="field-label">
+            <span>Пункт отчетного периода</span>
+            <WorkPeriodTaskLinkPicker
+              options={periodTaskOptions}
+              value={selectedValue}
+              onChange={setSelectedValue}
+              disabled={loading || workPeriodsStatus === "loading" || !periodTaskOptions.length}
+            />
+          </div>
           {!periodTaskOptions.length ? (
             <p className="status-note">{workPeriodsStatus === "loading" ? "Загружаем отчетные периоды..." : "Нет активного отчетного периода с пунктами плана."}</p>
           ) : null}
