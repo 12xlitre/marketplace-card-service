@@ -7829,6 +7829,10 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
   const taskHasCard = (task) => Boolean(findCardForApprovalTask(cards, task));
   const groupsByType = buildTaskGroupsByType(activeTasks);
   const totalGroups = Object.values(groupsByType).reduce((sum, groups) => sum + groups.length, 0);
+  const completedCountByType = Object.fromEntries(taskSectionOptions.map((section) => [
+    section.key,
+    completedTasks.filter((task) => task.workType === section.key || taskWorkTypes(task).includes(section.key)).length,
+  ]));
   const completedSearchText = completedSearch.trim().toLowerCase();
   const filteredCompletedTasks = completedTasks.filter((task) => {
     if (!completedSearchText) return true;
@@ -7876,7 +7880,19 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
         {taskSectionOptions.map((section) => {
           const groups = groupsByType[section.key] || [];
           const cardsCount = groups.reduce((sum, group) => sum + group.tasks.length, 0);
-          return <Metric label={section.label} value={`${formatNumber(groups.length)} / ${formatNumber(cardsCount)}`} key={section.key} />;
+          const completedCount = completedCountByType[section.key] || 0;
+          const hintParts = [
+            groups.length ? `${formatNumber(groups.length)} ${pluralRu(groups.length, "пачка", "пачки", "пачек")} активно` : "активных пачек нет",
+            completedCount ? `завершено ${formatNumber(completedCount)}` : "",
+          ].filter(Boolean);
+          return (
+            <Metric
+              label={section.label}
+              value={`${formatNumber(cardsCount)} ${pluralRu(cardsCount, "карточка", "карточки", "карточек")}`}
+              hint={hintParts.join(" · ")}
+              key={section.key}
+            />
+          );
         })}
       </div>
 
