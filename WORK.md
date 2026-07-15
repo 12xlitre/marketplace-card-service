@@ -89,6 +89,21 @@ npm run frontend:check
 
 Основной discovery-документ: `docs/discovery.md`.
 
+## Статус на 2026-07-15
+
+Сделано:
+- Исправлена ошибка при отправке блока на согласование: backend больше не падает на `sqlite3.Row` в `user_can_review_portal_approval`, читает логин пользователя через общий helper и корректно возвращает `approval_forbidden` только для запрещенных переходов (`approved`/`changes_requested` не от менеджера или админа).
+- Сравнение `approvalSections` стало совместимым со старыми/частичными черновиками: если в предыдущем payload нет секций, backend сравнивает их с fallback из общего `meta.approval`, поэтому отправка `submitted` не блокируется из-за соседних секций.
+- `POST /api/card-drafts` теперь различает `invalid_json`, `draft_payload_too_large` и `approval_forbidden`; frontend показывает конкретную причину отказа в панели согласования вместо общей фразы `Backend не принял изменение статуса`.
+
+Проверки:
+- `python3 -m py_compile server.py`;
+- `npm run frontend:check`;
+- `npm run frontend:build`;
+- `git diff --check`;
+- SQLite-smoke на временной базе: техспециалист может отправить блок на согласование, не может принять блок (`approval_forbidden`), аккаунт-менеджер может принять, старый общий `meta.approval` без секций не блокирует отправку.
+- audit-чеклист перед деплоем: новых секретов, внешних вызовов и расширения прав нет; `/api/card-drafts` остается за `require_user` + `user_can_access_portal`, принятие/возврат остаются только за менеджером проекта или админом.
+
 ## Статус на 2026-07-14
 
 Сделано:

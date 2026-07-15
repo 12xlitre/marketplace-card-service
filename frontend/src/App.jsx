@@ -127,6 +127,28 @@ async function apiRequest(path, options = {}) {
   return payload;
 }
 
+function draftSaveErrorText(errorObject) {
+  if (errorObject?.message === "approval_forbidden") {
+    return "Этот статус может поставить только аккаунт-менеджер проекта или администратор.";
+  }
+  if (errorObject?.message === "forbidden" || errorObject?.status === 403) {
+    return "Backend отклонил сохранение из-за прав доступа к кабинету.";
+  }
+  if (errorObject?.status === 401) {
+    return "Сессия истекла. Войдите заново и повторите действие.";
+  }
+  if (errorObject?.message === "draft_payload_too_large" || errorObject?.status === 413) {
+    return "Черновик получился слишком большим для backend. Сохраните итоговую подборку и попробуйте еще раз.";
+  }
+  if (errorObject?.message === "invalid_json") {
+    return "Backend не прочитал тело запроса. Обновите страницу и повторите сохранение.";
+  }
+  if (errorObject?.message === "invalid_portal_id" || errorObject?.message === "invalid_card_key") {
+    return "Backend не получил идентификатор кабинета или карточки. Откройте карточку заново из кабинета.";
+  }
+  return "Backend не принял черновик. Проверьте доступ и попробуйте еще раз.";
+}
+
 function formatNumber(value) {
   return new Intl.NumberFormat("ru-RU").format(Number(value) || 0);
 }
@@ -7530,6 +7552,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [characteristicSearch, setCharacteristicSearch] = useState("");
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
+  const [draftSaveError, setDraftSaveError] = useState("");
   const [competitors, setCompetitors] = useState([]);
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
@@ -9401,6 +9424,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   async function persistStructuredDraft(structuredDraft, { auditDone = false } = {}) {
     const savedAt = new Date().toISOString();
     let savedLocally = false;
+    setDraftSaveError("");
     try {
       localStorage.setItem(draftStorageKey, JSON.stringify({ ...structuredDraft, savedAt }));
       savedLocally = true;
@@ -9408,6 +9432,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setDraftSaveStatus(backendDraftEnabled ? "saving" : "local");
     } catch {
       setDraftSaveStatus("local-error");
+      setDraftSaveError("Браузер не сохранил локальную копию черновика.");
     }
     if (backendDraftEnabled) {
       try {
@@ -9423,6 +9448,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         });
         setDraftSavedAt(response.draft?.updatedAt || savedAt);
         setDraftSaveStatus("backend");
+        setDraftSaveError("");
         try {
           localStorage.setItem(draftStorageKey, JSON.stringify(response.draft || { ...structuredDraft, savedAt }));
         } catch {
@@ -9439,7 +9465,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           // The draft is already saved; parent refresh is a secondary UI sync.
         }
         return "backend";
-      } catch {
+      } catch (error) {
+        setDraftSaveError(draftSaveErrorText(error));
         setDraftSaveStatus(savedLocally ? "local-fallback" : "error");
         return savedLocally ? "local-fallback" : "error";
       }
@@ -9511,9 +9538,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setApprovalSections(previousSections);
       setApproval(previousApproval);
       setDraftSaveStatus("approval-save-error");
+      setDraftSaveError((current) => current || "Backend не принял изменение статуса.");
       return false;
     }
     setDraftSaveStatus(statusMessage);
+    setDraftSaveError("");
     return true;
   }
 
@@ -10622,6 +10651,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   onApprove={approveChanges}
                   onReturn={requestChanges}
                   status={draftSaveStatus}
+                  saveError={draftSaveError}
                 />
                 <div className="draft-actions">
                   <div>
@@ -10638,8 +10668,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
                       {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
                       {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
-                      {draftSaveStatus === "approval-save-error" ? <p>Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз.</p> : null}
-                      {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз.</p> : null}
+                      {draftSaveStatus === "approval-save-error" ? <p>{draftSaveError || "Решение не сохранилось на backend. Статус вернули назад, попробуйте еще раз."}</p> : null}
+                      {draftSaveStatus === "error" || draftSaveStatus === "local-error" ? <p>{draftSaveError || "Черновик не удалось сохранить. Не обновляйте страницу и попробуйте еще раз."}</p> : null}
                   </div>
                   <div className="draft-buttons">
                     <button className={loadingButtonClass("btn primary", draftSaveStatus === "saving")} type="button" onClick={saveDraft} disabled={approvalReadOnly || draftSaveStatus === "saving"} aria-busy={draftSaveStatus === "saving" || undefined}><Save size={17} />{draftSaveStatus === "saving" ? "Сохраняем" : "Сохранить"}</button>
@@ -11417,6 +11447,7 @@ function ApprovalPanel({
   onApprove,
   onReturn,
   status,
+  saveError = "",
 }) {
   const assignee = approval.assigneeLogin || team.manager || "";
   const lastEvent = approval.history?.[0];
@@ -11482,7 +11513,7 @@ function ApprovalPanel({
       {status === "approval-save-error" ? (
         <div className="approval-note">
           <span>Не сохранилось</span>
-          <p>Backend не принял изменение статуса. Проверьте доступ и попробуйте отправить еще раз.</p>
+          <p>{saveError || "Backend не принял изменение статуса. Проверьте доступ и попробуйте отправить еще раз."}</p>
         </div>
       ) : null}
       {lastEvent ? (

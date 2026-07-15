@@ -1010,6 +1010,14 @@ def user_is_admin(row):
   return any(part in marker for part in ("admin", "all", "полный", "админ"))
 
 
+def user_login_value(user):
+  if isinstance(user, sqlite3.Row):
+    return user["login"] if "login" in user.keys() else ""
+  if isinstance(user, dict):
+    return user.get("login", "")
+  return ""
+
+
 def user_can_access_portal(user, portal_id):
   if str(portal_id) == "demo-wb":
     return True
@@ -1021,7 +1029,7 @@ def user_can_access_portal(user, portal_id):
     return False
   if user_has_global_portal_access(user):
     return True
-  login = user["login"]
+  login = user_login_value(user)
   with connect_db() as db:
     row = db.execute(
       """
@@ -3581,7 +3589,7 @@ def portal_team_roles(portal_id):
 def user_can_review_portal_approval(user, portal_id):
   if user_is_admin(user):
     return True
-  return portal_team_roles(portal_id).get("manager") == user.get("login")
+  return portal_team_roles(portal_id).get("manager") == user_login_value(user)
 
 
 APPROVAL_SECTION_LABELS = {
@@ -4162,6 +4170,12 @@ def delete_portal_work_period(portal_id, period_id, user):
   return True
 
 
+def approval_from_payload(payload):
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  return approval
+
+
 def approval_sections_from_payload(payload):
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
@@ -4172,14 +4186,22 @@ def approval_sections_from_payload(payload):
   }
 
 
+def approval_sections_for_comparison(payload):
+  sections = approval_sections_from_payload(payload)
+  if sections:
+    return sections
+  approval = approval_from_payload(payload)
+  if not approval:
+    return {}
+  return {key: {**approval} for key in APPROVAL_SECTION_LABELS}
+
+
 def approval_status_from_approval(approval):
   return str(approval.get("status") or "draft").strip() or "draft"
 
 
 def approval_status_from_payload(payload):
-  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
-  return approval_status_from_approval(approval)
+  return approval_status_from_approval(approval_from_payload(payload))
 
 
 def approval_event_from_approval(approval, user, nm_id="", vendor_code="", section_label=""):
@@ -4198,7 +4220,7 @@ def approval_event_from_approval(approval, user, nm_id="", vendor_code="", secti
   return {
     "status": status[:40],
     "action": str(latest.get("action") or status)[:40],
-    "actorLogin": str(latest.get("userLogin") or user.get("login") or "")[:120],
+    "actorLogin": str(latest.get("userLogin") or user_login_value(user) or "")[:120],
     "assigneeLogin": str(approval.get("assigneeLogin") or "")[:120],
     "reason": reason,
     "eventAt": str(event_at)[:80],
@@ -4208,16 +4230,14 @@ def approval_event_from_approval(approval, user, nm_id="", vendor_code="", secti
 
 
 def approval_event_from_payload(payload, user, nm_id="", vendor_code=""):
-  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-  approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
-  return approval_event_from_approval(approval, user, nm_id, vendor_code)
+  return approval_event_from_approval(approval_from_payload(payload), user, nm_id, vendor_code)
 
 
 def restricted_approval_changes(payload, previous_payload):
   restricted_statuses = {"approved", "changes_requested"}
   sections = approval_sections_from_payload(payload)
   if sections:
-    previous_sections = approval_sections_from_payload(previous_payload or {})
+    previous_sections = approval_sections_for_comparison(previous_payload or {})
     changes = []
     for key, approval in sections.items():
       status = approval_status_from_approval(approval)
@@ -4233,7 +4253,7 @@ def restricted_approval_changes(payload, previous_payload):
 def approval_events_from_payload_change(payload, previous_payload, user, nm_id="", vendor_code=""):
   sections = approval_sections_from_payload(payload)
   if sections:
-    previous_sections = approval_sections_from_payload(previous_payload or {})
+    previous_sections = approval_sections_for_comparison(previous_payload or {})
     events = []
     for key, approval in sections.items():
       status = approval_status_from_approval(approval)
@@ -13178,7 +13198,20 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       user = self.require_user()
       if not user:
         return
-      payload = self.read_json(MAX_DRAFT_JSON_BYTES) or {}
+      payload = self.read_json(MAX_DRAFT_JSON_BYTES)
+      if payload is None:
+        try:
+          content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+          content_length = 0
+        if content_length > MAX_DRAFT_JSON_BYTES:
+          self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+            "error": "draft_payload_too_large",
+            "maxBytes": MAX_DRAFT_JSON_BYTES,
+          })
+        else:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        return
       try:
         draft = save_card_draft(
           payload.get("portalId"),
@@ -13188,8 +13221,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           payload.get("draft"),
           user,
         )
-      except PermissionError:
-        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except PermissionError as exc:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": str(exc) or "forbidden"})
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_draft"})
