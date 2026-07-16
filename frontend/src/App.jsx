@@ -6053,6 +6053,7 @@ export default function App() {
     const storeUrl = String(source.storeUrl || "").trim();
     const manualSource = String(source.manualSource || "").trim();
     const cabinetName = String(source.name || "").trim();
+    const scope = source.scope === "full" ? "full" : "selected";
     if (!storeUrl && !manualSource) {
       setNotice("Для Ozon-кабинета укажите ссылку, Seller ID или SKU.");
       return false;
@@ -6065,7 +6066,7 @@ export default function App() {
         body: JSON.stringify({
           mode: "manual",
           marketplace: "Ozon",
-          scope: "full",
+          scope,
           name: cabinetName || `${client.name} Ozon`,
           clientName: client.name,
           teamRoles,
@@ -7301,6 +7302,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const sourceManualText = String(portal.manualSource || "").trim();
   const sourceConfigured = Boolean(sourceStoreUrl || sourceManualText);
   const sourceSafeUrl = safeHttpsUrl(sourceStoreUrl);
+  const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный кабинет";
   const team = getPortalTeam(portal);
   const activeSellerTab = normalizeSellerTab(sellerTab);
   const setSellerTab = onSellerTabChange || (() => {});
@@ -7460,7 +7462,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const ozonFlowRows = [
     ["Кабинет", "Ozon beta · отдельный от WB поток"],
     ["Источник", sourceConfigured ? "сохранен в кабинете" : "нужно указать"],
-    ["Карточки", sourceConfigured ? "можно готовить загрузчик Ozon" : "ожидают Ozon-specific источник"],
+    ["Охват", scopeLabel],
+    ["Карточки", sourceConfigured ? "можно проверять и сохранять" : "ожидают Ozon-specific источник"],
     ["СЯ", "MPStats по WB keyword-базе"],
     ["Задачи", "будут храниться отдельно от WB задач"],
     ["Отчеты", "отдельные Ozon периоды и выгрузки"],
@@ -7494,7 +7497,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               </>
             )}
           </div>
-          <p>Ozon · beta-кабинет · отдельная логика данных · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
+          <p>Ozon · beta-кабинет · {scopeLabel} · отдельная логика данных · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
@@ -16345,6 +16348,7 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
 function OzonPortalModal({ client, onClose, onSubmit }) {
   const [form, setForm] = useState({
     name: `${client.name} Ozon`,
+    scope: "selected",
     storeUrl: "",
     testSkus: "",
     manualSource: "",
@@ -16370,18 +16374,24 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     const storeUrl = form.storeUrl.trim();
     const testSkus = form.testSkus.trim();
     const manualSource = form.manualSource.trim();
-    if (!storeUrl && !testSkus && !manualSource) {
-      setError("Укажите ссылку на Ozon-кабинет, Seller ID, SKU или список товаров.");
+    const scope = form.scope === "full" ? "full" : "selected";
+    if (scope === "full" && !storeUrl && !manualSource) {
+      setError("Для всего кабинета укажите ссылку на Ozon-кабинет или Seller ID.");
+      return;
+    }
+    if (scope === "selected" && !testSkus) {
+      setError("Для выбранных карточек вставьте артикулы или SKU.");
       return;
     }
     const sourceDetails = [
-      testSkus ? `Ozon артикулы/SKU для теста: ${testSkus}` : "",
+      scope === "selected" && testSkus ? `Ozon артикулы/SKU: ${testSkus}` : "",
       manualSource,
     ].filter(Boolean).join("\n");
     setLoading(true);
     try {
       const saved = await onSubmit({
         name: form.name.trim(),
+        scope,
         storeUrl,
         manualSource: sourceDetails,
       });
@@ -16409,12 +16419,22 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           <div className="ozon-connect-mode">
             <div className="active">
               <strong>MPStats по ссылке</strong>
-              <span>Сейчас: ссылка на кабинет, Seller ID, SKU или список товаров.</span>
+              <span>Сейчас: ссылка на кабинет, Seller ID или список SKU.</span>
             </div>
             <div className="disabled">
               <strong>Ozon Seller API</strong>
               <span>Позже: точные заказы, остатки, экономика и отчеты.</span>
             </div>
+          </div>
+          <div className="ozon-scope-toggle" role="group" aria-label="Охват Ozon-кабинета">
+            <button className={form.scope === "selected" ? "active" : ""} type="button" onClick={() => update("scope", "selected")}>
+              <strong>Выбранные карточки</strong>
+              <span>Сохраняем только указанные артикулы или SKU.</span>
+            </button>
+            <button className={form.scope === "full" ? "active" : ""} type="button" onClick={() => update("scope", "full")}>
+              <strong>Весь кабинет</strong>
+              <span>Стартуем от ссылки на продавца или Seller ID.</span>
+            </button>
           </div>
           <label className="field-label">
             Название Ozon-кабинета
@@ -16424,24 +16444,26 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             Ссылка на Ozon-кабинет, Seller ID или карточку
             <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.ozon.ru/seller/... или Seller ID" autoFocus />
           </label>
-          <label className="field-label">
-            Артикулы или SKU для теста
-            <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-ART-01, 987654321. Эти позиции проверим первыми, чтобы не тянуть всю витрину." />
-          </label>
+          {form.scope === "selected" ? (
+            <label className="field-label">
+              Артикулы или SKU
+              <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-ART-01, 987654321. Эти позиции попадут в первую проверку MPStats." />
+            </label>
+          ) : null}
           <label className="field-label">
             Что есть на старте
-            <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: файл клиента, комментарий по тестовой пачке или что нужно проверить в первую очередь." />
+            <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder={form.scope === "selected" ? "Например: комментарий по списку карточек, файл клиента или что проверить в первую очередь." : "Например: Seller ID, ссылка на продавца, файл клиента или комментарий по кабинету."} />
           </label>
           <div className="source-flow">
             <div className="list-row source-flow-row"><span>Создание</span><strong>Ozon beta</strong></div>
-            <div className="list-row source-flow-row"><span>Проверка</span><strong>артикулы первыми</strong></div>
-            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>следующий шаг</strong></div>
+            <div className="list-row source-flow-row"><span>Охват</span><strong>{form.scope === "selected" ? "выбранные карточки" : "весь кабинет"}</strong></div>
+            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>после проверки MPStats</strong></div>
           </div>
           {error ? <div className="form-error">{error}</div> : null}
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (!form.storeUrl.trim() && !form.testSkus.trim() && !form.manualSource.trim())} aria-busy={loading || undefined}>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (form.scope === "selected" ? !form.testSkus.trim() : (!form.storeUrl.trim() && !form.manualSource.trim()))} aria-busy={loading || undefined}>
             <Plus size={16} />{loading ? "Создаем Ozon" : "Создать и открыть"}
           </button>
         </div>

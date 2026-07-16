@@ -6576,6 +6576,49 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.ozon-scope-toggle {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+}
+
+.ozon-scope-toggle button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  min-height: 58px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.ozon-scope-toggle button:hover {
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+.ozon-scope-toggle button.active {
+  background: #edf5ff;
+  border-color: #b9cbed;
+}
+
+.ozon-scope-toggle strong {
+  font-size: 13px;
+}
+
+.ozon-scope-toggle span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .work-package-modal {
   width: min(620px, 100%);
 }
