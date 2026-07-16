@@ -2173,6 +2173,23 @@ function batchAuditErrorText(errorObject) {
   return code;
 }
 
+function batchContentErrorText(errorObject) {
+  const code = String(errorObject?.payload?.error || errorObject?.message || "request_failed");
+  const reason = String(errorObject?.payload?.reason || "");
+  if (errorObject?.status === 401) return "Сессия истекла";
+  if (errorObject?.status === 403 || code === "forbidden") return "Нет доступа к кабинету";
+  if (code === "unsupported_marketplace" || reason === "unsupported_marketplace") return "Для этого маркетплейса нужна своя методология";
+  if (code === "semantic_final_missing" || reason === "semantic_final_missing") return "Нет итогового СЯ";
+  if (code === "missing_semantic_keywords" || reason === "missing_semantic_keywords") return "Нет ключей для переоптимизации";
+  if (code === "llm_key_missing" || reason === "llm_key_missing") return "GigaChat не подключен";
+  if (code === "card_not_found") return "Карточка не найдена в кабинете";
+  if (code === "task_not_found") return "Задача карточки не найдена";
+  if (code === "content_reoptimization_task_failed") return reason ? `Ошибка переоптимизации: ${reason}` : "Backend не завершил переоптимизацию";
+  if (errorObject?.status === 502) return reason ? `LLM: ${reason}` : "LLM не подготовил контент";
+  if (errorObject?.status >= 500) return reason ? `Ошибка backend: ${reason}` : "Ошибка backend";
+  return code;
+}
+
 function batchAuditFailureLabel(item) {
   return item?.title || item?.vendorCode || item?.nmID || item?.cardKey || "Карточка";
 }
@@ -3664,6 +3681,7 @@ function buildStructuredCardDraft({
   card,
   auditResult,
   evidenceSummary,
+  contentOptimization,
 }) {
   const normalizedApprovalSections = normalizeApprovalSections(approvalSections, approval);
   return {
@@ -3699,6 +3717,7 @@ function buildStructuredCardDraft({
       semanticCoreFinal: normalizeSemanticFinalExport(semanticCoreFinal),
       auditResult: sanitizeAuditResult(auditResult),
       evidenceSummary: sanitizeEvidenceSummary(evidenceSummary),
+      contentOptimization: contentOptimization && typeof contentOptimization === "object" ? contentOptimization : undefined,
       card: {
         nmID: cardNmIdValue(card),
         vendorCode: cardVendorCodeValue(card),
@@ -3721,6 +3740,20 @@ function contentFromStoredDraft(storedDraft, card = {}) {
   const semanticCoreReports = normalizeSemanticReports(meta.semanticCoreReports);
   const semanticCoreFinal = normalizeSemanticFinalExport(meta.semanticCoreFinal);
   const semanticCoreRemoval = normalizeSemanticRemoval(meta.semanticCoreRemoval || meta.semanticCoreRemoved || meta.semanticCoreToRemove);
+  const auditHistory = sanitizeAuditHistory(meta.auditHistory);
+  const auditResult = sanitizeAuditResult(meta.auditResult);
+  const evidenceSummary = sanitizeEvidenceSummary(meta.evidenceSummary);
+  const hasStoredAuditResult = Boolean(auditResult && Object.keys(auditResult).length);
+  const fallbackAuditHistory = !auditHistory.length && hasStoredAuditResult
+    ? [{
+      id: `audit-${Date.parse(storedDraft?.updatedAt || payload.savedAt || "") || "stored"}`,
+      createdAt: storedDraft?.updatedAt || payload.savedAt || "",
+      engine: auditResult?._meta?.engine || "opticards-audit",
+      summary: auditResult.summary || {},
+      competitorSelection: evidenceSummary?.competitorSelection || null,
+      status: "done",
+    }]
+    : [];
   const semanticCoreSelected = normalizeSemanticSelection(
     Array.isArray(meta.semanticCoreSelected) && meta.semanticCoreSelected.length
       ? meta.semanticCoreSelected
@@ -3741,7 +3774,9 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     semanticCoreRemoval,
     semanticCoreReports,
     semanticCoreFinal,
-    auditHistory: sanitizeAuditHistory(meta.auditHistory),
+    auditHistory: auditHistory.length ? auditHistory : fallbackAuditHistory,
+    auditResult,
+    evidenceSummary,
     approval: deriveOverallApproval(approvalSections),
     approvalSections,
     savedAt: storedDraft?.updatedAt || payload.savedAt || "",
@@ -12088,6 +12123,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
   const [dirtyOrderKeys, setDirtyOrderKeys] = useState({});
   const [draggingTaskKey, setDraggingTaskKey] = useState("");
   const [batchAuditState, setBatchAuditState] = useState({});
+  const [batchContentState, setBatchContentState] = useState({});
   const dragAutoScrollRef = useRef({ frame: 0, pointerY: 0, scrollTarget: null, active: false });
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
@@ -12227,11 +12263,78 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
         });
       }
       const errorCounts = failedTasks.reduce((items, item) => {
-        const key = item.error || "Ошибка аудита";
+        const key = item.error || "Ошибка подготовки";
         items[key] = (items[key] || 0) + 1;
         return items;
       }, {});
       setBatchAuditState((current) => ({
+        ...current,
+        [actionKey]: {
+          status: done + failed >= runnableTasks.length ? (failed ? "partial" : "done") : "running",
+          done,
+          failed,
+          total: runnableTasks.length,
+          retryMode: options.retryMode || "",
+          failedTasks: [...failedTasks],
+          errors: Object.entries(errorCounts).map(([label, count]) => ({ label, count })),
+        },
+      }));
+    }
+  };
+  const runGroupContentReoptimization = async (group, workType, tasksToOptimize, options = {}) => {
+    if (!portalId || taskActionStatus) return;
+    const runnableTasks = (Array.isArray(tasksToOptimize) ? tasksToOptimize : [])
+      .filter((task) => task?.cardKey && taskHasCard(task) && taskHasSemanticFinal(task));
+    if (!runnableTasks.length) return;
+    const actionKey = group.key;
+    setBatchContentState((current) => ({
+      ...current,
+      [actionKey]: {
+        status: "running",
+        done: 0,
+        failed: 0,
+        total: runnableTasks.length,
+        retryMode: options.retryMode || "",
+        failedTasks: [],
+        errors: [],
+      },
+    }));
+    let done = 0;
+    let failed = 0;
+    const failedTasks = [];
+    for (const task of runnableTasks) {
+      try {
+        const payload = await apiRequest("/api/card-workset/reoptimize-content-task", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId,
+            cardKey: task.cardKey,
+            nmID: task.nmID || "",
+            vendorCode: task.vendorCode || "",
+            batchId: group.batchId || task.batchId || "",
+            workType,
+          }),
+        });
+        if (payload?.workflow && onWorkflowUpdated) {
+          onWorkflowUpdated(normalizeApprovalWorkflow(payload.workflow));
+        }
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        failedTasks.push({
+          cardKey: task.cardKey || "",
+          nmID: task.nmID || "",
+          vendorCode: task.vendorCode || "",
+          title: task.title || "",
+          error: batchContentErrorText(error),
+        });
+      }
+      const errorCounts = failedTasks.reduce((items, item) => {
+        const key = item.error || "Ошибка переоптимизации";
+        items[key] = (items[key] || 0) + 1;
+        return items;
+      }, {});
+      setBatchContentState((current) => ({
         ...current,
         [actionKey]: {
           status: done + failed >= runnableTasks.length ? (failed ? "partial" : "done") : "running",
@@ -12548,13 +12651,39 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const auditRetryMode = retryFailedTasks.length ? "failed" : (missingAuditTasks.length ? "missing" : "");
                       const auditButtonTasks = auditRetryTasks.length ? auditRetryTasks : groupTasks;
                       const auditButtonLabel = auditBusy
-                        ? "Аудит идет"
+                        ? "Готовим черновики"
                         : retryFailedTasks.length
                           ? `Повторить ошибки (${formatNumber(retryFailedTasks.length)})`
                           : missingAuditTasks.length
-                            ? `Доделать аудит (${formatNumber(missingAuditTasks.length)})`
-                            : "Запустить аудит";
+                            ? `Доделать черновики (${formatNumber(missingAuditTasks.length)})`
+                            : "Подготовить черновики";
                       const auditErrors = Array.isArray(auditState.errors) ? auditState.errors : [];
+                      const contentState = batchContentState[group.key] || {};
+                      const contentBusy = contentState.status === "running";
+                      const contentDone = Number(contentState.done || 0);
+                      const contentFailed = Number(contentState.failed || 0);
+                      const contentTotal = Number(contentState.total || 0);
+                      const contentFailedKeys = new Set((Array.isArray(contentState.failedTasks) ? contentState.failedTasks : []).map(batchAuditTaskKey).filter(Boolean));
+                      const contentVisibleEligibleTasks = groupTasks.filter((task) => taskHasCard(task) && taskHasSemanticFinal(task));
+                      const retryContentTasks = contentFailedKeys.size
+                        ? allGroupTasks.filter((task) => contentFailedKeys.has(batchAuditTaskKey(task)) && taskHasCard(task) && taskHasSemanticFinal(task))
+                        : [];
+                      const hasSavedContentOptimization = allGroupTasks.some((task) => task.hasContentOptimization);
+                      const missingContentTasks = hasSavedContentOptimization
+                        ? allGroupTasks.filter((task) => !task.hasContentOptimization && taskHasCard(task) && taskHasSemanticFinal(task))
+                        : [];
+                      const contentRetryTasks = retryContentTasks.length ? retryContentTasks : missingContentTasks;
+                      const contentRetryMode = retryContentTasks.length ? "failed" : (missingContentTasks.length ? "missing" : "");
+                      const contentButtonTasks = contentRetryTasks.length ? contentRetryTasks : contentVisibleEligibleTasks;
+                      const showContentReoptimize = ["semantic", "content"].includes(section.key);
+                      const contentButtonLabel = contentBusy
+                        ? "Переоптимизация идет"
+                        : retryContentTasks.length
+                          ? `Повторить СЯ (${formatNumber(retryContentTasks.length)})`
+                          : missingContentTasks.length
+                            ? `Доделать СЯ (${formatNumber(missingContentTasks.length)})`
+                            : "Переоптимизировать по СЯ";
+                      const contentErrors = Array.isArray(contentState.errors) ? contentState.errors : [];
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -12583,6 +12712,11 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                               <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, auditButtonTasks, { retryMode: auditRetryMode })} disabled={Boolean(taskActionStatus) || auditBusy || !auditButtonTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
                                 <WandSparkles size={16} />{auditButtonLabel}
                               </button>
+                              {showContentReoptimize ? (
+                                <button className={loadingButtonClass("btn", contentBusy)} type="button" onClick={() => runGroupContentReoptimization(group, section.key, contentButtonTasks, { retryMode: contentRetryMode })} disabled={Boolean(taskActionStatus) || contentBusy || !contentButtonTasks.length} aria-busy={contentBusy || undefined} title={contentButtonTasks.length ? "Обновить заголовок и описание по сохраненному итоговому СЯ." : "Сначала добавьте итоговое СЯ в карточках пачки."}>
+                                  <FileText size={16} />{contentButtonLabel}
+                                </button>
+                              ) : null}
 	                            {isOrdering ? (
 	                              <>
 	                                <button className={loadingButtonClass("btn primary", reorderBusy)} type="button" onClick={() => (orderDirty ? saveGroupOrder(group, section.key) : cancelGroupOrdering(group))} disabled={Boolean(taskActionStatus && !reorderBusy)} aria-busy={reorderBusy || undefined}>
@@ -12612,7 +12746,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                             {auditTotal ? (
                               <div className={`task-batch-audit-progress ${auditState.status || ""}`}>
                                 <div>
-                                  <strong>{auditBusy ? "Пакетный аудит" : auditFailed ? "Аудит завершен с ошибками" : "Аудит завершен"}</strong>
+                                  <strong>{auditBusy ? "Подготовка черновиков" : auditFailed ? "Черновики подготовлены с ошибками" : "Черновики подготовлены"}</strong>
                                   <span>{formatNumber(auditDone)} из {formatNumber(auditTotal)}{auditFailed ? ` · ошибок ${formatNumber(auditFailed)}` : ""}</span>
                                 </div>
                                 <div className="task-batch-audit-bar">
@@ -12624,6 +12758,27 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                                       <span key={item.label}>{item.label} · {formatNumber(item.count)}</span>
                                     ))}
                                     {(auditState.failedTasks || []).slice(0, 3).map((item) => (
+                                      <em key={batchAuditTaskKey(item)}>{batchAuditFailureLabel(item)}</em>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            {contentTotal ? (
+                              <div className={`task-batch-audit-progress ${contentState.status || ""}`}>
+                                <div>
+                                  <strong>{contentBusy ? "Переоптимизация по СЯ" : contentFailed ? "Переоптимизация завершена с ошибками" : "Переоптимизация завершена"}</strong>
+                                  <span>{formatNumber(contentDone)} из {formatNumber(contentTotal)}{contentFailed ? ` · ошибок ${formatNumber(contentFailed)}` : ""}</span>
+                                </div>
+                                <div className="task-batch-audit-bar">
+                                  <span style={{ width: `${Math.round(((contentDone + contentFailed) / Math.max(contentTotal, 1)) * 100)}%` }} />
+                                </div>
+                                {contentFailed ? (
+                                  <div className="task-batch-audit-errors">
+                                    {contentErrors.slice(0, 3).map((item) => (
+                                      <span key={item.label}>{item.label} · {formatNumber(item.count)}</span>
+                                    ))}
+                                    {(contentState.failedTasks || []).slice(0, 3).map((item) => (
                                       <em key={batchAuditTaskKey(item)}>{batchAuditFailureLabel(item)}</em>
                                     ))}
                                   </div>
@@ -14377,6 +14532,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         semanticCoreReports,
         semanticCoreFinal,
         card,
+        contentOptimization: payload.contentOptimization,
       });
       setDraftTitle(nextTitle);
       setDraftDescription(nextDescription);
@@ -14394,6 +14550,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     } catch (error) {
       const message = error.message === "llm_key_missing"
         ? "GigaChat не подключен: добавьте ключ на backend."
+        : error.message === "unsupported_marketplace"
+          ? "Для этого маркетплейса нужна отдельная методология переоптимизации."
         : error.status === 502
           ? "GigaChat не смог подготовить текст. Повторите позже."
           : "Не удалось переоптимизировать контент по СЯ.";
@@ -15988,10 +16146,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   <div>
                     <h2>Изменения и согласование</h2>
                     <p>{auditDone
-                      ? "Рекомендации аудита помечены, но любые поля можно править вручную."
+                      ? "Черновик подготовлен, но любые поля можно править вручную перед согласованием."
                       : auditStale
-                        ? "Черновик и задача сохранены после обновления WB. Аудит сброшен, поэтому для новых рекомендаций запустите его заново."
-                        : "Заполняйте колонку Черновик вручную. MPStats-аналитика подтянется из кэша аудита, если он уже был."}</p>
+                        ? "Черновик и задача сохранены после обновления WB. Рыночная аналитика сброшена, поэтому для новых рекомендаций подготовьте черновик заново."
+                        : "Здесь собирается единый черновик карточки: после аудита, переоптимизации по СЯ, изменений конкурента или ручной правки."}</p>
                   </div>
                   <div className="strip-actions">
                     <button
@@ -16057,7 +16215,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                         setDraftTitleSource(event.target.value.trim() ? "manual" : "");
                         setDraftTitleReason("");
                       }}
-                      placeholder="Введите новый заголовок или запустите аудит для рекомендации."
+                      placeholder="Введите новый заголовок или подготовьте черновик автоматически."
                     />
                     <p className="draft-source-line">
                       <span className={`char-counter ${draftTitleLength <= 60 ? "ok" : ""}`}>{draftTitleLength}/60 символов</span>
@@ -16080,7 +16238,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                         setDraftDescriptionSource(event.target.value.trim() ? "manual" : "");
                         setDraftDescriptionReason("");
                       }}
-                      placeholder="Введите новое описание или запустите аудит для рекомендации."
+                      placeholder="Введите новое описание или подготовьте черновик автоматически."
                     />
                     <DraftSourceMark source={draftDescriptionSource} />
                     <DraftReason reason={draftDescriptionReason} />
@@ -17101,6 +17259,10 @@ function approvalEventLabel(action) {
     skipped: "пропущена",
     deferred: "перенесена на позже",
     quick_completed: "закрыта быстрым действием",
+    audit_completed: "черновик аудита готов",
+    audit_failed: "черновик аудита не подготовлен",
+    content_reoptimized: "контент переоптимизирован по СЯ",
+    content_reoptimize_failed: "переоптимизация по СЯ не выполнена",
     competitor_change_detected: "найдено изменение конкурента",
     competitor_change_skipped: "изменение конкурента пропущено",
     competitor_change_applied: "черновик обновлен по конкуренту",
@@ -17133,7 +17295,7 @@ function CharacteristicsBlock({ items }) {
 
 function contentSummaryState({ changed, source, reason, emptyText }) {
   if (!reason && !source) {
-    return { tone: "green", label: emptyText || "без черновика", reason: "Запустите аудит или внесите ручную правку." };
+    return { tone: "green", label: emptyText || "без черновика", reason: "Подготовьте черновик любым доступным способом или внесите ручную правку." };
   }
   if (source === "manual") {
     return { tone: "blue", label: "ручная правка", reason: reason || "Значение изменено специалистом вручную." };
@@ -17159,6 +17321,48 @@ function contentSummaryState({ changed, source, reason, emptyText }) {
   };
 }
 
+function contentDraftMethodState({ titleSource, descriptionSource, auditCharacteristicsCount }) {
+  const sources = [titleSource, descriptionSource].filter(Boolean);
+  if (sources.includes("competitor")) {
+    return {
+      tone: "blue",
+      label: "по конкуренту",
+      title: "Источник черновика",
+      copy: "Заголовок и описание обновлены по изменению конкурента. Характеристики остаются зоной ручной проверки специалиста.",
+    };
+  }
+  if (sources.includes("semantic")) {
+    return {
+      tone: "blue",
+      label: "итоговое СЯ",
+      title: "Источник черновика",
+      copy: "Контент переоптимизирован по согласованному СЯ. Для WB заголовок и описание собираются по WB-методологии, характеристики проверяются только по фактическим полям и справочнику.",
+    };
+  }
+  if (sources.includes("audit") || auditCharacteristicsCount) {
+    return {
+      tone: "blue",
+      label: "аудит карточки",
+      title: "Источник черновика",
+      copy: "Черновик подготовлен аудитом по данным WB, MPStats и конкурентному контексту. Поля можно поправить вручную перед согласованием.",
+    };
+  }
+  if (sources.includes("manual")) {
+    return {
+      tone: "blue",
+      label: "ручная правка",
+      title: "Источник черновика",
+      copy: "Черновик изменен специалистом вручную. После проверки его можно отправить на согласование.",
+    };
+  }
+  return {
+    tone: "green",
+    label: "пусто",
+    title: "Источник черновика",
+    copy: "Черновик еще не подготовлен. Аудит, переоптимизация по СЯ и ручные правки сохраняют результат в этот блок.",
+  };
+}
+
 function ContentAuditSummary({
   titleChanged,
   titleSource,
@@ -17172,6 +17376,13 @@ function ContentAuditSummary({
 }) {
   const titleState = contentSummaryState({ changed: titleChanged, source: titleSource, reason: titleReason, emptyText: "нет заголовка" });
   const descriptionState = contentSummaryState({ changed: descriptionChanged, source: descriptionSource, reason: descriptionReason, emptyText: "нет описания" });
+  const methodState = contentDraftMethodState({ titleSource, descriptionSource, auditCharacteristicsCount });
+  const hasSemanticSource = [titleSource, descriptionSource].includes("semantic");
+  const characteristicsCopy = auditCharacteristicsCount
+    ? `Аудит подготовил ${auditCharacteristicsCount} ${pluralRu(auditCharacteristicsCount, "поле", "поля", "полей")}. ${mpstatsStatus}.`
+    : hasSemanticSource
+      ? "После переоптимизации по СЯ проверьте характеристики отдельно: ключи можно вносить только в релевантные фактические поля WB без переспама."
+      : "Можно править вручную или добавить поля из справочника WB.";
   return (
     <div className="content-audit-summary">
       <div className="content-audit-card">
@@ -17193,14 +17404,14 @@ function ContentAuditSummary({
           <strong>Характеристики</strong>
           <Tag tone={changedCharacteristicsCount ? "amber" : "green"}>{changedCharacteristicsCount ? `${changedCharacteristicsCount} изменено` : "без изменений"}</Tag>
         </div>
-        <p>{auditCharacteristicsCount ? `Аудит подготовил ${auditCharacteristicsCount} ${pluralRu(auditCharacteristicsCount, "поле", "поля", "полей")}. ${mpstatsStatus}.` : "Можно править вручную или добавить поля из справочника WB."}</p>
+        <p>{characteristicsCopy}</p>
       </div>
       <div className="content-audit-card">
         <div>
-          <strong>Методика</strong>
-          <Tag tone="blue">MP Audit</Tag>
+          <strong>{methodState.title}</strong>
+          <Tag tone={methodState.tone}>{methodState.label}</Tag>
         </div>
-        <p>Рекомендации строятся только на доступных данных WB, MPStats и карточек конкурентов. Если данных недостаточно, аудит помечает пункт для ручной проверки.</p>
+        <p>{methodState.copy}</p>
       </div>
     </div>
   );

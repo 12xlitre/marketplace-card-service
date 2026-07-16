@@ -3373,11 +3373,16 @@ def public_approval_task(row, snapshot_lookup):
   work_types = active_task_work_types(meta)
   status = task_status_for_work_types(meta, work_types)
   audit_status = str(row["audit_status"] or payload.get("auditStatus") or "")
+  has_audit_result = (
+    (isinstance(meta.get("auditResult"), dict) and bool(meta.get("auditResult")))
+    or (isinstance(payload.get("auditResult"), dict) and bool(payload.get("auditResult")))
+  )
   return {
     **approval_task_base(row, snapshot_lookup, meta, work_types),
     "status": status,
     "auditStatus": audit_status,
-    "hasAuditDraft": audit_status == "done" or isinstance(payload.get("auditResult"), dict),
+    "hasAuditDraft": audit_status == "done" or has_audit_result,
+    "hasContentOptimization": isinstance(meta.get("contentOptimization"), dict),
   }
 
 
@@ -4659,6 +4664,8 @@ CARD_WORK_EVENT_ACTIONS = {
   "quick_completed": "закрыта быстрым действием",
   "audit_completed": "аудит карточки готов",
   "audit_failed": "аудит карточки не выполнен",
+  "content_reoptimized": "контент переоптимизирован по итоговому СЯ",
+  "content_reoptimize_failed": "переоптимизация по итоговому СЯ не выполнена",
 }
 
 
@@ -9207,15 +9214,18 @@ description.recommended должен быть готовым переписан�
 """.strip()
 
 CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
-Ты — SEO-редактор карточек Wildberries. Перепиши заголовок и описание карточки под новое семантическое ядро.
+Ты — SEO-редактор карточек Wildberries. Перепиши заголовок и описание карточки под согласованное семантическое ядро.
 
 Правила:
 - используй только факты из evidenceBundle;
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
-- если новые ключевые запросы переданы, включи их естественно, без переспама и повторов;
+- новые ключевые запросы включай естественно: высокочастотный запрос ставь в основу заголовка, средне- и низкочастотные добавляй только если они точно подходят товару;
 - запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
-- заголовок должен быть готовым названием карточки WB длиной до 60 символов;
+- заголовок должен быть готовым названием карточки WB длиной до 60 символов, отвечать на вопрос "что на фото", ставить важные слова в начало;
+- в заголовке нельзя использовать бренд, повторы, перечисления через запятую или слэш, оценочные слова "лучший", "хит", "супер", состав, сезон, пол, возраст, контакты, emoji, caps lock, спецсимволы / * - + @ № % & $ ! = ( ) { } [ ];
 - описание должно быть готовым текстом карточки, а не советом специалисту;
+- описание должно быть лаконичным, правдивым и читабельным, обычно до 2000 символов, без списка SEO-запросов, артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
+- характеристики не переписывай в JSON, если нет официального справочника WB: в warnings укажи, какие поля стоит проверить вручную для внедрения средне- и низкочастотных ключей без переспама;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 
 Верни строго JSON:
@@ -13120,7 +13130,7 @@ def content_keywords_from_payload(items, limit=80):
       query = audit_str(item, 120)
       source = {}
     elif isinstance(item, dict):
-      query = audit_str(item.get("query") or item.get("keyword") or item.get("text") or "", 120)
+      query = audit_str(item.get("query") or item.get("keyword") or item.get("text") or item.get("phrase") or item.get("name") or "", 120)
       source = item
     else:
       continue
@@ -13145,6 +13155,26 @@ def content_reoptimization_configured():
   if OPTICARDS_LLM_PROVIDER == "gigachat":
     return bool(GIGACHAT_AUTH_KEY)
   return bool(audit_str(OPTICARDS_LLM_API_KEY))
+
+
+def ensure_wildberries_content_portal(portal_id):
+  portal_text = str(portal_id or "").strip()
+  if not portal_text or portal_text == "demo-wb":
+    return
+  try:
+    numeric_portal_id = int(portal_text)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT marketplace FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+  if not row:
+    raise ValueError("portal_not_found")
+  if audit_normalized(row["marketplace"]) != "wildberries":
+    raise ValueError("unsupported_marketplace")
 
 
 def content_card_for_portal(portal_id, card_key, raw_card):
@@ -13265,6 +13295,217 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "descriptionLength": len(next_description),
       "warnings": parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else [],
     },
+  }
+
+
+def semantic_final_keyword_lists(final_export):
+  final_export = final_export if isinstance(final_export, dict) else {}
+  semantic_core = final_export.get("semanticCore") if isinstance(final_export.get("semanticCore"), dict) else {}
+
+  def extend_from(output, *sources):
+    for source in sources:
+      if isinstance(source, list):
+        output.extend(source)
+    return output
+
+  selected_source = extend_from(
+    [],
+    final_export.get("selected"),
+    final_export.get("semanticCoreSelected"),
+    semantic_core.get("selected"),
+    semantic_core.get("selectedKeywords"),
+  )
+  removal_source = extend_from(
+    [],
+    final_export.get("removal"),
+    final_export.get("removed"),
+    final_export.get("toRemove"),
+    final_export.get("removeKeywords"),
+    semantic_core.get("removal"),
+    semantic_core.get("removed"),
+    semantic_core.get("removeKeywords"),
+  )
+  current_source = extend_from(
+    [],
+    semantic_core.get("current"),
+    semantic_core.get("rankedKeywords"),
+    semantic_core.get("rankingRows"),
+    semantic_core.get("positionRows"),
+  )
+  selected = content_keywords_from_payload(selected_source, limit=120)
+  remove = content_keywords_from_payload(removal_source, limit=80)
+  remove_keys = {audit_normalized(item.get("query")) for item in remove}
+  current = [
+    item
+    for item in content_keywords_from_payload(current_source, limit=120)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ][:80]
+  return selected, current, remove
+
+
+def reset_content_approval_for_reoptimization(meta):
+  meta = meta if isinstance(meta, dict) else {}
+  next_meta = {**meta}
+  sections = next_meta.get("approvalSections") if isinstance(next_meta.get("approvalSections"), dict) else {}
+  if sections:
+    content_section = sections.get("content") if isinstance(sections.get("content"), dict) else {}
+    next_sections = {**sections}
+    next_sections["content"] = {
+      **content_section,
+      "status": "draft",
+      "submittedAt": "",
+      "submittedBy": "",
+      "reviewedAt": "",
+      "reviewedBy": "",
+      "returnReason": "",
+    }
+    next_meta["approvalSections"] = next_sections
+    return next_meta
+  approval = next_meta.get("approval") if isinstance(next_meta.get("approval"), dict) else {}
+  if approval:
+    next_meta["approval"] = {
+      **approval,
+      "status": "draft",
+      "submittedAt": "",
+      "submittedBy": "",
+      "reviewedAt": "",
+      "reviewedBy": "",
+      "returnReason": "",
+    }
+  return next_meta
+
+
+def content_reoptimization_draft_payload_from_result(reoptimization_payload, previous_payload):
+  previous_payload = normalize_card_draft_payload(previous_payload)
+  draft_content = reoptimization_payload.get("draftContent") if isinstance(reoptimization_payload.get("draftContent"), dict) else {}
+  title = draft_content.get("title") if isinstance(draft_content.get("title"), dict) else {}
+  description = draft_content.get("description") if isinstance(draft_content.get("description"), dict) else {}
+  previous_content = previous_payload.get("content") if isinstance(previous_payload.get("content"), dict) else {}
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  optimization = reoptimization_payload.get("contentOptimization") if isinstance(reoptimization_payload.get("contentOptimization"), dict) else {}
+  previous_history = previous_meta.get("contentOptimizationHistory") if isinstance(previous_meta.get("contentOptimizationHistory"), list) else []
+  next_history = [optimization, *previous_history] if optimization else previous_history
+  meta = reset_content_approval_for_reoptimization({
+    **previous_meta,
+    "contentOptimization": optimization,
+    "contentOptimizationHistory": next_history[:20],
+    "contentReoptimizedAt": optimization.get("createdAt") if optimization else utc_now().isoformat(),
+  })
+  return normalize_card_draft_payload({
+    "version": 2,
+    "auditStatus": previous_payload.get("auditStatus") or "idle",
+    "content": {
+      "title": {
+        "value": title.get("value") or previous_content.get("title", {}).get("value") or "",
+        "source": title.get("source") or "semantic",
+        "reason": title.get("reason") or "Заголовок переоптимизирован по итоговому СЯ.",
+      },
+      "description": {
+        "value": description.get("value") or previous_content.get("description", {}).get("value") or "",
+        "source": description.get("source") or "semantic",
+        "reason": description.get("reason") or "Описание переоптимизировано по итоговому СЯ.",
+      },
+      "characteristics": previous_content.get("characteristics") if isinstance(previous_content.get("characteristics"), dict) else {},
+    },
+    "prices": previous_payload.get("prices") if isinstance(previous_payload.get("prices"), dict) else {},
+    "stocks": previous_payload.get("stocks") if isinstance(previous_payload.get("stocks"), dict) else {},
+    "meta": meta,
+  })
+
+
+def public_content_reoptimization_task_error_reason(exc):
+  if isinstance(exc, TimeoutError):
+    return "timeout"
+  if isinstance(exc, RuntimeError):
+    return str(exc).split(":", 1)[0] or "llm_content_reoptimization_failed"
+  if isinstance(exc, ValueError):
+    return str(exc) or "invalid_content_reoptimization_task"
+  return "internal_error"
+
+
+def reoptimize_and_save_card_task(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  ensure_wildberries_content_portal(numeric_portal_id)
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  if not card_key:
+    raise ValueError("invalid_card_key")
+
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    draft_row = db.execute(
+      """
+      SELECT payload_json, nm_id, vendor_code
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if not draft_row:
+      raise ValueError("task_not_found")
+    try:
+      previous_payload = json.loads(draft_row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+      previous_payload = normalize_card_draft_payload({})
+    previous_payload = normalize_card_draft_payload(previous_payload)
+    snapshot_card = snapshot_card_lookup(portal["cards_snapshot_json"]).get(card_key) or {}
+
+  meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+  if not semantic_core_final_exists(meta):
+    raise ValueError("semantic_final_missing")
+  selected_keywords, current_keywords, remove_keywords = semantic_final_keyword_lists(final_export)
+  if not selected_keywords and not remove_keywords:
+    raise ValueError("missing_semantic_keywords")
+
+  raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+  card = snapshot_card or raw_card
+  if not card:
+    raise ValueError("card_not_found")
+  content = previous_payload.get("content") if isinstance(previous_payload.get("content"), dict) else {}
+  title = content.get("title") if isinstance(content.get("title"), dict) else {}
+  description = content.get("description") if isinstance(content.get("description"), dict) else {}
+  work_type = str(payload.get("workType") or payload.get("work_type") or "").strip()
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  reoptimization_payload = build_card_content_reoptimization(
+    numeric_portal_id,
+    card_key,
+    card,
+    selected_keywords=selected_keywords,
+    current_keywords=current_keywords,
+    remove_keywords=remove_keywords,
+    draft={
+      "title": title.get("value") if isinstance(title, dict) else "",
+      "description": description.get("value") if isinstance(description, dict) else "",
+    },
+  )
+  next_payload = content_reoptimization_draft_payload_from_result(reoptimization_payload, previous_payload)
+  nm_id = card.get("nmID") or card.get("nmId") or card.get("nm_id") or draft_row["nm_id"] or payload.get("nmID") or ""
+  vendor_code = card.get("vendorCode") or card.get("vendor_code") or draft_row["vendor_code"] or payload.get("vendorCode") or ""
+  draft = save_card_draft(numeric_portal_id, card_key, nm_id, vendor_code, next_payload, user)
+  log_card_work_event(numeric_portal_id, {
+    "cardKey": card_key,
+    "action": "content_reoptimized",
+    "workType": work_type,
+    "batchId": batch_id,
+  }, user)
+  return {
+    "portalId": str(numeric_portal_id),
+    "cardKey": card_key,
+    "draft": draft,
+    "contentOptimization": reoptimization_payload.get("contentOptimization"),
+    "workflow": approval_workflow(numeric_portal_id, user),
   }
 
 
@@ -16118,6 +16359,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_card_key"})
         return
       try:
+        ensure_wildberries_content_portal(portal_id)
         result = build_card_content_reoptimization(
           portal_id,
           card_key,
@@ -16572,6 +16814,68 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           pass
         print(f"Card task audit failed portal={portal_id} card={card_key}: {type(exc).__name__}")
         self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "audit_task_failed", "reason": public_reason})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/reoptimize-content-task":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      portal_id = payload.get("portalId")
+      try:
+        result = reoptimize_and_save_card_task(portal_id, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+        public_reason = public_content_reoptimization_task_error_reason(exc)
+        try:
+          log_card_work_event(portal_id, {
+            "cardKey": card_key,
+            "action": "content_reoptimize_failed",
+            "workType": payload.get("workType") or payload.get("work_type") or "",
+            "batchId": payload.get("batchId") or payload.get("batch_id") or "",
+            "reason": public_reason,
+          }, user)
+        except Exception:
+          pass
+        status = HTTPStatus.CONFLICT if public_reason == "llm_key_missing" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": str(exc) or "invalid_content_reoptimization_task", "reason": public_reason})
+        return
+      except RuntimeError as exc:
+        card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+        public_reason = public_content_reoptimization_task_error_reason(exc)
+        try:
+          log_card_work_event(portal_id, {
+            "cardKey": card_key,
+            "action": "content_reoptimize_failed",
+            "workType": payload.get("workType") or payload.get("work_type") or "",
+            "batchId": payload.get("batchId") or payload.get("batch_id") or "",
+            "reason": public_reason,
+          }, user)
+        except Exception:
+          pass
+        print(f"Card task content reoptimization failed portal={portal_id} card={card_key}: {type(exc).__name__}")
+        self.send_json(HTTPStatus.BAD_GATEWAY, {"error": "content_reoptimization_task_failed", "reason": public_reason})
+        return
+      except Exception as exc:
+        card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+        public_reason = public_content_reoptimization_task_error_reason(exc)
+        try:
+          log_card_work_event(portal_id, {
+            "cardKey": card_key,
+            "action": "content_reoptimize_failed",
+            "workType": payload.get("workType") or payload.get("work_type") or "",
+            "batchId": payload.get("batchId") or payload.get("batch_id") or "",
+            "reason": public_reason,
+          }, user)
+        except Exception:
+          pass
+        print(f"Card task content reoptimization failed portal={portal_id} card={card_key}: {type(exc).__name__}")
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "content_reoptimization_task_failed", "reason": public_reason})
         return
       self.send_json(HTTPStatus.OK, result)
       return
