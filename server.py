@@ -460,6 +460,22 @@ def init_db():
         UNIQUE (portal_id, card_key)
       );
 
+      CREATE TABLE IF NOT EXISTS ozon_card_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        sku TEXT NOT NULL DEFAULT '',
+        offer_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        audit_status TEXT NOT NULL DEFAULT 'idle',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, card_key)
+      );
+
       CREATE TABLE IF NOT EXISTS service_integrations (
         provider TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT 'stored',
@@ -688,6 +704,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_ozon_semantic_drafts_portal
       ON ozon_semantic_drafts(portal_id, updated_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_ozon_card_drafts_portal
+      ON ozon_card_drafts(portal_id, updated_at)
       """
     )
     db.execute(
@@ -3546,12 +3568,14 @@ def normalize_ozon_task(raw_task):
   return payload if card_key else None
 
 
-def public_ozon_task(row):
+def public_ozon_task(row, semantic_map=None, content_map=None):
   try:
     payload = json.loads(row["payload_json"] or "{}")
   except (TypeError, json.JSONDecodeError):
     payload = {}
   payload = payload if isinstance(payload, dict) else {}
+  semantic = (semantic_map or {}).get(row["card_key"]) or {}
+  content = (content_map or {}).get(row["card_key"]) or {}
   return {
     "id": row["task_id"],
     "cardKey": row["card_key"],
@@ -3561,6 +3585,9 @@ def public_ozon_task(row):
     "category": row["category"] or payload.get("category") or "",
     "status": row["status"] or "draft",
     "workType": row["work_type"] or payload.get("workType") or "content",
+    "hasSemanticFinal": bool(semantic.get("hasFinal")),
+    "hasFinalContent": bool(content.get("hasFinalContent")),
+    "auditStatus": content.get("auditStatus") or "idle",
     "createdAt": row["created_at"] or "",
     "updatedAt": row["updated_at"] or "",
     "updatedBy": row["updated_by"] or "",
@@ -3660,6 +3687,13 @@ def normalize_ozon_semantic_payload(payload):
   return normalized if card_key else None
 
 
+def ozon_semantic_final_exists(payload):
+  if not isinstance(payload, dict):
+    return False
+  final_items = payload.get("final")
+  return isinstance(final_items, list) and bool(normalize_ozon_semantic_keywords(final_items, limit=1))
+
+
 def public_ozon_semantic_draft(row):
   try:
     payload = json.loads(row["payload_json"] or "{}")
@@ -3681,6 +3715,116 @@ def public_ozon_semantic_draft(row):
   }
 
 
+def normalize_ozon_content_payload(payload):
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = audit_str(payload.get("cardKey") or payload.get("card_key"), 160)
+  sku = audit_str(payload.get("sku") or payload.get("id"), 120)
+  offer_id = audit_str(payload.get("offerId") or payload.get("offer_id"), 120)
+  title = audit_str(payload.get("title"), 240)
+  if not card_key:
+    card_key = draft_card_key(sku or offer_id or title)
+  content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+  content_title = audit_str(content.get("title") or payload.get("contentTitle") or title, 300)
+  description = audit_str(content.get("description") or payload.get("description"), 6000)
+  characteristics = content.get("characteristics")
+  if isinstance(characteristics, dict):
+    clean_characteristics = {
+      audit_str(key, 120): audit_str(value, 500)
+      for key, value in characteristics.items()
+      if audit_str(key, 120)
+    }
+  elif isinstance(characteristics, list):
+    clean_characteristics = []
+    for item in characteristics[:300]:
+      if isinstance(item, dict):
+        name = audit_str(item.get("name") or item.get("label"), 120)
+        value = audit_str(item.get("value"), 500)
+        if name or value:
+          clean_characteristics.append({"name": name, "value": value})
+      else:
+        value = audit_str(item, 500)
+        if value:
+          clean_characteristics.append({"name": "", "value": value})
+  else:
+    clean_characteristics = []
+  approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+  content_status = audit_str(approval.get("contentStatus") or approval.get("status") or payload.get("contentStatus") or "draft", 40)
+  if content_status not in {"draft", "submitted", "approved", "exported"}:
+    content_status = "draft"
+  audit_result = payload.get("auditResult") if isinstance(payload.get("auditResult"), dict) else {}
+  audit_status = audit_str(payload.get("auditStatus") or payload.get("audit_status") or ("done" if audit_result else "idle"), 40)
+  normalized = {
+    "version": 1,
+    "cardKey": card_key,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title,
+    "content": {
+      "title": content_title,
+      "description": description,
+      "characteristics": clean_characteristics,
+    },
+    "approval": {
+      "contentStatus": content_status,
+    },
+    "auditStatus": audit_status,
+    "auditResult": audit_result,
+    "meta": {
+      "source": audit_str(payload.get("source") or "ozon-card-draft", 80),
+      "marketplace": "Ozon",
+    },
+  }
+  return normalized if card_key else None
+
+
+def ozon_content_final_exists(payload):
+  if not isinstance(payload, dict):
+    return False
+  approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+  if audit_str(approval.get("contentStatus"), 40) not in {"approved", "exported"}:
+    return False
+  content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+  return bool(audit_str(content.get("title"), 300) or audit_str(content.get("description"), 6000))
+
+
+def public_ozon_card_draft(row):
+  try:
+    payload = json.loads(row["payload_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    payload = {}
+  payload = normalize_ozon_content_payload(payload) or {}
+  return {
+    "id": str(row["id"]),
+    "portalId": str(row["portal_id"]),
+    "cardKey": row["card_key"] or payload.get("cardKey") or "",
+    "sku": row["sku"] or payload.get("sku") or "",
+    "offerId": row["offer_id"] or payload.get("offerId") or "",
+    "title": row["title"] or payload.get("title") or "",
+    "auditStatus": row["audit_status"] or payload.get("auditStatus") or "idle",
+    "hasFinalContent": ozon_content_final_exists(payload),
+    "draft": payload,
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def list_ozon_semantic_drafts(portal_id, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ?
+      ORDER BY updated_at DESC, id DESC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {"drafts": [public_ozon_semantic_draft(row) for row in rows]}
+
+
 def get_ozon_semantic_draft(portal_id, card_key, user):
   numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
   clean_card_key = audit_str(card_key, 160)
@@ -3696,6 +3840,38 @@ def get_ozon_semantic_draft(portal_id, card_key, user):
       (numeric_portal_id, clean_card_key),
     ).fetchone()
   return {"draft": public_ozon_semantic_draft(row) if row else None}
+
+
+def list_ozon_card_drafts(portal_id, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  with connect_db() as db:
+    rows = db.execute(
+      """
+      SELECT *
+      FROM ozon_card_drafts
+      WHERE portal_id = ?
+      ORDER BY updated_at DESC, id DESC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {"drafts": [public_ozon_card_draft(row) for row in rows]}
+
+
+def get_ozon_card_draft(portal_id, card_key, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  clean_card_key = audit_str(card_key, 160)
+  if not clean_card_key:
+    raise ValueError("invalid_card_key")
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT *
+      FROM ozon_card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, clean_card_key),
+    ).fetchone()
+  return {"draft": public_ozon_card_draft(row) if row else None}
 
 
 def save_ozon_semantic_draft(portal_id, payload, user):
@@ -3747,6 +3923,141 @@ def save_ozon_semantic_draft(portal_id, payload, user):
   return {"draft": public_ozon_semantic_draft(row)}
 
 
+def save_ozon_card_draft(portal_id, payload, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  draft = normalize_ozon_content_payload(payload)
+  if not draft:
+    raise ValueError("invalid_ozon_card_draft")
+  actor_login = user_login_value(user) or ""
+  with connect_db() as db:
+    db.execute(
+      """
+      INSERT INTO ozon_card_drafts (
+        portal_id, card_key, sku, offer_id, title, payload_json,
+        audit_status, created_by, updated_by, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(portal_id, card_key) DO UPDATE SET
+        sku = excluded.sku,
+        offer_id = excluded.offer_id,
+        title = excluded.title,
+        payload_json = excluded.payload_json,
+        audit_status = excluded.audit_status,
+        updated_by = excluded.updated_by,
+        updated_at = CURRENT_TIMESTAMP
+      """,
+      (
+        numeric_portal_id,
+        draft["cardKey"],
+        draft["sku"],
+        draft["offerId"],
+        draft["title"],
+        json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
+        draft["auditStatus"],
+        actor_login or None,
+        actor_login or None,
+      ),
+    )
+    row = db.execute(
+      """
+      SELECT *
+      FROM ozon_card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, draft["cardKey"]),
+    ).fetchone()
+  record_admin_event(user, "ozon_card_draft_saved", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "cardKey": draft["cardKey"],
+    "contentStatus": draft["approval"]["contentStatus"],
+    "auditStatus": draft["auditStatus"],
+  })
+  return {"draft": public_ozon_card_draft(row)}
+
+
+def ozon_card_value(raw_card, *keys):
+  raw_card = raw_card if isinstance(raw_card, dict) else {}
+  raw_fields = raw_card.get("rawFields") if isinstance(raw_card.get("rawFields"), dict) else {}
+  for key in keys:
+    value = raw_card.get(key)
+    if value in (None, "", [], {}):
+      value = raw_fields.get(key)
+    if value not in (None, "", [], {}):
+      return value
+  return ""
+
+
+def build_ozon_card_audit(portal_id, payload, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  payload = payload if isinstance(payload, dict) else {}
+  raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else payload
+  card_key = audit_str(payload.get("cardKey") or raw_card.get("cardKey"), 160)
+  sku = audit_str(payload.get("sku") or ozon_card_value(raw_card, "sku", "id", "productId"), 120)
+  offer_id = audit_str(payload.get("offerId") or ozon_card_value(raw_card, "offerId", "offer_id", "vendorCode"), 120)
+  title = audit_str(payload.get("title") or ozon_card_value(raw_card, "title", "name"), 300)
+  if not card_key:
+    card_key = draft_card_key(sku or offer_id or title)
+  if not card_key:
+    raise ValueError("invalid_ozon_card_audit")
+  description = audit_str(ozon_card_value(raw_card, "description"), 6000)
+  category = audit_str(ozon_card_value(raw_card, "subjectName", "category", "categoryName"), 180)
+  brand = audit_str(ozon_card_value(raw_card, "brand"), 180)
+  photos = ozon_card_value(raw_card, "photos")
+  characteristics = ozon_card_value(raw_card, "characteristics")
+  price = ozon_card_value(raw_card, "price", "finalPrice", "final_price")
+  stock = ozon_card_value(raw_card, "stock", "balance", "available_stock")
+  warnings = []
+  if not title:
+    warnings.append("нет названия")
+  if not sku:
+    warnings.append("нет SKU")
+  if not description:
+    warnings.append("нет описания")
+  if not brand:
+    warnings.append("бренд не указан")
+  if not category:
+    warnings.append("категория не указана")
+  if not isinstance(photos, list) or not photos:
+    warnings.append("нет фото")
+  if not ((isinstance(characteristics, list) and characteristics) or (isinstance(characteristics, dict) and characteristics)):
+    warnings.append("нет характеристик")
+  if price in (None, "", [], {}):
+    warnings.append("нет цены")
+  if stock in (None, "", [], {}):
+    warnings.append("нет остатка")
+  recommended_title = title or " ".join([brand, category, sku]).strip()
+  recommended_description = description or " ".join([recommended_title, category, brand]).strip()
+  audit_result = {
+    "marketplace": "Ozon",
+    "engine": "opticards-ozon-snapshot-audit-v1",
+    "createdAt": utc_now().isoformat(),
+    "summary": {
+      "status": "attention" if warnings else "ok",
+      "warnings": warnings[:20],
+      "filledBlocks": sum(1 for value in (title, sku, description, brand, category, photos, characteristics, price, stock) if value not in (None, "", [], {})),
+      "totalBlocks": 9,
+    },
+    "recommendations": {
+      "title": recommended_title,
+      "description": recommended_description,
+    },
+  }
+  return save_ozon_card_draft(numeric_portal_id, {
+    "cardKey": card_key,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title or recommended_title,
+    "content": {
+      "title": recommended_title,
+      "description": recommended_description,
+      "characteristics": characteristics if isinstance(characteristics, (list, dict)) else [],
+    },
+    "approval": {"contentStatus": "draft"},
+    "auditStatus": "done",
+    "auditResult": audit_result,
+    "source": "ozon-audit",
+  }, user)
+
+
 def list_ozon_tasks(portal_id, user):
   numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
   with connect_db() as db:
@@ -3756,6 +4067,22 @@ def list_ozon_tasks(portal_id, user):
       FROM ozon_tasks
       WHERE portal_id = ?
       ORDER BY created_at ASC, id ASC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    semantic_rows = db.execute(
+      """
+      SELECT card_key, payload_json
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    content_rows = db.execute(
+      """
+      SELECT card_key, payload_json, audit_status
+      FROM ozon_card_drafts
+      WHERE portal_id = ?
       """,
       (numeric_portal_id,),
     ).fetchall()
@@ -3769,9 +4096,26 @@ def list_ozon_tasks(portal_id, user):
       """,
       (numeric_portal_id,),
     ).fetchall()
+  semantic_map = {}
+  for row in semantic_rows:
+    try:
+      payload = normalize_ozon_semantic_payload(json.loads(row["payload_json"] or "{}")) or {}
+    except (TypeError, json.JSONDecodeError):
+      payload = {}
+    semantic_map[row["card_key"]] = {"hasFinal": ozon_semantic_final_exists(payload)}
+  content_map = {}
+  for row in content_rows:
+    try:
+      payload = normalize_ozon_content_payload(json.loads(row["payload_json"] or "{}")) or {}
+    except (TypeError, json.JSONDecodeError):
+      payload = {}
+    content_map[row["card_key"]] = {
+      "hasFinalContent": ozon_content_final_exists(payload),
+      "auditStatus": row["audit_status"] or payload.get("auditStatus") or "idle",
+    }
   return {
     "portalId": str(numeric_portal_id),
-    "tasks": [public_ozon_task(row) for row in task_rows],
+    "tasks": [public_ozon_task(row, semantic_map=semantic_map, content_map=content_map) for row in task_rows],
     "recentEvents": [public_ozon_task_event(row) for row in event_rows],
   }
 
@@ -14713,6 +15057,21 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": error_text})
       return
 
+    if path.startswith("/api/portals/") and path.endswith("/ozon-semantic-drafts"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-semantic-drafts")].strip("/")
+      try:
+        self.send_json(HTTPStatus.OK, list_ozon_semantic_drafts(portal_id_text, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_semantic_drafts"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+      return
+
     if path.startswith("/api/portals/") and path.endswith("/ozon-semantic-draft"):
       user = self.require_user()
       if not user:
@@ -14726,6 +15085,38 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_semantic_draft"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-card-drafts"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-card-drafts")].strip("/")
+      try:
+        self.send_json(HTTPStatus.OK, list_ozon_card_drafts(portal_id_text, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_card_drafts"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-card-draft"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-card-draft")].strip("/")
+      query = parse_qs(parsed.query)
+      card_key = query.get("card_key", [""])[0] or query.get("cardKey", [""])[0]
+      try:
+        self.send_json(HTTPStatus.OK, get_ozon_card_draft(portal_id_text, card_key, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_card_draft"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
       return
@@ -16189,6 +16580,44 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_semantic_draft"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-card-draft"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-card-draft")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        result = save_ozon_card_draft(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_card_draft"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-card-audit"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-card-audit")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        result = build_ozon_card_audit(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_card_audit"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return
