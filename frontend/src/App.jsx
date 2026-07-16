@@ -6598,7 +6598,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
         </div>
         <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
           <Plus size={17} />
-          Добавить WB кабинет
+          Добавить клиента
         </button>
       </header>
 
@@ -6608,7 +6608,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           title="Как начать работу"
           items={[
             "Откройте клиента, чтобы увидеть общую информацию и перейти в раздел WB или Ozon.",
-            "Новые Ozon-кабинеты добавим из карточки клиента после отдельного backend-контракта.",
+            "Новый клиент создается через первый WB-кабинет, а Ozon beta добавляется уже внутри клиента.",
             "Фильтр Активные / Неактивные помогает спрятать завершенные кабинеты без удаления истории.",
           ]}
         />
@@ -6666,11 +6666,11 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           {statusFilter !== "inactive" ? (
             <article className="workspace-card add-card">
               <div className="seller-logo">+</div>
-              <h2>Добавить WB кабинет</h2>
-              <p>Новый клиент появится в списке после создания первого WB-кабинета.</p>
+              <h2>Добавить клиента</h2>
+              <p>Создайте первый WB-кабинет, и клиент появится в списке.</p>
               <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
                 <Plus size={17} />
-                Добавить WB
+                Добавить клиента
               </button>
             </article>
           ) : null}
