@@ -6104,7 +6104,7 @@ export default function App() {
       return;
     }
     const confirmed = window.confirm(
-      "Обнулить работу по кабинету? Удалятся аудиты, черновики, итоговое СЯ, задачи и история согласования. Карточки WB, источник MPStats и API-ключ останутся.",
+      "Очистить черновики и СЯ по кабинету? Задачи останутся. Удалятся аудиты, черновики контента, итоговое СЯ и переоптимизация по карточкам. Карточки, источник данных и API-ключ останутся.",
     );
     if (!confirmed) {
       return;
@@ -6115,27 +6115,24 @@ export default function App() {
     }
     setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
     try {
-      await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-work-cache`, {
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/clear-draft-work`, {
         method: "POST",
         body: JSON.stringify({}),
       });
       clearLocalDraftsForPortal(portal.id);
       resetPortalWorkSummary(portal.id);
-      const resetPortal = {
+      const resetPortal = normalizePortal({
         ...portal,
-        draftSummary: emptyDraftSummary(),
-        realCards: portal.realCards || [],
-      };
+        ...(result.portal || {}),
+        realCards: portal.realCards || result.portal?.realCards || [],
+      });
       replaceUserPortal(resetPortal);
       const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
       const updatedPortal = applyWbSnapshotToPortal(resetPortal, payload);
-      replaceUserPortal({
-        ...updatedPortal,
-        draftSummary: emptyDraftSummary(),
-      });
-      setNotice("Работа по кабинету обнулена: аудиты, черновики и согласование удалены.");
+      replaceUserPortal(updatedPortal);
+      setNotice(`Черновики и СЯ очищены. Задачи сохранены: ${formatNumber(result.taskDraftsKept || 0)}.`);
     } catch {
-      setNotice("Не удалось обнулить работу по кабинету. Попробуйте повторить позже.");
+      setNotice("Не удалось очистить черновики и СЯ по кабинету. Попробуйте повторить позже.");
       replaceUserPortal({
         ...portal,
         syncStatus: "error",
@@ -6159,30 +6156,29 @@ export default function App() {
     }
     setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
     try {
+      let portalForLoad = portal;
       if (resetWork) {
-        await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/reset-work-cache`, {
+        const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/clear-draft-work`, {
           method: "POST",
           body: JSON.stringify({}),
         });
         clearLocalDraftsForPortal(portal.id);
         resetPortalWorkSummary(portal.id);
-        replaceUserPortal({
+        portalForLoad = normalizePortal({
           ...portal,
-          draftSummary: emptyDraftSummary(),
+          ...(result.portal || {}),
           realCards: portal.realCards || [],
         });
+        replaceUserPortal(portalForLoad);
       }
       const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
-      const updatedPortal = applyWbSnapshotToPortal(portal, payload);
-      replaceUserPortal(resetWork ? {
-        ...updatedPortal,
-        draftSummary: emptyDraftSummary(),
-      } : updatedPortal);
+      const updatedPortal = applyWbSnapshotToPortal(portalForLoad, payload);
+      replaceUserPortal(updatedPortal);
     } catch {
       replaceUserPortal({
         ...portal,
         syncStatus: "error",
-        draftSummary: resetWork ? emptyDraftSummary() : portal.draftSummary,
+        draftSummary: portal.draftSummary,
       });
     } finally {
       setLoadingPortalCards((items) => {
@@ -10510,8 +10506,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                         <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
                       </button>
                     ) : null}
-                    <button className="btn ghost" type="button" onClick={onResetWork} disabled={cardsLoading} title="Удалить черновики, итоговое СЯ, задачи и историю согласования по этому кабинету. Карточки и источник данных останутся.">
-                      <Trash2 size={16} />Обнулить работу
+                    <button className="btn ghost" type="button" onClick={onResetWork} disabled={cardsLoading} title="Очистить аудиты, черновики контента, итоговое СЯ и переоптимизацию. Пачки задач и история действий останутся.">
+                      <Trash2 size={16} />Очистить черновики/СЯ
                     </button>
                     <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
                   </div>

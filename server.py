@@ -6603,6 +6603,146 @@ def reset_portal_work_cache(portal_id, user):
   }
 
 
+def portal_task_draft_reset_payload(previous_payload):
+  payload = normalize_card_draft_payload(previous_payload or {})
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  work_types = normalize_optional_work_types(batch.get("workTypes"))
+  if not batch or not work_types:
+    return None
+
+  card_meta = meta.get("card") if isinstance(meta.get("card"), dict) else {}
+  previous_approval = meta.get("approval") if isinstance(meta.get("approval"), dict) else {}
+  assignee_login = str(batch.get("assigneeLogin") or previous_approval.get("assigneeLogin") or "")[:120]
+  approval = {
+    **previous_approval,
+    "status": "draft",
+    "submittedBy": "",
+    "submittedAt": "",
+    "reviewedBy": "",
+    "reviewedAt": "",
+    "returnReason": "",
+    "assigneeLogin": assignee_login,
+    "history": [],
+  }
+  previous_sections = meta.get("approvalSections") if isinstance(meta.get("approvalSections"), dict) else {}
+  approval_sections = {}
+  for work_type in work_types:
+    if work_type not in APPROVAL_SECTION_LABELS:
+      continue
+    previous_section = previous_sections.get(work_type) if isinstance(previous_sections.get(work_type), dict) else {}
+    approval_sections[work_type] = {
+      **previous_section,
+      "status": "draft",
+      "submittedBy": "",
+      "submittedAt": "",
+      "reviewedBy": "",
+      "reviewedAt": "",
+      "returnReason": "",
+      "assigneeLogin": str(previous_section.get("assigneeLogin") or assignee_login)[:120],
+      "history": [],
+    }
+
+  next_meta = {
+    "approval": approval,
+    "approvalSections": approval_sections,
+    "batch": batch,
+  }
+  if card_meta:
+    next_meta["card"] = card_meta
+
+  return normalize_card_draft_payload({
+    "version": 2,
+    "auditStatus": "idle",
+    "content": {},
+    "prices": {},
+    "stocks": {},
+    "meta": next_meta,
+  })
+
+
+def clear_portal_draft_work_keep_tasks(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  init_db()
+  updated_task_drafts = 0
+  deleted_loose_drafts = 0
+  semantic_cleared = 0
+  content_cleared = 0
+  audit_cleared = 0
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT id FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    draft_rows = db.execute(
+      """
+      SELECT id, payload_json
+      FROM card_drafts
+      WHERE portal_id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    for row in draft_rows:
+      try:
+        payload = json.loads(row["payload_json"])
+      except (TypeError, json.JSONDecodeError):
+        payload = normalize_card_draft_payload({})
+      payload = normalize_card_draft_payload(payload)
+      meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+      if any(key in meta for key in ("semanticCoreReports", "semanticCoreSelected", "semanticCoreRemoval", "semanticCoreFinal", "semanticCoreImportHistory")):
+        semantic_cleared += 1
+      if isinstance(meta.get("contentOptimization"), dict) or isinstance(meta.get("contentOptimizationHistory"), list):
+        content_cleared += 1
+      if draft_has_audit_data(payload) or isinstance(meta.get("auditResult"), dict) or isinstance(meta.get("evidenceSummary"), dict):
+        audit_cleared += 1
+
+      next_payload = portal_task_draft_reset_payload(payload)
+      if next_payload is None:
+        db.execute("DELETE FROM card_drafts WHERE id = ? AND portal_id = ?", (row["id"], numeric_portal_id))
+        deleted_loose_drafts += 1
+        continue
+
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, audit_status = 'idle', updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND portal_id = ?
+        """,
+        (
+          json.dumps(next_payload, ensure_ascii=False, separators=(",", ":")),
+          user_login_value(user) or None,
+          row["id"],
+          numeric_portal_id,
+        ),
+      )
+      updated_task_drafts += 1
+
+  updated_row = get_portal_row(numeric_portal_id, user)
+  record_admin_event(user, "portal_draft_work_cleared", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "taskDraftsKept": updated_task_drafts,
+    "looseDraftsDeleted": deleted_loose_drafts,
+    "semanticCleared": semantic_cleared,
+    "contentCleared": content_cleared,
+    "auditCleared": audit_cleared,
+  })
+  return {
+    "taskDraftsKept": updated_task_drafts,
+    "looseDraftsDeleted": deleted_loose_drafts,
+    "semanticCleared": semantic_cleared,
+    "contentCleared": content_cleared,
+    "auditCleared": audit_cleared,
+    "portal": public_portal_from_row(updated_row) if updated_row else None,
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
 def draft_has_audit_data(payload):
   if str(payload.get("auditStatus") or "") == "done":
     return True
@@ -17850,6 +17990,24 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_id_text = path[len("/api/portals/"):-len("/reset-work-cache")].strip("/")
       try:
         result = reset_portal_work_cache(portal_id_text, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_portal_id"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/clear-draft-work"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/clear-draft-work")].strip("/")
+      try:
+        result = clear_portal_draft_work_keep_tasks(portal_id_text, user)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
