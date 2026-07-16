@@ -12493,11 +12493,35 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
     }
     return true;
   };
+  const confirmBatchAction = (group, tasks, title, details) => {
+    const count = Array.isArray(tasks) ? tasks.length : 0;
+    return window.confirm([
+      `${title}?`,
+      "",
+      taskBatchGroupTitle(group),
+      `Будет обработано ${formatNumber(count)} ${pluralRu(count, "карточка", "карточки", "карточек")}.`,
+      details,
+      "Запустить действие?",
+    ].filter(Boolean).join("\n"));
+  };
   const runGroupAudit = async (group, workType, tasksToAudit, options = {}) => {
     if (!portalId || taskActionStatus) return;
     const runnableTasks = (Array.isArray(tasksToAudit) ? tasksToAudit : [])
       .filter((task) => task?.cardKey && taskHasCard(task));
     if (!runnableTasks.length) return;
+    const confirmTitle = options.retryMode === "failed"
+      ? "Повторить подготовку черновиков"
+      : options.retryMode === "missing"
+        ? "Доделать черновики"
+        : "Подготовить черновики";
+    if (options.confirm !== false && !confirmBatchAction(
+      group,
+      runnableTasks,
+      confirmTitle,
+      "Сервис запустит аудит карточек по очереди и сохранит первичные черновики правок.",
+    )) {
+      return;
+    }
     const actionKey = group.key;
     setBatchAuditState((current) => ({
       ...current,
@@ -12565,6 +12589,19 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
     const runnableTasks = (Array.isArray(tasksToOptimize) ? tasksToOptimize : [])
       .filter((task) => task?.cardKey && taskHasCard(task) && taskHasSemanticFinal(task));
     if (!runnableTasks.length) return;
+    const confirmTitle = options.retryMode === "failed"
+      ? "Повторить переоптимизацию по СЯ"
+      : options.retryMode === "missing"
+        ? "Доделать переоптимизацию по СЯ"
+        : "Переоптимизировать по СЯ";
+    if (options.confirm !== false && !confirmBatchAction(
+      group,
+      runnableTasks,
+      confirmTitle,
+      "Сервис возьмет сохраненное итоговое СЯ и обновит черновики заголовка и описания.",
+    )) {
+      return;
+    }
     const actionKey = group.key;
     setBatchContentState((current) => ({
       ...current,
