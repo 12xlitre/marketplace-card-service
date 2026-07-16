@@ -7348,6 +7348,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [probeStatus, setProbeStatus] = useState("idle");
   const [probeResult, setProbeResult] = useState(null);
   const [probeSaveStatus, setProbeSaveStatus] = useState("idle");
+  const [ozonWorkState, setOzonWorkState] = useState(() => readOzonWorkState(portal.id));
 
   useEffect(() => {
     if (!teamEditing) {
@@ -7369,6 +7370,14 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       });
     }
   }, [portal.id, sourceStoreUrl, sourceManualText, sourceEditing]);
+
+  useEffect(() => {
+    setOzonWorkState(readOzonWorkState(portal.id));
+  }, [portal.id]);
+
+  useEffect(() => {
+    writeOzonWorkState(portal.id, ozonWorkState);
+  }, [portal.id, ozonWorkState]);
 
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
@@ -7484,6 +7493,40 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
           : "Не удалось сохранить Ozon-карточки.";
       onNotice?.(message);
     }
+  }
+
+  function updateOzonTaskStatus(taskId, status) {
+    const now = new Date().toISOString();
+    setOzonWorkState((current) => {
+      const tasks = (current.tasks || []).map((task) => (
+        task.id === taskId ? { ...task, status, updatedAt: now } : task
+      ));
+      const task = tasks.find((item) => item.id === taskId);
+      return {
+        ...current,
+        tasks,
+        recentEvents: [
+          {
+            id: `event-${Date.now()}`,
+            action: status,
+            label: `${task?.title || "Ozon карточка"}: ${ozonTaskStatusMeta(status).label}`,
+            at: now,
+          },
+          ...(current.recentEvents || []),
+        ].slice(0, 30),
+      };
+    });
+  }
+
+  function deleteOzonTask(taskId) {
+    setOzonWorkState((current) => ({
+      ...current,
+      tasks: (current.tasks || []).filter((task) => task.id !== taskId),
+      recentEvents: [
+        { id: `event-${Date.now()}`, action: "deleted", label: "Ozon-задача удалена из beta-набора", at: new Date().toISOString() },
+        ...(current.recentEvents || []),
+      ].slice(0, 30),
+    }));
   }
 
   const ozonFlowRows = [
@@ -7723,15 +7766,24 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   </div>
                 </section>
 
-                <OzonCardsPanel cards={portal.realCards || []} onOpenCard={onOpenCard} />
+                <OzonCardsPanel
+                  cards={portal.realCards || []}
+                  portalId={portal.id}
+                  workState={ozonWorkState}
+                  onWorkStateChange={setOzonWorkState}
+                  onOpenCard={onOpenCard}
+                  onOpenTasks={() => setSellerTab("tasks")}
+                />
               </>
             ) : null}
 
             {activeSellerTab === "tasks" ? (
-              <OzonPlaceholderPanel
-                title="Задачи Ozon"
-                copy="Задачи Ozon будут собираться отдельно от WB-пачек. Для СЯ оставляем возможность MPStats по WB keyword-базе."
-                tag="ожидает карточки"
+              <OzonTasksPanel
+                cards={portal.realCards || []}
+                workState={ozonWorkState}
+                onOpenCard={onOpenCard}
+                onUpdateTaskStatus={updateOzonTaskStatus}
+                onDeleteTask={deleteOzonTask}
               />
             ) : null}
             {activeSellerTab === "reports" ? (
@@ -7915,12 +7967,121 @@ function ozonCardSearchText(card) {
   ].map((value) => String(value || "").toLowerCase()).join(" ");
 }
 
-function OzonCardsPanel({ cards, onOpenCard }) {
+function ozonCardStableKey(card) {
+  const { sku, offerId } = ozonCardIdentity(card);
+  return normalizeDraftKeyValue(sku !== "Не указано" ? sku : offerId) || cardDraftKey(card);
+}
+
+function ozonWorkStorageKey(portalId) {
+  return `opticards-ozon-work:${portalId || "portal"}`;
+}
+
+function readOzonWorkState(portalId) {
+  if (typeof window === "undefined") {
+    return { selectedKeys: [], tasks: [], recentEvents: [] };
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ozonWorkStorageKey(portalId)) || "{}");
+    return {
+      selectedKeys: Array.isArray(parsed.selectedKeys) ? parsed.selectedKeys.map(String).filter(Boolean) : [],
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      recentEvents: Array.isArray(parsed.recentEvents) ? parsed.recentEvents : [],
+    };
+  } catch {
+    return { selectedKeys: [], tasks: [], recentEvents: [] };
+  }
+}
+
+function writeOzonWorkState(portalId, state) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(ozonWorkStorageKey(portalId), JSON.stringify({
+    selectedKeys: Array.isArray(state?.selectedKeys) ? state.selectedKeys : [],
+    tasks: Array.isArray(state?.tasks) ? state.tasks : [],
+    recentEvents: Array.isArray(state?.recentEvents) ? state.recentEvents.slice(0, 30) : [],
+  }));
+}
+
+function ozonTaskStatusMeta(status) {
+  if (status === "done") return { label: "готово", tone: "green" };
+  if (status === "skipped") return { label: "пропущено", tone: "amber" };
+  if (status === "later") return { label: "вернуться позже", tone: "blue" };
+  if (status === "returned") return { label: "возврат", tone: "red" };
+  return { label: "в работе", tone: "blue" };
+}
+
+function ozonTaskForCard(card, tasks = []) {
+  const key = ozonCardStableKey(card);
+  return (Array.isArray(tasks) ? tasks : []).find((task) => task.cardKey === key) || null;
+}
+
+function ozonWorkStateForCard(card, selectedSet, tasks = []) {
+  const task = ozonTaskForCard(card, tasks);
+  if (task) {
+    return ozonTaskStatusMeta(task.status);
+  }
+  if (selectedSet.has(ozonCardStableKey(card))) {
+    return { label: "В наборе", tone: "blue" };
+  }
+  return ozonCardWorkState(card);
+}
+
+function ozonKeywordTokens(...values) {
+  const stopWords = new Set(["для", "или", "это", "как", "без", "при", "над", "под", "что", "the", "and", "with", "ozon", "mpstats"]);
+  const seen = new Set();
+  const tokens = [];
+  values
+    .join(" ")
+    .toLowerCase()
+    .replace(/[^0-9a-zа-яё\s-]+/gi, " ")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 2 && !stopWords.has(item))
+    .forEach((item) => {
+      if (!seen.has(item)) {
+        seen.add(item);
+        tokens.push(item);
+      }
+    });
+  return tokens;
+}
+
+function ozonSemanticDraftRows(card, seedQuery = "") {
+  const rawFields = rawFieldsForCard(card);
+  const title = card?.title || rawFields.title || rawFields.name || "";
+  const description = card?.description || rawFields.description || "";
+  const brand = card?.brand || rawFields.brand || "";
+  const category = ozonCardCategory(card);
+  const currentTokens = ozonKeywordTokens(title, description).slice(0, 12);
+  const seedTokens = ozonKeywordTokens(seedQuery, brand, category).slice(0, 10);
+  const current = currentTokens.map((query, index) => ({
+    query,
+    status: "selected",
+    frequency: "",
+    position: index < 4 ? index + 1 : "",
+    source: "Ozon карточка",
+  }));
+  const recommendations = [...new Set([...seedTokens, ...ozonKeywordTokens(category, brand, title).slice(0, 10)])]
+    .filter((query) => !currentTokens.includes(query))
+    .slice(0, 16)
+    .map((query, index) => ({
+      query,
+      status: "recommended",
+      frequency: "",
+      position: "",
+      source: index < seedTokens.length ? "MPStats/WB keyword-база" : "Ozon snapshot",
+    }));
+  return { current, recommendations };
+}
+
+function OzonCardsPanel({ cards, portalId, workState, onWorkStateChange, onOpenCard, onOpenTasks }) {
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const visibleCards = Array.isArray(cards) ? cards : [];
+  const selectedKeys = Array.isArray(workState?.selectedKeys) ? workState.selectedKeys : [];
+  const selectedSet = new Set(selectedKeys);
+  const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
   if (!visibleCards.length) {
     return (
       <OzonPlaceholderPanel
@@ -7938,10 +8099,12 @@ function OzonCardsPanel({ cards, onOpenCard }) {
   const signalOnlyCards = signalCards.filter((card) => !ozonCardProblemReasons(card).length);
   const cleanCards = visibleCards.filter((card) => !ozonCardProblemReasons(card).length && !ozonCardDataSignals(card).length);
   const readyCards = visibleCards.filter((card) => !ozonCardProblemReasons(card).length);
+  const taskCards = visibleCards.filter((card) => ozonTaskForCard(card, tasks));
+  const selectedCards = visibleCards.filter((card) => selectedSet.has(ozonCardStableKey(card)));
   const filteredCards = visibleCards.filter((card) => {
     const hasProblems = ozonCardProblemReasons(card).length > 0;
     const hasSignals = ozonCardDataSignals(card).length > 0;
-    const workState = ozonCardWorkState(card);
+    const cardWorkState = ozonWorkStateForCard(card, selectedSet, tasks);
     if (issueFilter === "problems" && !hasProblems) {
       return false;
     }
@@ -7954,7 +8117,13 @@ function OzonCardsPanel({ cards, onOpenCard }) {
     if (workFilter === "ready" && hasProblems) {
       return false;
     }
-    if (workFilter === "check" && workState.label !== "Проверить данные") {
+    if (workFilter === "check" && cardWorkState.label !== "Проверить данные") {
+      return false;
+    }
+    if (workFilter === "tasks" && !ozonTaskForCard(card, tasks)) {
+      return false;
+    }
+    if (workFilter === "selected" && !selectedSet.has(ozonCardStableKey(card))) {
       return false;
     }
     if (categoryFilter !== "all" && ozonCardCategory(card) !== categoryFilter) {
@@ -7965,6 +8134,66 @@ function OzonCardsPanel({ cards, onOpenCard }) {
     }
     return true;
   });
+  const visibleKeys = filteredCards.map(ozonCardStableKey);
+  const allVisibleSelected = Boolean(visibleKeys.length) && visibleKeys.every((key) => selectedSet.has(key));
+
+  function updateWorkState(nextPatch) {
+    const next = { selectedKeys, tasks, recentEvents: workState?.recentEvents || [], ...nextPatch };
+    onWorkStateChange?.(next);
+  }
+
+  function toggleCard(card) {
+    const key = ozonCardStableKey(card);
+    const nextKeys = selectedSet.has(key)
+      ? selectedKeys.filter((item) => item !== key)
+      : [...selectedKeys, key];
+    updateWorkState({ selectedKeys: nextKeys });
+  }
+
+  function toggleVisible() {
+    const nextSet = new Set(selectedKeys);
+    if (allVisibleSelected) {
+      visibleKeys.forEach((key) => nextSet.delete(key));
+    } else {
+      visibleKeys.forEach((key) => nextSet.add(key));
+    }
+    updateWorkState({ selectedKeys: [...nextSet] });
+  }
+
+  function createOzonTaskBatch() {
+    const now = new Date().toISOString();
+    const existingKeys = new Set(tasks.map((task) => task.cardKey));
+    const nextTasks = [
+      ...tasks,
+      ...selectedCards
+        .filter((card) => !existingKeys.has(ozonCardStableKey(card)))
+        .map((card, index) => {
+          const rawFields = rawFieldsForCard(card);
+          const { sku, offerId } = ozonCardIdentity(card);
+          return {
+            id: `ozon-task-${Date.now()}-${index}`,
+            cardKey: ozonCardStableKey(card),
+            title: card.title || rawFields.title || rawFields.name || "Ozon карточка",
+            sku,
+            offerId,
+            category: ozonCardCategory(card),
+            status: "draft",
+            workType: "content",
+            createdAt: now,
+            updatedAt: now,
+          };
+        }),
+    ];
+    updateWorkState({
+      tasks: nextTasks,
+      selectedKeys: [],
+      recentEvents: [
+        { id: `event-${Date.now()}`, action: "created", label: `Создан Ozon-набор: ${selectedCards.length} карточек`, at: now },
+        ...(workState?.recentEvents || []),
+      ],
+    });
+    onOpenTasks?.();
+  }
 
   function resetFilters() {
     setQuery("");
@@ -8018,9 +8247,13 @@ function OzonCardsPanel({ cards, onOpenCard }) {
               <span>Готовы к работе</span>
               <strong>{formatNumber(readyCards.length)}</strong>
             </button>
+            <button className={`work-summary-item ${isSummaryFilterActive({ work: "tasks" }) ? "active" : ""}`} type="button" onClick={() => applySummaryFilter({ work: "tasks" })}>
+              <span>В задачах</span>
+              <strong>{formatNumber(taskCards.length)}</strong>
+            </button>
             <div className="work-summary-note">
-              <strong>Ozon beta</strong>
-              <span>задачи и аудит подключим отдельным Ozon-потоком</span>
+              <strong>{selectedCards.length ? `${formatNumber(selectedCards.length)} в наборе` : "Набор пуст"}</strong>
+              <span>{selectedCards.length ? "можно создать Ozon-задачу" : "выберите строки для работы"}</span>
             </div>
           </div>
 
@@ -8039,6 +8272,8 @@ function OzonCardsPanel({ cards, onOpenCard }) {
               <option value="all">Любой статус</option>
               <option value="ready">Готовы к работе</option>
               <option value="check">Проверить данные</option>
+              <option value="tasks">В задачах</option>
+              <option value="selected">В рабочем наборе</option>
             </select>
             <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
               <option value="all">Все категории</option>
@@ -8049,6 +8284,13 @@ function OzonCardsPanel({ cards, onOpenCard }) {
           <div className="cards-toolbar">
             <span>Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · Ozon snapshot из MPStats</span>
             <div className="toolbar">
+              <button className="btn primary" type="button" onClick={createOzonTaskBatch} disabled={!selectedCards.length}>
+                <Plus size={16} />Взять в работу
+              </button>
+              <button className="btn" type="button" onClick={toggleVisible} disabled={!filteredCards.length}>
+                <CheckSquare size={16} />{allVisibleSelected ? "Убрать видимые" : "Выбрать видимые"}
+              </button>
+              <button className="btn" type="button" onClick={() => updateWorkState({ selectedKeys: [] })} disabled={!selectedKeys.length}>Очистить набор</button>
               <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
             </div>
           </div>
@@ -8059,6 +8301,9 @@ function OzonCardsPanel({ cards, onOpenCard }) {
             <table>
               <thead>
                 <tr>
+                  <th className="select-col">
+                    <input type="checkbox" aria-label="Выбрать видимые Ozon-карточки" checked={allVisibleSelected} onChange={toggleVisible} />
+                  </th>
                   <th>Карточка</th>
                   <th>SKU / offer</th>
                   <th>Заполненность</th>
@@ -8074,13 +8319,16 @@ function OzonCardsPanel({ cards, onOpenCard }) {
                   const reasons = ozonCardProblemReasons(card);
                   const signals = ozonCardDataSignals(card);
                   const completeness = ozonCardCompleteness(card);
-                  const workState = ozonCardWorkState(card);
+                  const rowWorkState = ozonWorkStateForCard(card, selectedSet, tasks);
                   const title = card.title || rawFields.title || rawFields.name || "Ozon карточка";
                   const brand = card.brand || rawFields.brand || "бренд не указан";
                   const price = ozonCardMetricValue(card, ["price", "finalPrice", "final_price"]);
                   const stock = ozonCardMetricValue(card, ["stock", "balance", "available_stock"]);
                   return (
-                    <tr key={`${sku}-${offerId}-${index}`}>
+                    <tr key={`${sku}-${offerId}-${index}`} className={selectedSet.has(ozonCardStableKey(card)) ? "selected-row" : ""}>
+                      <td className="select-col">
+                        <input type="checkbox" aria-label="Добавить Ozon-карточку в рабочий набор" checked={selectedSet.has(ozonCardStableKey(card))} onChange={() => toggleCard(card)} />
+                      </td>
                       <td>
                         <div className="product-cell">
                           <Thumb url={bestPhotoUrl(card)} alt={index % 2 === 1} />
@@ -8105,7 +8353,7 @@ function OzonCardsPanel({ cards, onOpenCard }) {
                           {!reasons.length && !signals.length ? <Tag tone="green">без замечаний</Tag> : null}
                         </div>
                       </td>
-                      <td><Tag tone={workState.tone}>{workState.label}</Tag></td>
+                      <td><Tag tone={rowWorkState.tone}>{rowWorkState.label}</Tag></td>
                       <td><IconButton icon={Eye} label="Открыть Ozon-карточку" onClick={() => onOpenCard?.(card)} /></td>
                     </tr>
                   );
@@ -8120,6 +8368,108 @@ function OzonCardsPanel({ cards, onOpenCard }) {
           </div>
         )}
       </div>
+    </section>
+  );
+}
+
+function OzonTasksPanel({ cards, workState, onOpenCard, onUpdateTaskStatus, onDeleteTask }) {
+  const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
+  const events = Array.isArray(workState?.recentEvents) ? workState.recentEvents : [];
+  const cardsByKey = new Map((Array.isArray(cards) ? cards : []).map((card) => [ozonCardStableKey(card), card]));
+  const activeTasks = tasks.filter((task) => !["done", "skipped"].includes(task.status));
+  const doneTasks = tasks.filter((task) => task.status === "done");
+  const skippedTasks = tasks.filter((task) => task.status === "skipped");
+  const laterTasks = tasks.filter((task) => task.status === "later");
+  const returnedTasks = tasks.filter((task) => task.status === "returned");
+
+  if (!tasks.length) {
+    return (
+      <OzonPlaceholderPanel
+        title="Задачи Ozon"
+        copy="Выберите карточки во вкладке Кабинет и нажмите Взять в работу. Задачи Ozon пока хранятся отдельно от WB-пачек в beta-контуре."
+        tag="нет задач"
+      />
+    );
+  }
+
+  return (
+    <section className="workspace-strip ozon-task-workspace">
+      <div className="strip-head">
+        <div>
+          <h2>Задачи Ozon</h2>
+          <p>Beta-набор задач по Ozon-карточкам. Он не использует WB workflow, WB audit и WB exports.</p>
+        </div>
+        <Tag tone="blue">{formatNumber(tasks.length)}</Tag>
+      </div>
+
+      <div className="cards-work-summary">
+        <div className="work-summary-note">
+          <span>В работе</span>
+          <strong>{formatNumber(activeTasks.length)}</strong>
+        </div>
+        <div className="work-summary-note">
+          <span>Готово</span>
+          <strong>{formatNumber(doneTasks.length)}</strong>
+        </div>
+        <div className="work-summary-note">
+          <span>Вернуться позже</span>
+          <strong>{formatNumber(laterTasks.length)}</strong>
+        </div>
+        <div className="work-summary-note">
+          <span>Возвраты</span>
+          <strong>{formatNumber(returnedTasks.length)}</strong>
+        </div>
+        <div className="work-summary-note">
+          <span>Пропущено</span>
+          <strong>{formatNumber(skippedTasks.length)}</strong>
+        </div>
+      </div>
+
+      <div className="task-card-list ozon-task-list">
+        {tasks.map((task) => {
+          const card = cardsByKey.get(task.cardKey);
+          const statusMeta = ozonTaskStatusMeta(task.status);
+          return (
+            <div className="task-card-row" key={task.id}>
+              <div className="task-card-row-main">
+                <Thumb url={card ? bestPhotoUrl(card) : ""} />
+                <div>
+                  <strong>{task.title}</strong>
+                  <span>Ozon SKU {textOrDash(task.sku)} · offer {textOrDash(task.offerId)} · {textOrDash(task.category)}</span>
+                </div>
+              </div>
+              <div className="task-card-row-actions">
+                <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
+                <button className="btn mini" type="button" onClick={() => card && onOpenCard?.(card)} disabled={!card}>Открыть</button>
+                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "done")}>Готово</button>
+                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "later")}>Вернуться позже</button>
+                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "skipped")}>Пропустить</button>
+                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "returned")}>Возврат</button>
+                <button className="btn mini danger" type="button" onClick={() => onDeleteTask?.(task.id)}>Удалить</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <details className="task-batch-log">
+        <summary>Журнал Ozon beta</summary>
+        {events.length ? (
+          <div className="task-batch-event-list">
+            {events.slice(0, 12).map((event) => (
+              <div className="task-batch-event" key={event.id}>
+                <div>
+                  <strong>{event.label}</strong>
+                  <span>{event.action || "событие"}</span>
+                </div>
+                <time>{event.at ? new Date(event.at).toLocaleString("ru-RU") : "без даты"}</time>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state compact"><span>Событий пока нет.</span></div>
+        )}
+      </details>
     </section>
   );
 }
@@ -8218,15 +8568,14 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
   const externalUrl = safeHttpsUrl(card?.url || rawFields.url || rawFields.productUrl || rawFields.link);
   const sourceLabel = mpstats.source || rawFields.source || "Ozon MPStats";
   const portalName = portalDisplayName(portal);
-  const issueCount = Number(card?.issueCount || 0);
+  const issueReasons = ozonCardProblemReasons(card);
+  const dataSignals = ozonCardDataSignals(card);
+  const completeness = ozonCardCompleteness(card);
+  const workState = ozonCardWorkState(card);
+  const issueCount = issueReasons.length || Number(card?.issueCount || 0);
   const rawTechnicalFields = Object.keys(rawFields).length ? rawFields : card;
 
   const pendingPanels = {
-    semantic: {
-      title: "Семантическое ядро Ozon",
-      copy: "Здесь будет СЯ для Ozon-карточки с явной пометкой источника: карточка Ozon, keyword-база MPStats/WB.",
-      tag: "следующий этап",
-    },
     audit: {
       title: "Рыночный аудит Ozon",
       copy: "Ozon-аудит будет использовать Ozon snapshot, MPStats-метрики, категорию, цену, остаток, фото и будущие Ozon-правила качества.",
@@ -8291,6 +8640,29 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
 
             {activeTab === "card" ? (
               <>
+                <section className="workspace-strip ozon-card-quality">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Статус карточки</h2>
+                      <p>Рабочая сводка по заполненности и замечаниям Ozon snapshot.</p>
+                    </div>
+                    <Tag tone={workState.tone}>{workState.label}</Tag>
+                  </div>
+                  <div className="commerce-summary">
+                    <div><span>Заполненность</span><strong>{completeness.label}</strong></div>
+                    <div><span>Замечания</span><strong>{formatNumber(issueReasons.length)}</strong></div>
+                    <div><span>Сигналы</span><strong>{formatNumber(dataSignals.length)}</strong></div>
+                    <div><span>Фото</span><strong>{formatNumber(ozonCardPhotoCount(card))}</strong></div>
+                    <div><span>Характеристики</span><strong>{formatNumber(ozonCardCharacteristicItems(card).length)}</strong></div>
+                    <div><span>Источник</span><strong>{sourceLabel}</strong></div>
+                  </div>
+                  <div className="problem-reasons ozon-detail-reasons">
+                    {issueReasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
+                    {!issueReasons.length && dataSignals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>)}
+                    {!issueReasons.length && !dataSignals.length ? <Tag tone="green">без замечаний</Tag> : null}
+                  </div>
+                </section>
+
                 <section className="workspace-strip">
                   <div className="strip-head">
                     <div>
@@ -8312,6 +8684,18 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                     <span>Описание</span>
                     <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                   </div>
+                  {Array.isArray(photos) && photos.length ? (
+                    <div className="ozon-photo-strip">
+                      {photos.slice(0, 8).map((photo, index) => {
+                        const url = typeof photo === "string" ? safeHttpsUrl(photo) : safeHttpsUrl(photo?.big || photo?.c516x688 || photo?.square || photo?.url);
+                        return (
+                          <div className={`ozon-photo-cell ${url ? "has-image" : ""}`} key={`${url || index}`}>
+                            {url ? <img src={url} alt="" loading="lazy" decoding="async" /> : <span>OZ</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </section>
 
                 <section className="workspace-strip">
@@ -8364,7 +8748,11 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
               </>
             ) : null}
 
-            {["semantic", "audit", "changes"].includes(activeTab) ? (
+            {activeTab === "semantic" ? (
+              <OzonSemanticDraftPanel card={card} />
+            ) : null}
+
+            {["audit", "changes"].includes(activeTab) ? (
               <OzonDetailPendingPanel {...pendingPanels[activeTab]} />
             ) : null}
 
@@ -8378,6 +8766,126 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
               </details>
             ) : null}
           </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OzonSemanticDraftPanel({ card }) {
+  const rawFields = rawFieldsForCard(card);
+  const defaultSeed = [card?.brand || rawFields.brand, ozonCardCategory(card), card?.title || rawFields.title || rawFields.name]
+    .filter((item) => item && item !== "Не указано")
+    .join(" ");
+  const [seedQuery, setSeedQuery] = useState(defaultSeed);
+  const [selectedQueries, setSelectedQueries] = useState([]);
+  const [removalQueries, setRemovalQueries] = useState([]);
+  const semanticDraft = ozonSemanticDraftRows(card, seedQuery);
+  const selectedSet = new Set(selectedQueries);
+  const removalSet = new Set(removalQueries);
+  const selectedRows = semanticDraft.recommendations.filter((item) => selectedSet.has(item.query));
+  const currentRows = semanticDraft.current;
+  const finalCount = currentRows.length + selectedRows.length - removalQueries.length;
+
+  function toggleSelected(query) {
+    setSelectedQueries((current) => (
+      current.includes(query) ? current.filter((item) => item !== query) : [...current, query]
+    ));
+  }
+
+  function toggleRemoval(query) {
+    setRemovalQueries((current) => (
+      current.includes(query) ? current.filter((item) => item !== query) : [...current, query]
+    ));
+  }
+
+  return (
+    <section className="workspace-strip ozon-semantic-workspace">
+      <div className="strip-head">
+        <div>
+          <h2>Семантическое ядро Ozon</h2>
+          <p>Beta-черновик: карточка Ozon, текущий контент и будущая MPStats/WB keyword-база без запуска WB API.</p>
+        </div>
+        <Tag tone="blue">MPStats/WB</Tag>
+      </div>
+
+      <div className="semantic-seed-row">
+        <label className="search-field card-search">
+          <Search size={16} />
+          <input value={seedQuery} onChange={(event) => setSeedQuery(event.target.value)} placeholder="Стартовая фраза для Ozon-СЯ" />
+        </label>
+        <Tag tone="amber">частотность подключим отдельно</Tag>
+      </div>
+
+      <div className="semantic-final-bar">
+        <div>
+          <span>Текущие ключи</span>
+          <strong>{formatNumber(currentRows.length)}</strong>
+          <em>из названия и описания Ozon</em>
+        </div>
+        <div>
+          <span>К добавлению</span>
+          <strong>{formatNumber(selectedRows.length)}</strong>
+          <em>выбрано из рекомендаций</em>
+        </div>
+        <div>
+          <span>К исключению</span>
+          <strong>{formatNumber(removalQueries.length)}</strong>
+          <em>ручная пометка</em>
+        </div>
+        <div>
+          <span>Итоговый черновик</span>
+          <strong>{formatNumber(Math.max(finalCount, 0))}</strong>
+          <em>для будущего сохранения</em>
+        </div>
+      </div>
+
+      <div className="semantic-core-grid">
+        <div className="semantic-keyword-list">
+          <div className="semantic-list-head">
+            <strong>Текущий контент Ozon</strong>
+            <span>{formatNumber(currentRows.length)}</span>
+          </div>
+          {currentRows.length ? currentRows.map((item) => {
+            const marked = removalSet.has(item.query);
+            return (
+              <div className={`semantic-keyword ${marked ? "remove" : ""}`} key={item.query}>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{marked ? "к исключению" : item.source}</em>
+                </div>
+                <div className="semantic-keyword-actions">
+                  <button className="btn mini" type="button" onClick={() => toggleRemoval(item.query)}>
+                    {marked ? "Оставить" : "Убрать"}
+                  </button>
+                </div>
+              </div>
+            );
+          }) : <div className="empty-state compact"><span>В текущем Ozon-контенте ключей не найдено.</span></div>}
+        </div>
+
+        <div className="semantic-keyword-list">
+          <div className="semantic-list-head">
+            <strong>Рекомендации MPStats/WB</strong>
+            <span>{formatNumber(semanticDraft.recommendations.length)}</span>
+          </div>
+          {semanticDraft.recommendations.length ? semanticDraft.recommendations.map((item) => {
+            const selected = selectedSet.has(item.query);
+            return (
+              <div className={`semantic-keyword recommended ${selected ? "selected" : ""}`} key={item.query}>
+                <div className="semantic-keyword-main">
+                  <strong>{item.query}</strong>
+                  <em>{item.source}</em>
+                </div>
+                <div className="semantic-keyword-actions">
+                  <Tag tone={selected ? "green" : "blue"}>{selected ? "в работе" : "кандидат"}</Tag>
+                  <button className="btn mini" type="button" onClick={() => toggleSelected(item.query)}>
+                    {selected ? "Убрать" : "Добавить"}
+                  </button>
+                </div>
+              </div>
+            );
+          }) : <div className="empty-state compact"><span>Добавьте стартовую фразу, чтобы собрать кандидаты.</span></div>}
         </div>
       </div>
     </section>
