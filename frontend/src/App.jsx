@@ -5290,6 +5290,14 @@ function IconButton({ icon: Icon, label, onClick, disabled = false }) {
   );
 }
 
+function ActionHelp({ label }) {
+  return (
+    <span className="action-help-icon" role="img" tabIndex={0} aria-label={label} title={label}>
+      <HelpCircle size={15} />
+    </span>
+  );
+}
+
 function HelpHint({ enabled, title, children }) {
   if (!enabled) {
     return null;
@@ -12856,6 +12864,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                           : missingAuditTasks.length
                             ? `Доделать черновики (${formatNumber(missingAuditTasks.length)})`
                             : "Подготовить черновики";
+                      const auditButtonHelp = "Подготовить черновики: запускает аудит карточек и готовит первичные правки по текущей карточке, MPStats, конкурентам и характеристикам. Это не переписывание строго по итоговому СЯ.";
                       const auditErrors = Array.isArray(auditState.errors) ? auditState.errors : [];
                       const contentState = batchContentState[group.key] || {};
                       const contentBusy = contentState.status === "running";
@@ -12882,6 +12891,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                           : missingContentTasks.length
                             ? `Доделать СЯ (${formatNumber(missingContentTasks.length)})`
                             : "Переоптимизировать по СЯ";
+                      const contentButtonHelp = "Переоптимизировать по СЯ: берет уже сохраненное итоговое СЯ карточки и переписывает заголовок/описание под согласованные ключи. Используйте после загрузки или сохранения итогового СЯ.";
                       const contentErrors = Array.isArray(contentState.errors) ? contentState.errors : [];
 	                      return (
                         <article className="task-batch-card" key={group.key}>
@@ -12911,10 +12921,14 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                               <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, auditButtonTasks, { retryMode: auditRetryMode })} disabled={Boolean(taskActionStatus) || auditBusy || !auditButtonTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
                                 <WandSparkles size={16} />{auditButtonLabel}
                               </button>
+                              <ActionHelp label={auditButtonHelp} />
                               {showContentReoptimize ? (
-                                <button className={loadingButtonClass("btn", contentBusy)} type="button" onClick={() => runGroupContentReoptimization(group, section.key, contentButtonTasks, { retryMode: contentRetryMode })} disabled={Boolean(taskActionStatus) || contentBusy || !contentButtonTasks.length} aria-busy={contentBusy || undefined} title={contentButtonTasks.length ? "Обновить заголовок и описание по сохраненному итоговому СЯ." : "Сначала добавьте итоговое СЯ в карточках пачки."}>
-                                  <FileText size={16} />{contentButtonLabel}
-                                </button>
+                                <>
+                                  <button className={loadingButtonClass("btn", contentBusy)} type="button" onClick={() => runGroupContentReoptimization(group, section.key, contentButtonTasks, { retryMode: contentRetryMode })} disabled={Boolean(taskActionStatus) || contentBusy || !contentButtonTasks.length} aria-busy={contentBusy || undefined} title={contentButtonTasks.length ? "Обновить заголовок и описание по сохраненному итоговому СЯ." : "Сначала добавьте итоговое СЯ в карточках пачки."}>
+                                    <FileText size={16} />{contentButtonLabel}
+                                  </button>
+                                  <ActionHelp label={contentButtonHelp} />
+                                </>
                               ) : null}
 	                            {isOrdering ? (
 	                              <>

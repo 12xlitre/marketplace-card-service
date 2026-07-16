@@ -4696,6 +4696,28 @@ tr:last-child td {
   cursor: help;
 }
 
+.action-help-icon {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--blue);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+  box-shadow: 0 1px 0 rgba(31, 37, 34, .04);
+}
+
+.action-help-icon:hover,
+.action-help-icon:focus-visible {
+  border-color: #8fa8e8;
+  background: var(--brand-soft);
+  color: var(--brand);
+  outline: none;
+}
+
 .status-note {
   color: var(--muted);
   font-size: 13px;
