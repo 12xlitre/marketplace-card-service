@@ -74,6 +74,7 @@ Read-only маршруты backend:
 POST /api/portals
 GET /api/portals
 POST /api/portals/<portal_id>/team
+POST /api/portals/<portal_id>/client-contact
 POST /api/portals/<portal_id>/archive
 POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
@@ -100,6 +101,8 @@ POST /api/portal-work-periods
 DELETE /api/semantic-core-collections?portal_id=1&collection_id=1
 DELETE /api/portal-work-periods?portal_id=1&period_id=1
 ```
+
+`POST /api/portals` принимает необязательный `clientName`: он нужен для группировки WB/Ozon кабинетов внутри одного клиента до появления отдельной backend-сущности `Client`.
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
 

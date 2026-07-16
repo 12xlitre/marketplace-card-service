@@ -111,6 +111,7 @@ const initialDemoPortal = {
     manager: "manager",
   },
   memberLogins: ["manager", "specialist"],
+  clientContact: { name: "", phone: "", email: "", comment: "" },
   isDemo: true,
   realCards: [],
   syncStatus: "demo",
@@ -686,6 +687,10 @@ function portalMarketplaceKey(portal) {
   return "wildberries";
 }
 
+function isOzonPortal(portal) {
+  return portalMarketplaceKey(portal) === "ozon";
+}
+
 function marketplaceTitle(key) {
   return key === "ozon" ? "Ozon" : "Wildberries";
 }
@@ -697,6 +702,27 @@ function portalClientName(portal) {
 
 function portalClientKey(portal) {
   return String(portal?.clientId || portal?.client_id || portalClientName(portal)).trim().toLowerCase() || "client";
+}
+
+function normalizeClientContact(contact = {}) {
+  const source = contact && typeof contact === "object" ? contact : {};
+  return {
+    name: String(source.name || "").trim(),
+    phone: String(source.phone || "").trim(),
+    email: String(source.email || "").trim(),
+    comment: String(source.comment || "").trim(),
+  };
+}
+
+function clientContactHasValue(contact) {
+  const normalized = normalizeClientContact(contact);
+  return Boolean(normalized.name || normalized.phone || normalized.email || normalized.comment);
+}
+
+function clientContactFromClient(client) {
+  const portals = Array.isArray(client?.portals) ? client.portals : [];
+  const portalWithContact = portals.find((portal) => clientContactHasValue(portal.clientContact));
+  return normalizeClientContact((portalWithContact || portals[0] || {}).clientContact);
 }
 
 function buildClientWorkspaces(portals) {
@@ -790,6 +816,8 @@ function normalizePortal(portal) {
     apiConnected: Boolean(portal.apiConnected),
     storeUrl: String(portal.storeUrl || portal.store_url || "").trim(),
     manualSource: String(portal.manualSource || portal.manual_source || "").trim(),
+    clientName: String(portal.clientName || portal.client_name || "").trim(),
+    clientContact: normalizeClientContact(portal.clientContact || portal.client_contact),
     isActive: portal.isActive !== false,
     status: portal.mode === "api" && !portal.apiConnected ? "API ожидает подключения" : portal.status,
     ownerLogin: teamRoles.lead || portal.ownerLogin,
@@ -5853,6 +5881,43 @@ export default function App() {
     }
   }
 
+  async function createOzonPortal(client) {
+    if (!client) {
+      setNotice("Сначала откройте клиента для добавления Ozon.");
+      return false;
+    }
+    const leadPortal = (client.portals || [])[0] || null;
+    const teamRoles = leadPortal ? getPortalTeam(leadPortal) : defaultTeamFromUsers(displayUsers);
+    try {
+      const response = await apiRequest("/api/portals", {
+        method: "POST",
+        body: JSON.stringify({
+          mode: "manual",
+          marketplace: "Ozon",
+          scope: "full",
+          name: `${client.name} Ozon`,
+          clientName: client.name,
+          teamRoles,
+        }),
+      });
+      const portal = normalizePortal(response.portal);
+      setUserPortals((items) => [...items, portal]);
+      setSelectedClientId(client.id);
+      setSelectedPortalId(portal.id);
+      setSellerTab("cabinet");
+      setScreen("seller");
+      setNotice("Тестовый Ozon-кабинет создан. Он не использует WB API и открыт как отдельный beta-поток.");
+      return true;
+    } catch (error) {
+      if (error.message === "client_name_too_long") {
+        setNotice("Название клиента слишком длинное для Ozon-кабинета.");
+      } else {
+        setNotice("Не удалось создать тестовый Ozon-кабинет.");
+      }
+      return false;
+    }
+  }
+
   async function replacePortalApiToken(targetPortal, payload) {
     const response = await apiRequest(`/api/portals/${encodeURIComponent(targetPortal.id)}/wb-token`, {
       method: "POST",
@@ -5912,6 +5977,48 @@ export default function App() {
       return true;
     }
     setNotice(`Команда сохранена в ${savedCount} из ${portals.length} кабинетов клиента.`);
+    return false;
+  }
+
+  async function updatePortalClientContact(portal, clientContact) {
+    const normalizedContact = normalizeClientContact(clientContact);
+    if (portal.isDemo) {
+      setDemoPortal((item) => ({ ...item, clientContact: normalizedContact }));
+      return true;
+    }
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/client-contact`, {
+        method: "POST",
+        body: JSON.stringify({ clientContact: normalizedContact }),
+      });
+      replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
+      return true;
+    } catch (error) {
+      if (String(error.message || "").includes("too_long")) {
+        setNotice("Контактные данные слишком длинные. Сократите текст и сохраните еще раз.");
+      } else {
+        setNotice("Не удалось сохранить контактные данные клиента.");
+      }
+      return false;
+    }
+  }
+
+  async function updateClientContact(client, clientContact) {
+    const portals = Array.isArray(client?.portals) ? client.portals : [];
+    if (!portals.length) {
+      setNotice("У клиента пока нет кабинетов для сохранения контактов.");
+      return false;
+    }
+    const results = [];
+    for (const portal of portals) {
+      results.push(await updatePortalClientContact(portal, clientContact));
+    }
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount === portals.length) {
+      setNotice("Контактные данные клиента сохранены.");
+      return true;
+    }
+    setNotice(`Контакты сохранены в ${savedCount} из ${portals.length} кабинетов клиента.`);
     return false;
   }
 
@@ -6026,13 +6133,30 @@ export default function App() {
               setPortalModalTarget(null);
               setPortalModalOpen(true);
             }}
-            onAddOzon={() => setNotice("Ozon-кабинет добавим после backend-модели клиента и отдельного Ozon API-контракта.")}
+            onAddOzon={() => createOzonPortal(currentClient)}
             onUpdateTeam={(teamRoles) => updateClientTeam(currentClient, teamRoles)}
+            onUpdateContact={(clientContact) => updateClientContact(currentClient, clientContact)}
             helpEnabled={helpEnabled}
           />
         ) : null}
 
-        {screen === "seller" ? (
+        {screen === "seller" && isOzonPortal(currentPortal) ? (
+          <OzonSellerScreen
+            portal={currentPortal}
+            displayUsers={displayUsers}
+            findUser={findUser}
+            canManage={canManagePortals}
+            onBack={() => setScreen("client")}
+            sellerTab={sellerTab}
+            onSellerTabChange={setSellerTab}
+            onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
+            onUpdateName={(name) => updatePortalName(currentPortal, name)}
+            onNotice={setNotice}
+            helpEnabled={helpEnabled}
+          />
+        ) : null}
+
+        {screen === "seller" && !isOzonPortal(currentPortal) ? (
           <SellerScreen
             portal={currentPortal}
             cards={currentPortalCards}
@@ -6397,20 +6521,25 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
   );
 }
 
-function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateTeam, helpEnabled = false }) {
+function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateTeam, onUpdateContact, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
   const [marketplaceTab, setMarketplaceTab] = useState("overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
   const ozonPortals = clientMarketplacePortals(client, "ozon");
   const leadPortal = client.portals[0] || null;
   const team = leadPortal ? getPortalTeam(leadPortal) : defaultTeamFromUsers(displayUsers);
+  const clientContact = clientContactFromClient(client);
   const [teamEditing, setTeamEditing] = useState(false);
   const [teamDraft, setTeamDraft] = useState(team);
   const [teamSaving, setTeamSaving] = useState(false);
+  const [contactEditing, setContactEditing] = useState(false);
+  const [contactDraft, setContactDraft] = useState(clientContact);
+  const [contactSaving, setContactSaving] = useState(false);
 
   useEffect(() => {
     setMarketplaceTab("overview");
     setTeamEditing(false);
+    setContactEditing(false);
   }, [client.id]);
 
   useEffect(() => {
@@ -6425,8 +6554,18 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
     }
   }, [team.lead, team.tech, team.manager, teamEditing]);
 
+  useEffect(() => {
+    if (!contactEditing) {
+      setContactDraft(clientContact);
+    }
+  }, [clientContact.name, clientContact.phone, clientContact.email, clientContact.comment, contactEditing]);
+
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
+  }
+
+  function updateContactDraft(field, value) {
+    setContactDraft((current) => ({ ...current, [field]: value }));
   }
 
   function openMarketplace(marketplaceKey, portals) {
@@ -6449,6 +6588,21 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
       }
     } finally {
       setTeamSaving(false);
+    }
+  }
+
+  async function saveContact() {
+    if (contactSaving) {
+      return;
+    }
+    setContactSaving(true);
+    try {
+      const saved = await onUpdateContact?.(normalizeClientContact(contactDraft));
+      if (saved !== false) {
+        setContactEditing(false);
+      }
+    } finally {
+      setContactSaving(false);
     }
   }
 
@@ -6518,6 +6672,62 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
           </section>
 
           <section className="panel client-info-panel">
+            <div className="panel-head">
+              <div>
+                <span className="section-eyebrow">Контакты</span>
+                <h2>Контактные данные</h2>
+                <p>Контакт клиента для согласований и рабочих вопросов.</p>
+              </div>
+              {!contactEditing && canManage ? <button className="btn" type="button" onClick={() => setContactEditing(true)}><Pencil size={16} />Редактировать</button> : null}
+            </div>
+            {!contactEditing ? (
+              <div className="client-info-list">
+                <div>
+                  <span>Контактное лицо</span>
+                  <strong>{clientContact.name || "не заполнено"}</strong>
+                </div>
+                <div>
+                  <span>Телефон</span>
+                  <strong>{clientContact.phone || "не заполнено"}</strong>
+                </div>
+                <div>
+                  <span>Email</span>
+                  <strong>{clientContact.email || "не заполнено"}</strong>
+                </div>
+                <div>
+                  <span>Комментарий</span>
+                  <strong>{clientContact.comment || "не заполнено"}</strong>
+                </div>
+              </div>
+            ) : (
+              <div className="client-team-editor">
+                <label className="field-label">
+                  Контактное лицо
+                  <input value={contactDraft.name || ""} onChange={(event) => updateContactDraft("name", event.target.value)} maxLength={120} disabled={contactSaving} />
+                </label>
+                <div className="form-two">
+                  <label className="field-label">
+                    Телефон
+                    <input type="tel" value={contactDraft.phone || ""} onChange={(event) => updateContactDraft("phone", event.target.value)} maxLength={80} disabled={contactSaving} />
+                  </label>
+                  <label className="field-label">
+                    Email
+                    <input type="email" value={contactDraft.email || ""} onChange={(event) => updateContactDraft("email", event.target.value)} maxLength={160} disabled={contactSaving} />
+                  </label>
+                </div>
+                <label className="field-label">
+                  Комментарий
+                  <textarea value={contactDraft.comment || ""} onChange={(event) => updateContactDraft("comment", event.target.value)} maxLength={1000} disabled={contactSaving} rows={3} />
+                </label>
+                <div className="client-team-actions">
+                  <button className="btn ghost" type="button" onClick={() => { setContactDraft(clientContact); setContactEditing(false); }} disabled={contactSaving}>Отмена</button>
+                  <button className={loadingButtonClass("btn primary", contactSaving)} type="button" onClick={saveContact} disabled={contactSaving} aria-busy={contactSaving || undefined}>Сохранить контакты</button>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="panel client-info-panel client-marketplaces-panel">
             <div className="panel-head">
               <div>
                 <span className="section-eyebrow">Маркетплейсы</span>
@@ -6626,7 +6836,7 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
         <article className="workspace-card add-card">
           <div className={`seller-logo ${isOzon ? "ozon-logo" : ""}`}>{isOzon ? "OZ" : "+"}</div>
           <h2>Добавить {label} кабинет</h2>
-          <p>{isOzon ? "Ozon-кабинет подключим отдельным контрактом." : "Подключить WB через API или завести ручной кабинет."}</p>
+          <p>{isOzon ? "Создать тестовый Ozon beta-кабинет внутри этого клиента." : "Подключить WB через API или завести ручной кабинет."}</p>
           <button className="btn primary" type="button" onClick={() => (isOzon ? onAddOzon?.() : onOpenModal?.("api"))}>
             <Plus size={17} />
             Добавить {label}
@@ -6735,6 +6945,282 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
         </div>
       </div>
     </article>
+  );
+}
+
+function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onNotice, helpEnabled = false }) {
+  const owner = findUser(portal.ownerLogin);
+  const creator = portalCreatorInfo(portal, findUser);
+  const displayName = portalDisplayName(portal);
+  const team = getPortalTeam(portal);
+  const activeSellerTab = normalizeSellerTab(sellerTab);
+  const setSellerTab = onSellerTabChange || (() => {});
+  const [teamEditing, setTeamEditing] = useState(false);
+  const [teamDraft, setTeamDraft] = useState(team);
+  const [teamSaving, setTeamSaving] = useState(false);
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(displayName);
+  const [nameSaving, setNameSaving] = useState(false);
+
+  useEffect(() => {
+    if (!teamEditing) {
+      setTeamDraft(team);
+    }
+  }, [portal.id, team.lead, team.tech, team.manager, teamEditing]);
+
+  useEffect(() => {
+    if (!nameEditing) {
+      setNameDraft(displayName);
+    }
+  }, [displayName, nameEditing]);
+
+  function updateTeamDraft(roleKey, login) {
+    setTeamDraft((current) => ({ ...current, [roleKey]: login }));
+  }
+
+  async function saveTeamDraft() {
+    if (teamSaving) return;
+    setTeamSaving(true);
+    try {
+      await onUpdateTeam?.(teamDraft);
+      setTeamEditing(false);
+    } finally {
+      setTeamSaving(false);
+    }
+  }
+
+  async function saveNameDraft() {
+    const cleanName = nameDraft.trim();
+    if (!cleanName) {
+      onNotice?.("Название Ozon-кабинета не может быть пустым.");
+      return;
+    }
+    setNameSaving(true);
+    try {
+      const saved = await onUpdateName?.(cleanName);
+      if (saved !== false) {
+        setNameEditing(false);
+      }
+    } finally {
+      setNameSaving(false);
+    }
+  }
+
+  const ozonFlowRows = [
+    ["Кабинет", "Ozon beta · отдельный от WB поток"],
+    ["Карточки", "ожидают Ozon-specific источник"],
+    ["СЯ", "MPStats по WB keyword-базе"],
+    ["Задачи", "будут храниться отдельно от WB задач"],
+    ["Отчеты", "отдельные Ozon периоды и выгрузки"],
+  ];
+  const ozonRouteRows = [
+    { title: "Кабинет Ozon", status: "создан", className: "active" },
+    { title: "Карточки Ozon", status: "источник не подключен", className: "paused" },
+    { title: "СЯ через MPStats", status: "WB keyword-база", className: "pending" },
+    { title: "Задачи Ozon", status: "после карточек", className: "pending" },
+    { title: "Отчеты Ozon", status: "после периодов", className: "pending" },
+  ];
+
+  return (
+    <section className="screen active marketplace-theme-ozon">
+      <header className="topbar">
+        <div className="title">
+          <div className="seller-title-row">
+            {nameEditing ? (
+              <div className="seller-name-editor">
+                <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
+                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
+                  {nameSaving ? "Сохраняем" : "Сохранить"}
+                </button>
+                <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
+              </div>
+            ) : (
+              <>
+                <h1>{displayName}</h1>
+                {canManage ? <IconButton icon={Pencil} label="Редактировать название Ozon-кабинета" onClick={() => setNameEditing(true)} /> : null}
+              </>
+            )}
+          </div>
+          <p>Ozon · beta-кабинет · отдельная логика данных · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
+        </div>
+        <div className="toolbar">
+          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
+          <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
+        </div>
+      </header>
+
+      <div className="content">
+        <div className="seller-layout">
+          <div className="seller-main">
+            <div className="seller-tabs">
+              <button className={activeSellerTab === "cabinet" ? "active" : ""} type="button" onClick={() => setSellerTab("cabinet")}>Кабинет</button>
+              <button className={activeSellerTab === "tasks" ? "active" : ""} type="button" onClick={() => setSellerTab("tasks")}>Задачи</button>
+              <button className={activeSellerTab === "reports" ? "active" : ""} type="button" onClick={() => setSellerTab("reports")}>Отчеты</button>
+              <button className={activeSellerTab === "work-periods" ? "active" : ""} type="button" onClick={() => setSellerTab("work-periods")}>Отчетный период</button>
+            </div>
+            <HelpHint enabled={helpEnabled} title="Ozon beta">
+              Этот кабинет не использует WB API. Карточки, задачи и отчетные периоды будут развиваться как отдельный Ozon-поток, а семантика может брать ключи из MPStats по WB keyword-базе.
+            </HelpHint>
+
+            {activeSellerTab === "cabinet" ? (
+              <>
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Обзор Ozon-кабинета</h2>
+                      <p>Каркас для теста Ozon внутри клиента без влияния на текущий WB-поток.</p>
+                    </div>
+                    <Tag tone="amber">beta</Tag>
+                  </div>
+                  <div className="summary-grid">
+                    <Metric label="Карточек Ozon" value={formatNumber(portal.cardCount)} />
+                    <Metric label="К проверке" value={formatNumber(portal.problemCount)} />
+                    <Metric label="Активные задачи" value={formatNumber(portalActiveTaskCount(portal))} />
+                    <Metric label="Источник" value="Ozon" hint="отдельно от WB" />
+                  </div>
+                </section>
+
+                <div className="seller-context-grid">
+                  <section className="workspace-strip project-strip">
+                    <div className="panel-title-row">
+                      <div>
+                        <h2>Состав проекта</h2>
+                        <p>Команда Ozon-кабинета внутри клиента.</p>
+                      </div>
+                      {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}>Редактировать</button> : null}
+                    </div>
+                    {!teamEditing ? (
+                      <div className="project-team-list compact">
+                        {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                          const user = findUser(team[roleKey]);
+                          return (
+                            <div className="project-team-row" key={roleKey}>
+                              <span>{label}</span>
+                              <strong>{user?.full_name || "Не назначен"}</strong>
+                              <small>{user?.role || "Выберите сотрудника"}</small>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="team-editor compact">
+                        {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                          const users = displayUsers.filter((user) => userCanFillProjectRole(user, roleKey));
+                          return (
+                            <label className="team-editor-row" key={roleKey}>
+                              <span>{label}</span>
+                              <select className="select" value={teamDraft[roleKey] || ""} onChange={(event) => updateTeamDraft(roleKey, event.target.value)} disabled={teamSaving}>
+                                <option value="">Не назначен</option>
+                                {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
+                              </select>
+                            </label>
+                          );
+                        })}
+                        <div className="team-editor-actions">
+                          <button className={loadingButtonClass("btn primary", teamSaving)} type="button" onClick={saveTeamDraft} disabled={teamSaving} aria-busy={teamSaving || undefined}>{teamSaving ? "Сохраняем" : "Сохранить состав"}</button>
+                          <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }} disabled={teamSaving}>Отмена</button>
+                        </div>
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="workspace-strip security-strip">
+                    <div>
+                      <h2>Контур Ozon</h2>
+                      <p>Отдельные данные и ограничения beta-кабинета.</p>
+                    </div>
+                    <div className="security-inline-list">
+                      <div><span>Ozon API</span><strong>не подключен</strong></div>
+                      <div><span>WB API</span><strong>не используется</strong></div>
+                      <div><span>MPStats</span><strong>WB ключи для СЯ</strong></div>
+                    </div>
+                  </section>
+                </div>
+
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Источник данных Ozon</h2>
+                      <p>Здесь будет подключаться Ozon-specific загрузка карточек, цен, остатков и отчетных периодов.</p>
+                    </div>
+                    <Tag tone="amber">ожидает источник</Tag>
+                  </div>
+                  <div className="source-flow">
+                    {ozonFlowRows.map(([label, value]) => (
+                      <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Маршрут Ozon</h2>
+                      <p>Форма работы похожа на WB, но карточки, задачи и отчеты будут храниться в Ozon-контуре.</p>
+                    </div>
+                    <Tag tone="blue">1 из 5</Tag>
+                  </div>
+                  <div className="pipeline">
+                    {ozonRouteRows.map((step) => (
+                      <div className={`step ${step.className}`} key={step.title}>
+                        <strong>{step.title}</strong>
+                        <span>{step.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <OzonPlaceholderPanel
+                  title="Карточки Ozon"
+                  copy="Карточки появятся после отдельного источника Ozon. WB-карточки сюда не подмешиваются."
+                  tag="нет данных"
+                />
+              </>
+            ) : null}
+
+            {activeSellerTab === "tasks" ? (
+              <OzonPlaceholderPanel
+                title="Задачи Ozon"
+                copy="Задачи Ozon будут собираться отдельно от WB-пачек. Для СЯ оставляем возможность MPStats по WB keyword-базе."
+                tag="ожидает карточки"
+              />
+            ) : null}
+            {activeSellerTab === "reports" ? (
+              <OzonPlaceholderPanel
+                title="Отчеты Ozon"
+                copy="Здесь будут Ozon-периоды и выгрузки. WB XLSX-отчет в этот поток не подключается."
+                tag="Ozon"
+              />
+            ) : null}
+            {activeSellerTab === "work-periods" ? (
+              <OzonPlaceholderPanel
+                title="Отчетный период Ozon"
+                copy="План работ Ozon будет отдельным списком, чтобы не смешивать статусы с Wildberries."
+                tag="beta"
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OzonPlaceholderPanel({ title, copy, tag }) {
+  return (
+    <section className="workspace-strip">
+      <div className="strip-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{copy}</p>
+        </div>
+        <Tag tone="amber">{tag}</Tag>
+      </div>
+      <div className="empty-state">
+        <strong>Ozon beta</strong>
+        <span>{copy}</span>
+      </div>
+    </section>
   );
 }
 
@@ -15453,6 +15939,7 @@ const adminEventLabels = {
   user_updated: "Изменен сотрудник",
   password_reset: "Сброшен пароль",
   portal_team_updated: "Изменены доступы",
+  portal_client_contact_updated: "Изменены контакты клиента",
   portal_created: "Кабинет создан",
   portal_name_updated: "Переименован кабинет",
   portal_archived: "Кабинет отправлен в архив",
@@ -15496,6 +15983,9 @@ function adminEventDetailsText(event) {
   }
   if (event?.action === "portal_team_updated") {
     return details.portalName || event.targetId || "Кабинет";
+  }
+  if (event?.action === "portal_client_contact_updated") {
+    return [details.portalName || event.targetId || "Кабинет", (details.nextFields || []).join(", ")].filter(Boolean).join(" · ");
   }
   if (event?.action === "portal_created") {
     return [details.portalName || event.targetId || "Кабинет", details.mode === "api" ? "WB API" : "ручной режим"].filter(Boolean).join(" · ");

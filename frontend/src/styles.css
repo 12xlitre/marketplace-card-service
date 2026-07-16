@@ -1601,6 +1601,10 @@ tr.selected-row td {
   gap: 14px;
 }
 
+.client-marketplaces-panel {
+  grid-column: 1 / -1;
+}
+
 .panel-head {
   display: flex;
   align-items: flex-start;
@@ -1648,6 +1652,7 @@ tr.selected-row td {
   min-width: 0;
   text-align: right;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .client-team-editor {

@@ -5,9 +5,12 @@
 Решение:
 - список кабинетов является backend-состоянием в SQLite `portals`;
 - состав проекта хранится в `portal_members`;
+- контактные данные клиента временно хранятся в `portals.client_contact_json`;
+- привязка кабинета к клиенту временно хранится в `portals.client_name`; если поле пустое, frontend группирует клиента по отображаемому имени кабинета;
 - frontend после логина загружает кабинеты через `GET /api/portals`;
 - создание кабинета идет через `POST /api/portals`;
 - изменение состава проекта идет через `POST /api/portals/<portal_id>/team`;
+- изменение контактов клиента идет через `POST /api/portals/<portal_id>/client-contact`; frontend уровня клиента применяет один контакт ко всем кабинетам клиента до появления отдельной backend-сущности `Client`;
 - рабочий набор карточек кабинета хранится в SQLite `portal_workset_cards`, читается через `GET /api/card-workset?portal_id=...` и сохраняется через `POST /api/card-workset`;
 - создание массового пакета работы идет через `POST /api/card-workset/create-tasks`: backend создает внутренние `card_drafts` со статусом `draft` (`в работе`) без write-запросов в WB;
 - удаление задачи идет через `POST /api/card-workset/delete-tasks`: backend очищает `meta.batch`/выбранные `workTypes` и соответствующие `approvalSections`, но не удаляет весь `card_draft`;
@@ -17,6 +20,8 @@
 
 Правила:
 - WB API токены не попадают в ответ `GET /api/portals`;
+- контактные данные клиента возвращаются как `clientContact` и не пишутся в admin-журнал целиком: событие фиксирует только заполненные типы полей;
+- `clientName` не является полноценной сущностью клиента и нужен только для текущей группировки нескольких marketplace-кабинетов;
 - `portal_integrations.external_key` хранит не секретный fingerprint внешнего кабинета/набора карточек для защиты от повторного добавления;
 - счетчики `card_count`, `work_count`, `problem_count` и `last_sync_at` обновляются после read-only загрузки WB;
 - карточки пока не являются отдельной постоянной таблицей, при открытии API-кабинета frontend может перечитать snapshot через `/api/wb/cards`.
