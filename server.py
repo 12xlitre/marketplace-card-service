@@ -10135,9 +10135,193 @@ def ozon_mpstats_payload_rows(payload):
   rows = audit_extract_list(payload)
   if rows:
     return rows
-  if isinstance(payload, dict) and any(payload.get(key) for key in ("sku", "id", "product_id", "productId", "name", "title")):
-    return [payload]
+  if not isinstance(payload, dict):
+    return []
+  candidate_dicts = [payload]
+  for key in ("data", "result", "output", "item", "product"):
+    value = payload.get(key)
+    if isinstance(value, dict):
+      candidate_dicts.append(value)
+  for candidate in candidate_dicts:
+    if any(candidate.get(key) for key in ("sku", "id", "product_id", "productId", "name", "title")):
+      return [candidate]
   return []
+
+
+def ozon_mpstats_nested_dicts(item):
+  if not isinstance(item, dict):
+    return []
+  nested = [item]
+  for key in ("content", "seo", "product", "item", "details", "card"):
+    value = item.get(key)
+    if isinstance(value, dict):
+      nested.append(value)
+  return nested
+
+
+def ozon_mpstats_text_value(value, limit=7000):
+  if isinstance(value, dict):
+    for key in ("value", "text", "description", "html", "content", "name", "title"):
+      text = ozon_mpstats_text_value(value.get(key), limit=limit)
+      if text:
+        return text
+    return ""
+  if isinstance(value, list):
+    parts = [ozon_mpstats_text_value(item, limit=limit) for item in value[:20]]
+    return audit_str(" ".join(part for part in parts if part), limit)
+  text = audit_str(value, limit)
+  if "<" in text and ">" in text:
+    text = re.sub(r"<[^>]+>", " ", text)
+  return audit_str(re.sub(r"\s+", " ", text), limit)
+
+
+def ozon_mpstats_description(item):
+  for container in ozon_mpstats_nested_dicts(item):
+    for key in (
+      "description",
+      "descriptionText",
+      "description_text",
+      "fullDescription",
+      "full_description",
+      "shortDescription",
+      "short_description",
+      "annotation",
+      "descriptionPreview",
+    ):
+      text = ozon_mpstats_text_value(container.get(key), limit=7000)
+      if text:
+        return text
+  return ""
+
+
+def ozon_mpstats_characteristic_value(value):
+  if isinstance(value, list):
+    values = []
+    for item in value[:60]:
+      if isinstance(item, dict):
+        text = first_nonempty(item.get("value"), item.get("name"), item.get("title"), item.get("text"))
+      else:
+        text = audit_str(item)
+      if text:
+        values.append(text)
+    return values
+  if isinstance(value, dict):
+    for key in ("value", "values", "text", "name", "title"):
+      if key in value:
+        return ozon_mpstats_characteristic_value(value.get(key))
+    return public_wb_value(value)
+  return audit_str(value, 500)
+
+
+def ozon_mpstats_characteristic_rows(source, limit=300):
+  rows = []
+  seen = set()
+
+  def add_row(name, value):
+    clean_name = audit_str(name, 180)
+    clean_value = ozon_mpstats_characteristic_value(value)
+    if not clean_name or clean_value in ("", [], {}):
+      return
+    key = audit_normalized(clean_name)
+    if key in seen:
+      return
+    seen.add(key)
+    rows.append({"name": clean_name, "value": public_wb_value(clean_value)})
+
+  if isinstance(source, dict):
+    if any(key in source for key in ("name", "title", "attribute_name", "attributeName", "key")):
+      name = first_nonempty(
+        source.get("name"),
+        source.get("title"),
+        source.get("attribute_name"),
+        source.get("attributeName"),
+        source.get("key"),
+        source.get("code"),
+      )
+      value = source.get("value") if "value" in source else source.get("values", source.get("text"))
+      add_row(name, value)
+    else:
+      for name, value in source.items():
+        add_row(name, value)
+        if len(rows) >= limit:
+          break
+  elif isinstance(source, list):
+    for index, item in enumerate(source):
+      if isinstance(item, dict):
+        name = first_nonempty(
+          item.get("name"),
+          item.get("title"),
+          item.get("charcName"),
+          item.get("attribute_name"),
+          item.get("attributeName"),
+          item.get("propertyName"),
+          item.get("key"),
+          item.get("code"),
+        )
+        value = item.get("value") if "value" in item else item.get("values", item.get("text"))
+        add_row(name or f"Характеристика {index + 1}", value)
+      else:
+        add_row(f"Характеристика {index + 1}", item)
+      if len(rows) >= limit:
+        break
+  return rows[:limit]
+
+
+def ozon_mpstats_characteristics(item):
+  for container in ozon_mpstats_nested_dicts(item):
+    for key in (
+      "characteristics",
+      "characteristicsList",
+      "characteristic",
+      "attributes",
+      "attrs",
+      "parameters",
+      "params",
+      "properties",
+      "features",
+      "specifications",
+    ):
+      rows = ozon_mpstats_characteristic_rows(container.get(key))
+      if rows:
+        return rows
+  fallback_rows = []
+  for label, keys in (
+    ("Цвет", ("color", "colors")),
+    ("Материал", ("material", "materials")),
+    ("Размер", ("size", "sizes")),
+    ("Страна производства", ("country", "countryName")),
+    ("Пол", ("gender",)),
+    ("Сезон", ("season",)),
+  ):
+    value = first_nonempty(*(item.get(key) for key in keys)) if isinstance(item, dict) else ""
+    if value:
+      fallback_rows.append({"name": label, "value": value})
+  return fallback_rows
+
+
+def ozon_mpstats_photo_rows(item):
+  rows = mpstats_storefront_photo_rows(item)
+  if isinstance(item, dict):
+    for key in ("photoUrl", "imageUrl", "cover", "picture"):
+      url = mpstats_media_url(item.get(key))
+      if url:
+        rows.append({"big": url, "c516x688": url, "c246x328": url})
+    for key in ("images", "pictures"):
+      value = item.get(key)
+      if isinstance(value, list):
+        for photo in value:
+          url = mpstats_media_url(photo.get("url") if isinstance(photo, dict) else photo)
+          if url:
+            rows.append({"big": url, "c516x688": url, "c246x328": url})
+  output = []
+  seen = set()
+  for row in rows:
+    url = row.get("big") if isinstance(row, dict) else ""
+    if not url or url in seen:
+      continue
+    seen.add(url)
+    output.append(row)
+  return output
 
 
 def ozon_mpstats_card_sample(item):
@@ -10155,20 +10339,27 @@ def ozon_mpstats_card_sample(item):
   title = audit_str(item.get("title") or item.get("name") or item.get("full_name") or item.get("productName") or "")
   if not product_id and not title:
     return None
+  description = ozon_mpstats_description(item)
+  characteristics = ozon_mpstats_characteristics(item)
+  photos = ozon_mpstats_photo_rows(item)
   return {
     "id": product_id,
     "offerId": first_nonempty(item.get("offer_id"), item.get("offerId"), item.get("vendorCode"), item.get("vendor_code")),
     "title": title or f"Ozon {product_id}",
+    "description": description,
     "brand": audit_named_value(item.get("brand") or item.get("brandName") or ""),
     "sellerName": audit_named_value(item.get("sellerName") or item.get("seller") or item.get("shopName") or ""),
     "category": audit_str(item.get("category") or item.get("categoryName") or item.get("subject") or item.get("subjectName") or ""),
+    "characteristics": public_wb_value(characteristics),
+    "characteristicsCount": len(characteristics),
     "price": audit_positive_number(item.get("price"), item.get("final_price"), item.get("finalPrice"), item.get("client_price")),
     "stock": audit_number(item.get("stock") or item.get("balance") or item.get("available_stock"), None),
     "sales": audit_int(item.get("sales"), 0),
     "revenue": audit_number(item.get("revenue"), 0),
     "rating": audit_number(item.get("rating") or item.get("commentsvaluation"), None),
     "feedbacks": audit_int(item.get("feedbacks") or item.get("comments") or item.get("reviews"), 0),
-    "photoUrl": first_nonempty(item.get("thumb_middle"), item.get("thumb"), item.get("photo"), item.get("image"), item.get("url_photo")),
+    "photoUrl": first_photo_url({"photos": photos}) or first_nonempty(item.get("thumb_middle"), item.get("thumb"), item.get("photo"), item.get("image"), item.get("url_photo")),
+    "photos": public_wb_value(photos),
     "fieldKeys": list(item.keys())[:18],
   }
 
@@ -10183,11 +10374,15 @@ def ozon_snapshot_card_from_sample(item):
   title = audit_str(item.get("title") or item.get("name") or (f"Ozon {sku}" if sku else "Ozon карточка"), 300)
   if not card_key or not title:
     return None
-  photo_url = mpstats_media_url(first_nonempty(item.get("photoUrl"), item.get("photo"), item.get("image"), item.get("thumb"), item.get("thumb_middle")))
-  photos = [{"big": photo_url, "c516x688": photo_url, "c246x328": photo_url}] if photo_url else []
+  photos = ozon_mpstats_photo_rows(item)
+  photo_url = first_photo_url({"photos": photos}) or mpstats_media_url(first_nonempty(item.get("photoUrl"), item.get("photo"), item.get("image"), item.get("thumb"), item.get("thumb_middle")))
+  if photo_url and not photos:
+    photos = [{"big": photo_url, "c516x688": photo_url, "c246x328": photo_url}]
   category = audit_str(item.get("category") or item.get("categoryName") or item.get("subjectName") or item.get("subject") or "", 240)
   price = audit_positive_number(item.get("price"), item.get("finalPrice"), item.get("final_price"), item.get("client_price"))
   stock = audit_number(item.get("stock") or item.get("balance") or item.get("available_stock"), None)
+  description = ozon_mpstats_description(item)
+  characteristics = ozon_mpstats_characteristics(item)
   size_row = {
     "techSize": "единый",
     "price": price,
@@ -10202,6 +10397,8 @@ def ozon_snapshot_card_from_sample(item):
     issues.append("Нет фото")
   if not category:
     issues.append("Категория не указана")
+  if not characteristics:
+    issues.append("Нет характеристик")
   return {
     "marketplace": "ozon",
     "cardKey": card_key,
@@ -10210,14 +10407,14 @@ def ozon_snapshot_card_from_sample(item):
     "offerId": offer_id,
     "vendorCode": offer_id,
     "title": title,
-    "description": audit_str(item.get("description") or "", 7000),
+    "description": description,
     "brand": audit_named_value(item.get("brand") or item.get("brandName") or ""),
     "sellerName": audit_named_value(item.get("sellerName") or item.get("seller") or item.get("shopName") or ""),
     "subjectName": category or "категория не указана",
     "category": category,
     "photoUrl": photo_url,
     "photos": photos,
-    "characteristics": public_wb_value(item.get("characteristics") or []),
+    "characteristics": public_wb_value(characteristics),
     "sizes": [size_row] if price is not None or stock is not None or sku else [],
     "price": price,
     "stock": stock,

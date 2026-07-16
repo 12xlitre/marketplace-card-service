@@ -7348,6 +7348,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [probeStatus, setProbeStatus] = useState("idle");
   const [probeResult, setProbeResult] = useState(null);
   const [probeSaveStatus, setProbeSaveStatus] = useState("idle");
+  const [sourceExpanded, setSourceExpanded] = useState(!sourceConfigured);
   const [ozonWorkState, setOzonWorkState] = useState(() => readOzonWorkState(portal.id));
   const [ozonWorkStatus, setOzonWorkStatus] = useState("idle");
   const [ozonSemanticDrafts, setOzonSemanticDrafts] = useState([]);
@@ -7489,7 +7490,40 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
-  async function runOzonMpstatsProbe() {
+  async function saveOzonCards(cards, { silent = false } = {}) {
+    if (!canManage || !cards.length || probeSaveStatus === "saving") {
+      return null;
+    }
+    setProbeSaveStatus("saving");
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-cards`, {
+        method: "POST",
+        body: JSON.stringify({ cards }),
+      });
+      if (response.portal) {
+        onPortalUpdated?.(response.portal);
+      }
+      const total = Number(response.saved?.total || response.portal?.cardCount || cards.length || 0);
+      const added = Number(response.saved?.added || 0);
+      const updated = Number(response.saved?.updated || 0);
+      setProbeSaveStatus("saved");
+      if (!silent) {
+        onNotice?.(`Обновили Ozon-карточки: всего ${formatNumber(total)}, новых ${formatNumber(added)}, обновлено ${formatNumber(updated)}.`);
+      }
+      return response;
+    } catch (error) {
+      setProbeSaveStatus("error");
+      const message = error.message === "ozon_cards_missing"
+        ? "Нет найденных карточек для сохранения."
+        : error.message === "ozon_portal_required"
+          ? "Сохранять Ozon-карточки можно только в Ozon-кабинет."
+          : "Не удалось сохранить Ozon-карточки.";
+      onNotice?.(message);
+      return null;
+    }
+  }
+
+  async function runOzonMpstatsProbe({ autoSave = true } = {}) {
     if (!canManage || !sourceConfigured || probeStatus === "loading") {
       return;
     }
@@ -7505,7 +7539,17 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       setProbeStatus("loaded");
       const count = Number(result.cardCount || result.totalEstimate || result.cards?.length || 0);
       if (count > 0) {
-        onNotice?.(`MPStats нашел Ozon-данные: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`);
+        if (autoSave && Array.isArray(result.cards) && result.cards.length) {
+          const saved = await saveOzonCards(result.cards, { silent: true });
+          if (saved) {
+            const total = Number(saved.saved?.total || saved.portal?.cardCount || result.cards.length || 0);
+            const added = Number(saved.saved?.added || 0);
+            const updated = Number(saved.saved?.updated || 0);
+            onNotice?.(`MPStats нашел ${formatNumber(count)} Ozon-карточек и обновил кабинет: всего ${formatNumber(total)}, новых ${formatNumber(added)}, обновлено ${formatNumber(updated)}.`);
+          }
+        } else {
+          onNotice?.(`MPStats нашел Ozon-данные: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`);
+        }
       } else {
         onNotice?.("MPStats не нашел Ozon-карточки по этому источнику. Проверьте ссылку, Seller ID или SKU.");
       }
@@ -7525,32 +7569,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
 
   async function saveOzonProbeCards() {
     const cards = Array.isArray(probeResult?.cards) ? probeResult.cards : [];
-    if (!canManage || !cards.length || probeSaveStatus === "saving") {
-      return;
-    }
-    setProbeSaveStatus("saving");
-    try {
-      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-cards`, {
-        method: "POST",
-        body: JSON.stringify({ cards }),
-      });
-      if (response.portal) {
-        onPortalUpdated?.(response.portal);
-      }
-      const total = Number(response.saved?.total || response.portal?.cardCount || cards.length || 0);
-      const added = Number(response.saved?.added || 0);
-      const updated = Number(response.saved?.updated || 0);
-      setProbeSaveStatus("saved");
-      onNotice?.(`Сохранили Ozon-карточки: всего ${formatNumber(total)}, новых ${formatNumber(added)}, обновлено ${formatNumber(updated)}.`);
-    } catch (error) {
-      setProbeSaveStatus("error");
-      const message = error.message === "ozon_cards_missing"
-        ? "Нет найденных карточек для сохранения."
-        : error.message === "ozon_portal_required"
-          ? "Сохранять Ozon-карточки можно только в Ozon-кабинет."
-          : "Не удалось сохранить Ozon-карточки.";
-      onNotice?.(message);
-    }
+    await saveOzonCards(cards);
   }
 
   async function loadOzonResultDrafts() {
@@ -7708,6 +7727,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const sourceDescription = sourceConfigured
     ? "Кабинет заведен без Ozon Seller API, а карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Ozon API можно подключить позже."
     : "Кабинет заведен без Ozon Seller API. Здесь фиксируем ссылку на магазин, Seller ID, список SKU или исходные данные клиента; карточки можно загрузить через MPStats или позже подключить API.";
+  const sourceDetailsOpen = sourceExpanded || sourceEditing || !sourceConfigured || probeStatus === "loading" || probeSaveStatus === "saving";
 
   return (
     <section className="screen active marketplace-theme-ozon">
@@ -7825,83 +7845,101 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   </section>
                 </div>
 
-                <section className="workspace-strip">
+                <section className={`workspace-strip source-strip ${sourceDetailsOpen ? "expanded" : "collapsed"}`}>
                   <div className="strip-head">
                     <div>
                       <h2>Источник данных</h2>
                       <p>{sourceDescription}</p>
                     </div>
-                    <Tag tone={sourceConfigured ? "blue" : "amber"}>{sourceTag}</Tag>
+                    <div className="strip-actions">
+                      <Tag tone={sourceConfigured ? "blue" : "amber"}>{sourceTag}</Tag>
+                      <button className="btn" type="button" onClick={() => setSourceExpanded((value) => !value)}>
+                        {sourceDetailsOpen ? <ArrowUp size={16} /> : <ArrowDown size={16} />}
+                        {sourceDetailsOpen ? "Свернуть" : "Развернуть"}
+                      </button>
+                    </div>
                   </div>
-                  <HelpHint enabled={helpEnabled} title="Ozon и MPStats">
-                    Нажимайте Обновить из MPStats, чтобы проверить сохраненный Ozon-источник. Загрузить все карточки сохраняет найденные карточки в Ozon-кабинет после успешной проверки.
-                  </HelpHint>
-                  {sourceEditing ? (
-                    <div className="ozon-source-editor">
-                      <label className="field-label">
-                        Ссылка, Seller ID или ориентир Ozon
-                        <input
-                          value={sourceDraft.storeUrl}
-                          onChange={(event) => updateSourceDraft("storeUrl", event.target.value)}
-                          placeholder="https://www.ozon.ru/seller/... или Seller ID"
-                          disabled={sourceSaving}
-                        />
-                      </label>
-                      <label className="field-label">
-                        Что есть на старте
-                        <textarea
-                          value={sourceDraft.manualSource}
-                          onChange={(event) => updateSourceDraft("manualSource", event.target.value)}
-                          placeholder="Например: список SKU, ссылка на витрину, файл клиента или комментарий по тестовой пачке."
-                          disabled={sourceSaving}
-                        />
-                      </label>
-                      <div className="team-editor-actions">
-                        <button className={loadingButtonClass("btn primary", sourceSaving)} type="button" onClick={saveSourceDraft} disabled={sourceSaving} aria-busy={sourceSaving || undefined}>
-                          <Save size={16} />{sourceSaving ? "Сохраняем" : "Сохранить источник"}
-                        </button>
-                        <button className="btn ghost" type="button" onClick={() => { setSourceDraft({ storeUrl: sourceStoreUrl, manualSource: sourceManualText }); setSourceEditing(false); }} disabled={sourceSaving}>Отмена</button>
+                  {sourceDetailsOpen ? (
+                    <div className="source-details">
+                      <HelpHint enabled={helpEnabled} title="Ozon и MPStats">
+                        Нажимайте Обновить карточки, чтобы проверить сохраненный Ozon-источник через MPStats и сразу сохранить найденные карточки в Ozon-кабинет.
+                      </HelpHint>
+                      {sourceEditing ? (
+                        <div className="ozon-source-editor">
+                          <label className="field-label">
+                            Ссылка, Seller ID или ориентир Ozon
+                            <input
+                              value={sourceDraft.storeUrl}
+                              onChange={(event) => updateSourceDraft("storeUrl", event.target.value)}
+                              placeholder="https://www.ozon.ru/seller/... или Seller ID"
+                              disabled={sourceSaving}
+                            />
+                          </label>
+                          <label className="field-label">
+                            Что есть на старте
+                            <textarea
+                              value={sourceDraft.manualSource}
+                              onChange={(event) => updateSourceDraft("manualSource", event.target.value)}
+                              placeholder="Например: список SKU, ссылка на витрину, файл клиента или комментарий по тестовой пачке."
+                              disabled={sourceSaving}
+                            />
+                          </label>
+                          <div className="team-editor-actions">
+                            <button className={loadingButtonClass("btn primary", sourceSaving)} type="button" onClick={saveSourceDraft} disabled={sourceSaving} aria-busy={sourceSaving || undefined}>
+                              <Save size={16} />{sourceSaving ? "Сохраняем" : "Сохранить источник"}
+                            </button>
+                            <button className="btn ghost" type="button" onClick={() => { setSourceDraft({ storeUrl: sourceStoreUrl, manualSource: sourceManualText }); setSourceEditing(false); }} disabled={sourceSaving}>Отмена</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="manual-source-box ozon-source-box">
+                          <div className="manual-source-row">
+                            <span>Ozon ориентир</span>
+                            {sourceStoreUrl ? (
+                              sourceSafeUrl ? <a href={sourceSafeUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />{sourceStoreUrl}</a> : <strong>{sourceStoreUrl}</strong>
+                            ) : <strong>не указан</strong>}
+                          </div>
+                          <div className="manual-source-row">
+                            <span>Исходные данные</span>
+                            <p>{sourceManualText || "Пока не описаны"}</p>
+                          </div>
+                          {canManage ? (
+                            <div className="manual-source-actions">
+                              <button className="btn" type="button" onClick={() => setSourceEditing(true)}><Pencil size={16} />Редактировать источник</button>
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                      <div className="source-flow">
+                        {ozonFlowRows.map(([label, value]) => (
+                          <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
+                        ))}
                       </div>
+                      <div className="panel-actions ozon-source-actions">
+                        <button className={loadingButtonClass("btn primary", probeStatus === "loading" || probeSaveStatus === "saving")} type="button" onClick={() => runOzonMpstatsProbe({ autoSave: true })} disabled={!canManage || !sourceConfigured || probeStatus === "loading" || probeSaveStatus === "saving"} aria-busy={probeStatus === "loading" || probeSaveStatus === "saving" || undefined}>
+                          <RefreshCw size={16} />{probeStatus === "loading" ? "Ищем данные" : probeSaveStatus === "saving" ? "Сохраняем" : "Обновить карточки"}
+                        </button>
+                        <button className="btn" type="button" onClick={() => runOzonMpstatsProbe({ autoSave: false })} disabled={!canManage || !sourceConfigured || probeStatus === "loading" || probeSaveStatus === "saving"}>
+                          <Search size={16} />Проверить источник
+                        </button>
+                        <button className={loadingButtonClass("btn", probeSaveStatus === "saving")} type="button" onClick={saveOzonProbeCards} disabled={!canManage || !hasProbeCards || probeSaveStatus === "saving" || probeSaveStatus === "saved"} aria-busy={probeSaveStatus === "saving" || undefined} title={hasProbeCards ? "Сохранить найденные MPStats карточки в Ozon-кабинет" : "Сначала проверьте источник через MPStats"}>
+                          <Save size={16} />{probeSaveStatus === "saved" ? "Карточки обновлены" : probeSaveStatus === "saving" ? "Сохраняем" : "Сохранить найденные"}
+                        </button>
+                        <button className="btn ghost" type="button" disabled title="Появится после подключения Ozon-задач и Ozon-черновиков">
+                          <Trash2 size={16} />Обнулить работу
+                        </button>
+                        <button className="btn" type="button" disabled title="Ozon Seller API подключим отдельным шагом">
+                          <Upload size={16} />Подключить API
+                        </button>
+                      </div>
+                      <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={false} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
                     </div>
                   ) : (
-                    <div className="manual-source-box ozon-source-box">
-                      <div className="manual-source-row">
-                        <span>Ozon ориентир</span>
-                        {sourceStoreUrl ? (
-                          sourceSafeUrl ? <a href={sourceSafeUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />{sourceStoreUrl}</a> : <strong>{sourceStoreUrl}</strong>
-                        ) : <strong>не указан</strong>}
-                      </div>
-                      <div className="manual-source-row">
-                        <span>Исходные данные</span>
-                        <p>{sourceManualText || "Пока не описаны"}</p>
-                      </div>
-                      {canManage ? (
-                        <div className="manual-source-actions">
-                          <button className="btn" type="button" onClick={() => setSourceEditing(true)}><Pencil size={16} />Редактировать источник</button>
-                        </div>
-                      ) : null}
+                    <div className="source-collapsed-summary">
+                      <span>{sourceStoreUrl || sourceManualText ? "Источник сохранен" : "Источник не заполнен"}</span>
+                      <strong>{formatNumber(portal.cardCount)} {pluralRu(portal.cardCount, "карточка", "карточки", "карточек")}</strong>
                     </div>
                   )}
-                  <div className="source-flow">
-                    {ozonFlowRows.map(([label, value]) => (
-                      <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
-                    ))}
-                  </div>
-                  <div className="panel-actions ozon-source-actions">
-                    <button className={loadingButtonClass("btn", probeStatus === "loading")} type="button" onClick={runOzonMpstatsProbe} disabled={!canManage || !sourceConfigured || probeStatus === "loading"} aria-busy={probeStatus === "loading" || undefined}>
-                      <RefreshCw size={16} />{probeStatus === "loading" ? "Загружаем данные" : "Обновить из MPStats"}
-                    </button>
-                    <button className={loadingButtonClass("btn primary", probeSaveStatus === "saving")} type="button" onClick={saveOzonProbeCards} disabled={!canManage || !hasProbeCards || probeSaveStatus === "saving"} aria-busy={probeSaveStatus === "saving" || undefined} title={hasProbeCards ? "Сохранить найденные MPStats карточки в Ozon-кабинет" : "Сначала обновите источник через MPStats"}>
-                      <Download size={16} />{probeSaveStatus === "saving" ? "Загружаем карточки" : "Загрузить все карточки"}
-                    </button>
-                    <button className="btn ghost" type="button" disabled title="Появится после подключения Ozon-задач и Ozon-черновиков">
-                      <Trash2 size={16} />Обнулить работу
-                    </button>
-                    <button className="btn" type="button" disabled title="Ozon Seller API подключим отдельным шагом">
-                      <Upload size={16} />Подключить API
-                    </button>
-                  </div>
-                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={false} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
                 </section>
 
                 <section className="workspace-strip">
@@ -9576,6 +9614,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamSaving, setTeamSaving] = useState(false);
   const [taskActionStatus, setTaskActionStatus] = useState("");
   const [importJob, setImportJob] = useState(null);
+  const [sourceExpanded, setSourceExpanded] = useState(false);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
 
   useEffect(() => {
@@ -10004,9 +10043,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const importMessage = ["error", "paused"].includes(importJob?.status) && importJob?.error
     ? `${importJob.message || "Загрузка карточек прервалась"}: ${importJob.error}`
     : importJob?.message || (importRunning ? "MPStats добирает карточки пачками." : "");
+  const sourceDetailsOpen = sourceExpanded || cardsLoading || importRunning;
 
   return (
-    <section className="screen active">
+    <section className="screen active marketplace-theme-wildberries">
       <header className="topbar">
         <div className="title">
           <div className="seller-title-row">
@@ -10132,7 +10172,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </section>
             </div>
 
-            <section className="workspace-strip">
+            <section className={`workspace-strip source-strip ${sourceDetailsOpen ? "expanded" : "collapsed"}`}>
               <div className="strip-head">
                 <div>
                   <h2>Источник данных</h2>
@@ -10144,43 +10184,58 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                       ? "Кабинет заведен без WB API. Здесь фиксируем ссылку на магазин, исходные данные от клиента и команду; карточки можно добавить вручную или позже подключить API."
                       : "Кабинет подключается для чтения данных. Возможность записи в WB настраивается отдельным режимом работы."))}</p>
                 </div>
-                <Tag tone={portal.apiConnected || isMpstatsLoaded ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isMpstatsLoaded ? "MPStats витрина" : (isManual ? "Без API" : "ручной режим"))}</Tag>
-              </div>
-              <HelpHint enabled={helpEnabled} title="Когда нажимать обновление">
-                Нажимайте Загрузить свежие данные перед новой волной рыночного аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
-              </HelpHint>
-              <div className="panel-actions">
-                <button className={loadingButtonClass("btn", cardsLoading)} type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading} aria-busy={cardsLoading || undefined}>
-                  <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
-                </button>
-                {isManual ? (
-                  <button className={loadingButtonClass("btn primary", importRunning)} type="button" onClick={startFullImport} disabled={!canRefreshSource || cardsLoading || importRunning} aria-busy={importRunning || undefined}>
-                    <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
+                <div className="strip-actions">
+                  <Tag tone={portal.apiConnected || isMpstatsLoaded ? "blue" : "amber"}>{portal.apiConnected ? "API подключен" : (isMpstatsLoaded ? "MPStats витрина" : (isManual ? "Без API" : "ручной режим"))}</Tag>
+                  <button className="btn" type="button" onClick={() => setSourceExpanded((value) => !value)}>
+                    {sourceDetailsOpen ? <ArrowUp size={16} /> : <ArrowDown size={16} />}
+                    {sourceDetailsOpen ? "Свернуть" : "Развернуть"}
                   </button>
-                ) : null}
-                <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
-                  <Trash2 size={16} />Обнулить работу
-                </button>
-                <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
-              </div>
-              {importJob ? (
-                <div className={`store-import-progress ${importJob.status || "idle"}`}>
-                  <div className="store-import-progress-head">
-                    <strong>{importJob.status === "done" ? "Загрузка завершена" : importJob.status === "paused" ? "Загрузка остановлена" : importJob.status === "error" ? "Загрузка прервалась" : "Загружаем карточки"}</strong>
-                    <span>{importProgressText}</span>
-                  </div>
-                  <div className={`store-import-bar ${importTotal ? "" : "indeterminate"}`}>
-                    <span style={{ width: importTotal ? `${importPercent}%` : undefined }} />
-                  </div>
-                  <p>{importMessage}</p>
                 </div>
-              ) : null}
-              <div className="source-flow">
-                {sourceRows.map(([label, value]) => (
-                  <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
-                ))}
               </div>
-              {isManual ? <ManualPortalSource portal={portal} /> : null}
+              {sourceDetailsOpen ? (
+                <div className="source-details">
+                  <HelpHint enabled={helpEnabled} title="Когда нажимать обновление">
+                    Нажимайте Загрузить свежие данные перед новой волной рыночного аудита или отчетом. Это обновит снимок карточек из WB, а старые рекомендации аудита пометит как устаревшие.
+                  </HelpHint>
+                  <div className="panel-actions">
+                    <button className={loadingButtonClass("btn", cardsLoading)} type="button" onClick={onRefreshCards} disabled={!canRefreshSource || cardsLoading} aria-busy={cardsLoading || undefined}>
+                      <RefreshCw size={16} />{cardsLoading ? "Загружаем данные" : (portal.apiConnected ? "Загрузить свежие данные" : "Обновить из MPStats")}
+                    </button>
+                    {isManual ? (
+                      <button className={loadingButtonClass("btn primary", importRunning)} type="button" onClick={startFullImport} disabled={!canRefreshSource || cardsLoading || importRunning} aria-busy={importRunning || undefined}>
+                        <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
+                      </button>
+                    ) : null}
+                    <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
+                      <Trash2 size={16} />Обнулить работу
+                    </button>
+                    <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
+                  </div>
+                  {importJob ? (
+                    <div className={`store-import-progress ${importJob.status || "idle"}`}>
+                      <div className="store-import-progress-head">
+                        <strong>{importJob.status === "done" ? "Загрузка завершена" : importJob.status === "paused" ? "Загрузка остановлена" : importJob.status === "error" ? "Загрузка прервалась" : "Загружаем карточки"}</strong>
+                        <span>{importProgressText}</span>
+                      </div>
+                      <div className={`store-import-bar ${importTotal ? "" : "indeterminate"}`}>
+                        <span style={{ width: importTotal ? `${importPercent}%` : undefined }} />
+                      </div>
+                      <p>{importMessage}</p>
+                    </div>
+                  ) : null}
+                  <div className="source-flow">
+                    {sourceRows.map(([label, value]) => (
+                      <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
+                    ))}
+                  </div>
+                  {isManual ? <ManualPortalSource portal={portal} /> : null}
+                </div>
+              ) : (
+                <div className="source-collapsed-summary">
+                  <span>{portal.apiConnected ? "WB API" : (isMpstatsLoaded ? "MPStats витрина" : "Источник ожидает настройки")}</span>
+                  <strong>{formatNumber(portal.cardCount)} {pluralRu(portal.cardCount, "карточка", "карточки", "карточек")}</strong>
+                </div>
+              )}
             </section>
 
             <section className="workspace-strip">

@@ -2388,6 +2388,40 @@ tr.selected-row td {
   overflow: hidden;
 }
 
+.source-strip.collapsed {
+  gap: 10px;
+}
+
+.source-details {
+  display: grid;
+  gap: 12px;
+}
+
+.source-collapsed-summary {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.source-collapsed-summary span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.source-collapsed-summary strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: right;
+}
+
 .source-flow-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
