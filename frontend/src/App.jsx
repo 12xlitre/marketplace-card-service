@@ -2153,6 +2153,30 @@ function taskMatchesBatchFilter(task, filterKey, workType) {
   return true;
 }
 
+function batchAuditTaskKey(task) {
+  return String(task?.cardKey || task?.nmID || task?.vendorCode || "").trim();
+}
+
+function batchAuditErrorText(errorObject) {
+  const code = String(errorObject?.payload?.error || errorObject?.message || "request_failed");
+  const reason = String(errorObject?.payload?.reason || "");
+  if (errorObject?.status === 401) return "Сессия истекла";
+  if (errorObject?.status === 403 || code === "forbidden") return "Нет доступа к кабинету";
+  if (code === "card_not_found") return "Карточка не найдена в кабинете";
+  if (code === "task_not_found") return "Задача карточки не найдена";
+  if (code === "secret_storage_unavailable") return "Не удалось прочитать ключи интеграций";
+  if (reason === "invalid_audit_result") return "Некорректный формат ответа аудита";
+  if (reason === "timeout") return "Таймаут внешнего источника";
+  if (reason === "service_secret_unavailable") return "Не удалось прочитать ключи интеграций";
+  if (code === "audit_task_failed") return reason ? `Ошибка аудита: ${reason}` : "Backend не завершил аудит";
+  if (errorObject?.status >= 500) return reason ? `Ошибка backend: ${reason}` : "Ошибка backend";
+  return code;
+}
+
+function batchAuditFailureLabel(item) {
+  return item?.title || item?.vendorCode || item?.nmID || item?.cardKey || "Карточка";
+}
+
 function taskCardWorkStatus(task, workType) {
   if (workType === "semantic") {
     return taskHasSemanticFinal(task)
@@ -10024,7 +10048,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
     }
     return true;
   };
-  const runGroupAudit = async (group, workType, tasksToAudit) => {
+  const runGroupAudit = async (group, workType, tasksToAudit, options = {}) => {
     if (!portalId || taskActionStatus) return;
     const runnableTasks = (Array.isArray(tasksToAudit) ? tasksToAudit : [])
       .filter((task) => task?.cardKey && taskHasCard(task));
@@ -10032,10 +10056,19 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
     const actionKey = group.key;
     setBatchAuditState((current) => ({
       ...current,
-      [actionKey]: { status: "running", done: 0, failed: 0, total: runnableTasks.length },
+      [actionKey]: {
+        status: "running",
+        done: 0,
+        failed: 0,
+        total: runnableTasks.length,
+        retryMode: options.retryMode || "",
+        failedTasks: [],
+        errors: [],
+      },
     }));
     let done = 0;
     let failed = 0;
+    const failedTasks = [];
     for (const task of runnableTasks) {
       try {
         const payload = await apiRequest("/api/card-workset/audit-task", {
@@ -10053,9 +10086,21 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
           onWorkflowUpdated(normalizeApprovalWorkflow(payload.workflow));
         }
         done += 1;
-      } catch {
+      } catch (error) {
         failed += 1;
+        failedTasks.push({
+          cardKey: task.cardKey || "",
+          nmID: task.nmID || "",
+          vendorCode: task.vendorCode || "",
+          title: task.title || "",
+          error: batchAuditErrorText(error),
+        });
       }
+      const errorCounts = failedTasks.reduce((items, item) => {
+        const key = item.error || "Ошибка аудита";
+        items[key] = (items[key] || 0) + 1;
+        return items;
+      }, {});
       setBatchAuditState((current) => ({
         ...current,
         [actionKey]: {
@@ -10063,6 +10108,9 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
           done,
           failed,
           total: runnableTasks.length,
+          retryMode: options.retryMode || "",
+          failedTasks: [...failedTasks],
+          errors: Object.entries(errorCounts).map(([label, count]) => ({ label, count })),
         },
       }));
     }
@@ -10358,6 +10406,25 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const auditDone = Number(auditState.done || 0);
                       const auditFailed = Number(auditState.failed || 0);
                       const auditTotal = Number(auditState.total || 0);
+                      const auditFailedKeys = new Set((Array.isArray(auditState.failedTasks) ? auditState.failedTasks : []).map(batchAuditTaskKey).filter(Boolean));
+                      const retryFailedTasks = auditFailedKeys.size
+                        ? allGroupTasks.filter((task) => auditFailedKeys.has(batchAuditTaskKey(task)) && taskHasCard(task))
+                        : [];
+                      const hasSavedAuditDrafts = allGroupTasks.some((task) => task.hasAuditDraft);
+                      const missingAuditTasks = hasSavedAuditDrafts
+                        ? allGroupTasks.filter((task) => !task.hasAuditDraft && taskHasCard(task))
+                        : [];
+                      const auditRetryTasks = retryFailedTasks.length ? retryFailedTasks : missingAuditTasks;
+                      const auditRetryMode = retryFailedTasks.length ? "failed" : (missingAuditTasks.length ? "missing" : "");
+                      const auditButtonTasks = auditRetryTasks.length ? auditRetryTasks : groupTasks;
+                      const auditButtonLabel = auditBusy
+                        ? "Аудит идет"
+                        : retryFailedTasks.length
+                          ? `Повторить ошибки (${formatNumber(retryFailedTasks.length)})`
+                          : missingAuditTasks.length
+                            ? `Доделать аудит (${formatNumber(missingAuditTasks.length)})`
+                            : "Запустить аудит";
+                      const auditErrors = Array.isArray(auditState.errors) ? auditState.errors : [];
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -10383,8 +10450,8 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
 	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, runGroup, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
-                              <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, groupTasks)} disabled={Boolean(taskActionStatus) || auditBusy || !groupTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
-                                <WandSparkles size={16} />{auditBusy ? "Аудит идет" : "Запустить аудит"}
+                              <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, auditButtonTasks, { retryMode: auditRetryMode })} disabled={Boolean(taskActionStatus) || auditBusy || !auditButtonTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
+                                <WandSparkles size={16} />{auditButtonLabel}
                               </button>
 	                            {isOrdering ? (
 	                              <>
@@ -10421,6 +10488,16 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                                 <div className="task-batch-audit-bar">
                                   <span style={{ width: `${Math.round(((auditDone + auditFailed) / Math.max(auditTotal, 1)) * 100)}%` }} />
                                 </div>
+                                {auditFailed ? (
+                                  <div className="task-batch-audit-errors">
+                                    {auditErrors.slice(0, 3).map((item) => (
+                                      <span key={item.label}>{item.label} · {formatNumber(item.count)}</span>
+                                    ))}
+                                    {(auditState.failedTasks || []).slice(0, 3).map((item) => (
+                                      <em key={batchAuditTaskKey(item)}>{batchAuditFailureLabel(item)}</em>
+                                    ))}
+                                  </div>
+                                ) : null}
                               </div>
                             ) : null}
                           <details className="task-card-details" open={isOrdering || undefined}>

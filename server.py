@@ -3231,9 +3231,12 @@ def public_approval_task(row, snapshot_lookup):
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   work_types = active_task_work_types(meta)
   status = task_status_for_work_types(meta, work_types)
+  audit_status = str(row["audit_status"] or payload.get("auditStatus") or "")
   return {
     **approval_task_base(row, snapshot_lookup, meta, work_types),
     "status": status,
+    "auditStatus": audit_status,
+    "hasAuditDraft": audit_status == "done" or isinstance(payload.get("auditResult"), dict),
   }
 
 
@@ -3801,6 +3804,7 @@ CARD_WORK_EVENT_ACTIONS = {
   "deferred": "перенесена на позже",
   "quick_completed": "закрыта быстрым действием",
   "audit_completed": "аудит карточки готов",
+  "audit_failed": "аудит карточки не выполнен",
 }
 
 
@@ -3896,6 +3900,16 @@ def audit_draft_payload_from_result(audit_payload, previous_payload):
     "stocks": previous_payload.get("stocks") if isinstance(previous_payload.get("stocks"), dict) else {},
     "meta": meta,
   })
+
+
+def public_audit_task_error_reason(exc):
+  if isinstance(exc, (AttributeError, TypeError, KeyError, IndexError)):
+    return "invalid_audit_result"
+  if isinstance(exc, TimeoutError):
+    return "timeout"
+  if isinstance(exc, RuntimeError):
+    return "service_secret_unavailable"
+  return "internal_error"
 
 
 def audit_and_save_card_task(portal_id, payload, user):
@@ -11453,7 +11467,16 @@ def audit_build_result(card, market_data, competitors, characteristics, warnings
 
 
 def audit_result_valid(payload):
-  return isinstance(payload, dict) and all(key in payload for key in AUDIT_REQUIRED_KEYS)
+  if not isinstance(payload, dict) or not all(key in payload for key in AUDIT_REQUIRED_KEYS):
+    return False
+  return (
+    isinstance(payload.get("category"), dict)
+    and isinstance(payload.get("title"), dict)
+    and isinstance(payload.get("description"), dict)
+    and isinstance(payload.get("summary"), dict)
+    and isinstance(payload.get("competitors"), list)
+    and isinstance(payload.get("characteristics"), list)
+  )
 
 
 def parse_llm_json_content(content):
@@ -12024,6 +12047,8 @@ def update_competitor_change_action(portal_id, card_key, competitor_nm_id, actio
 
 
 def audit_draft_from_result(result, characteristic_draft):
+  title_result = result.get("title") if isinstance(result.get("title"), dict) else {}
+  description_result = result.get("description") if isinstance(result.get("description"), dict) else {}
   characteristics = {key: {**value} for key, value in (characteristic_draft or {}).items()}
   for item in result.get("characteristics", []) if isinstance(result.get("characteristics"), list) else []:
     if not isinstance(item, dict):
@@ -12048,14 +12073,14 @@ def audit_draft_from_result(result, characteristic_draft):
     }
   return {
     "title": {
-      "value": audit_str(result.get("title", {}).get("recommended") or result.get("title", {}).get("current") or ""),
+      "value": audit_str(title_result.get("recommended") or title_result.get("current") or ""),
       "source": "audit",
-      "reason": audit_str(result.get("title", {}).get("reason") or ""),
+      "reason": audit_str(title_result.get("reason") or ""),
     },
     "description": {
-      "value": audit_str(result.get("description", {}).get("recommended") or "", 7000),
+      "value": audit_str(description_result.get("recommended") or "", 7000),
       "source": "audit",
-      "reason": audit_str(result.get("description", {}).get("reason") or ""),
+      "reason": audit_str(description_result.get("reason") or ""),
     },
     "characteristics": characteristics,
   }
@@ -12141,6 +12166,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
     result["summary"]["riskNotes"] = audit_unique([*(result.get("summary", {}).get("riskNotes") or []), *audit_public_warnings(warnings)], limit=8)
   draft_content = audit_draft_from_result(result, characteristic_draft)
   changed_characteristics = sum(1 for item in draft_content.get("characteristics", {}).values() if item.get("source") == "audit")
+  result_title = result.get("title") if isinstance(result.get("title"), dict) else {}
   mpstats_usage_summary = mpstats_usage_public(mpstats_usage)
   return {
     "auditResult": result,
@@ -12160,7 +12186,7 @@ def build_card_audit(portal_id, card_key, raw_card, subject_characteristics=None
       "promotionRelevantCount": sum(1 for item in characteristics if item.get("isPromotionRelevant")),
       "changedCharacteristics": changed_characteristics,
       "content": {
-        "titleChanged": audit_normalized(draft_content["title"]["value"]) != audit_normalized(result.get("title", {}).get("current")),
+        "titleChanged": audit_normalized(draft_content["title"]["value"]) != audit_normalized(result_title.get("current")),
         "descriptionChanged": True,
         "titleReason": draft_content["title"]["reason"],
         "descriptionReason": draft_content["description"]["reason"],
@@ -14909,16 +14935,46 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if not user:
         return
       payload = self.read_json() or {}
+      portal_id = payload.get("portalId")
       try:
-        result = audit_and_save_card_task(payload.get("portalId"), payload, user)
+        result = audit_and_save_card_task(portal_id, payload, user)
       except PermissionError:
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_audit"})
         return
-      except RuntimeError:
-        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+      except RuntimeError as exc:
+        card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+        public_reason = public_audit_task_error_reason(exc)
+        try:
+          log_card_work_event(portal_id, {
+            "cardKey": card_key,
+            "action": "audit_failed",
+            "workType": payload.get("workType") or payload.get("work_type") or "",
+            "batchId": payload.get("batchId") or payload.get("batch_id") or "",
+            "reason": public_reason,
+          }, user)
+        except Exception:
+          pass
+        print(f"Card task audit failed portal={portal_id} card={card_key}: {type(exc).__name__}")
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable", "reason": public_reason})
+        return
+      except Exception as exc:
+        card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+        public_reason = public_audit_task_error_reason(exc)
+        try:
+          log_card_work_event(portal_id, {
+            "cardKey": card_key,
+            "action": "audit_failed",
+            "workType": payload.get("workType") or payload.get("work_type") or "",
+            "batchId": payload.get("batchId") or payload.get("batch_id") or "",
+            "reason": public_reason,
+          }, user)
+        except Exception:
+          pass
+        print(f"Card task audit failed portal={portal_id} card={card_key}: {type(exc).__name__}")
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "audit_task_failed", "reason": public_reason})
         return
       self.send_json(HTTPStatus.OK, result)
       return

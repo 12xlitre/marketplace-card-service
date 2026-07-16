@@ -2764,6 +2764,33 @@ tr.selected-row td {
   background: var(--amber);
 }
 
+.task-batch-audit-errors {
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-batch-audit-errors span,
+.task-batch-audit-errors em {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 3px 8px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.task-batch-audit-errors span {
+  border-color: #e9cfa5;
+  background: #fff8ec;
+  color: var(--amber);
+}
+
 .task-card-row-actions {
   display: flex;
   justify-content: flex-end;
