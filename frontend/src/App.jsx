@@ -2676,6 +2676,7 @@ function characteristicRows(items) {
   if (!Array.isArray(items)) {
     return [];
   }
+  const seenKeys = new Map();
   return items.map((item, index) => {
     if (!item || typeof item !== "object") {
       return {
@@ -2688,8 +2689,11 @@ function characteristicRows(items) {
     const label = item.name || item.charcName || item.id || item.charcID || `Характеристика ${index + 1}`;
     const value = Object.prototype.hasOwnProperty.call(item, "value") ? item.value : (item.values ?? item);
     const charcID = item.charcID || item.id || null;
+    const baseKey = charcID ? `charc:${charcID}` : characteristicKeyFromName(label);
+    const keyCount = (seenKeys.get(baseKey) || 0) + 1;
+    seenKeys.set(baseKey, keyCount);
     return {
-      key: charcID ? `charc:${charcID}` : `${label}-${index}`,
+      key: keyCount > 1 ? `${baseKey}#${keyCount}` : baseKey,
       label,
       value,
       charcID,
@@ -2758,6 +2762,61 @@ function draftCharacteristicValues(draft) {
   return characteristicValueTokens(draft.value);
 }
 
+function characteristicKeyFromName(name) {
+  const normalizedName = normalizedCharacteristicName(name);
+  return normalizedName ? `charc-name:${normalizedName}` : "";
+}
+
+function characteristicKeyFromDraft(key, draft) {
+  const draftObject = draft && typeof draft === "object" ? draft : {};
+  if (draftObject.charcID) {
+    return `charc:${draftObject.charcID}`;
+  }
+  const labelKey = characteristicKeyFromName(draftObject.label || draftObject.name || "");
+  if (labelKey) {
+    return labelKey;
+  }
+  if (String(key || "").startsWith("charc-name:")) {
+    return key;
+  }
+  return key || "";
+}
+
+function characteristicMetaLookup(items = []) {
+  return (items || []).reduce((lookup, item) => {
+    const primaryKey = characteristicKeyFromMeta(item);
+    const nameKey = characteristicKeyFromName(item?.name || item?.label || "");
+    if (primaryKey && !lookup[primaryKey]) {
+      lookup[primaryKey] = item;
+    }
+    if (nameKey && !lookup[nameKey]) {
+      lookup[nameKey] = item;
+    }
+    return lookup;
+  }, {});
+}
+
+function mergeDraftCharacteristic(left, right) {
+  const values = [];
+  [...draftCharacteristicValues(left), ...draftCharacteristicValues(right)].forEach((value) => {
+    const normalizedValue = normalizedCharacteristicOption(value);
+    if (normalizedValue && !values.some((item) => normalizedCharacteristicOption(item) === normalizedValue)) {
+      values.push(value);
+    }
+  });
+  const next = {
+    ...(left || {}),
+    ...(right || {}),
+  };
+  if (values.length) {
+    next.value = values.join(", ");
+    next.values = values;
+  } else {
+    next.values = draftCharacteristicValues(next);
+  }
+  return next;
+}
+
 function characteristicDraftValuesFromMarket(row, meta, mpstatsCharacteristics = []) {
   const currentValues = characteristicValueTokens(row.value);
   const stats = mpstatsValueStatsForCharacteristic(meta || row, mpstatsCharacteristics);
@@ -2771,7 +2830,7 @@ function characteristicDraftValuesFromMarket(row, meta, mpstatsCharacteristics =
 }
 
 function characteristicDraftsFromRows(rows, source = "audit", mpstatsCharacteristics = [], availableCharacteristics = []) {
-  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const metaByKey = characteristicMetaLookup(availableCharacteristics);
   return Object.fromEntries(rows.map((row) => {
     const meta = metaByKey[row.key] || row;
     const marketDraft = source === "audit"
@@ -2792,14 +2851,25 @@ function characteristicDraftsFromRows(rows, source = "audit", mpstatsCharacteris
 }
 
 function normalizeDraftCharacteristics(drafts) {
-  return Object.fromEntries(Object.entries(drafts || {}).map(([key, draft]) => [key, {
-    ...draft,
-    values: draftCharacteristicValues(draft),
-  }]));
+  return Object.entries(drafts || {}).reduce((normalized, [key, draft]) => {
+    const draftObject = draft && typeof draft === "object" ? draft : { value: draft };
+    const normalizedKey = characteristicKeyFromDraft(key, draftObject);
+    if (!normalizedKey) {
+      return normalized;
+    }
+    const nextDraft = {
+      ...draftObject,
+      values: draftCharacteristicValues(draftObject),
+    };
+    normalized[normalizedKey] = normalized[normalizedKey]
+      ? mergeDraftCharacteristic(normalized[normalizedKey], nextDraft)
+      : nextDraft;
+    return normalized;
+  }, {});
 }
 
 function characteristicKeyFromMeta(item) {
-  return item?.charcID ? `charc:${item.charcID}` : `charc-name:${String(item?.name || "").toLowerCase()}`;
+  return item?.charcID ? `charc:${item.charcID}` : characteristicKeyFromName(item?.name || item?.label || "");
 }
 
 function normalizeCharacteristicMeta(item) {
@@ -3099,7 +3169,7 @@ function characteristicValueMetaTitle(meta, hasOptions, valuesCount, isAuditSugg
 
 function characteristicValueOptionsByKey(portal, currentRows, availableCharacteristics = [], mpstatsCharacteristics = []) {
   const options = {};
-  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const metaByKey = characteristicMetaLookup(availableCharacteristics);
   currentRows.forEach((row) => {
     const meta = metaByKey[row.key] || row;
     const wbOptions = Array.isArray(meta.valueOptions) ? meta.valueOptions : [];
@@ -3167,7 +3237,7 @@ function mpstatsValueStatsForCharacteristic(meta, mpstatsCharacteristics = []) {
 }
 
 function countMpstatsMatches(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
-  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const metaByKey = characteristicMetaLookup(availableCharacteristics);
   return rows.filter((row) => {
     const meta = metaByKey[row.key] || row;
     return mpstatsValuesForCharacteristic(meta, mpstatsCharacteristics).length > 0;
@@ -3175,7 +3245,7 @@ function countMpstatsMatches(rows, availableCharacteristics = [], mpstatsCharact
 }
 
 function countPromotionRelevantCharacteristics(rows, availableCharacteristics = [], mpstatsCharacteristics = []) {
-  const metaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const metaByKey = characteristicMetaLookup(availableCharacteristics);
   return rows.filter((row) => characteristicIsPromotionRelevant(metaByKey[row.key] || row, mpstatsCharacteristics)).length;
 }
 
@@ -3910,7 +3980,9 @@ function contentFromStoredDraft(storedDraft, card = {}) {
 
 function countChangedDraftCharacteristics(drafts, rows) {
   return Object.entries(drafts || {}).filter(([key, draft]) => {
-    const currentRow = rows.find((row) => row.key === key);
+    const currentRow = rows.find((row) => row.key === key)
+      || rows.find((row) => row.charcID && draft?.charcID && String(row.charcID) === String(draft.charcID))
+      || rows.find((row) => normalizedCharacteristicName(row.label) === normalizedCharacteristicName(draft?.label || draft?.name || ""));
     if (!currentRow) {
       return true;
     }
@@ -18261,7 +18333,7 @@ function CharacteristicsDiffTable({
   readOnly = false,
 }) {
   const baseKeys = new Set(rows.map((row) => row.key));
-  const characteristicMetaByKey = Object.fromEntries((availableCharacteristics || []).map((item) => [characteristicKeyFromMeta(item), item]));
+  const characteristicMetaByKey = characteristicMetaLookup(availableCharacteristics);
   const draftOnlyRows = Object.entries(drafts)
     .filter(([key]) => !baseKeys.has(key))
     .map(([key, draft]) => ({
@@ -18284,7 +18356,8 @@ function CharacteristicsDiffTable({
   const availableOptions = (availableCharacteristics || [])
     .filter((item) => {
       const key = characteristicKeyFromMeta(item);
-      if (selectedKeys.has(key)) {
+      const nameKey = characteristicKeyFromName(item.name || item.label || "");
+      if (selectedKeys.has(key) || selectedKeys.has(nameKey) || baseKeys.has(key) || baseKeys.has(nameKey)) {
         return false;
       }
       if (!normalizedSearch) {
