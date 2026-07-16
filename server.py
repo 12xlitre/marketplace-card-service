@@ -9371,6 +9371,143 @@ def ozon_mpstats_card_sample(item):
   }
 
 
+def ozon_snapshot_card_from_sample(item):
+  if not isinstance(item, dict):
+    return None
+  raw_fields = public_wb_value(item)
+  sku = audit_str(first_nonempty(item.get("id"), item.get("sku"), item.get("skuId"), item.get("productId"), item.get("product_id")), 120)
+  offer_id = audit_str(first_nonempty(item.get("offerId"), item.get("offer_id"), item.get("vendorCode"), item.get("vendor_code")), 120)
+  card_key = draft_card_key(sku or offer_id or item.get("title"))
+  title = audit_str(item.get("title") or item.get("name") or (f"Ozon {sku}" if sku else "Ozon карточка"), 300)
+  if not card_key or not title:
+    return None
+  photo_url = mpstats_media_url(first_nonempty(item.get("photoUrl"), item.get("photo"), item.get("image"), item.get("thumb"), item.get("thumb_middle")))
+  photos = [{"big": photo_url, "c516x688": photo_url, "c246x328": photo_url}] if photo_url else []
+  category = audit_str(item.get("category") or item.get("categoryName") or item.get("subjectName") or item.get("subject") or "", 240)
+  price = audit_positive_number(item.get("price"), item.get("finalPrice"), item.get("final_price"), item.get("client_price"))
+  stock = audit_number(item.get("stock") or item.get("balance") or item.get("available_stock"), None)
+  size_row = {
+    "techSize": "единый",
+    "price": price,
+    "discountedPrice": price,
+    "stock": stock,
+    "sellerStock": stock,
+    "wbStock": stock,
+    "skus": [sku] if sku else [],
+  }
+  issues = []
+  if not photos:
+    issues.append("Нет фото")
+  if not category:
+    issues.append("Категория не указана")
+  return {
+    "marketplace": "ozon",
+    "cardKey": card_key,
+    "id": sku,
+    "sku": sku,
+    "offerId": offer_id,
+    "vendorCode": offer_id,
+    "title": title,
+    "description": audit_str(item.get("description") or "", 7000),
+    "brand": audit_named_value(item.get("brand") or item.get("brandName") or ""),
+    "sellerName": audit_named_value(item.get("sellerName") or item.get("seller") or item.get("shopName") or ""),
+    "subjectName": category or "категория не указана",
+    "category": category,
+    "photoUrl": photo_url,
+    "photos": photos,
+    "characteristics": public_wb_value(item.get("characteristics") or []),
+    "sizes": [size_row] if price is not None or stock is not None or sku else [],
+    "price": price,
+    "stock": stock,
+    "sales": audit_int(item.get("sales"), 0),
+    "revenue": audit_number(item.get("revenue"), 0),
+    "rating": audit_number(item.get("rating"), None),
+    "feedbacks": audit_int(item.get("feedbacks") or item.get("reviews"), 0),
+    "quality": "Требует проверки" if issues else "Данные получены",
+    "qualityClass": "amber" if issues else "green",
+    "issue": issues[0] if issues else "Нет критичных",
+    "issueCount": len(issues),
+    "status": "MPStats",
+    "statusClass": "green" if not issues else "amber",
+    "updatedAt": utc_now().isoformat(),
+    "rawFields": raw_fields,
+    "mpstats": {
+      "source": "ozon-mpstats-probe",
+      "sales": audit_int(item.get("sales"), 0),
+      "revenue": audit_number(item.get("revenue"), 0),
+    },
+  }
+
+
+def save_ozon_mpstats_cards(portal_id, user, cards):
+  row = get_portal_row(portal_id, user)
+  if not row:
+    raise ValueError("portal_not_found")
+  if audit_normalized(row["marketplace"]) != "ozon":
+    raise ValueError("ozon_portal_required")
+  if not user_can_edit_portal(user, portal_id):
+    raise PermissionError("forbidden")
+  if not isinstance(cards, list) or not cards:
+    raise ValueError("ozon_cards_missing")
+
+  existing_cards = wb_snapshot_cards_from_row(row)
+  merged = []
+  key_to_index = {}
+  for existing in existing_cards:
+    if not isinstance(existing, dict):
+      continue
+    key = card_key_from_snapshot_card(existing) or draft_card_key(existing.get("cardKey"))
+    if not key or key in key_to_index:
+      continue
+    key_to_index[key] = len(merged)
+    merged.append(existing)
+
+  added = 0
+  updated = 0
+  for item in cards[:50]:
+    card = ozon_snapshot_card_from_sample(item)
+    if not card:
+      continue
+    key = card_key_from_snapshot_card(card) or draft_card_key(card.get("cardKey"))
+    if not key:
+      continue
+    if key in key_to_index:
+      merged[key_to_index[key]] = card
+      updated += 1
+    else:
+      key_to_index[key] = len(merged)
+      merged.append(card)
+      added += 1
+
+  if not added and not updated:
+    raise ValueError("ozon_cards_unrecognized")
+
+  loaded_at = utc_now().isoformat()
+  snapshot = {
+    "cards": merged,
+    "stats": {
+      "cardCount": len(merged),
+      "workCount": 0,
+      "problemCount": sum(1 for card in merged if int(card.get("issueCount") or 0) > 0),
+      "loadedAt": loaded_at,
+      "portalName": "",
+      "source": "ozon-mpstats-probe",
+      "sourceLabel": "Ozon MPStats probe",
+    },
+  }
+  update_portal_manual_snapshot(portal_id, snapshot, status="Ozon MPStats карточки")
+  updated_row = get_portal_row(portal_id, user)
+  return {
+    "portal": public_portal_from_row(updated_row),
+    "saved": {
+      "added": added,
+      "updated": updated,
+      "total": len(merged),
+      "loadedAt": loaded_at,
+    },
+  }
+
+
 def build_ozon_mpstats_probe(portal_id, user, limit=20):
   row = get_portal_row(portal_id, user)
   if not row:
@@ -15502,6 +15639,28 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_mpstats_probe"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-mpstats-cards"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-mpstats-cards")].strip("/")
+      if not user_can_edit_portal(user, portal_id_text):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        result = save_ozon_mpstats_cards(portal_id_text, user, payload.get("cards"))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_cards"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return

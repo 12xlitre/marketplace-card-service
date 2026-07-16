@@ -2521,6 +2521,80 @@ tr.selected-row td {
   padding: 4px 8px;
 }
 
+.ozon-probe-save-row {
+  border-top: 1px solid rgba(40, 86, 146, 0.18);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.ozon-probe-save-row span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ozon-cards-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ozon-card-row {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+}
+
+.ozon-card-row img,
+.ozon-card-thumb {
+  width: 52px;
+  height: 52px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--blue-soft);
+  object-fit: cover;
+}
+
+.ozon-card-thumb {
+  display: grid;
+  place-items: center;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.ozon-card-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ozon-card-row strong,
+.ozon-card-row span,
+.ozon-card-row small {
+  overflow-wrap: anywhere;
+}
+
+.ozon-card-row strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.ozon-card-row span,
+.ozon-card-row small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .store-import-progress {
   border: 1px solid var(--line);
   border-radius: 8px;

@@ -6417,6 +6417,7 @@ export default function App() {
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
             onUpdateName={(name) => updatePortalName(currentPortal, name)}
             onUpdateSource={(source) => updatePortalSource(currentPortal, source)}
+            onPortalUpdated={replaceUserPortal}
             onNotice={setNotice}
             helpEnabled={helpEnabled}
           />
@@ -7292,7 +7293,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onNotice, helpEnabled = false }) {
+function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
@@ -7317,6 +7318,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [sourceSaving, setSourceSaving] = useState(false);
   const [probeStatus, setProbeStatus] = useState("idle");
   const [probeResult, setProbeResult] = useState(null);
+  const [probeSaveStatus, setProbeSaveStatus] = useState("idle");
 
   useEffect(() => {
     if (!teamEditing) {
@@ -7397,6 +7399,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
     setProbeStatus("loading");
     setProbeResult(null);
+    setProbeSaveStatus("idle");
     try {
       const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-probe`, {
         method: "POST",
@@ -7420,6 +7423,36 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
             ? "Не удалось распознать Ozon seller/SKU из источника."
             : "Не удалось проверить Ozon через MPStats.";
       setProbeResult({ status: "error", message });
+      onNotice?.(message);
+    }
+  }
+
+  async function saveOzonProbeCards() {
+    const cards = Array.isArray(probeResult?.cards) ? probeResult.cards : [];
+    if (!canManage || !cards.length || probeSaveStatus === "saving") {
+      return;
+    }
+    setProbeSaveStatus("saving");
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-cards`, {
+        method: "POST",
+        body: JSON.stringify({ cards }),
+      });
+      if (response.portal) {
+        onPortalUpdated?.(response.portal);
+      }
+      const total = Number(response.saved?.total || response.portal?.cardCount || cards.length || 0);
+      const added = Number(response.saved?.added || 0);
+      const updated = Number(response.saved?.updated || 0);
+      setProbeSaveStatus("saved");
+      onNotice?.(`Сохранили Ozon-карточки: всего ${formatNumber(total)}, новых ${formatNumber(added)}, обновлено ${formatNumber(updated)}.`);
+    } catch (error) {
+      setProbeSaveStatus("error");
+      const message = error.message === "ozon_cards_missing"
+        ? "Нет найденных карточек для сохранения."
+        : error.message === "ozon_portal_required"
+          ? "Сохранять Ozon-карточки можно только в Ozon-кабинет."
+          : "Не удалось сохранить Ozon-карточки.";
       onNotice?.(message);
     }
   }
@@ -7622,7 +7655,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                     </button>
                     <span>{!canManage ? "Проверка доступна пользователю с правом управления кабинетом." : sourceConfigured ? "Проверка ничего не сохраняет, только показывает доступные Ozon-данные." : "Сначала укажите ссылку, Seller ID или SKU."}</span>
                   </div>
-                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} />
+                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={canManage} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
                 </section>
 
                 <section className="workspace-strip">
@@ -7643,11 +7676,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   </div>
                 </section>
 
-                <OzonPlaceholderPanel
-                  title="Карточки Ozon"
-                  copy="Карточки появятся после отдельного источника Ozon. WB-карточки сюда не подмешиваются."
-                  tag="нет данных"
-                />
+                <OzonCardsPanel cards={portal.realCards || []} />
               </>
             ) : null}
 
@@ -7697,7 +7726,49 @@ function OzonPlaceholderPanel({ title, copy, tag }) {
   );
 }
 
-function OzonMpstatsProbeResult({ result, status }) {
+function OzonCardsPanel({ cards }) {
+  const visibleCards = Array.isArray(cards) ? cards : [];
+  if (!visibleCards.length) {
+    return (
+      <OzonPlaceholderPanel
+        title="Карточки Ozon"
+        copy="Карточки появятся после проверки MPStats и явного сохранения найденного результата. WB-карточки сюда не подмешиваются."
+        tag="нет данных"
+      />
+    );
+  }
+  return (
+    <section className="workspace-strip">
+      <div className="strip-head">
+        <div>
+          <h2>Карточки Ozon</h2>
+          <p>Сохраненные карточки из Ozon MPStats probe. Это отдельный Ozon snapshot внутри клиента.</p>
+        </div>
+        <Tag tone="blue">{formatNumber(visibleCards.length)}</Tag>
+      </div>
+      <div className="ozon-cards-list">
+        {visibleCards.map((card, index) => {
+          const rawFields = rawFieldsForCard(card);
+          const sku = card.id || card.sku || rawFields.id || rawFields.sku || "";
+          const offerId = card.offerId || card.vendorCode || rawFields.offerId || rawFields.offer_id || "";
+          return (
+            <article className="ozon-card-row" key={`${sku || offerId || card.title}-${index}`}>
+              {card.photoUrl ? <img src={card.photoUrl} alt="" loading="lazy" /> : <div className="ozon-card-thumb">OZ</div>}
+              <div>
+                <strong>{card.title || sku || "Ozon карточка"}</strong>
+                <span>{[sku ? `SKU ${sku}` : "", offerId ? `offer ${offerId}` : "", card.brand, card.subjectName || card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
+                <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ") || "метрики появятся после расширения Ozon-логики"}</small>
+              </div>
+              <Tag tone={Number(card.issueCount || 0) ? "amber" : "green"}>{card.status || "MPStats"}</Tag>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = "idle", onSave }) {
   if (status === "idle" || !result) {
     return null;
   }
@@ -7739,6 +7810,20 @@ function OzonMpstatsProbeResult({ result, status }) {
               <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ")}</small>
             </div>
           ))}
+        </div>
+      ) : null}
+      {cards.length && canSave ? (
+        <div className="ozon-probe-save-row">
+          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={onSave} disabled={saveStatus === "saving"} aria-busy={saveStatus === "saving" || undefined}>
+            <Save size={16} />{saveStatus === "saving" ? "Сохраняем" : saveStatus === "saved" ? "Сохранено" : "Сохранить карточки"}
+          </button>
+          <span>
+            {saveStatus === "saved"
+              ? "Найденные карточки добавлены в Ozon-кабинет."
+              : saveStatus === "error"
+                ? "Сохранение не прошло, попробуйте еще раз."
+                : "Сохранит найденные карточки в раздел Ozon этого клиента."}
+          </span>
         </div>
       ) : null}
       {attempts.length ? (

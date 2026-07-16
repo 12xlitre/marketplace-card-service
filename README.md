@@ -78,6 +78,7 @@ POST /api/portals/<portal_id>/client-name
 POST /api/portals/<portal_id>/client-contact
 POST /api/portals/<portal_id>/manual-source
 POST /api/portals/<portal_id>/ozon-mpstats-probe
+POST /api/portals/<portal_id>/ozon-mpstats-cards
 POST /api/portals/<portal_id>/archive
 POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
@@ -110,6 +111,8 @@ DELETE /api/portal-work-periods?portal_id=1&period_id=1
 `POST /api/portals/<portal_id>/manual-source` обновляет `storeUrl` и `manualSource` только у manual-кабинетов после проверки доступа. В текущем Ozon beta это сохраняет ссылку/Seller ID/ориентир и комментарий к будущей Ozon-specific загрузке, без подключения WB API.
 
 `POST /api/portals/<portal_id>/ozon-mpstats-probe` доступен только для Ozon-порталов с edit/manage правами пользователя и проверяет сохраненный Ozon-источник через MPStats малым лимитом. Если в источнике указаны тестовые артикулы/SKU, item-кандидаты проверяются первыми и агрегируются пачкой до 50 найденных карточек; seller/brand/category остаются fallback, если SKU ничего не дали. Маршрут возвращает статус, найденный источник, попытки endpoint-ов и sample-карточки, но не сохраняет карточки и не запускает WB-загрузчик.
+
+`POST /api/portals/<portal_id>/ozon-mpstats-cards` доступен только для Ozon-порталов с edit/manage правами пользователя и сохраняет явно выбранный результат Ozon MPStats probe в `cards_snapshot_json`. Карточки нормализуются как `marketplace=ozon`, мержатся по SKU/offer/id с уже сохраненным Ozon snapshot и обновляют `card_count/problem_count/last_sync_at`; WB API и WB bootstrap не запускаются.
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
 
