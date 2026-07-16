@@ -7293,6 +7293,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     manualSource: sourceManualText,
   });
   const [sourceSaving, setSourceSaving] = useState(false);
+  const [probeStatus, setProbeStatus] = useState("idle");
+  const [probeResult, setProbeResult] = useState(null);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -7364,6 +7366,39 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       }
     } finally {
       setSourceSaving(false);
+    }
+  }
+
+  async function runOzonMpstatsProbe() {
+    if (!canManage || !sourceConfigured || probeStatus === "loading") {
+      return;
+    }
+    setProbeStatus("loading");
+    setProbeResult(null);
+    try {
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-probe`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 20 }),
+      });
+      setProbeResult(result);
+      setProbeStatus("loaded");
+      const count = Number(result.cardCount || result.totalEstimate || result.cards?.length || 0);
+      if (count > 0) {
+        onNotice?.(`MPStats нашел Ozon-данные: ${count} ${pluralRu(count, "карточка", "карточки", "карточек")}.`);
+      } else {
+        onNotice?.("MPStats не нашел Ozon-карточки по этому источнику. Проверьте ссылку, Seller ID или SKU.");
+      }
+    } catch (error) {
+      setProbeStatus("error");
+      const message = error.message === "mpstats_api_error" && error.payload?.message === "mpstats_key_missing"
+        ? "MPStats не подключен: проверьте ключ в настройках."
+        : error.message === "manual_source_missing"
+          ? "Сначала заполните источник Ozon."
+          : error.message === "ozon_source_unrecognized"
+            ? "Не удалось распознать Ozon seller/SKU из источника."
+            : "Не удалось проверить Ozon через MPStats.";
+      setProbeResult({ status: "error", message });
+      onNotice?.(message);
     }
   }
 
@@ -7559,6 +7594,13 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
                     ))}
                   </div>
+                  <div className="ozon-probe-actions">
+                    <button className={loadingButtonClass("btn primary", probeStatus === "loading")} type="button" onClick={runOzonMpstatsProbe} disabled={!canManage || !sourceConfigured || probeStatus === "loading"} aria-busy={probeStatus === "loading" || undefined}>
+                      <RefreshCw size={16} />{probeStatus === "loading" ? "Проверяем MPStats" : "Проверить MPStats"}
+                    </button>
+                    <span>{!canManage ? "Проверка доступна пользователю с правом управления кабинетом." : sourceConfigured ? "Проверка ничего не сохраняет, только показывает доступные Ozon-данные." : "Сначала укажите ссылку, Seller ID или SKU."}</span>
+                  </div>
+                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} />
                 </section>
 
                 <section className="workspace-strip">
@@ -7630,6 +7672,61 @@ function OzonPlaceholderPanel({ title, copy, tag }) {
         <span>{copy}</span>
       </div>
     </section>
+  );
+}
+
+function OzonMpstatsProbeResult({ result, status }) {
+  if (status === "idle" || !result) {
+    return null;
+  }
+  if (status === "loading") {
+    return (
+      <div className="ozon-probe-result">
+        <strong>Проверяем MPStats</strong>
+        <span>Ищем Ozon-карточки по сохраненному источнику.</span>
+      </div>
+    );
+  }
+  if (status === "error" || result.status === "error") {
+    return (
+      <div className="ozon-probe-result error">
+        <strong>Проверка не прошла</strong>
+        <span>{result.message || "MPStats временно недоступен для Ozon-проверки."}</span>
+      </div>
+    );
+  }
+  const cards = Array.isArray(result.cards) ? result.cards : [];
+  const attempts = Array.isArray(result.attempts) ? result.attempts : [];
+  const count = Number(result.totalEstimate || result.cardCount || cards.length || 0);
+  const source = result.source || {};
+  return (
+    <div className={`ozon-probe-result ${cards.length ? "loaded" : "empty"}`}>
+      <div className="ozon-probe-head">
+        <div>
+          <strong>{cards.length ? `MPStats нашел ${formatNumber(count)} ${pluralRu(count, "карточку", "карточки", "карточек")}` : "MPStats не нашел карточки"}</strong>
+          <span>{source.kind ? `${source.kind}: ${source.path || "источник"}` : "Источник Ozon"}</span>
+        </div>
+        <Tag tone={cards.length ? "blue" : "amber"}>{result.status || "probe"}</Tag>
+      </div>
+      {cards.length ? (
+        <div className="ozon-probe-cards">
+          {cards.slice(0, 5).map((card, index) => (
+            <div className="ozon-probe-card" key={`${card.id || card.offerId || card.title}-${index}`}>
+              <strong>{card.title || card.id || "Ozon карточка"}</strong>
+              <span>{[card.id ? `SKU ${card.id}` : "", card.offerId ? `offer ${card.offerId}` : "", card.brand, card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
+              <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ")}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {attempts.length ? (
+        <div className="ozon-probe-attempts">
+          {attempts.slice(0, 4).map((attempt, index) => (
+            <span key={`${attempt.path}-${index}`}>{attempt.status}: {attempt.path}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

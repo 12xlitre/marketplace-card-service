@@ -8993,6 +8993,81 @@ def mpstats_storefront_candidates(name, store_url, manual_source, seed_cards=Non
   return candidates
 
 
+def ozon_mpstats_add_candidate(candidates, seen, kind, path, source):
+  kind = audit_str(kind)
+  path = audit_str(path, 180)
+  normalized = audit_normalized(path)
+  if kind not in {"seller", "brand", "category", "item"} or not path or normalized in {"ozon", "озон", "кабинет ozon", "ozon beta"}:
+    return
+  key = f"{kind}:{normalized}"
+  if key in seen:
+    return
+  seen.add(key)
+  candidates.append({"kind": kind, "path": path, "source": source})
+
+
+def ozon_mpstats_candidates(name, store_url, manual_source, limit=12):
+  candidates = []
+  seen = set()
+  source_text = mpstats_manual_source_text(name, store_url, manual_source)
+  for raw_url in re.findall(r"https?://[^\s,;]+", source_text):
+    parsed = urlparse(raw_url)
+    host = (parsed.netloc or "").lower()
+    if "ozon" not in host:
+      continue
+    path_parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(path_parts):
+      normalized_part = audit_normalized(part)
+      next_part = path_parts[index + 1] if index + 1 < len(path_parts) else ""
+      if normalized_part in {"seller", "sellers", "shop", "shops"} and next_part:
+        ozon_mpstats_add_candidate(candidates, seen, "seller", mpstats_storefront_label(next_part), "seller-url")
+        numeric_tail = re.search(r"(\d{4,12})$", next_part)
+        if numeric_tail:
+          ozon_mpstats_add_candidate(candidates, seen, "seller", numeric_tail.group(1), "seller-url")
+      if normalized_part in {"brand", "brands"} and next_part:
+        ozon_mpstats_add_candidate(candidates, seen, "brand", mpstats_storefront_label(next_part), "brand-url")
+      if normalized_part in {"category", "categories", "catalog"} and next_part:
+        ozon_mpstats_add_candidate(candidates, seen, "category", mpstats_storefront_label(next_part), "category-url")
+      if normalized_part in {"product", "products"} and next_part:
+        for match in re.findall(r"\d{6,14}", next_part):
+          ozon_mpstats_add_candidate(candidates, seen, "item", match, "product-url")
+    query = parse_qs(parsed.query)
+    for key in ("seller", "sellerId", "seller_id", "shop", "shopId"):
+      for value in query.get(key, []):
+        ozon_mpstats_add_candidate(candidates, seen, "seller", mpstats_storefront_label(value), "query")
+    for key in ("brand", "brandName"):
+      for value in query.get(key, []):
+        ozon_mpstats_add_candidate(candidates, seen, "brand", mpstats_storefront_label(value), "query")
+    for key in ("sku", "id", "product_id", "productId"):
+      for value in query.get(key, []):
+        for match in re.findall(r"\d{6,14}", value):
+          ozon_mpstats_add_candidate(candidates, seen, "item", match, "query")
+
+  for pattern, kind in (
+    (r"(?:seller\s*id|seller|продавец|магазин|shop)\s*[:=]\s*([^\n;,]+)", "seller"),
+    (r"(?:бренд|brand)\s*[:=]\s*([^\n;,]+)", "brand"),
+    (r"(?:категория|category)\s*[:=]\s*([^\n;,]+)", "category"),
+  ):
+    for match in re.findall(pattern, source_text, flags=re.IGNORECASE):
+      value = mpstats_storefront_label(match)
+      ozon_mpstats_add_candidate(candidates, seen, kind, value, "manual-source")
+      if kind == "seller":
+        numeric_tail = re.search(r"(\d{4,12})$", value)
+        if numeric_tail:
+          ozon_mpstats_add_candidate(candidates, seen, kind, numeric_tail.group(1), "manual-source")
+
+  for pattern in (
+    r"(?:sku|ozon\s*id|product\s*id|product_id|товар|артикул)\D{0,16}(\d{6,14})",
+    r"\b(\d{8,14})\b",
+  ):
+    for match in re.findall(pattern, source_text, flags=re.IGNORECASE):
+      ozon_mpstats_add_candidate(candidates, seen, "item", match, "manual-source")
+      if len(candidates) >= limit:
+        return candidates[:limit]
+
+  return candidates[:limit]
+
+
 def mpstats_storefront_params(path_value, period):
   return {
     "path": path_value,
@@ -9217,6 +9292,172 @@ def fetch_mpstats_storefront_listing(token, candidate, period, limit, start_row=
     if raw_card:
       raw_cards.append(raw_card)
   return raw_cards, payload
+
+
+def ozon_mpstats_candidate_endpoints(candidate, period):
+  kind = candidate.get("kind")
+  path = candidate.get("path")
+  if kind in {"seller", "brand", "category"}:
+    params = mpstats_storefront_params(path, period)
+    body = mpstats_storefront_body(20, start_row=0)
+    return [
+      {"method": "POST", "path": f"/oz/get/{kind}", "params": params, "body": body},
+      {"method": "POST", "path": f"/ozon/get/{kind}", "params": params, "body": body},
+    ]
+  if kind == "item":
+    query = urlencode({"d1": period["d1"], "d2": period["d2"]})
+    return [
+      {"method": "GET", "path": f"/analytics/v1/oz/items/{path}"},
+      {"method": "GET", "path": f"/analytics/v1/oz/items/{path}/full?{query}"},
+      {"method": "GET", "path": f"/analytics/v1/ozon/items/{path}"},
+    ]
+  return []
+
+
+def ozon_mpstats_payload_rows(payload):
+  rows = audit_extract_list(payload)
+  if rows:
+    return rows
+  if isinstance(payload, dict) and any(payload.get(key) for key in ("sku", "id", "product_id", "productId", "name", "title")):
+    return [payload]
+  return []
+
+
+def ozon_mpstats_card_sample(item):
+  if not isinstance(item, dict):
+    return None
+  product_id = first_nonempty(
+    item.get("sku"),
+    item.get("skuId"),
+    item.get("id"),
+    item.get("product_id"),
+    item.get("productId"),
+    item.get("fbo_sku"),
+    item.get("fbs_sku"),
+  )
+  title = audit_str(item.get("title") or item.get("name") or item.get("full_name") or item.get("productName") or "")
+  if not product_id and not title:
+    return None
+  return {
+    "id": product_id,
+    "offerId": first_nonempty(item.get("offer_id"), item.get("offerId"), item.get("vendorCode"), item.get("vendor_code")),
+    "title": title or f"Ozon {product_id}",
+    "brand": audit_named_value(item.get("brand") or item.get("brandName") or ""),
+    "sellerName": audit_named_value(item.get("sellerName") or item.get("seller") or item.get("shopName") or ""),
+    "category": audit_str(item.get("category") or item.get("categoryName") or item.get("subject") or item.get("subjectName") or ""),
+    "price": audit_positive_number(item.get("price"), item.get("final_price"), item.get("finalPrice"), item.get("client_price")),
+    "stock": audit_number(item.get("stock") or item.get("balance") or item.get("available_stock"), None),
+    "sales": audit_int(item.get("sales"), 0),
+    "revenue": audit_number(item.get("revenue"), 0),
+    "rating": audit_number(item.get("rating") or item.get("commentsvaluation"), None),
+    "feedbacks": audit_int(item.get("feedbacks") or item.get("comments") or item.get("reviews"), 0),
+    "photoUrl": first_nonempty(item.get("thumb_middle"), item.get("thumb"), item.get("photo"), item.get("image"), item.get("url_photo")),
+    "fieldKeys": list(item.keys())[:18],
+  }
+
+
+def build_ozon_mpstats_probe(portal_id, user, limit=20):
+  row = get_portal_row(portal_id, user)
+  if not row:
+    raise ValueError("portal_not_found")
+  if audit_normalized(row["marketplace"]) != "ozon":
+    raise ValueError("ozon_portal_required")
+  if not (row["store_url"] or row["manual_source"]):
+    raise ValueError("manual_source_missing")
+  token = get_service_integration_secret(MPSTATS_PROVIDER)
+  if not token:
+    raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
+
+  period = audit_period_default()
+  candidates = ozon_mpstats_candidates(row["name"], row["store_url"], row["manual_source"])
+  if not candidates:
+    raise ValueError("ozon_source_unrecognized")
+  limit = max(1, min(int(limit or 20), 50))
+  attempts = []
+  checked = 0
+  max_attempts = 10
+
+  for candidate in candidates:
+    for endpoint in ozon_mpstats_candidate_endpoints(candidate, period):
+      if checked >= max_attempts:
+        break
+      checked += 1
+      request_path = endpoint["path"]
+      if endpoint["method"] == "POST":
+        request_path = f"{request_path}?{urlencode(endpoint.get('params') or {}, doseq=True)}"
+      attempt = {
+        "candidate": candidate,
+        "method": endpoint["method"],
+        "path": endpoint["path"],
+        "status": "pending",
+      }
+      try:
+        if endpoint["method"] == "POST":
+          payload = mpstats_post_body_json(
+            token,
+            endpoint["path"],
+            body=endpoint.get("body"),
+            params=endpoint.get("params"),
+            attempts=1,
+          )
+        else:
+          payload = mpstats_get_json(token, endpoint["path"], attempts=1)
+        rows = ozon_mpstats_payload_rows(payload)
+        samples = []
+        seen = set()
+        for row_item in rows:
+          sample = ozon_mpstats_card_sample(row_item)
+          if not sample:
+            continue
+          key = audit_normalized(sample.get("id") or sample.get("offerId") or sample.get("title"))
+          if key in seen:
+            continue
+          seen.add(key)
+          samples.append(sample)
+          if len(samples) >= min(limit, 5):
+            break
+        total_estimate = mpstats_payload_total_count(payload) or len(rows)
+        attempt.update({
+          "status": "loaded" if samples else "empty",
+          "rowCount": len(rows),
+          "sampleCount": len(samples),
+          "totalEstimate": total_estimate,
+          "requestPath": request_path,
+        })
+        attempts.append(attempt)
+        if samples:
+          return {
+            "status": "loaded",
+            "source": candidate,
+            "period": period,
+            "cardCount": len(rows),
+            "totalEstimate": total_estimate,
+            "cards": samples,
+            "attempts": attempts,
+            "checkedAt": utc_now().isoformat(),
+          }
+      except MpstatsApiError as exc:
+        attempt.update({
+          "status": "error",
+          "message": exc.message,
+          "httpStatus": exc.status,
+          "retryable": exc.retryable,
+          "requestPath": request_path,
+        })
+        attempts.append(attempt)
+    if checked >= max_attempts:
+      break
+
+  return {
+    "status": "empty",
+    "source": candidates[0],
+    "period": period,
+    "cardCount": 0,
+    "totalEstimate": 0,
+    "cards": [],
+    "attempts": attempts,
+    "checkedAt": utc_now().isoformat(),
+  }
 
 
 def mpstats_payload_total_count(payload):
@@ -15160,6 +15401,52 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_payload = public_portal_from_row(row)
       portal_payload["manualBootstrap"] = bootstrap
       self.send_json(HTTPStatus.OK, {"portal": portal_payload, "bootstrap": bootstrap})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-mpstats-probe"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-mpstats-probe")].strip("/")
+      if not user_can_edit_portal(user, portal_id_text):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        limit = int(payload.get("limit") or 20)
+      except (TypeError, ValueError):
+        limit = 20
+      try:
+        context_token = mpstats_call_context_start(user, "Ozon: проверка источника MPStats", portal_id=portal_id_text, details={
+          "limit": max(1, min(limit, 50)),
+        })
+        try:
+          result = build_ozon_mpstats_probe(portal_id_text, user, limit=limit)
+        finally:
+          mpstats_call_context_stop(context_token)
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except MpstatsApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "mpstats_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_mpstats_probe"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path.startswith("/api/portals/") and path.endswith("/mpstats-import-all"):
