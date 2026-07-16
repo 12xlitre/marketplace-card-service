@@ -671,6 +671,51 @@ function portalDisplayName(portal) {
   return currentName || cardName || "Кабинет WB";
 }
 
+function portalMarketplaceName(portal) {
+  return String(portal?.marketplace || "Wildberries").trim() || "Wildberries";
+}
+
+function portalMarketplaceKey(portal) {
+  const marketplace = portalMarketplaceName(portal).toLowerCase();
+  if (marketplace.includes("ozon") || marketplace.includes("озон")) {
+    return "ozon";
+  }
+  return "wildberries";
+}
+
+function marketplaceTitle(key) {
+  return key === "ozon" ? "Ozon" : "Wildberries";
+}
+
+function portalClientName(portal) {
+  const explicitName = String(portal?.clientName || portal?.client_name || portal?.customerName || portal?.customer_name || "").trim();
+  return explicitName || portalDisplayName(portal);
+}
+
+function portalClientKey(portal) {
+  return String(portal?.clientId || portal?.client_id || portalClientName(portal)).trim().toLowerCase() || "client";
+}
+
+function buildClientWorkspaces(portals) {
+  const clients = new Map();
+  (Array.isArray(portals) ? portals : []).forEach((portal) => {
+    const key = portalClientKey(portal);
+    const existing = clients.get(key) || {
+      id: key,
+      name: portalClientName(portal),
+      portals: [],
+    };
+    existing.portals.push(portal);
+    clients.set(key, existing);
+  });
+  return Array.from(clients.values());
+}
+
+function userCanSeeOzonBeta(user) {
+  const marker = `${user?.login || ""} ${user?.full_name || ""}`.toLowerCase();
+  return marker.includes("dmitriy") || marker.includes("dmitry") || marker.includes("дмитрий") || marker.includes("сафиуллин");
+}
+
 function uniqueLogins(logins) {
   return [...new Set(logins.filter(Boolean))];
 }
@@ -5889,6 +5934,7 @@ export default function App() {
           <CabinetsScreen
             portals={visiblePortals()}
             activePortals={activePortals}
+            currentUser={currentUser}
             statusFilter={portalStatusFilter}
             onStatusFilter={setPortalStatusFilter}
             canManage={canManagePortals}
@@ -6117,23 +6163,53 @@ function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNa
   );
 }
 
-function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onDelete, onOpenModal, helpEnabled = false }) {
-  const apiCount = activePortals.filter((portal) => portal.apiConnected).length;
-  const manualCount = activePortals.filter((portal) => !portal.apiConnected).length;
-  const apiCardsCount = activePortals
+function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onStatusFilter, canManage, findUser, onOpen, onArchive, onRestore, onDelete, onOpenModal, helpEnabled = false }) {
+  const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
+  const [marketplaceTab, setMarketplaceTab] = useState("wildberries");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  useEffect(() => {
+    if (!canSeeOzonBeta && marketplaceTab === "ozon") {
+      setMarketplaceTab("wildberries");
+    }
+  }, [canSeeOzonBeta, marketplaceTab]);
+
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const searchedPortals = portals.filter((portal) => {
+    if (!normalizedSearchQuery) {
+      return true;
+    }
+    const haystack = [
+      portalClientName(portal),
+      portalDisplayName(portal),
+      portalMarketplaceName(portal),
+      portal.ownerLogin,
+      portal.storeUrl,
+      portal.manualSource,
+    ].join(" ").toLowerCase();
+    return haystack.includes(normalizedSearchQuery);
+  });
+  const scopedPortals = searchedPortals.filter((portal) => portalMarketplaceKey(portal) === marketplaceTab);
+  const activeScopedPortals = activePortals.filter((portal) => portalMarketplaceKey(portal) === marketplaceTab);
+  const clientSourcePortals = marketplaceTab === "ozon" ? searchedPortals : scopedPortals;
+  const clientWorkspaces = buildClientWorkspaces(clientSourcePortals);
+  const apiCount = activeScopedPortals.filter((portal) => portal.apiConnected).length;
+  const manualCount = activeScopedPortals.filter((portal) => !portal.apiConnected).length;
+  const apiCardsCount = activeScopedPortals
     .filter((portal) => portal.apiConnected)
     .reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
-  const manualCardsCount = activePortals
+  const manualCardsCount = activeScopedPortals
     .filter((portal) => !portal.apiConnected)
     .reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
-  const cardsCount = activePortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
-  const activeTasksCount = activePortals.reduce((sum, portal) => sum + portalActiveTaskCount(portal), 0);
+  const cardsCount = activeScopedPortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
+  const activeTasksCount = activeScopedPortals.reduce((sum, portal) => sum + portalActiveTaskCount(portal), 0);
+  const marketplaceLabel = marketplaceTitle(marketplaceTab);
   return (
     <section className="screen active">
       <header className="topbar">
         <div className="title">
           <h1>Кабинеты</h1>
-          <p>Активные рабочие кабинеты и подключенные источники данных.</p>
+          <p>Клиенты, маркетплейсы и рабочие кабинеты команды.</p>
         </div>
         <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
           <Plus size={17} />
@@ -6147,25 +6223,25 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
           title="Как начать работу"
           items={[
             "Нажмите Добавить кабинет, чтобы подключить новый WB-кабинет или завести ручной кабинет.",
-            "Откройте нужный кабинет, чтобы увидеть карточки, отчеты и маршрут работы по клиенту.",
+            "Клиент объединяет разделы маркетплейсов; рабочий WB-поток остается в карточке кабинета.",
             "Фильтр Активные / Неактивные помогает спрятать завершенные кабинеты без удаления истории.",
           ]}
         />
         <div className="summary-grid">
           <Metric
-            label="Кабинеты в работе"
-            value={formatNumber(activePortals.length)}
+            label={`${marketplaceLabel}: кабинеты`}
+            value={formatNumber(activeScopedPortals.length)}
             hint={`${formatNumber(apiCount)} API · ${formatNumber(manualCount)} ручной`}
           />
           <Metric
-            label="Карточки всего"
+            label={`${marketplaceLabel}: карточки`}
             value={formatNumber(cardsCount)}
             hint={`${formatNumber(apiCardsCount)} из API · ${formatNumber(manualCardsCount)} ручной импорт`}
           />
           <Metric
             label="API-кабинеты"
             value={formatNumber(apiCount)}
-            hint={apiCount ? "данные обновляются по WB API" : "нет подключенных API"}
+            hint={apiCount ? `данные обновляются по ${marketplaceLabel} API` : "нет подключенных API"}
           />
           <Metric
             label="Активные задачи"
@@ -6178,12 +6254,13 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
           <div className="filters">
             <label className="search-field">
               <Search size={16} />
-              <input type="search" placeholder="Поиск по клиенту, бренду, артикулу" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Поиск по клиенту, бренду, артикулу"
+              />
             </label>
-            <select className="select" aria-label="Маркетплейс">
-              <option>Все маркетплейсы</option>
-              <option>Wildberries</option>
-            </select>
             <select className="select" value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)} aria-label="Статус кабинета">
               <option value="active">Активные</option>
               <option value="inactive">Неактивные</option>
@@ -6192,34 +6269,142 @@ function CabinetsScreen({ portals, activePortals, statusFilter, onStatusFilter, 
           </div>
         </div>
 
-        <div className="workspace-grid">
-          {portals.map((portal) => (
-            <PortalCard
-              key={portal.id}
-              portal={portal}
-              owner={findUser(portal.ownerLogin)}
-              findUser={findUser}
-              canManage={canManage}
-              onOpen={() => onOpen(portal)}
-              onArchive={() => onArchive(portal)}
-              onRestore={() => onRestore(portal)}
-              onDelete={() => onDelete(portal)}
-            />
-          ))}
-          {statusFilter !== "inactive" ? (
-            <article className="workspace-card add-card">
-              <div className="seller-logo">+</div>
-              <h2>Добавить кабинет</h2>
-              <p>Подключить Wildberries через API или начать вручную с таблицами и списками карточек.</p>
-              <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
-                <Plus size={17} />
-                Добавить
+        <div className="client-marketplace-shell">
+          <div className="client-marketplace-head">
+            <div>
+              <span className="section-eyebrow">Клиент</span>
+              <h2>Маркетплейсы клиента</h2>
+              <p>{canSeeOzonBeta
+                ? "Wildberries работает в текущем режиме; Ozon включен как закрытый beta-раздел."
+                : "Wildberries работает в текущем режиме; дополнительные маркетплейсы подключаются поэтапно."}</p>
+            </div>
+            <div className="seller-tabs marketplace-tabs" role="tablist" aria-label="Маркетплейс">
+              <button
+                className={marketplaceTab === "wildberries" ? "active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={marketplaceTab === "wildberries"}
+                onClick={() => setMarketplaceTab("wildberries")}
+              >
+                Wildberries
               </button>
-            </article>
+              {canSeeOzonBeta ? (
+                <button
+                  className={marketplaceTab === "ozon" ? "active soon" : "soon"}
+                  type="button"
+                  role="tab"
+                  aria-selected={marketplaceTab === "ozon"}
+                  onClick={() => setMarketplaceTab("ozon")}
+                >
+                  Ozon <span>beta</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          {clientWorkspaces.length ? (
+            <div className="client-workspace-list">
+              {clientWorkspaces.map((client) => (
+                <section className="client-workspace" key={`${client.id}-${marketplaceTab}`}>
+                  <div className="client-workspace-head">
+                    <div>
+                      <span className="section-eyebrow">Клиент</span>
+                      <h3>{client.name}</h3>
+                      <p>{marketplaceLabel}: кабинеты, карточки, задачи и отчетные периоды.</p>
+                    </div>
+                    <Tag tone={marketplaceTab === "ozon" ? "amber" : "blue"}>{marketplaceLabel}</Tag>
+                  </div>
+                  {marketplaceTab === "ozon" ? (
+                    <div className="workspace-grid">
+                      <OzonBetaCard client={client} />
+                    </div>
+                  ) : (
+                    <div className="workspace-grid">
+                      {client.portals.map((portal) => (
+                        <PortalCard
+                          key={portal.id}
+                          portal={portal}
+                          owner={findUser(portal.ownerLogin)}
+                          findUser={findUser}
+                          canManage={canManage}
+                          onOpen={() => onOpen(portal)}
+                          onArchive={() => onArchive(portal)}
+                          onRestore={() => onRestore(portal)}
+                          onDelete={() => onDelete(portal)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
+            </div>
+          ) : (
+            <EmptyMarketplaceState marketplaceTab={marketplaceTab} />
+          )}
+
+          {marketplaceTab === "wildberries" && statusFilter !== "inactive" ? (
+            <div className="workspace-grid">
+              <article className="workspace-card add-card">
+                <div className="seller-logo">+</div>
+                <h2>Добавить кабинет</h2>
+                <p>Подключить Wildberries через API или начать вручную с таблицами и списками карточек.</p>
+                <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
+                  <Plus size={17} />
+                  Добавить
+                </button>
+              </article>
+            </div>
           ) : null}
         </div>
       </div>
     </section>
+  );
+}
+
+function OzonBetaCard({ client }) {
+  return (
+    <article className="workspace-card ozon-beta-card">
+      <div className="card-head">
+        <div className="seller">
+          <div className="seller-logo ozon-logo">OZ</div>
+          <div>
+            <h2>Ozon beta</h2>
+            <p>{client.name} · закрытый раздел</p>
+          </div>
+        </div>
+        <Tag tone="amber">beta</Tag>
+      </div>
+      <div className="scope-row">
+        <span>Доступ</span>
+        <strong>Дмитрий</strong>
+      </div>
+      <div className="card-stats">
+        <MiniStat value="0" label="кабинеты" />
+        <MiniStat value="0" label="карточки" />
+        <MiniStat value="0" label="задачи" />
+      </div>
+      <div className="marketplace-beta-list">
+        <span>Кабинеты Ozon</span>
+        <span>Карточки Ozon</span>
+        <span>Задачи Ozon</span>
+        <span>Отчетные периоды Ozon</span>
+      </div>
+      <div className="card-actions">
+        <Tag tone="amber">API не подключен</Tag>
+      </div>
+    </article>
+  );
+}
+
+function EmptyMarketplaceState({ marketplaceTab }) {
+  return (
+    <div className="empty-marketplace-state">
+      <Tags size={20} />
+      <div>
+        <strong>{marketplaceTitle(marketplaceTab)}: кабинетов пока нет</strong>
+        <p>{marketplaceTab === "ozon" ? "Раздел включен как beta-каркас без API и без влияния на WB." : "Добавьте WB-кабинет, чтобы начать работу по клиенту."}</p>
+      </div>
+    </div>
   );
 }
 

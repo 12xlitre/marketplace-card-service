@@ -414,6 +414,16 @@ a {
   line-height: 1.4;
 }
 
+.section-eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .seller-title-row {
   display: flex;
   align-items: center;
@@ -1474,6 +1484,108 @@ tr.selected-row td {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.client-marketplace-shell,
+.client-workspace-list,
+.client-workspace {
+  display: grid;
+  gap: 16px;
+}
+
+.client-marketplace-head,
+.client-workspace-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.client-marketplace-head h2,
+.client-workspace-head h3 {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.client-marketplace-head h2 {
+  font-size: 18px;
+}
+
+.client-workspace-head h3 {
+  font-size: 16px;
+}
+
+.client-marketplace-head p,
+.client-workspace-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.marketplace-tabs {
+  flex: 0 0 auto;
+}
+
+.ozon-logo {
+  background: #e7f0ff;
+  color: #005bff;
+  border: 1px solid #c8dcff;
+}
+
+.marketplace-beta-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.marketplace-beta-list span,
+.empty-marketplace-state {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.marketplace-beta-list span {
+  min-height: 34px;
+  display: grid;
+  align-items: center;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.ozon-beta-card {
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.empty-marketplace-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+}
+
+.empty-marketplace-state svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.empty-marketplace-state strong {
+  display: block;
+  font-size: 14px;
+}
+
+.empty-marketplace-state p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .card-head,
@@ -6277,6 +6389,20 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 
+  .client-marketplace-head,
+  .client-workspace-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .marketplace-tabs {
+    width: 100%;
+  }
+
+  .marketplace-tabs button {
+    flex: 1 1 0;
+  }
+
   .approval-panel-head {
     flex-direction: column;
   }
@@ -6309,6 +6435,7 @@ tr:last-child td {
 
   .summary-grid,
   .workspace-grid,
+  .marketplace-beta-list,
   .filters,
   .admin-overview,
   .admin-toolbar,
