@@ -5188,6 +5188,7 @@ export default function App() {
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [portalModalTarget, setPortalModalTarget] = useState(null);
+  const [ozonModalOpen, setOzonModalOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
@@ -6044,9 +6045,16 @@ export default function App() {
     }
   }
 
-  async function createOzonPortal(client) {
+  async function createOzonPortal(client, source = {}) {
     if (!client) {
       setNotice("Сначала откройте клиента для добавления Ozon.");
+      return false;
+    }
+    const storeUrl = String(source.storeUrl || "").trim();
+    const manualSource = String(source.manualSource || "").trim();
+    const cabinetName = String(source.name || "").trim();
+    if (!storeUrl && !manualSource) {
+      setNotice("Для Ozon-кабинета укажите ссылку, Seller ID или SKU.");
       return false;
     }
     const leadPortal = (client.portals || [])[0] || null;
@@ -6058,22 +6066,29 @@ export default function App() {
           mode: "manual",
           marketplace: "Ozon",
           scope: "full",
-          name: `${client.name} Ozon`,
+          name: cabinetName || `${client.name} Ozon`,
           clientName: client.name,
           teamRoles,
+          storeUrl,
+          manualSource,
         }),
       });
       const portal = normalizePortal(response.portal);
       setUserPortals((items) => [...items, portal]);
+      setOzonModalOpen(false);
       setSelectedClientId(client.id);
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
-      setNotice("Тестовый Ozon-кабинет создан. Он не использует WB API и открыт как отдельный beta-поток.");
+      setNotice("Ozon beta-кабинет создан с источником. Нажмите «Проверить MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
       if (error.message === "client_name_too_long") {
         setNotice("Название клиента слишком длинное для Ozon-кабинета.");
+      } else if (error.message === "store_url_too_long") {
+        setNotice("Ссылка или идентификатор Ozon слишком длинные.");
+      } else if (error.message === "manual_source_too_long") {
+        setNotice("Описание Ozon-источника слишком длинное.");
       } else {
         setNotice("Не удалось создать тестовый Ozon-кабинет.");
       }
@@ -6379,7 +6394,7 @@ export default function App() {
               setPortalModalTarget(null);
               setPortalModalOpen(true);
             }}
-            onAddOzon={() => createOzonPortal(currentClient)}
+            onAddOzon={() => setOzonModalOpen(true)}
             onUpdateName={(clientName) => updateClientName(currentClient, clientName)}
             onUpdateTeam={(teamRoles) => updateClientTeam(currentClient, teamRoles)}
             onUpdateContact={(clientContact) => updateClientContact(currentClient, clientContact)}
@@ -6490,6 +6505,13 @@ export default function App() {
                 : createPortal(payload)
             )}
           />
+      ) : null}
+      {ozonModalOpen && currentClient ? (
+        <OzonPortalModal
+          client={currentClient}
+          onClose={() => setOzonModalOpen(false)}
+          onSubmit={(payload) => createOzonPortal(currentClient, payload)}
+        />
       ) : null}
     </div>
   );
@@ -7163,10 +7185,10 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
           <article className="workspace-card add-card">
             <div className={`seller-logo ${isOzon ? "ozon-logo" : ""}`}>{isOzon ? "OZ" : "+"}</div>
             <h2>Добавить {label} кабинет</h2>
-            <p>{isOzon ? "Создать еще один Ozon beta-кабинет внутри этого клиента." : "Подключить WB через API или завести ручной кабинет."}</p>
+            <p>{isOzon ? "Добавить Ozon beta-кабинет со ссылкой, Seller ID или SKU для проверки MPStats." : "Подключить WB через API или завести ручной кабинет."}</p>
             <button className="btn primary" type="button" onClick={() => (isOzon ? onAddOzon?.() : onOpenModal?.("api"))}>
               <Plus size={17} />
-              Добавить {label}
+              {isOzon ? "Подключить Ozon" : `Добавить ${label}`}
             </button>
           </article>
         )}
@@ -7189,15 +7211,15 @@ function OzonEmptyCard({ client, onAddOzon }) {
         <Tag tone="amber">beta</Tag>
       </div>
       <div className="ozon-empty-list">
-        <span>Ozon будет создан внутри этого клиента.</span>
+        <span>Сначала укажите ссылку на кабинет, Seller ID или SKU.</span>
+        <span>После создания можно проверить источник через MPStats.</span>
         <span>Карточки, задачи и периоды будут отдельными от WB.</span>
-        <span>API Ozon пока не подключаем, это beta-каркас.</span>
       </div>
       <div className="card-actions">
-        <Tag tone="amber">API не подключен</Tag>
+        <Tag tone="amber">MPStats beta</Tag>
         <button className="btn primary" type="button" onClick={() => onAddOzon?.()}>
           <Plus size={17} />
-          Создать Ozon beta
+          Подключить Ozon
         </button>
       </div>
     </article>
@@ -16229,6 +16251,104 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
           <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading} aria-busy={loading || undefined}>{loading ? (mode === "manual" && !isReplacement ? "Создаем..." : "Проверяем...") : (isReplacement ? "Заменить ключ" : (mode === "manual" ? "Создать без API" : "Добавить кабинет"))}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function OzonPortalModal({ client, onClose, onSubmit }) {
+  const [form, setForm] = useState({
+    name: `${client.name} Ozon`,
+    storeUrl: "",
+    manualSource: "",
+  });
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  function update(name, value) {
+    setForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function errorText(errorObject) {
+    if (errorObject.message === "store_url_too_long") return "Ссылка или Seller ID слишком длинные.";
+    if (errorObject.message === "manual_source_too_long") return "Комментарий по источнику слишком длинный.";
+    if (errorObject.message === "client_name_too_long") return "Название клиента слишком длинное.";
+    if (errorObject.status === 401) return "Сессия истекла. Войдите заново.";
+    return "Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.";
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    const storeUrl = form.storeUrl.trim();
+    const manualSource = form.manualSource.trim();
+    if (!storeUrl && !manualSource) {
+      setError("Укажите ссылку на Ozon-кабинет, Seller ID, SKU или список товаров.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const saved = await onSubmit({
+        name: form.name.trim(),
+        storeUrl,
+        manualSource,
+      });
+      if (saved === false) {
+        setError("Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.");
+      }
+    } catch (submitError) {
+      setError(errorText(submitError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="modal ozon-connect-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <h2>Подключить Ozon beta</h2>
+            <p>{client.name}: создаем Ozon-кабинет с источником для проверки через MPStats. WB-поток не меняется.</p>
+          </div>
+          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+        </div>
+        <div className="modal-body">
+          <div className="ozon-connect-mode">
+            <div className="active">
+              <strong>MPStats по ссылке</strong>
+              <span>Сейчас: ссылка на кабинет, Seller ID, SKU или список товаров.</span>
+            </div>
+            <div className="disabled">
+              <strong>Ozon Seller API</strong>
+              <span>Позже: точные заказы, остатки, экономика и отчеты.</span>
+            </div>
+          </div>
+          <label className="field-label">
+            Название Ozon-кабинета
+            <input value={form.name} onChange={(event) => update("name", event.target.value)} maxLength={120} />
+          </label>
+          <label className="field-label">
+            Ссылка на Ozon-кабинет, Seller ID или карточку
+            <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.ozon.ru/seller/... или Seller ID" autoFocus />
+          </label>
+          <label className="field-label">
+            Что есть на старте
+            <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: список SKU, ссылка на витрину, файл клиента или комментарий по тестовой пачке." />
+          </label>
+          <div className="source-flow">
+            <div className="list-row source-flow-row"><span>Создание</span><strong>Ozon beta</strong></div>
+            <div className="list-row source-flow-row"><span>Проверка</span><strong>MPStats вручную</strong></div>
+            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>следующий шаг</strong></div>
+          </div>
+          {error ? <div className="form-error">{error}</div> : null}
+        </div>
+        <div className="modal-actions">
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (!form.storeUrl.trim() && !form.manualSource.trim())} aria-busy={loading || undefined}>
+            <Plus size={16} />{loading ? "Создаем Ozon" : "Создать и открыть"}
+          </button>
         </div>
       </form>
     </div>

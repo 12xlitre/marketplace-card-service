@@ -6467,6 +6467,41 @@ tr:last-child td {
   line-height: 1.35;
 }
 
+.ozon-connect-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ozon-connect-mode div {
+  min-height: 68px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.ozon-connect-mode div.active {
+  border-color: #b9cbed;
+  background: #edf5ff;
+}
+
+.ozon-connect-mode div.disabled {
+  opacity: .68;
+}
+
+.ozon-connect-mode strong,
+.ozon-connect-mode span {
+  display: block;
+}
+
+.ozon-connect-mode span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .work-package-modal {
   width: min(620px, 100%);
 }
