@@ -16261,6 +16261,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
   const [form, setForm] = useState({
     name: `${client.name} Ozon`,
     storeUrl: "",
+    testSkus: "",
     manualSource: "",
   });
   const [error, setError] = useState("");
@@ -16282,17 +16283,22 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     event.preventDefault();
     setError("");
     const storeUrl = form.storeUrl.trim();
+    const testSkus = form.testSkus.trim();
     const manualSource = form.manualSource.trim();
-    if (!storeUrl && !manualSource) {
+    if (!storeUrl && !testSkus && !manualSource) {
       setError("Укажите ссылку на Ozon-кабинет, Seller ID, SKU или список товаров.");
       return;
     }
+    const sourceDetails = [
+      testSkus ? `Ozon артикулы/SKU для теста: ${testSkus}` : "",
+      manualSource,
+    ].filter(Boolean).join("\n");
     setLoading(true);
     try {
       const saved = await onSubmit({
         name: form.name.trim(),
         storeUrl,
-        manualSource,
+        manualSource: sourceDetails,
       });
       if (saved === false) {
         setError("Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.");
@@ -16334,19 +16340,23 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.ozon.ru/seller/... или Seller ID" autoFocus />
           </label>
           <label className="field-label">
+            Артикулы или SKU для теста
+            <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-ART-01, 987654321. Эти позиции проверим первыми, чтобы не тянуть всю витрину." />
+          </label>
+          <label className="field-label">
             Что есть на старте
-            <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: список SKU, ссылка на витрину, файл клиента или комментарий по тестовой пачке." />
+            <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: файл клиента, комментарий по тестовой пачке или что нужно проверить в первую очередь." />
           </label>
           <div className="source-flow">
             <div className="list-row source-flow-row"><span>Создание</span><strong>Ozon beta</strong></div>
-            <div className="list-row source-flow-row"><span>Проверка</span><strong>MPStats вручную</strong></div>
+            <div className="list-row source-flow-row"><span>Проверка</span><strong>артикулы первыми</strong></div>
             <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>следующий шаг</strong></div>
           </div>
           {error ? <div className="form-error">{error}</div> : null}
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (!form.storeUrl.trim() && !form.manualSource.trim())} aria-busy={loading || undefined}>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (!form.storeUrl.trim() && !form.testSkus.trim() && !form.manualSource.trim())} aria-busy={loading || undefined}>
             <Plus size={16} />{loading ? "Создаем Ozon" : "Создать и открыть"}
           </button>
         </div>

@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -9010,6 +9010,12 @@ def ozon_mpstats_candidates(name, store_url, manual_source, limit=12):
   candidates = []
   seen = set()
   source_text = mpstats_manual_source_text(name, store_url, manual_source)
+
+  def prioritized():
+    item_candidates = [candidate for candidate in candidates if candidate.get("kind") == "item"]
+    other_candidates = [candidate for candidate in candidates if candidate.get("kind") != "item"]
+    return (item_candidates + other_candidates)[:limit] if item_candidates else candidates[:limit]
+
   for raw_url in re.findall(r"https?://[^\s,;]+", source_text):
     parsed = urlparse(raw_url)
     host = (parsed.netloc or "").lower()
@@ -9056,6 +9062,14 @@ def ozon_mpstats_candidates(name, store_url, manual_source, limit=12):
         if numeric_tail:
           ozon_mpstats_add_candidate(candidates, seen, kind, numeric_tail.group(1), "manual-source")
 
+  for match in re.findall(r"(?:артикул(?:ы)?|sku|offer\s*id|offer|vendor\s*code)[^:\n]*[:=]\s*([^\n]+)", source_text, flags=re.IGNORECASE):
+    for token in re.split(r"[\s,;]+", match):
+      token = audit_str(token.strip(" .:;|/\\()[]{}"), 80)
+      if re.search(r"[A-Za-zА-Яа-я0-9]", token) and len(token) >= 3:
+        ozon_mpstats_add_candidate(candidates, seen, "item", token, "manual-source")
+        if len(candidates) >= limit:
+          return prioritized()
+
   for pattern in (
     r"(?:sku|ozon\s*id|product\s*id|product_id|товар|артикул)\D{0,16}(\d{6,14})",
     r"\b(\d{8,14})\b",
@@ -9063,9 +9077,9 @@ def ozon_mpstats_candidates(name, store_url, manual_source, limit=12):
     for match in re.findall(pattern, source_text, flags=re.IGNORECASE):
       ozon_mpstats_add_candidate(candidates, seen, "item", match, "manual-source")
       if len(candidates) >= limit:
-        return candidates[:limit]
+        return prioritized()
 
-  return candidates[:limit]
+  return prioritized()
 
 
 def mpstats_storefront_params(path_value, period):
@@ -9306,10 +9320,11 @@ def ozon_mpstats_candidate_endpoints(candidate, period):
     ]
   if kind == "item":
     query = urlencode({"d1": period["d1"], "d2": period["d2"]})
+    safe_path = quote(str(path or ""), safe="")
     return [
-      {"method": "GET", "path": f"/analytics/v1/oz/items/{path}"},
-      {"method": "GET", "path": f"/analytics/v1/oz/items/{path}/full?{query}"},
-      {"method": "GET", "path": f"/analytics/v1/ozon/items/{path}"},
+      {"method": "GET", "path": f"/analytics/v1/oz/items/{safe_path}"},
+      {"method": "GET", "path": f"/analytics/v1/oz/items/{safe_path}/full?{query}"},
+      {"method": "GET", "path": f"/analytics/v1/ozon/items/{safe_path}"},
     ]
   return []
 
