@@ -1650,6 +1650,18 @@ tr.selected-row td {
   font-size: 13px;
 }
 
+.client-team-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.client-team-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .client-marketplace-picker {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

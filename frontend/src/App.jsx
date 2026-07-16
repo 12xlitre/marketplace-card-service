@@ -5879,7 +5879,7 @@ export default function App() {
         teamRoles,
         memberLogins: uniqueLogins(Object.values(teamRoles)),
       }));
-      return;
+      return true;
     }
     try {
       const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/team`, {
@@ -5887,9 +5887,30 @@ export default function App() {
         body: JSON.stringify({ teamRoles }),
       });
       replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
+      return true;
     } catch {
       setNotice("Не удалось сохранить состав проекта на backend.");
+      return false;
     }
+  }
+
+  async function updateClientTeam(client, teamRoles) {
+    const portals = Array.isArray(client?.portals) ? client.portals : [];
+    if (!portals.length) {
+      setNotice("У клиента пока нет кабинетов для сохранения команды.");
+      return false;
+    }
+    const results = [];
+    for (const portal of portals) {
+      results.push(await updatePortalTeam(portal, teamRoles));
+    }
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount === portals.length) {
+      setNotice("Команда клиента сохранена во всех кабинетах.");
+      return true;
+    }
+    setNotice(`Команда сохранена в ${savedCount} из ${portals.length} кабинетов клиента.`);
+    return false;
   }
 
   async function updatePortalName(portal, name) {
@@ -5990,6 +6011,7 @@ export default function App() {
           <ClientWorkspaceScreen
             client={currentClient}
             currentUser={currentUser}
+            displayUsers={displayUsers}
             canManage={canManagePortals}
             findUser={findUser}
             onBack={() => setScreen("cabinets")}
@@ -6003,6 +6025,7 @@ export default function App() {
               setPortalModalOpen(true);
             }}
             onAddOzon={() => setNotice("Ozon-кабинет добавим после backend-модели клиента и отдельного Ozon API-контракта.")}
+            onUpdateTeam={(teamRoles) => updateClientTeam(currentClient, teamRoles)}
             helpEnabled={helpEnabled}
           />
         ) : null}
@@ -6372,16 +6395,20 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
   );
 }
 
-function ClientWorkspaceScreen({ client, currentUser, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, helpEnabled = false }) {
+function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateTeam, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
   const [marketplaceTab, setMarketplaceTab] = useState("overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
   const ozonPortals = clientMarketplacePortals(client, "ozon");
   const leadPortal = client.portals[0] || null;
-  const owner = leadPortal ? findUser(leadPortal.ownerLogin) : null;
+  const team = leadPortal ? getPortalTeam(leadPortal) : defaultTeamFromUsers(displayUsers);
+  const [teamEditing, setTeamEditing] = useState(false);
+  const [teamDraft, setTeamDraft] = useState(team);
+  const [teamSaving, setTeamSaving] = useState(false);
 
   useEffect(() => {
     setMarketplaceTab("overview");
+    setTeamEditing(false);
   }, [client.id]);
 
   useEffect(() => {
@@ -6389,6 +6416,31 @@ function ClientWorkspaceScreen({ client, currentUser, canManage, findUser, onBac
       setMarketplaceTab("overview");
     }
   }, [canSeeOzonBeta, marketplaceTab]);
+
+  useEffect(() => {
+    if (!teamEditing) {
+      setTeamDraft(team);
+    }
+  }, [team.lead, team.tech, team.manager, teamEditing]);
+
+  function updateTeamDraft(roleKey, login) {
+    setTeamDraft((current) => ({ ...current, [roleKey]: login }));
+  }
+
+  async function saveTeam() {
+    if (!teamDraft.lead || !teamDraft.tech || !teamDraft.manager || teamSaving) {
+      return;
+    }
+    setTeamSaving(true);
+    try {
+      const saved = await onUpdateTeam?.(teamDraft);
+      if (saved !== false) {
+        setTeamEditing(false);
+      }
+    } finally {
+      setTeamSaving(false);
+    }
+  }
 
   return (
     <section className="screen active">
@@ -6419,15 +6471,40 @@ function ClientWorkspaceScreen({ client, currentUser, canManage, findUser, onBac
             <div className="panel-head">
               <div>
                 <span className="section-eyebrow">Общее</span>
-                <h2>Информация клиента</h2>
+                <h2>Команда клиента</h2>
                 <p>{formatNumber(client.portals.length)} кабинета · {formatNumber(clientCardCount(client))} карточек · {formatNumber(clientTaskCount(client))} активных задач</p>
               </div>
+              {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}><Pencil size={16} />Редактировать</button> : null}
             </div>
-            <div className="client-info-list">
-              <div><span>Ответственный</span><strong>{owner?.full_name || "не указан"}</strong></div>
-              <div><span>Контакт клиента</span><strong>не заполнен</strong></div>
-              <div><span>Комментарий</span><strong>не заполнен</strong></div>
-            </div>
+            {!teamEditing ? (
+              <div className="client-info-list">
+                {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
+                  const user = findUser(team[roleKey]);
+                  return (
+                    <div key={roleKey}>
+                      <span>{label}</span>
+                      <strong>{user?.full_name || "не указан"}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="client-team-editor">
+                {Object.entries(projectRoleLabels).map(([roleKey, label]) => (
+                  <UserSelect
+                    key={roleKey}
+                    label={label}
+                    value={teamDraft[roleKey] || ""}
+                    users={displayUsers}
+                    onChange={(value) => updateTeamDraft(roleKey, value)}
+                  />
+                ))}
+                <div className="client-team-actions">
+                  <button className="btn ghost" type="button" onClick={() => { setTeamDraft(team); setTeamEditing(false); }} disabled={teamSaving}>Отмена</button>
+                  <button className={loadingButtonClass("btn primary", teamSaving)} type="button" onClick={saveTeam} disabled={teamSaving || !teamDraft.lead || !teamDraft.tech || !teamDraft.manager} aria-busy={teamSaving || undefined}>Сохранить команду</button>
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="panel client-info-panel">
