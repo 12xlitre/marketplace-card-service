@@ -6092,7 +6092,7 @@ export default function App() {
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
-      setNotice("Ozon beta-кабинет создан с источником. Нажмите «Проверить MPStats», чтобы посмотреть доступные данные.");
+      setNotice("Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
       if (error.message === "client_name_too_long") {
@@ -7503,6 +7503,12 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     { title: "Задачи Ozon", status: "после карточек", className: "pending" },
     { title: "Отчеты Ozon", status: "после периодов", className: "pending" },
   ];
+  const probeCards = Array.isArray(probeResult?.cards) ? probeResult.cards : [];
+  const hasProbeCards = probeCards.length > 0;
+  const sourceTag = sourceConfigured ? "MPStats витрина" : "Без API";
+  const sourceDescription = sourceConfigured
+    ? "Кабинет заведен без Ozon Seller API, а карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Ozon API можно подключить позже."
+    : "Кабинет заведен без Ozon Seller API. Здесь фиксируем ссылку на магазин, Seller ID, список SKU или исходные данные клиента; карточки можно загрузить через MPStats или позже подключить API.";
 
   return (
     <section className="screen active marketplace-theme-ozon">
@@ -7623,11 +7629,14 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 <section className="workspace-strip">
                   <div className="strip-head">
                     <div>
-                      <h2>Источник данных Ozon</h2>
-                      <p>Ручной ориентир для будущей Ozon-specific загрузки карточек, цен, остатков и отчетных периодов.</p>
+                      <h2>Источник данных</h2>
+                      <p>{sourceDescription}</p>
                     </div>
-                    <Tag tone={sourceConfigured ? "blue" : "amber"}>{sourceConfigured ? "источник задан" : "ожидает источник"}</Tag>
+                    <Tag tone={sourceConfigured ? "blue" : "amber"}>{sourceTag}</Tag>
                   </div>
+                  <HelpHint enabled={helpEnabled} title="Ozon и MPStats">
+                    Нажимайте Обновить из MPStats, чтобы проверить сохраненный Ozon-источник. Загрузить все карточки сохраняет найденные карточки в Ozon-кабинет после успешной проверки.
+                  </HelpHint>
                   {sourceEditing ? (
                     <div className="ozon-source-editor">
                       <label className="field-label">
@@ -7679,13 +7688,21 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
                     ))}
                   </div>
-                  <div className="ozon-probe-actions">
-                    <button className={loadingButtonClass("btn primary", probeStatus === "loading")} type="button" onClick={runOzonMpstatsProbe} disabled={!canManage || !sourceConfigured || probeStatus === "loading"} aria-busy={probeStatus === "loading" || undefined}>
-                      <RefreshCw size={16} />{probeStatus === "loading" ? "Проверяем MPStats" : "Проверить MPStats"}
+                  <div className="panel-actions ozon-source-actions">
+                    <button className={loadingButtonClass("btn", probeStatus === "loading")} type="button" onClick={runOzonMpstatsProbe} disabled={!canManage || !sourceConfigured || probeStatus === "loading"} aria-busy={probeStatus === "loading" || undefined}>
+                      <RefreshCw size={16} />{probeStatus === "loading" ? "Загружаем данные" : "Обновить из MPStats"}
                     </button>
-                    <span>{!canManage ? "Проверка доступна пользователю с правом управления кабинетом." : sourceConfigured ? "Проверка ничего не сохраняет, только показывает доступные Ozon-данные." : "Сначала укажите ссылку, Seller ID или SKU."}</span>
+                    <button className={loadingButtonClass("btn primary", probeSaveStatus === "saving")} type="button" onClick={saveOzonProbeCards} disabled={!canManage || !hasProbeCards || probeSaveStatus === "saving"} aria-busy={probeSaveStatus === "saving" || undefined} title={hasProbeCards ? "Сохранить найденные MPStats карточки в Ozon-кабинет" : "Сначала обновите источник через MPStats"}>
+                      <Download size={16} />{probeSaveStatus === "saving" ? "Загружаем карточки" : "Загрузить все карточки"}
+                    </button>
+                    <button className="btn ghost" type="button" disabled title="Появится после подключения Ozon-задач и Ozon-черновиков">
+                      <Trash2 size={16} />Обнулить работу
+                    </button>
+                    <button className="btn" type="button" disabled title="Ozon Seller API подключим отдельным шагом">
+                      <Upload size={16} />Подключить API
+                    </button>
                   </div>
-                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={canManage} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
+                  <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={false} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
                 </section>
 
                 <section className="workspace-strip">
