@@ -6695,7 +6695,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
   const cardsCount = activePortals.reduce((sum, portal) => sum + (Number(portal.cardCount) || 0), 0);
   const activeTasksCount = activePortals.reduce((sum, portal) => sum + portalActiveTaskCount(portal), 0);
   return (
-    <section className="screen active">
+    <section className="screen active marketplace-theme-wildberries">
       <header className="topbar">
         <div className="title">
           <h1>Клиенты</h1>
@@ -11477,8 +11477,15 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
   const signalCards = cards.filter((card) => cardDataSignals(card).length);
   const signalOnlyCards = signalCards.filter((card) => !cardProblemReasons(card).length);
   const cleanCards = cards.filter((card) => !cardProblemReasons(card).length && !cardDataSignals(card).length).length;
+  const readyCards = cards.filter((card) => !cardProblemReasons(card).length);
   const selectedCards = cards.filter((card) => selectedSet.has(cardStableKey(card)));
   const taskCards = cards.filter((card) => approvalTaskForCard(card, approvalTaskLookup));
+  const workflowTasks = [...(workflow.tasks || []), ...(workflow.completedTasks || [])];
+  const tasksForCard = (card) => workflowTasks.filter((task) => cardMatchesApprovalTask(card, task));
+  const cardHasSemanticFinal = (card) => tasksForCard(card).some((task) => task.workType === "semantic" && (taskHasSemanticFinal(task) || ["done", "approved", "exported"].includes(task.status)));
+  const cardHasFinalContent = (card) => tasksForCard(card).some((task) => task.workType === "content" && ["approved", "exported", "done"].includes(task.status));
+  const semanticFinalCards = cards.filter(cardHasSemanticFinal);
+  const contentFinalCards = cards.filter(cardHasFinalContent);
   const bulkMatchedCards = bulkFilterActive
     ? cards.filter((card) => {
       const identifiers = cardIdentifierSets.get(cardStableKey(card)) || new Set();
@@ -11517,6 +11524,18 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
       return false;
     }
     if (workFilter === "tasks" && !hasTask) {
+      return false;
+    }
+    if (workFilter === "ready" && hasProblems) {
+      return false;
+    }
+    if (workFilter === "without-semantic" && cardHasSemanticFinal(card)) {
+      return false;
+    }
+    if (workFilter === "semantic-final" && !cardHasSemanticFinal(card)) {
+      return false;
+    }
+    if (workFilter === "content-final" && !cardHasFinalContent(card)) {
       return false;
     }
     if (workFilter === "selected" && !selectedSet.has(key)) {
@@ -11653,8 +11672,17 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
             onClick={() => applySummaryFilter({ issue: "clean" })}
             title={isSummaryFilterActive({ issue: "clean" }) ? "Показать все карточки" : "Показать карточки без замечаний"}
           >
-            <span>Без проблем</span>
+            <span>Без замечаний</span>
             <strong>{formatNumber(cleanCards)}</strong>
+          </button>
+          <button
+            className={`work-summary-item ${isSummaryFilterActive({ work: "ready" }) ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ work: "ready" })}
+            title={isSummaryFilterActive({ work: "ready" }) ? "Показать все карточки" : "Показать карточки без критичных проблем"}
+          >
+            <span>Готовы к работе</span>
+            <strong>{formatNumber(readyCards.length)}</strong>
           </button>
           <button
             className={`work-summary-item ${isSummaryFilterActive({ work: "tasks" }) ? "active" : ""}`}
@@ -11666,13 +11694,22 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
             <strong>{formatNumber(taskCards.length)}</strong>
           </button>
           <button
-            className={`work-summary-item ${isSummaryFilterActive({ work: "selected" }) ? "active" : ""}`}
+            className={`work-summary-item ${isSummaryFilterActive({ work: "semantic-final" }) ? "active" : ""}`}
             type="button"
-            onClick={() => applySummaryFilter({ work: "selected" })}
-            title={isSummaryFilterActive({ work: "selected" }) ? "Показать все карточки" : "Показать рабочий набор"}
+            onClick={() => applySummaryFilter({ work: "semantic-final" })}
+            title={isSummaryFilterActive({ work: "semantic-final" }) ? "Показать все карточки" : "Показать карточки с итоговым СЯ"}
           >
-            <span>В рабочем наборе</span>
-            <strong>{formatNumber(selectedCards.length)}</strong>
+            <span>Итоговое СЯ</span>
+            <strong>{formatNumber(semanticFinalCards.length)}</strong>
+          </button>
+          <button
+            className={`work-summary-item ${isSummaryFilterActive({ work: "content-final" }) ? "active" : ""}`}
+            type="button"
+            onClick={() => applySummaryFilter({ work: "content-final" })}
+            title={isSummaryFilterActive({ work: "content-final" }) ? "Показать все карточки" : "Показать карточки с итоговым контентом"}
+          >
+            <span>Итоговый контент</span>
+            <strong>{formatNumber(contentFinalCards.length)}</strong>
           </button>
           <div className="work-summary-note">
             <strong>{selectedCards.length ? `${selectedProblemCount} с проблемами` : "Набор пуст"}</strong>
@@ -11693,8 +11730,12 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
             <option value="selected">Рабочий набор</option>
           </select>
           <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>
-            <option value="all">Любая работа</option>
+            <option value="all">Любой статус</option>
+            <option value="ready">Готовы к работе</option>
             <option value="tasks">Есть задача</option>
+            <option value="without-semantic">Без итогового СЯ</option>
+            <option value="semantic-final">Есть итоговое СЯ</option>
+            <option value="content-final">Есть итоговый контент</option>
             <option value="selected">В рабочем наборе</option>
             <option value="none">Нет задачи</option>
           </select>
