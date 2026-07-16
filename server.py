@@ -13224,6 +13224,11 @@ SEMANTIC_IMPORT_CATEGORY_ALIASES = (
   ("бейсболки", ("бейсболк", "кепк", "кепи")),
 )
 
+SEMANTIC_IMPORT_GENDER_ALIASES = (
+  ("девочки", ("девоч", "девуш", "женск", "girl")),
+  ("мальчики", ("мальчик", "мужск", "boy")),
+)
+
 
 def semantic_import_xml_name(element):
   tag = element.tag if element is not None else ""
@@ -13661,6 +13666,23 @@ def semantic_import_category_name(label):
   return "", ()
 
 
+def semantic_import_gender_name(label):
+  normalized = audit_normalized(unicodedata.normalize("NFC", str(label or "")))
+  if not normalized:
+    return "", ()
+  for name, aliases in SEMANTIC_IMPORT_GENDER_ALIASES:
+    if any(alias in normalized for alias in aliases):
+      return name, aliases
+  return "", ()
+
+
+def semantic_import_descriptor_matches_aliases(descriptor, aliases):
+  if not aliases:
+    return True
+  haystack = audit_normalized(unicodedata.normalize("NFC", f"{descriptor.get('subjectName', '')} {descriptor.get('title', '')} {descriptor.get('vendorCode', '')}"))
+  return any(alias in haystack for alias in aliases)
+
+
 def semantic_import_category_targets(context, label):
   name, aliases = semantic_import_category_name(label)
   if not aliases:
@@ -13677,6 +13699,7 @@ def semantic_import_sheet_targets(context, sheet_name, filename, scope, explicit
   if scope == "card":
     descriptor = semantic_import_match_identifier(context, explicit_card_key)
     return ([descriptor], "card") if descriptor else ([], "card")
+  gender_name, gender_aliases = semantic_import_gender_name(sheet_name)
   for label in (sheet_name, Path(filename).stem):
     descriptor = semantic_import_match_identifier(context, label)
     if descriptor:
@@ -13684,6 +13707,14 @@ def semantic_import_sheet_targets(context, sheet_name, filename, scope, explicit
   for label in (sheet_name, Path(filename).stem):
     targets, strategy = semantic_import_category_targets(context, label)
     if targets:
+      if gender_aliases:
+        gender_targets = [
+          target
+          for target in targets
+          if semantic_import_descriptor_matches_aliases(target, gender_aliases)
+        ]
+        if gender_targets:
+          return gender_targets, f"{strategy}:gender:{gender_name}"
       return targets, strategy
   return [], ""
 
@@ -13710,23 +13741,39 @@ def semantic_import_new_group(descriptor, strategy):
     "rejectedRemoval": [],
     "ignored": [],
     "warnings": [],
+    "_seen": {},
   }
 
 
 def semantic_import_add_group_item(groups, descriptor, strategy, bucket, item):
   card_key = descriptor.get("cardKey") or ""
   if not card_key:
-    return
+    return False
   group = groups.setdefault(card_key, semantic_import_new_group(descriptor, strategy))
   if strategy and strategy not in group.get("matchStrategy", ""):
     group["matchStrategy"] = ", ".join(part for part in (group.get("matchStrategy"), strategy) if part)
   destination = group.get(bucket)
   if not isinstance(destination, list):
-    return
+    return False
   key = semantic_import_keyword_key(item)
-  if key and any(semantic_import_keyword_key(existing) == key for existing in destination):
-    return
+  seen_by_bucket = group.setdefault("_seen", {})
+  seen = seen_by_bucket.setdefault(bucket, set())
+  if key and key in seen:
+    return False
   destination.append(item)
+  if key:
+    seen.add(key)
+  return True
+
+
+def semantic_import_public_group(group):
+  if not isinstance(group, dict):
+    return group
+  return {
+    key: value
+    for key, value in group.items()
+    if not key.startswith("_")
+  }
 
 
 def semantic_import_row_has_data(row, *columns):
@@ -13816,21 +13863,27 @@ def semantic_import_prepare(payload, user):
           add_decision = semantic_import_decision(semantic_import_cell(row, columns.get("addAgreement"), 120))
         item = semantic_import_keyword_item(add_query, "selected", row_meta)
         if add_decision is True:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "selected", item)
-          summary["selectedToAdd"] += len(targets)
-          sheet_matched += len(targets)
+            if semantic_import_add_group_item(groups, target, strategy, "selected", item):
+              added_count += 1
+          summary["selectedToAdd"] += added_count
+          sheet_matched += added_count
         elif add_decision is False:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "rejectedSelected", item)
+            if semantic_import_add_group_item(groups, target, strategy, "rejectedSelected", item):
+              added_count += 1
             semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_addition"})
-          summary["rejectedAdditions"] += len(targets)
-          summary["ignoredRows"] += len(targets)
+          summary["rejectedAdditions"] += added_count
+          summary["ignoredRows"] += added_count
         else:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_addition_agreement"})
-          summary["unknownRows"] += len(targets)
-          summary["ignoredRows"] += len(targets)
+            if semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_addition_agreement"}):
+              added_count += 1
+          summary["unknownRows"] += added_count
+          summary["ignoredRows"] += added_count
       if removal_query:
         if columns.get("removalAgreement") is None:
           removal_decision = True
@@ -13838,21 +13891,27 @@ def semantic_import_prepare(payload, user):
           removal_decision = semantic_import_decision(semantic_import_cell(row, columns.get("removalAgreement"), 120))
         item = semantic_import_keyword_item(removal_query, "removal", {**row_meta, "reason": removal_reason})
         if removal_decision is True:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "removal", item)
-          summary["removalToApply"] += len(targets)
-          sheet_matched += len(targets)
+            if semantic_import_add_group_item(groups, target, strategy, "removal", item):
+              added_count += 1
+          summary["removalToApply"] += added_count
+          sheet_matched += added_count
         elif removal_decision is False:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "rejectedRemoval", item)
+            if semantic_import_add_group_item(groups, target, strategy, "rejectedRemoval", item):
+              added_count += 1
             semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_removal"})
-          summary["rejectedRemovals"] += len(targets)
-          summary["ignoredRows"] += len(targets)
+          summary["rejectedRemovals"] += added_count
+          summary["ignoredRows"] += added_count
         else:
+          added_count = 0
           for target in targets:
-            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_removal_agreement"})
-          summary["unknownRows"] += len(targets)
-          summary["ignoredRows"] += len(targets)
+            if semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_removal_agreement"}):
+              added_count += 1
+          summary["unknownRows"] += added_count
+          summary["ignoredRows"] += added_count
     if sheet_rows:
       summary["sheetsUsed"] += 1
     sheet_summaries.append({
@@ -13868,7 +13927,7 @@ def semantic_import_prepare(payload, user):
       },
     })
 
-  cards = sorted(groups.values(), key=lambda item: (item.get("subjectName") or "", item.get("vendorCode") or item.get("nmID") or item.get("cardKey")))
+  cards = sorted((semantic_import_public_group(group) for group in groups.values()), key=lambda item: (item.get("subjectName") or "", item.get("vendorCode") or item.get("nmID") or item.get("cardKey")))
   summary["cardsMatched"] = len([card for card in cards if card.get("selected") or card.get("removal") or card.get("rejectedSelected") or card.get("rejectedRemoval")])
   summary["unmatchedRows"] = len(unmatched)
   preview = {
