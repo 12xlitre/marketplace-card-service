@@ -9384,82 +9384,126 @@ def build_ozon_mpstats_probe(portal_id, user, limit=20):
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
 
   period = audit_period_default()
-  candidates = ozon_mpstats_candidates(row["name"], row["store_url"], row["manual_source"])
+  limit = max(1, min(int(limit or 20), 50))
+  candidates = ozon_mpstats_candidates(row["name"], row["store_url"], row["manual_source"], limit=max(limit, 50))
   if not candidates:
     raise ValueError("ozon_source_unrecognized")
-  limit = max(1, min(int(limit or 20), 50))
   attempts = []
+  samples = []
+  seen_samples = set()
+  last_total_estimate = 0
+
+  def add_samples(rows):
+    added = 0
+    for row_item in rows:
+      sample = ozon_mpstats_card_sample(row_item)
+      if not sample:
+        continue
+      key = audit_normalized(sample.get("id") or sample.get("offerId") or sample.get("title"))
+      if key in seen_samples:
+        continue
+      seen_samples.add(key)
+      samples.append(sample)
+      added += 1
+      if len(samples) >= limit:
+        break
+    return added
+
+  def check_endpoint(candidate, endpoint):
+    nonlocal last_total_estimate
+    request_path = endpoint["path"]
+    if endpoint["method"] == "POST":
+      request_path = f"{request_path}?{urlencode(endpoint.get('params') or {}, doseq=True)}"
+    attempt = {
+      "candidate": candidate,
+      "method": endpoint["method"],
+      "path": endpoint["path"],
+      "status": "pending",
+    }
+    try:
+      if endpoint["method"] == "POST":
+        payload = mpstats_post_body_json(
+          token,
+          endpoint["path"],
+          body=endpoint.get("body"),
+          params=endpoint.get("params"),
+          attempts=1,
+        )
+      else:
+        payload = mpstats_get_json(token, endpoint["path"], attempts=1)
+      rows = ozon_mpstats_payload_rows(payload)
+      added = add_samples(rows)
+      total_estimate = mpstats_payload_total_count(payload) or len(rows)
+      last_total_estimate = max(last_total_estimate, total_estimate)
+      attempt.update({
+        "status": "loaded" if added else "empty",
+        "rowCount": len(rows),
+        "sampleCount": added,
+        "totalEstimate": total_estimate,
+        "requestPath": request_path,
+      })
+      attempts.append(attempt)
+      return added
+    except MpstatsApiError as exc:
+      attempt.update({
+        "status": "error",
+        "message": exc.message,
+        "httpStatus": exc.status,
+        "retryable": exc.retryable,
+        "requestPath": request_path,
+      })
+      attempts.append(attempt)
+      return 0
+
+  item_candidates = [candidate for candidate in candidates if candidate.get("kind") == "item"]
+  fallback_candidates = [candidate for candidate in candidates if candidate.get("kind") != "item"]
+
+  checked = 0
+  max_item_attempts = 80
+  for candidate in item_candidates:
+    if len(samples) >= limit or checked >= max_item_attempts:
+      break
+    for endpoint in ozon_mpstats_candidate_endpoints(candidate, period):
+      if checked >= max_item_attempts:
+        break
+      checked += 1
+      if check_endpoint(candidate, endpoint):
+        break
+
+  if samples:
+    return {
+      "status": "loaded",
+      "source": {
+        "kind": "SKU",
+        "path": f"{len(samples)} из {len(item_candidates)}",
+        "source": "manual-source",
+      },
+      "period": period,
+      "cardCount": len(samples),
+      "totalEstimate": len(samples),
+      "cards": samples,
+      "attempts": attempts,
+      "checkedAt": utc_now().isoformat(),
+    }
+
   checked = 0
   max_attempts = 10
-
-  for candidate in candidates:
+  for candidate in fallback_candidates:
     for endpoint in ozon_mpstats_candidate_endpoints(candidate, period):
       if checked >= max_attempts:
         break
       checked += 1
-      request_path = endpoint["path"]
-      if endpoint["method"] == "POST":
-        request_path = f"{request_path}?{urlencode(endpoint.get('params') or {}, doseq=True)}"
-      attempt = {
-        "candidate": candidate,
-        "method": endpoint["method"],
-        "path": endpoint["path"],
-        "status": "pending",
-      }
-      try:
-        if endpoint["method"] == "POST":
-          payload = mpstats_post_body_json(
-            token,
-            endpoint["path"],
-            body=endpoint.get("body"),
-            params=endpoint.get("params"),
-            attempts=1,
-          )
-        else:
-          payload = mpstats_get_json(token, endpoint["path"], attempts=1)
-        rows = ozon_mpstats_payload_rows(payload)
-        samples = []
-        seen = set()
-        for row_item in rows:
-          sample = ozon_mpstats_card_sample(row_item)
-          if not sample:
-            continue
-          key = audit_normalized(sample.get("id") or sample.get("offerId") or sample.get("title"))
-          if key in seen:
-            continue
-          seen.add(key)
-          samples.append(sample)
-          if len(samples) >= min(limit, 5):
-            break
-        total_estimate = mpstats_payload_total_count(payload) or len(rows)
-        attempt.update({
-          "status": "loaded" if samples else "empty",
-          "rowCount": len(rows),
-          "sampleCount": len(samples),
-          "totalEstimate": total_estimate,
-          "requestPath": request_path,
-        })
-        attempts.append(attempt)
-        if samples:
-          return {
-            "status": "loaded",
-            "source": candidate,
-            "period": period,
-            "cardCount": len(rows),
-            "totalEstimate": total_estimate,
-            "cards": samples,
-            "attempts": attempts,
-            "checkedAt": utc_now().isoformat(),
-          }
-      except MpstatsApiError as exc:
-        attempt.update({
-          "status": "error",
-          "message": exc.message,
-          "httpStatus": exc.status,
-          "retryable": exc.retryable,
-          "requestPath": request_path,
-        })
-        attempts.append(attempt)
+      if check_endpoint(candidate, endpoint):
+        return {
+          "status": "loaded",
+          "source": candidate,
+          "period": period,
+          "cardCount": last_total_estimate or len(samples),
+          "totalEstimate": last_total_estimate or len(samples),
+          "cards": samples,
+          "attempts": attempts,
+          "checkedAt": utc_now().isoformat(),
+        }
     if checked >= max_attempts:
       break
 

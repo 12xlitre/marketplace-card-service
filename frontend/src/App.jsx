@@ -7400,7 +7400,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     try {
       const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-mpstats-probe`, {
         method: "POST",
-        body: JSON.stringify({ limit: 20 }),
+        body: JSON.stringify({ limit: 50 }),
       });
       setProbeResult(result);
       setProbeStatus("loaded");
