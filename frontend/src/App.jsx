@@ -6269,7 +6269,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           </div>
         </div>
 
-        <div className="client-marketplace-shell">
+        <div className={`client-marketplace-shell marketplace-theme-${marketplaceTab}`}>
           <div className="client-marketplace-head">
             <div>
               <span className="section-eyebrow">Клиент</span>

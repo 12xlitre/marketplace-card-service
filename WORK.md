@@ -118,6 +118,7 @@ npm run frontend:check
 - Добавлены статусы по карточке внутри пачки и журнал событий пачки: backend route `POST /api/card-workset/log-event` пишет `opened/skipped/deferred/quick_completed/audit_completed` в `card_approval_events` только после `require_user`, `user_can_access_portal` и проверки существующего `card_draft`.
 - Добавлен пакетный аудит видимых карточек пачки: frontend вызывает `POST /api/card-workset/audit-task` последовательно по одной карточке, backend переиспользует `build_card_audit`, сохраняет audit/content draft в `card_drafts`, сохраняет прежние `prices/stocks/meta.batch/approval/semantic`, не отправляет секции на согласование и не делает write-запросов в WB.
 - Начат первый Ozon/WB-каркас: экран `Кабинеты` получил верхний уровень `Клиент` и вкладки маркетплейсов, Wildberries остался рабочим сценарием по умолчанию, а `Ozon beta` скрыт для всех кроме Дмитрия и пока показывает только каркас кабинетов, карточек, задач и отчетных периодов без API.
+- По UX-фидбеку усилена визуальная читаемость frontend: границы блоков/полей стали четче, кнопки получили более явные hover/focus/active-состояния, а зона вкладок Wildberries/Ozon получила мягкую marketplace-подсветку.
 
 Локальные идеи, которые планировали дальше:
 - причина удаления задачи из кабинета: `создана ошибочно`, `дубль`, `неактуально`, `другое`;
@@ -131,6 +132,7 @@ npm run frontend:check
 - `npm run frontend:build`;
 - `git diff --check`;
 - Для Ozon/WB-каркаса: `npm run frontend:check`, `npm run frontend:build`, `git diff --check`; backend не менялся, Ozon API/секреты/новые маршруты не добавлялись.
+- Для UI-контраста и marketplace-подсветки: `npm run frontend:check`, `npm run frontend:build`, `git diff --check`; backend не менялся.
 - frontend-smoke через `npm run frontend:check` подтвердил новый `taskRun`-контекст, панель пачки и кнопки `Предыдущая`/`Следующая`;
 - audit-чеклист перед деплоем без блокеров: новые мутации фильтруются по `portal_id` и доступны только после `user_can_access_portal`; локальный SQLite-smoke подтвердил `unlink_task` и автоочистку связей при `POST /api/card-workset/delete-tasks`;
 - локальный SQLite-smoke подтвердил агрегирование статусов отчетного периода по всей пачке: СЯ закрывается только после финального СЯ по всем карточкам, контент проходит `in_progress -> review -> done`, возврат переводит в `in_progress` с причиной;
