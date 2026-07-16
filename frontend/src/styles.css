@@ -1507,6 +1507,12 @@ tr.selected-row td {
   gap: 14px;
 }
 
+.client-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .workspace-card,
 .workspace-strip,
 .panel {
@@ -1546,6 +1552,160 @@ tr.selected-row td {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.client-card {
+  grid-template-rows: auto auto auto auto;
+}
+
+.client-marketplace-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.client-marketplace-badge {
+  min-height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-soft);
+}
+
+.client-marketplace-badge.wb {
+  color: #7130a6;
+  background: #f4eaff;
+  border-color: #d8c8ed;
+}
+
+.client-marketplace-badge.ozon {
+  color: #0052d9;
+  background: #e9f2ff;
+  border-color: #c4d8f6;
+}
+
+.client-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
+  gap: 14px;
+}
+
+.client-info-panel {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-head h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.panel-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.client-info-list {
+  display: grid;
+  gap: 8px;
+}
+
+.client-info-list div {
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+}
+
+.client-info-list span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.client-info-list strong {
+  min-width: 0;
+  text-align: right;
+  font-size: 13px;
+}
+
+.client-marketplace-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.client-marketplace-button {
+  min-height: 92px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-soft);
+  color: var(--ink);
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 7px;
+  padding: 14px;
+  text-align: left;
+  box-shadow: 0 7px 16px rgba(34, 34, 34, .04);
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .08s ease;
+}
+
+.client-marketplace-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 11px 22px rgba(34, 34, 34, .08);
+}
+
+.client-marketplace-button span {
+  font-weight: 900;
+}
+
+.client-marketplace-button strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.client-marketplace-button.wb {
+  background: linear-gradient(180deg, #ffffff 0%, #f8f1ff 100%);
+  border-color: #d8c8ed;
+}
+
+.client-marketplace-button.wb.active {
+  background: #f2e6ff;
+  border-color: #a46bd1;
+  box-shadow: 0 12px 24px rgba(123, 53, 184, .13);
+}
+
+.client-marketplace-button.ozon {
+  background: linear-gradient(180deg, #ffffff 0%, #edf5ff 100%);
+  border-color: #c4d8f6;
+}
+
+.client-marketplace-button.ozon.active {
+  background: #e3f0ff;
+  border-color: #79aaff;
+  box-shadow: 0 12px 24px rgba(0, 91, 255, .13);
 }
 
 .client-marketplace-shell,
@@ -6390,6 +6550,10 @@ tr:last-child td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .client-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .detail-layout {
     grid-template-columns: 1fr;
   }
@@ -6541,6 +6705,9 @@ tr:last-child td {
 
   .summary-grid,
   .workspace-grid,
+  .client-grid,
+  .client-overview-grid,
+  .client-marketplace-picker,
   .marketplace-beta-list,
   .filters,
   .admin-overview,
