@@ -24,6 +24,8 @@ import {
   Save,
   Search,
   Settings,
+  ShoppingBag,
+  Store,
   Tags,
   Trash2,
   Unlink,
@@ -6427,6 +6429,14 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
   }
 
+  function openMarketplace(marketplaceKey, portals) {
+    if (portals.length === 1) {
+      onOpenPortal(portals[0]);
+      return;
+    }
+    setMarketplaceTab(marketplaceKey);
+  }
+
   async function saveTeam() {
     if (!teamDraft.lead || !teamDraft.tech || !teamDraft.manager || teamSaving) {
       return;
@@ -6512,26 +6522,26 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
               <div>
                 <span className="section-eyebrow">Маркетплейсы</span>
                 <h2>Разделы работы</h2>
-                <p>Выберите WB или Ozon внутри клиента.</p>
+                <p>Один кабинет откроется сразу, несколько покажем списком.</p>
               </div>
             </div>
             <div className="client-marketplace-picker">
               <button
                 className={`client-marketplace-button wb ${marketplaceTab === "wildberries" ? "active" : ""}`}
                 type="button"
-                onClick={() => setMarketplaceTab("wildberries")}
+                onClick={() => openMarketplace("wildberries", wbPortals)}
               >
-                <Warehouse size={18} />
+                <Store size={18} />
                 <span>Wildberries</span>
-                <strong>{formatNumber(wbPortals.length)} кабинета</strong>
+                <strong>{formatNumber(wbPortals.length)} {pluralRu(wbPortals.length, "кабинет", "кабинета", "кабинетов")}</strong>
               </button>
               {canSeeOzonBeta ? (
                 <button
                   className={`client-marketplace-button ozon ${marketplaceTab === "ozon" ? "active" : ""}`}
                   type="button"
-                  onClick={() => setMarketplaceTab("ozon")}
+                  onClick={() => openMarketplace("ozon", ozonPortals)}
                 >
-                  <Tags size={18} />
+                  <ShoppingBag size={18} />
                   <span>Ozon</span>
                   <strong>beta · {formatNumber(ozonPortals.length)}</strong>
                 </button>
@@ -6545,7 +6555,7 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
             <LayoutDashboard size={20} />
             <div>
               <strong>Выберите маркетплейс клиента</strong>
-              <p>Wildberries откроет текущие кабинеты и задачи. Ozon пока доступен как beta-каркас.</p>
+              <p>Wildberries откроет текущую работу сразу, если у клиента один WB-кабинет. Ozon пока доступен как beta-каркас.</p>
             </div>
           </div>
         ) : null}
