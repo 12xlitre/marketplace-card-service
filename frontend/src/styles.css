@@ -2319,9 +2319,61 @@ tr.selected-row td {
   flex-wrap: wrap;
 }
 
+.task-batch-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-batch-audit-progress {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.task-batch-audit-progress div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.task-batch-audit-progress strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.task-batch-audit-progress span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.task-batch-audit-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.task-batch-audit-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+}
+
+.task-batch-audit-progress.partial .task-batch-audit-bar span {
+  background: var(--amber);
+}
+
 .task-card-row-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
@@ -2342,6 +2394,32 @@ tr.selected-row td {
   margin-top: 8px;
   display: grid;
   gap: 6px;
+}
+
+.task-batch-filter {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-batch-filter button {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.task-batch-filter button.active {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--blue);
 }
 
 .task-card-row {
@@ -2392,6 +2470,59 @@ tr.selected-row td {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.task-batch-log {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.task-batch-log summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.task-batch-event-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.task-batch-event {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.task-batch-event div {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.task-batch-event strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.task-batch-event span,
+.task-batch-event p,
+.task-batch-event em {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.task-batch-event em {
+  font-style: normal;
+  overflow-wrap: anywhere;
 }
 
 .task-section-completed,
@@ -2854,6 +2985,10 @@ tr:last-child td {
   overflow-wrap: anywhere;
 }
 
+.task-run-copy .tag {
+  justify-self: start;
+}
+
 .task-run-progress {
   height: 8px;
   border-radius: 999px;
@@ -2873,6 +3008,15 @@ tr:last-child td {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.task-run-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .photo-preview {

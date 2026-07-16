@@ -11,6 +11,8 @@
 - рабочий набор карточек кабинета хранится в SQLite `portal_workset_cards`, читается через `GET /api/card-workset?portal_id=...` и сохраняется через `POST /api/card-workset`;
 - создание массового пакета работы идет через `POST /api/card-workset/create-tasks`: backend создает внутренние `card_drafts` со статусом `draft` (`в работе`) без write-запросов в WB;
 - удаление задачи идет через `POST /api/card-workset/delete-tasks`: backend очищает `meta.batch`/выбранные `workTypes` и соответствующие `approvalSections`, но не удаляет весь `card_draft`;
+- ручной порядок задач внутри пачки сохраняется через `POST /api/card-workset/reorder-tasks` в `card_drafts.meta.batch.position`; маршрут обязан фильтровать задачи по `portal_id` и `meta.batch.id`;
+- журнал действий пачки пишется через `POST /api/card-workset/log-event`, а пакетный аудит через `POST /api/card-workset/audit-task`; оба маршрута требуют доступ к `portal_id`, работают только с существующим `card_draft` и не выполняют write-запросы в WB;
 - `localStorage` в frontend остается только временным fallback, когда backend еще недоступен на контуре.
 
 Правила:

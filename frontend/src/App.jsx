@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Archive,
   AlertTriangle,
@@ -2001,6 +2001,53 @@ function taskRunItemKey(item) {
   return item?.cardKey || item?.nmID || item?.vendorCode || "";
 }
 
+function taskHasSemanticFinal(task) {
+  return Boolean(task?.hasSemanticCoreFinal || task?.semanticCoreFinalSaved || task?.semanticCoreFinal);
+}
+
+const taskBatchFilterOptions = [
+  { key: "all", label: "Все" },
+  { key: "todo", label: "Незавершенные" },
+  { key: "returned", label: "Возвращенные" },
+  { key: "semantic-missing", label: "Без итогового СЯ", semanticOnly: true },
+];
+
+function taskMatchesBatchFilter(task, filterKey, workType) {
+  if (filterKey === "todo") {
+    return task?.status === "draft";
+  }
+  if (filterKey === "returned") {
+    return task?.status === "changes_requested";
+  }
+  if (filterKey === "semantic-missing") {
+    return workType === "semantic" && !taskHasSemanticFinal(task);
+  }
+  return true;
+}
+
+function taskCardWorkStatus(task, workType) {
+  if (workType === "semantic") {
+    return taskHasSemanticFinal(task)
+      ? { label: "СЯ готово", tone: "green" }
+      : { label: "без итогового СЯ", tone: "amber" };
+  }
+  if (task?.status === "changes_requested") {
+    return { label: "возврат", tone: "red" };
+  }
+  if (task?.status === "submitted") {
+    const submittedLabel = {
+      content: "контент отправлен",
+      prices: "цены отправлены",
+      stocks: "остатки отправлены",
+    }[workType] || "отправлено";
+    return { label: submittedLabel, tone: "amber" };
+  }
+  if (task?.status === "approved" || task?.status === "exported") {
+    return { label: task.status === "exported" ? "выгружено" : "принято", tone: "green" };
+  }
+  return { label: "в работе", tone: "blue" };
+}
+
 function buildTaskRunContext(cards, group, workType, startTask) {
   const taskItems = Array.isArray(group?.tasks) ? group.tasks : [];
   const seen = new Set();
@@ -2016,6 +2063,8 @@ function buildTaskRunContext(cards, group, workType, startTask) {
       vendorCode: cardVendorCodeValue(card) || task.vendorCode || "",
       title: card.title || task.title || "Карточка",
       subjectName: card.subjectName || task.subjectName || "",
+      status: task.status || "",
+      hasSemanticCoreFinal: taskHasSemanticFinal(task),
     };
   }).filter(Boolean);
   if (!items.length) return null;
@@ -5659,25 +5708,52 @@ export default function App() {
     setScreen("seller");
   }
 
-  function navigateTaskRun(delta) {
-    if (!taskRun?.items?.length) {
-      return;
-    }
-    const nextIndex = Math.max(0, Math.min(taskRun.currentIndex + delta, taskRun.items.length - 1));
-    if (nextIndex === taskRun.currentIndex) {
-      return;
-    }
-    const item = taskRun.items[nextIndex];
+  function openTaskRunIndex(nextTaskRun, nextIndex, notice = "") {
+    const item = nextTaskRun.items[nextIndex];
     const cards = cardsForPortal(currentPortal);
     const nextCard = cards.find((card) => cardMatchesDraftKey(card, item.cardKey)) || null;
     if (!nextCard) {
       setNotice("Карточка из пачки не найдена в текущем списке кабинета.");
-      return;
+      return false;
     }
     setSelectedCard(nextCard);
     setSelectedCardKey(cardDraftKey(nextCard));
-    setTaskRun((current) => current ? { ...current, currentIndex: nextIndex } : current);
+    setTaskRun({ ...nextTaskRun, currentIndex: nextIndex, total: nextTaskRun.items.length });
+    if (notice) {
+      setNotice(notice);
+    }
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    return true;
+  }
+
+  function navigateTaskRun(command) {
+    if (!taskRun?.items?.length) {
+      return;
+    }
+    const action = typeof command === "number" ? { type: "move", delta: command } : (command || {});
+    const currentIndex = Math.max(0, Math.min(Number(taskRun.currentIndex || 0), taskRun.items.length - 1));
+    if (action.type === "defer-current") {
+      if (taskRun.items.length < 2) {
+        setNotice("В текущем проходе только одна карточка.");
+        return;
+      }
+      const currentItem = taskRun.items[currentIndex];
+      const remainingItems = taskRun.items.filter((_, index) => index !== currentIndex);
+      const nextItems = [...remainingItems, { ...currentItem, deferred: true }];
+      const nextIndex = Math.min(currentIndex, remainingItems.length - 1);
+      openTaskRunIndex(
+        { ...taskRun, items: nextItems, total: nextItems.length },
+        nextIndex,
+        "Карточка перенесена в конец текущего прохода.",
+      );
+      return;
+    }
+    const delta = Number(action.delta || 0);
+    const nextIndex = Math.max(0, Math.min(currentIndex + delta, taskRun.items.length - 1));
+    if (nextIndex === currentIndex) {
+      return;
+    }
+    openTaskRunIndex(taskRun, nextIndex);
   }
 
   async function createPortal(payload) {
@@ -6373,9 +6449,33 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  function logApprovalTaskEvent(task, group = null, workType = "", action = "opened", reason = "") {
+    if (!portal?.id || portal.isDemo || !task?.cardKey) return;
+    apiRequest("/api/card-workset/log-event", {
+      method: "POST",
+      body: JSON.stringify({
+        portalId: portal.id,
+        cardKey: task.cardKey,
+        nmID: task.nmID || "",
+        vendorCode: task.vendorCode || "",
+        batchId: group?.batchId || task.batchId || "",
+        workType,
+        action,
+        reason,
+      }),
+    })
+      .then((payload) => {
+        if (payload?.workflow) {
+          setApprovalWorkflow(normalizeApprovalWorkflow(payload.workflow));
+        }
+      })
+      .catch(() => {});
+  }
+
   function openApprovalTask(task, group = null, workType = "") {
     const card = findCardForApprovalTask(cards, task);
     if (card) {
+      logApprovalTaskEvent(task, group, workType, "opened");
       onOpenCard(card, {
         sellerTab: "tasks",
         backLabel: "Задачи",
@@ -6879,6 +6979,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             ) : null}
             {activeSellerTab === "tasks" ? (
               <ApprovalWorkflowPanel
+                portalId={portal.id}
                 workflow={approvalWorkflow}
                 status={approvalWorkflowStatus}
 	                cards={cards}
@@ -6889,6 +6990,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                onLinkTaskGroup={linkApprovalTaskGroupToWorkPeriod}
 	                onUnlinkTaskGroup={unlinkApprovalTaskGroupFromWorkPeriod}
 	                onDeleteCompletedTask={deleteCompletedApprovalTask}
+	                onWorkflowUpdated={setApprovalWorkflow}
 	                taskActionStatus={taskActionStatus}
 	                workPeriods={workPeriods}
 	                workPeriodsStatus={workPeriodsStatus}
@@ -8606,15 +8708,18 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
   );
 }
 
-function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onReorderTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
+function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onReorderTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, onWorkflowUpdated, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
   const [completedSearch, setCompletedSearch] = useState("");
+  const [groupFilters, setGroupFilters] = useState({});
   const [linkingGroup, setLinkingGroup] = useState(null);
   const [orderingGroupKey, setOrderingGroupKey] = useState("");
   const [localTaskOrders, setLocalTaskOrders] = useState({});
   const [dirtyOrderKeys, setDirtyOrderKeys] = useState({});
   const [draggingTaskKey, setDraggingTaskKey] = useState("");
+  const [batchAuditState, setBatchAuditState] = useState({});
+  const dragAutoScrollRef = useRef({ frame: 0, pointerY: 0, scrollTarget: null, active: false });
   const activeTasks = tasks.filter((task) => ["draft", "changes_requested"].includes(task.status));
   const analytics = workflow.analytics || {};
   const recentEvents = workflow.recentEvents || [];
@@ -8637,6 +8742,11 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
       completedBy?.full_name,
     ].map((value) => String(value || "").toLowerCase()).join(" ").includes(completedSearchText);
   });
+  const eventsForTaskGroup = (group) => {
+    const keys = new Set((Array.isArray(group?.tasks) ? group.tasks : []).map((task) => task.cardKey).filter(Boolean));
+    if (!keys.size) return [];
+    return recentEvents.filter((event) => keys.has(event.cardKey)).slice(0, 8);
+  };
   const completedTotal = Number(analytics.completedCount || completedTasks.length || 0);
   const submitTaskLink = async (target) => {
     if (!linkingGroup) return;
@@ -8644,6 +8754,16 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
     setLinkingGroup(null);
   };
   const currentGroupTasks = (group) => localTaskOrders[group.key] || group.tasks || [];
+  const groupFilterKey = (group) => groupFilters[group.key] || "all";
+  const setGroupFilterKey = (group, key) => {
+    setGroupFilters((current) => ({ ...current, [group.key]: key }));
+  };
+  const visibleGroupTasks = (group, workType, isOrdering = false) => {
+    const source = currentGroupTasks(group);
+    if (isOrdering) return source;
+    const filterKey = groupFilterKey(group);
+    return source.filter((task) => taskMatchesBatchFilter(task, filterKey, workType));
+  };
   const taskOrderKey = (task) => taskRunItemKey(task) || String(task?.cardKey || "");
   const isGroupOrderDirty = (group) => Boolean(dirtyOrderKeys[group.key]);
   const setGroupDraftOrder = (group, nextTasks, dirty = true) => {
@@ -8689,6 +8809,49 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
     }
     return true;
   };
+  const runGroupAudit = async (group, workType, tasksToAudit) => {
+    if (!portalId || taskActionStatus) return;
+    const runnableTasks = (Array.isArray(tasksToAudit) ? tasksToAudit : [])
+      .filter((task) => task?.cardKey && taskHasCard(task));
+    if (!runnableTasks.length) return;
+    const actionKey = group.key;
+    setBatchAuditState((current) => ({
+      ...current,
+      [actionKey]: { status: "running", done: 0, failed: 0, total: runnableTasks.length },
+    }));
+    let done = 0;
+    let failed = 0;
+    for (const task of runnableTasks) {
+      try {
+        const payload = await apiRequest("/api/card-workset/audit-task", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId,
+            cardKey: task.cardKey,
+            nmID: task.nmID || "",
+            vendorCode: task.vendorCode || "",
+            batchId: group.batchId || task.batchId || "",
+            workType,
+          }),
+        });
+        if (payload?.workflow && onWorkflowUpdated) {
+          onWorkflowUpdated(normalizeApprovalWorkflow(payload.workflow));
+        }
+        done += 1;
+      } catch {
+        failed += 1;
+      }
+      setBatchAuditState((current) => ({
+        ...current,
+        [actionKey]: {
+          status: done + failed >= runnableTasks.length ? (failed ? "partial" : "done") : "running",
+          done,
+          failed,
+          total: runnableTasks.length,
+        },
+      }));
+    }
+  };
   const moveGroupTask = (group, index, delta) => {
     if (taskActionStatus) return;
     const source = currentGroupTasks(group);
@@ -8707,23 +8870,109 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
     setGroupDraftOrder(group, nextTasks);
     return nextTasks;
   };
+  function stopTaskDragAutoScroll() {
+    const state = dragAutoScrollRef.current;
+    state.active = false;
+    state.scrollTarget = null;
+    if (state.frame) {
+      window.cancelAnimationFrame(state.frame);
+      state.frame = 0;
+    }
+  }
+  function findTaskDragScrollTarget(target) {
+    let element = target instanceof Element ? target : null;
+    while (element && element !== document.body) {
+      if (element instanceof HTMLElement) {
+        const style = window.getComputedStyle(element);
+        const canScroll = /(auto|scroll)/.test(style.overflowY) && element.scrollHeight > element.clientHeight;
+        if (canScroll) return element;
+      }
+      element = element.parentElement;
+    }
+    return null;
+  }
+  function scrollTaskDragTarget(delta) {
+    const target = dragAutoScrollRef.current.scrollTarget;
+    if (target) {
+      const before = target.scrollTop;
+      target.scrollTop += delta;
+      if (target.scrollTop !== before) return;
+    }
+    window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+  }
+  function runTaskDragAutoScroll() {
+    const state = dragAutoScrollRef.current;
+    if (!state.active) {
+      state.frame = 0;
+      return;
+    }
+    const edgeSize = 120;
+    const maxSpeed = 28;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const pointerY = Number(state.pointerY || 0);
+    let delta = 0;
+    if (pointerY < edgeSize) {
+      const strength = (edgeSize - Math.max(pointerY, 0)) / edgeSize;
+      delta = -Math.max(3, Math.ceil(maxSpeed * strength * strength));
+    } else if (pointerY > viewportHeight - edgeSize) {
+      const strength = (Math.min(pointerY, viewportHeight) - (viewportHeight - edgeSize)) / edgeSize;
+      delta = Math.max(3, Math.ceil(maxSpeed * strength * strength));
+    }
+    if (delta) {
+      scrollTaskDragTarget(delta);
+    }
+    state.frame = window.requestAnimationFrame(runTaskDragAutoScroll);
+  }
+  function updateTaskDragAutoScroll(event) {
+    const state = dragAutoScrollRef.current;
+    state.pointerY = event.clientY;
+    state.scrollTarget = findTaskDragScrollTarget(event.target);
+    if (!state.active) {
+      state.active = true;
+      state.frame = window.requestAnimationFrame(runTaskDragAutoScroll);
+    }
+  }
+  function endTaskDrag() {
+    setDraggingTaskKey("");
+    stopTaskDragAutoScroll();
+  }
+  useEffect(() => {
+    if (!draggingTaskKey) {
+      stopTaskDragAutoScroll();
+      return undefined;
+    }
+    const handleWindowDragOver = (event) => {
+      event.preventDefault();
+      updateTaskDragAutoScroll(event);
+    };
+    const handleWindowDragEnd = () => endTaskDrag();
+    window.addEventListener("dragover", handleWindowDragOver);
+    window.addEventListener("drop", handleWindowDragEnd);
+    return () => {
+      window.removeEventListener("dragover", handleWindowDragOver);
+      window.removeEventListener("drop", handleWindowDragEnd);
+      stopTaskDragAutoScroll();
+    };
+  }, [draggingTaskKey]);
   const startTaskDrag = (event, group, task) => {
     if (!orderingGroupKey || orderingGroupKey !== group.key || taskActionStatus) return;
     const key = taskOrderKey(task);
     setDraggingTaskKey(key);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", key);
+    updateTaskDragAutoScroll(event);
   };
   const hoverTaskDrag = (event, group, task) => {
     if (!draggingTaskKey || orderingGroupKey !== group.key || taskActionStatus) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
+    updateTaskDragAutoScroll(event);
     moveDraggedGroupTask(group, draggingTaskKey, taskOrderKey(task));
   };
   const dropTaskDrag = (event, group) => {
     if (orderingGroupKey !== group.key) return;
     event.preventDefault();
-    setDraggingTaskKey("");
+    endTaskDrag();
   };
   const renderCompletedTaskRows = (sectionTasks, limit = 30) => {
     const visibleTasks = sectionTasks.slice(0, limit);
@@ -8860,25 +9109,40 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                   <div className="task-batch-list">
                     {groups.map((group) => {
                       const firstTask = group.tasks[0] || {};
-                      const groupTasks = currentGroupTasks(group);
+                      const isOrdering = orderingGroupKey === group.key;
+                      const allGroupTasks = currentGroupTasks(group);
+                      const groupTasks = visibleGroupTasks(group, section.key, isOrdering);
+                      const selectedFilterKey = groupFilterKey(group);
+                      const availableFilters = taskBatchFilterOptions.filter((option) => !option.semanticOnly || section.key === "semantic");
                       const statusValue = taskGroupStatus(group.tasks);
                       const originalCount = Number(firstTask.batchCardsCount || group.tasks.length || 0);
-                      const remainingCount = groupTasks.length;
+                      const remainingCount = allGroupTasks.length;
+                      const visibleCount = groupTasks.length;
                       const assignee = findUser(group.assigneeLogin);
                       const author = findUser(group.createdBy);
-                      const openableTask = groupTasks.find(taskHasCard) || firstTask;
+                      const openableTask = groupTasks.find(taskHasCard) || null;
                       const canOpen = Boolean(openableTask && taskHasCard(openableTask));
 	                      const cardsLabel = originalCount && originalCount !== remainingCount
 	                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
-	                        : formatNumber(remainingCount);
+	                        : selectedFilterKey !== "all"
+                            ? `${formatNumber(visibleCount)} из ${formatNumber(remainingCount)}`
+	                          : formatNumber(remainingCount);
 		                      const actionBusy = taskActionStatus === group.key;
 		                      const reorderBusy = taskActionStatus === `reorder:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const unlinkBusy = taskActionStatus === `unlink:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkedPlan = workPeriodLinkForGroup(workPeriods, group);
 		                      const linkedPlanLabel = linkedPlan?.label || "";
-		                      const isOrdering = orderingGroupKey === group.key;
 		                      const orderDirty = isGroupOrderDirty(group);
+                      const runGroup = { ...group, tasks: groupTasks };
+                      const batchEvents = eventsForTaskGroup(group);
+                      const returnedCount = allGroupTasks.filter((task) => task.status === "changes_requested").length;
+                      const draftCount = allGroupTasks.filter((task) => task.status === "draft").length;
+                      const auditState = batchAuditState[group.key] || {};
+                      const auditBusy = auditState.status === "running";
+                      const auditDone = Number(auditState.done || 0);
+                      const auditFailed = Number(auditState.failed || 0);
+                      const auditTotal = Number(auditState.total || 0);
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -8895,10 +9159,18 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                            <span>План: {linkedPlanLabel || "не привязано"}</span>
 	                          </div>
 	                          {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
+                            <div className="task-batch-status-line">
+                              <Tag tone={draftCount ? "blue" : "green"}>{formatNumber(draftCount)} в работе</Tag>
+                              <Tag tone={returnedCount ? "red" : "green"}>{formatNumber(returnedCount)} возвратов</Tag>
+                              <Tag tone={batchEvents.length ? "blue" : "amber"}>{formatNumber(batchEvents.length)} событий</Tag>
+                            </div>
 	                          <div className="task-batch-actions">
-	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, group, section.key)} disabled={!canOpen}>
+	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, runGroup, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
+                              <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, groupTasks)} disabled={Boolean(taskActionStatus) || auditBusy || !groupTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
+                                <WandSparkles size={16} />{auditBusy ? "Аудит идет" : "Запустить аудит"}
+                              </button>
 	                            {isOrdering ? (
 	                              <>
 	                                <button className={loadingButtonClass("btn primary", reorderBusy)} type="button" onClick={() => (orderDirty ? saveGroupOrder(group, section.key) : cancelGroupOrdering(group))} disabled={Boolean(taskActionStatus && !reorderBusy)} aria-busy={reorderBusy || undefined}>
@@ -8925,14 +9197,40 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
 	                              <Trash2 size={16} />Удалить задачу
 	                            </button>
 	                          </div>
+                            {auditTotal ? (
+                              <div className={`task-batch-audit-progress ${auditState.status || ""}`}>
+                                <div>
+                                  <strong>{auditBusy ? "Пакетный аудит" : auditFailed ? "Аудит завершен с ошибками" : "Аудит завершен"}</strong>
+                                  <span>{formatNumber(auditDone)} из {formatNumber(auditTotal)}{auditFailed ? ` · ошибок ${formatNumber(auditFailed)}` : ""}</span>
+                                </div>
+                                <div className="task-batch-audit-bar">
+                                  <span style={{ width: `${Math.round(((auditDone + auditFailed) / Math.max(auditTotal, 1)) * 100)}%` }} />
+                                </div>
+                              </div>
+                            ) : null}
                           <details className="task-card-details" open={isOrdering || undefined}>
                             <summary>Карточки в задаче</summary>
-                            {isOrdering ? <p className="task-order-hint">Перетащите карточку мышкой или используйте кнопки выше/ниже. Когда порядок готов, нажмите Сохранить порядок.</p> : null}
+                            {isOrdering ? <p className="task-order-hint">Перетащите карточку мышкой или используйте кнопки выше/ниже. У края экрана список прокрутится сам. Когда порядок готов, нажмите Сохранить порядок.</p> : null}
+                            {!isOrdering ? (
+                              <div className="task-batch-filter" role="group" aria-label="Фильтр карточек пачки">
+                                {availableFilters.map((option) => (
+                                  <button
+                                    className={selectedFilterKey === option.key ? "active" : ""}
+                                    type="button"
+                                    onClick={() => setGroupFilterKey(group, option.key)}
+                                    key={option.key}
+                                  >
+                                    {option.label}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
                             <div className="task-card-list">
-                              {groupTasks.map((task, taskIndex) => {
+                              {groupTasks.length ? groupTasks.map((task, taskIndex) => {
                                 const rowCanOpen = taskHasCard(task);
                                 const rowKey = taskOrderKey(task);
                                 const dragging = isOrdering && draggingTaskKey === rowKey;
+                                const rowStatus = taskCardWorkStatus(task, section.key);
                                 return (
                                   <div
                                     className={`task-card-row ${isOrdering ? "ordering" : ""} ${dragging ? "dragging" : ""}`}
@@ -8942,7 +9240,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                                     onDragEnter={(event) => hoverTaskDrag(event, group, task)}
                                     onDragOver={(event) => hoverTaskDrag(event, group, task)}
                                     onDrop={(event) => dropTaskDrag(event, group)}
-                                    onDragEnd={() => setDraggingTaskKey("")}
+                                    onDragEnd={endTaskDrag}
                                   >
                                     <div className="task-card-row-main">
                                       {isOrdering ? <span className="task-drag-handle" title="Перетащить"><GripVertical size={16} /></span> : null}
@@ -8952,6 +9250,7 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                                       </div>
                                     </div>
                                     <div className="task-card-row-actions">
+                                      <Tag tone={rowStatus.tone}>{rowStatus.label}</Tag>
                                       {isOrdering ? (
                                         <>
                                           <button className="btn mini" type="button" onClick={() => moveGroupTask(group, taskIndex, -1)} disabled={Boolean(taskActionStatus) || taskIndex === 0} title="Поднять выше">
@@ -8962,14 +9261,39 @@ function ApprovalWorkflowPanel({ workflow, status, cards, findUser, onOpenTask, 
                                           </button>
                                         </>
                                       ) : null}
-                                      <button className="btn mini" type="button" onClick={() => onOpenTask(task, group, section.key)} disabled={!rowCanOpen}>
+                                      <button className="btn mini" type="button" onClick={() => onOpenTask(task, runGroup, section.key)} disabled={!rowCanOpen}>
                                         Открыть
                                       </button>
                                     </div>
                                   </div>
                                 );
-                              })}
+                              }) : (
+                                <div className="empty-state compact"><span>По выбранному фильтру карточек нет.</span></div>
+                              )}
                             </div>
+                          </details>
+                          <details className="task-batch-log">
+                            <summary>Журнал действий</summary>
+                            {batchEvents.length ? (
+                              <div className="task-batch-event-list">
+                                {batchEvents.map((event) => {
+                                  const actor = findUser(event.actorLogin);
+                                  const eventTime = event.eventAt ? new Date(event.eventAt).toLocaleString("ru-RU") : "без даты";
+                                  return (
+                                    <div className="task-batch-event" key={event.id || `${event.cardKey}-${event.action}-${event.eventAt}`}>
+                                      <div>
+                                        <strong>{approvalEventLabel(event.action || event.status)}</strong>
+                                        <span>{event.title || `WB ${textOrDash(event.nmID)}`}</span>
+                                      </div>
+                                      <p>{actor?.full_name || event.actorLogin || "система"} · {eventTime}</p>
+                                      {event.reason ? <em>{event.reason}</em> : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="empty-state compact"><span>По этой пачке пока нет событий.</span></div>
+                            )}
                           </details>
                         </article>
                       );
@@ -9097,6 +9421,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
   const [cardDescriptionOpen, setCardDescriptionOpen] = useState(false);
   const [cardCharacteristicsOpen, setCardCharacteristicsOpen] = useState(false);
+  const [taskRunActionStatus, setTaskRunActionStatus] = useState("");
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = textOrDash(card?.title);
   const portalName = portalDisplayName(portal);
@@ -9106,6 +9431,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const taskRunCurrent = taskRunItems[taskRunIndex] || null;
   const taskRunPrevious = taskRunIndex > 0 ? taskRunItems[taskRunIndex - 1] : null;
   const taskRunNext = taskRunIndex < taskRunTotal - 1 ? taskRunItems[taskRunIndex + 1] : null;
+  const taskRunWorkType = taskRun?.workType || "";
+  const taskRunCurrentStatus = taskCardWorkStatus(taskRunCurrent, taskRunWorkType);
   const titleLength = currentTitle.length;
   const cardIssueReasons = cardProblemReasons(card);
   const issueCount = cardIssueReasons.length || Number(card?.issueCount ?? (card?.issue && card.issue !== "Нет критичных" ? 1 : 0));
@@ -9415,8 +9742,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       : approvedOrExportedCount
         ? `${approvedOrExportedCount} ${pluralRu(approvedOrExportedCount, "блок", "блока", "блоков")} принято, можно выгружать.`
         : readyForApprovalCount
-          ? `${readyForApprovalCount} ${pluralRu(readyForApprovalCount, "блок готов", "блока готовы", "блоков готовы")} к отправке на согласование.`
-          : "Подготовьте черновик, затем отправьте нужный блок на согласование.";
+        ? `${readyForApprovalCount} ${pluralRu(readyForApprovalCount, "блок готов", "блока готовы", "блоков готовы")} к отправке на согласование.`
+        : "Подготовьте черновик, затем отправьте нужный блок на согласование.";
+  const taskRunActionBusy = taskRunActionStatus === "saving";
+  const taskRunCompleteLabel = taskRunActionBusy ? "Сохраняем" : taskRunNext ? "Готово, следующая" : "Готово";
+  const taskRunActionMessage = {
+    done: "Карточка закрыта, открываем следующую.",
+    "done-last": "Карточка закрыта. Это последняя карточка в текущем проходе.",
+    skipped: "Карточка пропущена в текущем проходе.",
+    deferred: "Карточка перенесена в конец текущего прохода.",
+    "semantic-missing": "Сначала сохраните текущий выбор и добавьте его в итоговое СЯ.",
+    "semantic-conflict": "По карточке уже есть другая итоговая версия СЯ. Замените ее вручную, если это нужная версия.",
+    "missing-changes": "В этом блоке нет правок для отправки на согласование.",
+    "approval-blocked": "Этот блок сейчас нельзя отправить: проверьте роль или текущий статус согласования.",
+    error: "Действие не сохранилось. Проверьте сообщение ниже и попробуйте еще раз.",
+  }[taskRunActionStatus] || "";
   const auditStatusText = auditRunning ? "Идет аудит" : auditDone ? "Рыночный аудит готов" : auditStale ? "Рыночный аудит устарел" : "Рыночный аудит не запускался";
   const auditStatusTone = auditRunning ? "blue" : auditDone ? "green" : auditStale ? "amber" : "amber";
   const auditNextStep = auditRunning
@@ -9470,6 +9810,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticEditingKeywords([]);
     setCardDescriptionOpen(false);
     setCardCharacteristicsOpen(false);
+    setTaskRunActionStatus("");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -9901,6 +10242,132 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       return;
     }
     onTaskRunNavigate?.(delta);
+  }
+
+  function logTaskRunEvent(action, reason = "") {
+    if (!backendDraftEnabled || !taskRunTotal) return;
+    apiRequest("/api/card-workset/log-event", {
+      method: "POST",
+      body: JSON.stringify({
+        portalId: portal.id,
+        cardKey: taskRunCurrent?.cardKey || draftCardKey,
+        nmID: taskRunCurrent?.nmID || cardNmIdValue(card),
+        vendorCode: taskRunCurrent?.vendorCode || cardVendorCodeValue(card),
+        batchId: taskRun?.batchId || "",
+        workType: taskRunWorkType,
+        action,
+        reason,
+      }),
+    }).catch(() => {});
+  }
+
+  function moveTaskRunForward(status = "") {
+    if (taskRunNext) {
+      if (status) {
+        setTaskRunActionStatus(status);
+      }
+      onTaskRunNavigate?.(1);
+      return true;
+    }
+    if (status) {
+      setTaskRunActionStatus("done-last");
+    }
+    return false;
+  }
+
+  async function completeTaskRunCardAndNext() {
+    if (!taskRunTotal || taskRunActionStatus === "saving") {
+      return;
+    }
+    if (activeTab === "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    setTaskRunActionStatus("saving");
+    try {
+      if (taskRunWorkType === "semantic") {
+        setActiveTab("semantic");
+        if (semanticFinalMatchesCurrent || semanticStoredFinal) {
+          logTaskRunEvent("quick_completed");
+          moveTaskRunForward("done");
+          return;
+        }
+        if (semanticFinalConflict) {
+          setTaskRunActionStatus("semantic-conflict");
+          return;
+        }
+        if (!semanticCurrentChoiceSaved || !currentSemanticFinalExport || !semanticFinalHasRows) {
+          setTaskRunActionStatus("semantic-missing");
+          return;
+        }
+        const saved = await addSemanticCoreToFinal();
+        if (!saved) {
+          setTaskRunActionStatus("semantic-missing");
+          return;
+        }
+        logTaskRunEvent("quick_completed");
+        moveTaskRunForward("done");
+        return;
+      }
+      if (APPROVAL_SECTION_KEYS.includes(taskRunWorkType)) {
+        const section = changesReadinessSections.find((item) => item.key === taskRunWorkType);
+        setActiveTab("changes");
+        setChangesTab(taskRunWorkType);
+        if (!section) {
+          setTaskRunActionStatus("error");
+          return;
+        }
+        if (["submitted", "approved", "exported"].includes(section.approval.status)) {
+          logTaskRunEvent("quick_completed");
+          moveTaskRunForward("done");
+          return;
+        }
+        if (!section.changesCount) {
+          setTaskRunActionStatus("missing-changes");
+          return;
+        }
+        if (!canSubmitApprovalSection(taskRunWorkType)) {
+          setTaskRunActionStatus("approval-blocked");
+          return;
+        }
+        const saved = await submitForApproval(taskRunWorkType);
+        if (!saved) {
+          setTaskRunActionStatus("error");
+          return;
+        }
+        logTaskRunEvent("quick_completed");
+        moveTaskRunForward("done");
+        return;
+      }
+      await saveDraft();
+      logTaskRunEvent("quick_completed");
+      moveTaskRunForward("done");
+    } catch {
+      setTaskRunActionStatus("error");
+    }
+  }
+
+  function skipTaskRunCard() {
+    if (!taskRunNext || taskRunActionStatus === "saving") {
+      return;
+    }
+    if (activeTab === "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    setTaskRunActionStatus("skipped");
+    logTaskRunEvent("skipped");
+    onTaskRunNavigate?.(1);
+  }
+
+  function deferTaskRunCard() {
+    if (taskRunTotal < 2 || taskRunActionStatus === "saving") {
+      return;
+    }
+    if (activeTab === "semantic" && !confirmLeaveUnsavedSemantic()) {
+      return;
+    }
+    setTaskRunActionStatus("deferred");
+    logTaskRunEvent("deferred");
+    onTaskRunNavigate?.({ type: "defer-current" });
   }
 
   function handleSemanticSeedKeyDown(event) {
@@ -11133,13 +11600,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     });
   }
 
-  async function applyApprovalChange(nextApproval, statusMessage) {
+  async function applyApprovalChange(nextApproval, statusMessage, sectionKey = activeApprovalSection) {
     const previousApproval = approval;
     const previousSections = approvalSections;
     const normalized = normalizeApprovalState(nextApproval);
     const nextSections = normalizeApprovalSections({
       ...approvalSections,
-      [activeApprovalSection]: normalized,
+      [sectionKey]: normalized,
     });
     const nextOverallApproval = deriveOverallApproval(nextSections);
     setApprovalSections(nextSections);
@@ -11157,12 +11624,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     return true;
   }
 
-  function approvalHistoryItem(action, reason = "") {
+  function approvalHistoryItem(action, reason = "", sectionKey = activeApprovalSection) {
     return {
       id: `approval-${Date.now()}`,
       action,
-      section: activeApprovalSection,
-      sectionLabel: approvalSectionLabel(activeApprovalSection),
+      section: sectionKey,
+      sectionLabel: approvalSectionLabel(sectionKey),
       reason,
       userLogin: currentUser?.login || "",
       userName: currentUser?.full_name || currentUser?.login || "",
@@ -11170,10 +11637,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     };
   }
 
-  async function submitForApproval() {
+  function canSubmitApprovalSection(sectionKey) {
+    const sectionApproval = normalizeApprovalState(approvalSections[sectionKey]);
+    const sectionReadOnly = isProjectLead || (sectionApproval.status === "submitted" && isApprovalReviewer);
+    return !sectionReadOnly && ["draft", "changes_requested"].includes(sectionApproval.status);
+  }
+
+  async function submitForApproval(sectionKey = activeApprovalSection) {
     const now = new Date().toISOString();
+    const sectionApproval = normalizeApprovalState(approvalSections[sectionKey]);
     const nextApproval = normalizeApprovalState({
-      ...activeApproval,
+      ...sectionApproval,
       status: "submitted",
       assigneeLogin: portalTeam.manager || "",
       submittedBy: currentUser?.login || "",
@@ -11181,9 +11655,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       reviewedBy: "",
       reviewedAt: "",
       returnReason: "",
-      history: [approvalHistoryItem("submitted"), ...(activeApproval.history || [])],
+      history: [approvalHistoryItem("submitted", "", sectionKey), ...(sectionApproval.history || [])],
     });
-    await applyApprovalChange(nextApproval, "approval-submitted");
+    return applyApprovalChange(nextApproval, "approval-submitted", sectionKey);
   }
 
   async function approveChanges() {
@@ -11386,18 +11860,35 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
             <span>{taskRun.workTypeLabel || "Задача"} · {formatNumber(taskRunIndex + 1)} из {formatNumber(taskRunTotal)}</span>
             <strong>{taskRun.title || "Пачка задач"}</strong>
             <p>{taskRunCurrent?.title || currentTitle} · WB {textOrDash(taskRunCurrent?.nmID || card?.nmID)} · артикул {textOrDash(taskRunCurrent?.vendorCode || card?.vendorCode)}</p>
+            <Tag tone={taskRunCurrentStatus.tone}>{taskRunCurrentStatus.label}</Tag>
           </div>
           <div className="task-run-progress" aria-label={`Карточка ${taskRunIndex + 1} из ${taskRunTotal}`}>
             <span style={{ width: `${Math.round(((taskRunIndex + 1) / taskRunTotal) * 100)}%` }} />
           </div>
           <div className="task-run-actions">
+            <button
+              className={loadingButtonClass("btn primary", taskRunActionBusy)}
+              type="button"
+              onClick={completeTaskRunCardAndNext}
+              disabled={taskRunActionBusy}
+              aria-busy={taskRunActionBusy || undefined}
+            >
+              <CheckSquare size={17} />{taskRunCompleteLabel}
+            </button>
+            <button className="btn" type="button" onClick={skipTaskRunCard} disabled={!taskRunNext || taskRunActionBusy}>
+              Пропустить
+            </button>
+            <button className="btn" type="button" onClick={deferTaskRunCard} disabled={taskRunTotal < 2 || taskRunActionBusy}>
+              <RotateCcw size={17} />Вернуться позже
+            </button>
             <button className="btn" type="button" onClick={() => navigateTaskRunCard(-1)} disabled={!taskRunPrevious} title={taskRunPrevious ? taskRunPrevious.title : "Это первая карточка"}>
               <ChevronLeft size={17} />Предыдущая
             </button>
-            <button className="btn primary" type="button" onClick={() => navigateTaskRunCard(1)} disabled={!taskRunNext} title={taskRunNext ? taskRunNext.title : "Это последняя карточка"}>
+            <button className="btn" type="button" onClick={() => navigateTaskRunCard(1)} disabled={!taskRunNext} title={taskRunNext ? taskRunNext.title : "Это последняя карточка"}>
               Следующая<ChevronRight size={17} />
             </button>
           </div>
+          {taskRunActionMessage ? <p className="task-run-status">{taskRunActionMessage}</p> : null}
         </section>
       ) : null}
 
@@ -13184,6 +13675,10 @@ function approvalEventLabel(action) {
     submitted: "отправлено на согласование",
     approved: "принято",
     changes_requested: "возвращено на доработку",
+    opened: "открыта в конвейере",
+    skipped: "пропущена",
+    deferred: "перенесена на позже",
+    quick_completed: "закрыта быстрым действием",
     competitor_change_detected: "найдено изменение конкурента",
     competitor_change_skipped: "изменение конкурента пропущено",
     competitor_change_applied: "черновик обновлен по конкуренту",

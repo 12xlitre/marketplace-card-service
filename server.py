@@ -3141,6 +3141,7 @@ def approval_task_base(row, snapshot_lookup, meta, work_types):
     "workTypes": work_types,
     "workTypeLabels": [WORK_TYPE_LABELS.get(item, item) for item in work_types],
     "workComment": str(batch.get("comment") or "")[:700],
+    "hasSemanticCoreFinal": semantic_core_final_exists(meta),
     "updatedAt": row["updated_at"] or "",
   }
 
@@ -3713,6 +3714,188 @@ def reorder_card_work_tasks(portal_id, payload, user):
     "portalId": str(numeric_portal_id),
     "batchId": batch_id,
     "updated": updated,
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
+CARD_WORK_EVENT_ACTIONS = {
+  "opened": "открыта в конвейере",
+  "skipped": "пропущена в текущем проходе",
+  "deferred": "перенесена на позже",
+  "quick_completed": "закрыта быстрым действием",
+  "audit_completed": "аудит карточки готов",
+}
+
+
+def log_card_work_event(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  action = str(payload.get("action") or "").strip()[:40]
+  if not card_key or action not in CARD_WORK_EVENT_ACTIONS:
+    raise ValueError("invalid_task_event")
+  work_type = str(payload.get("workType") or payload.get("work_type") or "").strip()
+  work_type_label = WORK_TYPE_LABELS.get(work_type, work_type)
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  comment = str(payload.get("reason") or "").strip()[:400]
+
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT card_key, nm_id, vendor_code
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if not row:
+      raise ValueError("task_not_found")
+    reason_parts = [CARD_WORK_EVENT_ACTIONS[action]]
+    if work_type_label:
+      reason_parts.append(work_type_label)
+    if batch_id:
+      reason_parts.append(f"batch {batch_id}")
+    if comment:
+      reason_parts.append(comment)
+    event = {
+      "status": action,
+      "action": action,
+      "actorLogin": user_login_value(user) or "",
+      "assigneeLogin": "",
+      "reason": " · ".join(reason_parts)[:1000],
+      "eventAt": utc_now().isoformat(),
+      "nmID": str(row["nm_id"] or payload.get("nmID") or payload.get("nm_id") or "")[:80],
+      "vendorCode": str(row["vendor_code"] or payload.get("vendorCode") or payload.get("vendor_code") or "")[:120],
+    }
+    insert_card_approval_event(db, numeric_portal_id, card_key, event)
+
+  return {
+    "portalId": str(numeric_portal_id),
+    "cardKey": card_key,
+    "action": action,
+    "workflow": approval_workflow(numeric_portal_id, user),
+  }
+
+
+def audit_draft_payload_from_result(audit_payload, previous_payload):
+  previous_payload = normalize_card_draft_payload(previous_payload)
+  draft_content = audit_payload.get("draftContent") if isinstance(audit_payload.get("draftContent"), dict) else {}
+  title = draft_content.get("title") if isinstance(draft_content.get("title"), dict) else {}
+  description = draft_content.get("description") if isinstance(draft_content.get("description"), dict) else {}
+  characteristics = draft_content.get("characteristics") if isinstance(draft_content.get("characteristics"), dict) else {}
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  previous_history = previous_meta.get("auditHistory") if isinstance(previous_meta.get("auditHistory"), list) else []
+  audit_entry = audit_payload.get("auditEntry") if isinstance(audit_payload.get("auditEntry"), dict) else {}
+  next_history = [audit_entry, *previous_history] if audit_entry else previous_history
+  meta = {
+    **previous_meta,
+    "auditHistory": next_history[:20],
+    "auditResult": audit_payload.get("auditResult") if isinstance(audit_payload.get("auditResult"), dict) else {},
+    "evidenceSummary": audit_payload.get("evidenceSummary") if isinstance(audit_payload.get("evidenceSummary"), dict) else {},
+  }
+  return normalize_card_draft_payload({
+    "version": 2,
+    "auditStatus": "done",
+    "content": {
+      "title": {
+        "value": title.get("value") or "",
+        "source": title.get("source") or "audit",
+        "reason": title.get("reason") or "",
+      },
+      "description": {
+        "value": description.get("value") or "",
+        "source": description.get("source") or "audit",
+        "reason": description.get("reason") or "",
+      },
+      "characteristics": characteristics,
+    },
+    "prices": previous_payload.get("prices") if isinstance(previous_payload.get("prices"), dict) else {},
+    "stocks": previous_payload.get("stocks") if isinstance(previous_payload.get("stocks"), dict) else {},
+    "meta": meta,
+  })
+
+
+def audit_and_save_card_task(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  if not card_key:
+    raise ValueError("invalid_card_key")
+
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    draft_row = db.execute(
+      """
+      SELECT payload_json, nm_id, vendor_code
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if not draft_row:
+      raise ValueError("task_not_found")
+    try:
+      previous_payload = json.loads(draft_row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+      previous_payload = normalize_card_draft_payload({})
+    snapshot_card = snapshot_card_lookup(portal["cards_snapshot_json"]).get(card_key) or {}
+
+  raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+  card = snapshot_card or raw_card
+  if not card:
+    raise ValueError("card_not_found")
+  work_type = str(payload.get("workType") or payload.get("work_type") or "").strip()
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  context_token = mpstats_call_context_start(user, "Пачка: аудит карточки", portal_id=numeric_portal_id, card_key=card_key, nm_id=card.get("nmID") or card.get("nmId"), details={
+    "batchId": batch_id,
+    "workType": work_type,
+  })
+  try:
+    audit_payload = build_card_audit(
+      numeric_portal_id,
+      card_key,
+      card,
+      subject_characteristics=None,
+      mpstats_characteristics=None,
+      period=payload.get("period"),
+      audit_competitors=payload.get("auditCompetitors") or payload.get("competitorsForAudit"),
+    )
+  finally:
+    mpstats_call_context_stop(context_token)
+
+  next_payload = audit_draft_payload_from_result(audit_payload, previous_payload)
+  nm_id = card.get("nmID") or card.get("nmId") or card.get("nm_id") or draft_row["nm_id"] or payload.get("nmID") or ""
+  vendor_code = card.get("vendorCode") or card.get("vendor_code") or draft_row["vendor_code"] or payload.get("vendorCode") or ""
+  draft = save_card_draft(numeric_portal_id, card_key, nm_id, vendor_code, next_payload, user)
+  log_card_work_event(numeric_portal_id, {
+    "cardKey": card_key,
+    "action": "audit_completed",
+    "workType": work_type,
+    "batchId": batch_id,
+  }, user)
+  return {
+    "portalId": str(numeric_portal_id),
+    "cardKey": card_key,
+    "draft": draft,
+    "auditEntry": audit_payload.get("auditEntry"),
+    "evidenceSummary": audit_payload.get("evidenceSummary"),
     "workflow": approval_workflow(numeric_portal_id, user),
   }
 
@@ -14595,6 +14778,41 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_order"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/log-event":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = log_card_work_event(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_event"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/audit-task":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = audit_and_save_card_task(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_audit"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       self.send_json(HTTPStatus.OK, result)
       return
