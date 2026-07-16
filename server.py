@@ -445,6 +445,21 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS ozon_semantic_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        sku TEXT NOT NULL DEFAULT '',
+        offer_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, card_key)
+      );
+
       CREATE TABLE IF NOT EXISTS service_integrations (
         provider TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT 'stored',
@@ -667,6 +682,12 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_ozon_task_events_portal
       ON ozon_task_events(portal_id, event_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_ozon_semantic_drafts_portal
+      ON ozon_semantic_drafts(portal_id, updated_at)
       """
     )
     db.execute(
@@ -3556,6 +3577,174 @@ def public_ozon_task_event(row):
     "actorLogin": row["actor_login"] or "",
     "at": row["event_at"] or "",
   }
+
+
+def normalize_ozon_semantic_keyword(item, fallback_source=""):
+  if isinstance(item, str):
+    query = audit_str(item, 160)
+    source = audit_str(fallback_source, 80)
+  elif isinstance(item, dict):
+    query = audit_str(item.get("query") or item.get("keyword") or item.get("text"), 160)
+    source = audit_str(item.get("source") or fallback_source, 80)
+  else:
+    return None
+  if not query:
+    return None
+  payload = {"query": query}
+  if isinstance(item, dict):
+    status = audit_str(item.get("status"), 40)
+    frequency = audit_str(item.get("frequency"), 40)
+    position = audit_str(item.get("position"), 40)
+    if status:
+      payload["status"] = status
+    if frequency:
+      payload["frequency"] = frequency
+    if position:
+      payload["position"] = position
+  if source:
+    payload["source"] = source
+  return payload
+
+
+def normalize_ozon_semantic_keywords(items, limit=500, fallback_source=""):
+  if not isinstance(items, list):
+    return []
+  output = []
+  seen = set()
+  for item in items:
+    keyword = normalize_ozon_semantic_keyword(item, fallback_source=fallback_source)
+    if not keyword:
+      continue
+    key = audit_normalized(keyword["query"])
+    if not key or key in seen:
+      continue
+    seen.add(key)
+    output.append(keyword)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def normalize_ozon_semantic_payload(payload):
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = audit_str(payload.get("cardKey") or payload.get("card_key"), 160)
+  sku = audit_str(payload.get("sku") or payload.get("id"), 120)
+  offer_id = audit_str(payload.get("offerId") or payload.get("offer_id"), 120)
+  title = audit_str(payload.get("title"), 240)
+  seed_query = audit_str(payload.get("seedQuery") or payload.get("seed_query"), 240)
+  if not card_key:
+    card_key = draft_card_key(sku or offer_id or title)
+  current = normalize_ozon_semantic_keywords(payload.get("current"), fallback_source="Ozon карточка")
+  recommendations = normalize_ozon_semantic_keywords(payload.get("recommendations"), fallback_source="MPStats/WB keyword-база")
+  selected = normalize_ozon_semantic_keywords(payload.get("selected"), fallback_source="MPStats/WB keyword-база")
+  removal = normalize_ozon_semantic_keywords(payload.get("removal"), fallback_source="Ozon карточка")
+  final_keywords = normalize_ozon_semantic_keywords(payload.get("final"), fallback_source="Ozon итог")
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  normalized = {
+    "version": 1,
+    "cardKey": card_key,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title,
+    "seedQuery": seed_query,
+    "current": current,
+    "recommendations": recommendations,
+    "selected": selected,
+    "removal": removal,
+    "final": final_keywords,
+    "meta": {
+      "source": audit_str(meta.get("source") or "ozon-semantic-beta", 80),
+      "marketplace": "Ozon",
+    },
+  }
+  return normalized if card_key else None
+
+
+def public_ozon_semantic_draft(row):
+  try:
+    payload = json.loads(row["payload_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    payload = {}
+  payload = normalize_ozon_semantic_payload(payload) or {}
+  return {
+    "id": str(row["id"]),
+    "portalId": str(row["portal_id"]),
+    "cardKey": row["card_key"] or payload.get("cardKey") or "",
+    "sku": row["sku"] or payload.get("sku") or "",
+    "offerId": row["offer_id"] or payload.get("offerId") or "",
+    "title": row["title"] or payload.get("title") or "",
+    "draft": payload,
+    "createdBy": row["created_by"] or "",
+    "updatedBy": row["updated_by"] or "",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+  }
+
+
+def get_ozon_semantic_draft(portal_id, card_key, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  clean_card_key = audit_str(card_key, 160)
+  if not clean_card_key:
+    raise ValueError("invalid_card_key")
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT *
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, clean_card_key),
+    ).fetchone()
+  return {"draft": public_ozon_semantic_draft(row) if row else None}
+
+
+def save_ozon_semantic_draft(portal_id, payload, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  draft = normalize_ozon_semantic_payload(payload)
+  if not draft:
+    raise ValueError("invalid_ozon_semantic_draft")
+  actor_login = user_login_value(user) or ""
+  with connect_db() as db:
+    db.execute(
+      """
+      INSERT INTO ozon_semantic_drafts (
+        portal_id, card_key, sku, offer_id, title, payload_json,
+        created_by, updated_by, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(portal_id, card_key) DO UPDATE SET
+        sku = excluded.sku,
+        offer_id = excluded.offer_id,
+        title = excluded.title,
+        payload_json = excluded.payload_json,
+        updated_by = excluded.updated_by,
+        updated_at = CURRENT_TIMESTAMP
+      """,
+      (
+        numeric_portal_id,
+        draft["cardKey"],
+        draft["sku"],
+        draft["offerId"],
+        draft["title"],
+        json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
+        actor_login or None,
+        actor_login or None,
+      ),
+    )
+    row = db.execute(
+      """
+      SELECT *
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, draft["cardKey"]),
+    ).fetchone()
+  record_admin_event(user, "ozon_semantic_draft_saved", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "cardKey": draft["cardKey"],
+    "selectedCount": len(draft.get("selected") or []),
+    "finalCount": len(draft.get("final") or []),
+  })
+  return {"draft": public_ozon_semantic_draft(row)}
 
 
 def list_ozon_tasks(portal_id, user):
@@ -14524,6 +14713,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": error_text})
       return
 
+    if path.startswith("/api/portals/") and path.endswith("/ozon-semantic-draft"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-semantic-draft")].strip("/")
+      query = parse_qs(parsed.query)
+      card_key = query.get("card_key", [""])[0] or query.get("cardKey", [""])[0]
+      try:
+        self.send_json(HTTPStatus.OK, get_ozon_semantic_draft(portal_id_text, card_key, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_semantic_draft"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+      return
+
     if path == "/api/portal-work-periods":
       user = self.require_user()
       if not user:
@@ -15964,6 +16170,25 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_tasks"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-semantic-draft"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-semantic-draft")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        result = save_ozon_semantic_draft(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_semantic_draft"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return
