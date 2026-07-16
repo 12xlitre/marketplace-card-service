@@ -1815,20 +1815,19 @@ tr.selected-row td {
   border: 1px solid #a9c8ff;
 }
 
-.marketplace-beta-list {
+.ozon-empty-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.marketplace-beta-list span,
+.ozon-empty-list span,
 .empty-marketplace-state {
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: var(--surface-soft);
 }
 
-.marketplace-beta-list span {
+.ozon-empty-list span {
   min-height: 34px;
   display: grid;
   align-items: center;
@@ -1839,7 +1838,7 @@ tr.selected-row td {
   line-height: 1.25;
 }
 
-.ozon-beta-card {
+.ozon-empty-card {
   border-style: dashed;
   border-color: #a9c8ff;
   background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);

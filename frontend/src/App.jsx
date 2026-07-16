@@ -672,7 +672,8 @@ function portalDisplayName(portal) {
   if (cardName && (!currentName || / wb$/i.test(currentName) || currentName === "Кабинет WB" || currentName === "Wildberries")) {
     return cardName;
   }
-  return currentName || cardName || "Кабинет WB";
+  const fallbackName = portalMarketplaceKey(portal) === "ozon" ? "Кабинет Ozon" : "Кабинет WB";
+  return currentName || cardName || fallbackName;
 }
 
 function portalMarketplaceName(portal) {
@@ -6807,19 +6808,24 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
 function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, findUser, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon }) {
   const isOzon = marketplaceKey === "ozon";
   const label = marketplaceTitle(marketplaceKey);
+  const hasPortals = portals.length > 0;
+  const emptyOzonTitle = "Ozon-кабинет еще не создан";
   return (
     <section className={`client-marketplace-shell marketplace-theme-${marketplaceKey}`}>
       <div className="client-marketplace-head">
         <div>
           <span className="section-eyebrow">{label}</span>
-          <h2>{label}: кабинеты клиента</h2>
-          <p>{label}: карточки, задачи и отчетные периоды внутри клиента.</p>
+          <h2>{isOzon && !hasPortals ? emptyOzonTitle : `${label}: кабинеты клиента`}</h2>
+          <p>
+            {isOzon && !hasPortals
+              ? "У клиента пока нет Ozon-контура. Создайте beta-кабинет, чтобы тестировать Ozon отдельно от WB."
+              : `${label}: карточки, задачи и отчетные периоды внутри клиента.`}
+          </p>
         </div>
-        {isOzon ? <Tag tone="amber">beta</Tag> : <Tag tone="blue">рабочий поток</Tag>}
+        {isOzon ? <Tag tone="amber">{hasPortals ? "beta" : "не создан"}</Tag> : <Tag tone="blue">рабочий поток</Tag>}
       </div>
 
       <div className="workspace-grid">
-        {isOzon && !portals.length ? <OzonBetaCard client={client} /> : null}
         {portals.map((portal) => (
           <PortalCard
             key={portal.id}
@@ -6833,50 +6839,48 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
             onDelete={() => onDelete(portal)}
           />
         ))}
-        <article className="workspace-card add-card">
-          <div className={`seller-logo ${isOzon ? "ozon-logo" : ""}`}>{isOzon ? "OZ" : "+"}</div>
-          <h2>Добавить {label} кабинет</h2>
-          <p>{isOzon ? "Создать тестовый Ozon beta-кабинет внутри этого клиента." : "Подключить WB через API или завести ручной кабинет."}</p>
-          <button className="btn primary" type="button" onClick={() => (isOzon ? onAddOzon?.() : onOpenModal?.("api"))}>
-            <Plus size={17} />
-            Добавить {label}
-          </button>
-        </article>
+        {isOzon && !hasPortals ? (
+          <OzonEmptyCard client={client} onAddOzon={onAddOzon} />
+        ) : (
+          <article className="workspace-card add-card">
+            <div className={`seller-logo ${isOzon ? "ozon-logo" : ""}`}>{isOzon ? "OZ" : "+"}</div>
+            <h2>Добавить {label} кабинет</h2>
+            <p>{isOzon ? "Создать еще один Ozon beta-кабинет внутри этого клиента." : "Подключить WB через API или завести ручной кабинет."}</p>
+            <button className="btn primary" type="button" onClick={() => (isOzon ? onAddOzon?.() : onOpenModal?.("api"))}>
+              <Plus size={17} />
+              Добавить {label}
+            </button>
+          </article>
+        )}
       </div>
     </section>
   );
 }
 
-function OzonBetaCard({ client }) {
+function OzonEmptyCard({ client, onAddOzon }) {
   return (
-    <article className="workspace-card ozon-beta-card">
+    <article className="workspace-card ozon-empty-card">
       <div className="card-head">
         <div className="seller">
           <div className="seller-logo ozon-logo">OZ</div>
           <div>
-            <h2>Ozon beta</h2>
-            <p>{client.name} · закрытый раздел</p>
+            <h2>Создать Ozon beta-кабинет</h2>
+            <p>{client.name} · отдельный тестовый контур</p>
           </div>
         </div>
         <Tag tone="amber">beta</Tag>
       </div>
-      <div className="scope-row">
-        <span>Доступ</span>
-        <strong>Дмитрий</strong>
-      </div>
-      <div className="card-stats">
-        <MiniStat value="0" label="кабинеты" />
-        <MiniStat value="0" label="карточки" />
-        <MiniStat value="0" label="задачи" />
-      </div>
-      <div className="marketplace-beta-list">
-        <span>Кабинеты Ozon</span>
-        <span>Карточки Ozon</span>
-        <span>Задачи Ozon</span>
-        <span>Отчетные периоды Ozon</span>
+      <div className="ozon-empty-list">
+        <span>Ozon будет создан внутри этого клиента.</span>
+        <span>Карточки, задачи и периоды будут отдельными от WB.</span>
+        <span>API Ozon пока не подключаем, это beta-каркас.</span>
       </div>
       <div className="card-actions">
         <Tag tone="amber">API не подключен</Tag>
+        <button className="btn primary" type="button" onClick={() => onAddOzon?.()}>
+          <Plus size={17} />
+          Создать Ozon beta
+        </button>
       </div>
     </article>
   );
