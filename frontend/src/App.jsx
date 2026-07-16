@@ -158,6 +158,40 @@ function draftSaveErrorText(errorObject) {
   return "Backend не принял черновик. Проверьте доступ и попробуйте еще раз.";
 }
 
+function semanticImportErrorText(errorObject) {
+  if (errorObject?.status === 413 || errorObject?.message === "semantic_import_payload_too_large" || errorObject?.message === "semantic_import_file_too_large") {
+    return "Файл слишком большой для загрузки. Разделите его на несколько файлов и повторите импорт.";
+  }
+  if (errorObject?.message === "semantic_import_unsupported_file") {
+    return "Поддерживаются XLSX, CSV, TXT или TSV.";
+  }
+  if (errorObject?.message === "semantic_import_invalid_xlsx" || errorObject?.message === "semantic_import_invalid_csv") {
+    return "Файл не удалось прочитать. Сохраните его заново в XLSX или CSV и повторите загрузку.";
+  }
+  if (errorObject?.message === "unsupported_marketplace") {
+    return "Обратная загрузка согласованного СЯ сейчас включена только для WB-кабинета.";
+  }
+  if (errorObject?.message === "forbidden" || errorObject?.status === 403) {
+    return "Нет доступа к этому кабинету.";
+  }
+  if (errorObject?.status === 401) {
+    return "Сессия истекла. Войдите заново и повторите загрузку.";
+  }
+  return "Не удалось разобрать согласованное СЯ. Проверьте шаблон, листы и колонку Да/Нет.";
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",", 2)[1] : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("file_read_failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function formatNumber(value) {
   return new Intl.NumberFormat("ru-RU").format(Number(value) || 0);
 }
@@ -3410,6 +3444,97 @@ function buildPortalSemanticCoreSheets(cards, drafts) {
     })
     .filter(Boolean);
   return cardSheets.length ? [buildSemanticCoreInstructionSheet(), ...cardSheets] : [];
+}
+
+function semanticImportHasChanges(preview) {
+  const summary = preview?.summary || {};
+  return Boolean(
+    Number(summary.selectedToAdd || 0)
+    || Number(summary.removalToApply || 0)
+    || Number(summary.rejectedAdditions || 0)
+    || Number(summary.rejectedRemovals || 0)
+  );
+}
+
+function semanticImportSummaryText(preview) {
+  const summary = preview?.summary || {};
+  const parts = [
+    `${formatNumber(summary.cardsMatched)} ${pluralRu(summary.cardsMatched, "карточка", "карточки", "карточек")}`,
+    `${formatNumber(summary.selectedToAdd)} к добавлению`,
+    `${formatNumber(summary.removalToApply)} к удалению`,
+  ];
+  const rejected = Number(summary.rejectedAdditions || 0) + Number(summary.rejectedRemovals || 0);
+  if (rejected) parts.push(`${formatNumber(rejected)} отклонено`);
+  if (summary.unmatchedRows) parts.push(`${formatNumber(summary.unmatchedRows)} не сопоставлено`);
+  if (summary.unknownRows) parts.push(`${formatNumber(summary.unknownRows)} без понятного Да/Нет`);
+  return parts.join(" · ");
+}
+
+function semanticImportStatusLabel(status, error) {
+  if (status === "reading") return "Читаем файл...";
+  if (status === "previewing") return "Проверяем сопоставление...";
+  if (status === "applying") return "Применяем согласование...";
+  if (status === "applied") return "Согласованное СЯ загружено.";
+  if (status === "preview") return "Предпросмотр готов.";
+  if (status === "error") return error || "Импорт не выполнен.";
+  return "";
+}
+
+function SemanticCoreImportPanel({ status = "", error = "", preview = null, onPickFile, onApply, disabled = false, title = "Загрузить согласованное СЯ", applyTitle = "Применить СЯ" }) {
+  const inputRef = useRef(null);
+  const busy = ["reading", "previewing", "applying"].includes(status);
+  const canApply = Boolean(preview && semanticImportHasChanges(preview) && !busy && !disabled);
+  const statusLabel = semanticImportStatusLabel(status, error);
+  const visibleCards = (Array.isArray(preview?.cards) ? preview.cards : [])
+    .filter((item) => (item.selected?.length || item.removal?.length || item.rejectedSelected?.length || item.rejectedRemoval?.length))
+    .slice(0, 5);
+  const usesDefaultAgreement = (Array.isArray(preview?.sheets) ? preview.sheets : [])
+    .some((sheet) => sheet.agreementDefaults?.addition || sheet.agreementDefaults?.removal);
+  return (
+    <div className="semantic-import-panel">
+      <div className="panel-actions semantic-import-actions">
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".xlsx,.xlsm,.csv,.txt,.tsv"
+          className="hidden-file-input"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onPickFile?.(file);
+            event.target.value = "";
+          }}
+        />
+        <button className={loadingButtonClass("btn", busy && status !== "applying")} type="button" onClick={() => inputRef.current?.click()} disabled={disabled || busy} aria-busy={(busy && status !== "applying") || undefined}>
+          <Upload size={16} />{busy && status !== "applying" ? "Проверяем файл" : title}
+        </button>
+        <button className={loadingButtonClass("btn primary", status === "applying")} type="button" onClick={onApply} disabled={!canApply} aria-busy={status === "applying" || undefined}>
+          <CheckSquare size={16} />{status === "applying" ? "Применяем" : applyTitle}
+        </button>
+      </div>
+      {statusLabel ? <p className={`status-note ${status === "error" ? "error" : ""}`}>{statusLabel}</p> : null}
+      {preview ? (
+        <div className="semantic-import-preview">
+          <div className="semantic-import-preview-head">
+            <strong>{semanticImportSummaryText(preview)}</strong>
+            <Tag tone={preview.summary?.unmatchedRows || preview.summary?.unknownRows ? "amber" : "green"}>{preview.fileName || "файл"}</Tag>
+          </div>
+          {visibleCards.length ? (
+            <div className="semantic-import-card-list">
+              {visibleCards.map((item) => (
+                <div className="semantic-import-card-row" key={item.cardKey}>
+                  <span>{item.vendorCode || item.nmID || item.cardKey}</span>
+                  <strong>{formatNumber(item.selected?.length || 0)} добавить · {formatNumber(item.removal?.length || 0)} удалить</strong>
+                  <em>{item.matchStrategy || "сопоставлено"}</em>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {preview.unmatched?.length ? <span className="status-note">Есть строки без карточки: проверьте артикулы, WB ID или название листа.</span> : null}
+          {usesDefaultAgreement ? <span className="status-note">В части листов нет колонки Да/Нет: предпросмотр считает найденные ключи согласованными только после кнопки Применить.</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCharacteristics) {
@@ -9651,6 +9776,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [importJob, setImportJob] = useState(null);
   const [sourceExpanded, setSourceExpanded] = useState(false);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
+  const [semanticImportStatus, setSemanticImportStatus] = useState("");
+  const [semanticImportError, setSemanticImportError] = useState("");
+  const [semanticImportPreview, setSemanticImportPreview] = useState(null);
+  const [semanticImportFile, setSemanticImportFile] = useState(null);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -9692,6 +9821,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 
   useEffect(() => {
     setImportJob(null);
+    setSemanticImportStatus("");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    setSemanticImportFile(null);
   }, [portal.id]);
 
   useEffect(() => {
@@ -10049,6 +10182,62 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function previewPortalSemanticImport(file) {
+    if (!file || portal.isDemo) return;
+    setSemanticImportStatus("reading");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    try {
+      const fileData = await readFileAsBase64(file);
+      const filePayload = { fileName: file.name, fileData };
+      setSemanticImportFile(filePayload);
+      setSemanticImportStatus("previewing");
+      const preview = await apiRequest("/api/semantic-core-import", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          scope: "portal",
+          mode: "preview",
+          ...filePayload,
+        }),
+      });
+      setSemanticImportPreview(preview);
+      setSemanticImportStatus("preview");
+      onNotice?.(`СЯ прочитано: ${semanticImportSummaryText(preview)}.`);
+    } catch (error) {
+      setSemanticImportStatus("error");
+      setSemanticImportError(semanticImportErrorText(error));
+      onNotice?.(semanticImportErrorText(error));
+    }
+  }
+
+  async function applyPortalSemanticImport() {
+    if (!semanticImportFile || portal.isDemo) return;
+    setSemanticImportStatus("applying");
+    setSemanticImportError("");
+    try {
+      const result = await apiRequest("/api/semantic-core-import", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          scope: "portal",
+          mode: "apply",
+          ...semanticImportFile,
+        }),
+      });
+      setSemanticImportPreview(result);
+      setSemanticImportStatus("applied");
+      if (result.applied?.workflow) {
+        replaceApprovalWorkflow(result.applied.workflow);
+      }
+      onNotice?.(`СЯ применено: обновлено ${formatNumber(result.applied?.updatedCards || 0)} ${pluralRu(result.applied?.updatedCards || 0, "карточка", "карточки", "карточек")}.`);
+    } catch (error) {
+      setSemanticImportStatus("error");
+      setSemanticImportError(semanticImportErrorText(error));
+      onNotice?.(semanticImportErrorText(error));
+    }
+  }
+
   async function downloadPortalFinalContent() {
     setCabinetExportStatus("content-loading");
     try {
@@ -10312,6 +10501,16 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
                 </button>
               </div>
+              <SemanticCoreImportPanel
+                status={semanticImportStatus}
+                error={semanticImportError}
+                preview={semanticImportPreview}
+                onPickFile={previewPortalSemanticImport}
+                onApply={applyPortalSemanticImport}
+                disabled={portal.isDemo}
+                title="Загрузить согласованное СЯ"
+                applyTitle="Применить по кабинету"
+              />
               {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового СЯ по карточкам пока нет.</p> : null}
               {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого контента по карточкам пока нет.</p> : null}
             </section>
@@ -12971,6 +13170,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
   const [semanticCleared, setSemanticCleared] = useState(false);
   const [semanticFinalStatus, setSemanticFinalStatus] = useState("");
+  const [semanticImportStatus, setSemanticImportStatus] = useState("");
+  const [semanticImportError, setSemanticImportError] = useState("");
+  const [semanticImportPreview, setSemanticImportPreview] = useState(null);
+  const [semanticImportFile, setSemanticImportFile] = useState(null);
   const [semanticActiveReportId, setSemanticActiveReportId] = useState("");
   const [semanticSeedQuery, setSemanticSeedQuery] = useState(() => defaultSemanticSeedQuery(card));
   const [semanticSubjectFilter, setSemanticSubjectFilter] = useState("");
@@ -13385,6 +13588,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticEditingCollectionId("");
     setSemanticEditingCollectionName("");
     setSemanticEditingKeywords([]);
+    setSemanticImportStatus("");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    setSemanticImportFile(null);
     setCardDescriptionOpen(false);
     setCardCharacteristicsOpen(false);
     setTaskRunActionStatus("");
@@ -15345,6 +15552,81 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     downloadXlsx(`семантическое ядро - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, [buildSemanticCoreInstructionSheet(card), sheet]);
   }
 
+  async function previewCardSemanticImport(file) {
+    if (!file || !backendDraftEnabled) return;
+    setSemanticImportStatus("reading");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    try {
+      const fileData = await readFileAsBase64(file);
+      const filePayload = { fileName: file.name, fileData };
+      setSemanticImportFile(filePayload);
+      setSemanticImportStatus("previewing");
+      const preview = await apiRequest("/api/semantic-core-import", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          cardKey: draftCardKey,
+          scope: "card",
+          mode: "preview",
+          ...filePayload,
+        }),
+      });
+      setSemanticImportPreview(preview);
+      setSemanticImportStatus("preview");
+      onDraftActivity?.({ draft: true });
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+    }
+  }
+
+  async function applyCardSemanticImport() {
+    if (!semanticImportFile || !backendDraftEnabled) return;
+    setSemanticImportStatus("applying");
+    setSemanticImportError("");
+    try {
+      const result = await apiRequest("/api/semantic-core-import", {
+        method: "POST",
+        body: JSON.stringify({
+          portalId: portal.id,
+          cardKey: draftCardKey,
+          scope: "card",
+          mode: "apply",
+          ...semanticImportFile,
+        }),
+      });
+      setSemanticImportPreview(result);
+      setSemanticImportStatus("applied");
+      const updatedDraft = (result.applied?.cards || []).find((item) => String(item.cardKey) === String(draftCardKey))?.draft
+        || result.applied?.cards?.[0]?.draft
+        || null;
+      if (updatedDraft) {
+        const normalized = contentFromStoredDraft(updatedDraft, card);
+        setSemanticCoreSelected(normalized.semanticCoreSelected);
+        setSemanticCoreRemoval(normalized.semanticCoreRemoval);
+        setSemanticCoreFinal(normalized.semanticCoreFinal);
+        setSemanticDraftDirty(false);
+        setSemanticDraftSaved(true);
+        setSemanticSaveStatus("saved");
+        setSemanticFinalStatus("saved");
+        setDraftSavedAt(updatedDraft.updatedAt || new Date().toISOString());
+        try {
+          localStorage.setItem(draftStorageKey, JSON.stringify(updatedDraft));
+        } catch {
+          // Backend save succeeded; local cache sync is best effort.
+        }
+        onDraftActivity?.({ draft: true });
+        await onDraftSaved?.(updatedDraft);
+      }
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+    }
+  }
+
   async function persistSemanticFinal(nextFinal, { replacing = false } = {}) {
     const previousFinal = semanticCoreFinal;
     setSemanticCoreFinal(nextFinal);
@@ -15810,6 +16092,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     </button>
                   </div>
                 </div>
+                <SemanticCoreImportPanel
+                  status={semanticImportStatus}
+                  error={semanticImportError}
+                  preview={semanticImportPreview}
+                  onPickFile={previewCardSemanticImport}
+                  onApply={applyCardSemanticImport}
+                  disabled={!backendDraftEnabled}
+                  title="Загрузить согласованное СЯ"
+                  applyTitle="Применить к карточке"
+                />
                 {semanticFinalBanner ? (
                   <div className={`semantic-save-banner ${semanticFinalBanner.tone}`}>
                     <strong>{semanticFinalBanner.title}</strong>

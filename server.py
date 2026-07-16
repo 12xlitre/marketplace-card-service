@@ -2,10 +2,12 @@
 import argparse
 import base64
 import binascii
+import csv
 import datetime as dt
 import getpass
 import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -16,7 +18,9 @@ import ssl
 import time
 import threading
 import contextvars
+import unicodedata
 import uuid
+import zipfile
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -25,6 +29,7 @@ from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+import xml.etree.ElementTree as ET
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -56,6 +61,9 @@ SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 512 * 1024
 MAX_DRAFT_JSON_BYTES = int(os.environ.get("OPTICARDS_MAX_DRAFT_JSON_BYTES", str(4 * 1024 * 1024)))
+SEMANTIC_IMPORT_MAX_FILE_BYTES = int(os.environ.get("OPTICARDS_SEMANTIC_IMPORT_MAX_FILE_BYTES", str(8 * 1024 * 1024)))
+SEMANTIC_IMPORT_MAX_JSON_BYTES = int(SEMANTIC_IMPORT_MAX_FILE_BYTES * 4 / 3) + 64 * 1024
+SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES = int(os.environ.get("OPTICARDS_SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES", str(32 * 1024 * 1024)))
 WORK_PERIOD_ATTACHMENT_MAX_BYTES = int(os.environ.get("OPTICARDS_WORK_PERIOD_ATTACHMENT_MAX_BYTES", str(2 * 1024 * 1024)))
 WORK_PERIOD_ATTACHMENT_MAX_DATA_URL_BYTES = int(WORK_PERIOD_ATTACHMENT_MAX_BYTES * 4 / 3) + 4096
 SECRET_KEY_ENV = "OPTICARDS_SECRET_KEY"
@@ -4664,6 +4672,7 @@ CARD_WORK_EVENT_ACTIONS = {
   "quick_completed": "закрыта быстрым действием",
   "audit_completed": "аудит карточки готов",
   "audit_failed": "аудит карточки не выполнен",
+  "semantic_final_imported": "итоговое СЯ загружено из файла",
   "content_reoptimized": "контент переоптимизирован по итоговому СЯ",
   "content_reoptimize_failed": "переоптимизация по итоговому СЯ не выполнена",
 }
@@ -13177,6 +13186,842 @@ def ensure_wildberries_content_portal(portal_id):
     raise ValueError("unsupported_marketplace")
 
 
+SEMANTIC_IMPORT_POSITIVE = {
+  "1",
+  "+",
+  "v",
+  "ok",
+  "ок",
+  "да",
+  "yes",
+  "y",
+  "true",
+  "согласовано",
+  "принято",
+  "добавить",
+  "удалить",
+}
+
+SEMANTIC_IMPORT_NEGATIVE = {
+  "0",
+  "-",
+  "нет",
+  "no",
+  "n",
+  "false",
+  "несогласовано",
+  "неодобрено",
+  "отклонено",
+  "оставить",
+  "убрать",
+  "небрать",
+}
+
+SEMANTIC_IMPORT_CATEGORY_ALIASES = (
+  ("шапки", ("шапк", "бини")),
+  ("косынки", ("косынк", "платок", "платк")),
+  ("панамки", ("панам",)),
+  ("бейсболки", ("бейсболк", "кепк", "кепи")),
+)
+
+
+def semantic_import_xml_name(element):
+  tag = element.tag if element is not None else ""
+  return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def semantic_import_xml_child(element, name):
+  if element is None:
+    return None
+  for child in element:
+    if semantic_import_xml_name(child) == name:
+      return child
+  return None
+
+
+def semantic_import_decode_file(payload):
+  filename = audit_str(payload.get("fileName") or payload.get("filename") or "semantic-core.xlsx", 240)
+  encoded = audit_str(payload.get("fileData") or payload.get("data") or "")
+  if "," in encoded and encoded.lower().startswith("data:"):
+    encoded = encoded.split(",", 1)[1]
+  if not encoded:
+    raise ValueError("semantic_import_file_required")
+  try:
+    raw = base64.b64decode(re.sub(r"\s+", "", encoded), validate=True)
+  except (binascii.Error, ValueError) as exc:
+    raise ValueError("semantic_import_invalid_base64") from exc
+  if not raw:
+    raise ValueError("semantic_import_empty_file")
+  if len(raw) > SEMANTIC_IMPORT_MAX_FILE_BYTES:
+    raise ValueError("semantic_import_file_too_large")
+  return filename, raw
+
+
+def semantic_import_xlsx_col_index(ref):
+  letters = "".join(char for char in audit_str(ref) if char.isalpha())
+  if not letters:
+    return 0
+  index = 0
+  for char in letters.upper():
+    if "A" <= char <= "Z":
+      index = index * 26 + (ord(char) - ord("A") + 1)
+  return max(index - 1, 0)
+
+
+def semantic_import_xlsx_shared_strings(zf):
+  try:
+    root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+  except KeyError:
+    return []
+  strings = []
+  for si in root.iter():
+    if semantic_import_xml_name(si) != "si":
+      continue
+    text_parts = [
+      item.text or ""
+      for item in si.iter()
+      if semantic_import_xml_name(item) == "t"
+    ]
+    strings.append("".join(text_parts))
+  return strings
+
+
+def semantic_import_xlsx_cell_value(cell, shared_strings):
+  ctype = audit_str(cell.attrib.get("t"))
+  if ctype == "inlineStr":
+    return "".join(
+      item.text or ""
+      for item in cell.iter()
+      if semantic_import_xml_name(item) == "t"
+    )
+  value_node = semantic_import_xml_child(cell, "v")
+  value = value_node.text if value_node is not None else ""
+  if ctype == "s":
+    try:
+      return shared_strings[int(value)]
+    except (TypeError, ValueError, IndexError):
+      return ""
+  return audit_str(value)
+
+
+def semantic_import_xlsx_relationships(zf):
+  try:
+    root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+  except KeyError:
+    return {}
+  output = {}
+  for rel in root:
+    if semantic_import_xml_name(rel) != "Relationship":
+      continue
+    rel_id = audit_str(rel.attrib.get("Id"))
+    target = audit_str(rel.attrib.get("Target"))
+    if not rel_id or not target:
+      continue
+    if target.startswith("/"):
+      path = target.lstrip("/")
+    elif target.startswith("xl/"):
+      path = target
+    else:
+      path = f"xl/{target}"
+    output[rel_id] = re.sub(r"/+", "/", path)
+  return output
+
+
+def semantic_import_xlsx_sheet_rows(zf, sheet_path, shared_strings):
+  try:
+    root = ET.fromstring(zf.read(sheet_path))
+  except KeyError:
+    return []
+  rows = []
+  for row_node in root.iter():
+    if semantic_import_xml_name(row_node) != "row":
+      continue
+    row = []
+    for cell in row_node:
+      if semantic_import_xml_name(cell) != "c":
+        continue
+      column = semantic_import_xlsx_col_index(cell.attrib.get("r", ""))
+      while len(row) <= column:
+        row.append("")
+      row[column] = semantic_import_xlsx_cell_value(cell, shared_strings)
+    rows.append(row)
+  return rows
+
+
+def semantic_import_parse_xlsx(raw):
+  try:
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+      if sum(item.file_size for item in zf.infolist()) > SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES:
+        raise ValueError("semantic_import_file_too_large")
+      shared_strings = semantic_import_xlsx_shared_strings(zf)
+      relationships = semantic_import_xlsx_relationships(zf)
+      try:
+        workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+      except KeyError as exc:
+        raise ValueError("semantic_import_invalid_xlsx") from exc
+      sheets = []
+      for index, sheet_node in enumerate(workbook.iter(), start=1):
+        if semantic_import_xml_name(sheet_node) != "sheet":
+          continue
+        name = audit_str(sheet_node.attrib.get("name") or f"Лист {len(sheets) + 1}", 80)
+        rel_id = audit_str(
+          sheet_node.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+          or sheet_node.attrib.get("id")
+        )
+        sheet_path = relationships.get(rel_id) or f"xl/worksheets/sheet{len(sheets) + 1}.xml"
+        rows = semantic_import_xlsx_sheet_rows(zf, sheet_path, shared_strings)
+        sheets.append({"name": name, "rows": rows})
+      return sheets
+  except zipfile.BadZipFile as exc:
+    raise ValueError("semantic_import_invalid_xlsx") from exc
+
+
+def semantic_import_parse_csv(filename, raw):
+  for encoding in ("utf-8-sig", "cp1251"):
+    try:
+      text = raw.decode(encoding)
+      break
+    except UnicodeDecodeError:
+      text = ""
+  if not text:
+    raise ValueError("semantic_import_invalid_csv")
+  try:
+    dialect = csv.Sniffer().sniff(text[:4096], delimiters=";,\t")
+    rows = [row for row in csv.reader(io.StringIO(text), dialect)]
+  except csv.Error:
+    rows = [row for row in csv.reader(io.StringIO(text), delimiter=";")]
+  return [{"name": audit_str(Path(filename).stem or "CSV", 80), "rows": rows}]
+
+
+def semantic_import_parse_file(filename, raw):
+  suffix = Path(filename).suffix.lower()
+  if suffix in {".xlsx", ".xlsm"} or raw[:2] == b"PK":
+    sheets = semantic_import_parse_xlsx(raw)
+  elif suffix in {".csv", ".txt", ".tsv"}:
+    sheets = semantic_import_parse_csv(filename, raw)
+  else:
+    raise ValueError("semantic_import_unsupported_file")
+  return [
+    {"name": sheet.get("name") or f"Лист {index + 1}", "rows": sheet.get("rows") if isinstance(sheet.get("rows"), list) else []}
+    for index, sheet in enumerate(sheets)
+  ]
+
+
+def semantic_import_header_compact(value):
+  return re.sub(r"[^0-9a-zа-я]+", "", audit_normalized(unicodedata.normalize("NFC", str(value or ""))))
+
+
+def semantic_import_header_map(row):
+  columns = {}
+  compact_values = [semantic_import_header_compact(value) for value in row]
+  for index, compact in enumerate(compact_values):
+    if not compact:
+      continue
+    if compact in {"cardkey", "ключкарточки"} or ("card" in compact and "key" in compact):
+      columns.setdefault("cardKey", index)
+    elif "nmid" in compact or "номенклатураwb" in compact or "wbid" in compact or compact == "wb":
+      columns.setdefault("nmID", index)
+    elif "артикулпродавца" in compact or "vendorcode" in compact or "supplierarticle" in compact:
+      columns.setdefault("vendorCode", index)
+    elif compact in {"артикул", "sku", "артикулsku"}:
+      columns.setdefault("vendorCode", index)
+
+    if ("ключкдобавлению" in compact or "кдобавлению" in compact or ("добав" in compact and ("ключ" in compact or "запрос" in compact))) and "соглас" not in compact and "частот" not in compact:
+      columns.setdefault("addQuery", index)
+    elif ("ключкудалению" in compact or "ключкисключению" in compact or ("удал" in compact and ("ключ" in compact or "запрос" in compact))) and "соглас" not in compact and "причин" not in compact:
+      columns.setdefault("removalQuery", index)
+    elif "соглас" in compact and "добав" in compact:
+      columns.setdefault("addAgreement", index)
+    elif "соглас" in compact and ("удал" in compact or "исключ" in compact):
+      columns.setdefault("removalAgreement", index)
+    elif "частот" in compact and "добав" in compact:
+      columns.setdefault("addFrequency", index)
+    elif "причин" in compact and ("удал" in compact or "исключ" in compact):
+      columns.setdefault("removalReason", index)
+
+  if "addQuery" not in columns and "removalQuery" not in columns:
+    for index, compact in enumerate(compact_values):
+      if not compact:
+        continue
+      if any(marker in compact for marker in ("действ", "ранж", "позици", "частот", "соглас", "причин", "удален", "удалению", "исключ")):
+        continue
+      if compact in {"ключ", "ключи", "запрос", "запросы", "фраза", "фразы", "keyword", "keywords", "query", "queries"} or "ключ" in compact or "запрос" in compact:
+        columns["addQuery"] = index
+        break
+  if "addAgreement" not in columns:
+    for index, compact in enumerate(compact_values):
+      if compact in {"данет", "yesno", "согласовано", "согласование"} or "соглас" in compact:
+        columns["addAgreement"] = index
+        break
+  return columns
+
+
+def semantic_import_find_header(rows):
+  for index, row in enumerate((rows or [])[:40]):
+    columns = semantic_import_header_map(row)
+    if columns.get("addQuery") is not None or columns.get("removalQuery") is not None:
+      return index, columns
+  return None, {}
+
+
+def semantic_import_cell(row, index, limit=500):
+  if index is None or index < 0 or index >= len(row):
+    return ""
+  return audit_str(row[index], limit)
+
+
+def semantic_import_decision(value):
+  text = audit_normalized(value)
+  compact = semantic_import_header_compact(value)
+  if not compact:
+    return None
+  if compact in SEMANTIC_IMPORT_NEGATIVE or text.startswith("не ") or text.startswith("нет "):
+    return False
+  if compact in SEMANTIC_IMPORT_POSITIVE or text.startswith("да ") or text.startswith("yes "):
+    return True
+  return None
+
+
+def semantic_import_keyword_key(item):
+  return audit_normalized(item.get("query") if isinstance(item, dict) else item)
+
+
+def semantic_import_keyword_item(query, kind, meta=None):
+  meta = meta if isinstance(meta, dict) else {}
+  clean_query = audit_str(query, 250)
+  item = {
+    "query": clean_query,
+    "status": "remove" if kind == "removal" else "selected",
+    "field": "content" if kind == "removal" else "work",
+    "source": "semantic-import",
+  }
+  frequency = audit_int(meta.get("frequency"), 0)
+  if frequency > 0:
+    item["wbCount"] = frequency
+  reason = audit_str(meta.get("reason"), 250)
+  if kind == "removal":
+    item["removalReason"] = reason or "Согласовано к удалению из карточки перед переоптимизацией."
+  elif reason:
+    item["reason"] = reason
+  for key in ("sheetName", "fileName", "rowNumber"):
+    value = meta.get(key)
+    if value not in (None, ""):
+      item[key] = value
+  return item
+
+
+def semantic_import_normalize_items(items, kind, limit=4000):
+  output = []
+  seen = set()
+  for source in items if isinstance(items, list) else []:
+    query = audit_str(source if isinstance(source, str) else (source.get("query") if isinstance(source, dict) else ""), 250)
+    key = audit_normalized(query)
+    if not query or not key or key in seen:
+      continue
+    seen.add(key)
+    item = semantic_import_keyword_item(query, kind, source if isinstance(source, dict) else {})
+    if isinstance(source, dict):
+      for field in ("cluster", "prioritySubject", "prioritySubjectId", "frequency365", "priority", "orgPos", "adPos", "avgPos", "totalFound", "rankPeriod"):
+        if source.get(field) not in (None, ""):
+          item[field] = source.get(field)
+    output.append(item)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def semantic_import_merge_items(existing, incoming, rejected=None, kind="selected", limit=4000):
+  output = []
+  seen = set()
+  rejected_items = rejected if isinstance(rejected, list) else []
+  rejected_keys = {
+    audit_normalized(item.get("query") if isinstance(item, dict) else item)
+    for item in rejected_items
+  }
+  for source in [*semantic_import_normalize_items(existing, kind, limit), *semantic_import_normalize_items(incoming, kind, limit)]:
+    key = semantic_import_keyword_key(source)
+    if not key or key in seen or key in rejected_keys:
+      continue
+    seen.add(key)
+    output.append(source)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def semantic_import_card_descriptor(card=None, draft_row=None, draft_payload=None):
+  card = card if isinstance(card, dict) else {}
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  meta = draft_payload.get("meta") if isinstance(draft_payload, dict) and isinstance(draft_payload.get("meta"), dict) else {}
+  meta_card = meta.get("card") if isinstance(meta.get("card"), dict) else {}
+  card_key = card_key_from_snapshot_card(card) or draft_card_key(draft_row["card_key"] if draft_row else "")
+  nm_id = audit_str(card.get("nmID") or card.get("nmId") or card.get("nm_id") or raw_fields.get("nmID") or meta_card.get("nmID") or (draft_row["nm_id"] if draft_row else ""), 80)
+  vendor_code = audit_str(card.get("vendorCode") or card.get("vendor_code") or raw_fields.get("vendorCode") or meta_card.get("vendorCode") or (draft_row["vendor_code"] if draft_row else ""), 120)
+  return {
+    "cardKey": card_key,
+    "nmID": nm_id,
+    "vendorCode": vendor_code,
+    "title": audit_str(card.get("title") or raw_fields.get("title") or "", 240),
+    "subjectName": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or meta_card.get("subjectName") or "", 180),
+  }
+
+
+def semantic_import_add_identifier(identifier_map, value, descriptor):
+  value = audit_str(value, 240)
+  if not value:
+    return
+  for key in (value, audit_normalized(value)):
+    if not key:
+      continue
+    existing = identifier_map.get(key)
+    if existing is None:
+      continue
+    if existing and existing.get("cardKey") != descriptor.get("cardKey"):
+      identifier_map[key] = None
+    else:
+      identifier_map[key] = descriptor
+
+
+def semantic_import_load_context(portal_id, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  ensure_wildberries_content_portal(numeric_portal_id)
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT id, marketplace, cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    draft_rows = db.execute(
+      """
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  cards = []
+  try:
+    cards = json.loads(portal["cards_snapshot_json"] or "[]")
+  except (TypeError, json.JSONDecodeError):
+    cards = []
+  cards = cards if isinstance(cards, list) else []
+  descriptors_by_key = {}
+  identifier_map = {}
+  for card in cards:
+    descriptor = semantic_import_card_descriptor(card=card)
+    if not descriptor.get("cardKey"):
+      continue
+    descriptors_by_key[descriptor["cardKey"]] = descriptor
+    for value in (descriptor.get("cardKey"), descriptor.get("nmID"), descriptor.get("vendorCode")):
+      semantic_import_add_identifier(identifier_map, value, descriptor)
+  draft_payloads = {}
+  for row in draft_rows:
+    try:
+      draft_payload = json.loads(row["payload_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+      draft_payload = normalize_card_draft_payload({})
+    draft_payload = normalize_card_draft_payload(draft_payload)
+    draft_payloads[row["card_key"]] = draft_payload
+    if row["card_key"] not in descriptors_by_key:
+      descriptor = semantic_import_card_descriptor(draft_row=row, draft_payload=draft_payload)
+      if descriptor.get("cardKey"):
+        descriptors_by_key[descriptor["cardKey"]] = descriptor
+        for value in (descriptor.get("cardKey"), descriptor.get("nmID"), descriptor.get("vendorCode")):
+          semantic_import_add_identifier(identifier_map, value, descriptor)
+  return {
+    "portalId": numeric_portal_id,
+    "descriptors": list(descriptors_by_key.values()),
+    "descriptorsByKey": descriptors_by_key,
+    "identifierMap": identifier_map,
+    "draftPayloads": draft_payloads,
+  }
+
+
+def semantic_import_match_identifier(context, value):
+  text = audit_str(value, 240)
+  if not text:
+    return None
+  return context["identifierMap"].get(text) or context["identifierMap"].get(audit_normalized(text))
+
+
+def semantic_import_category_name(label):
+  normalized = audit_normalized(unicodedata.normalize("NFC", str(label or "")))
+  if not normalized:
+    return "", ()
+  for name, aliases in SEMANTIC_IMPORT_CATEGORY_ALIASES:
+    if any(alias in normalized for alias in aliases):
+      return name, aliases
+  return "", ()
+
+
+def semantic_import_category_targets(context, label):
+  name, aliases = semantic_import_category_name(label)
+  if not aliases:
+    return [], ""
+  targets = []
+  for descriptor in context["descriptors"]:
+    haystack = audit_normalized(unicodedata.normalize("NFC", f"{descriptor.get('subjectName', '')} {descriptor.get('title', '')}"))
+    if any(alias in haystack for alias in aliases):
+      targets.append(descriptor)
+  return targets, f"category:{name}" if targets else ""
+
+
+def semantic_import_sheet_targets(context, sheet_name, filename, scope, explicit_card_key):
+  if scope == "card":
+    descriptor = semantic_import_match_identifier(context, explicit_card_key)
+    return ([descriptor], "card") if descriptor else ([], "card")
+  for label in (sheet_name, Path(filename).stem):
+    descriptor = semantic_import_match_identifier(context, label)
+    if descriptor:
+      return [descriptor], "identifier"
+  for label in (sheet_name, Path(filename).stem):
+    targets, strategy = semantic_import_category_targets(context, label)
+    if targets:
+      return targets, strategy
+  return [], ""
+
+
+def semantic_import_row_target(context, row, columns):
+  for key in ("cardKey", "nmID", "vendorCode"):
+    descriptor = semantic_import_match_identifier(context, semantic_import_cell(row, columns.get(key), 240))
+    if descriptor:
+      return descriptor
+  return None
+
+
+def semantic_import_new_group(descriptor, strategy):
+  return {
+    "cardKey": descriptor.get("cardKey") or "",
+    "nmID": descriptor.get("nmID") or "",
+    "vendorCode": descriptor.get("vendorCode") or "",
+    "title": descriptor.get("title") or "",
+    "subjectName": descriptor.get("subjectName") or "",
+    "matchStrategy": strategy or "",
+    "selected": [],
+    "removal": [],
+    "rejectedSelected": [],
+    "rejectedRemoval": [],
+    "ignored": [],
+    "warnings": [],
+  }
+
+
+def semantic_import_add_group_item(groups, descriptor, strategy, bucket, item):
+  card_key = descriptor.get("cardKey") or ""
+  if not card_key:
+    return
+  group = groups.setdefault(card_key, semantic_import_new_group(descriptor, strategy))
+  if strategy and strategy not in group.get("matchStrategy", ""):
+    group["matchStrategy"] = ", ".join(part for part in (group.get("matchStrategy"), strategy) if part)
+  destination = group.get(bucket)
+  if not isinstance(destination, list):
+    return
+  key = semantic_import_keyword_key(item)
+  if key and any(semantic_import_keyword_key(existing) == key for existing in destination):
+    return
+  destination.append(item)
+
+
+def semantic_import_row_has_data(row, *columns):
+  return any(semantic_import_cell(row, column) for column in columns if column is not None)
+
+
+def semantic_import_prepare(payload, user):
+  payload = payload if isinstance(payload, dict) else {}
+  portal_id = payload.get("portalId") or payload.get("portal_id")
+  scope = audit_str(payload.get("scope") or "portal")
+  if scope not in {"portal", "card"}:
+    raise ValueError("semantic_import_invalid_scope")
+  explicit_card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  if scope == "card" and not explicit_card_key:
+    raise ValueError("invalid_card_key")
+  filename, raw = semantic_import_decode_file(payload)
+  sheets = semantic_import_parse_file(filename, raw)
+  if not sheets:
+    raise ValueError("semantic_import_empty_file")
+  context = semantic_import_load_context(portal_id, user)
+  groups = {}
+  unmatched = []
+  sheet_summaries = []
+  summary = {
+    "rowsRead": 0,
+    "selectedToAdd": 0,
+    "removalToApply": 0,
+    "rejectedAdditions": 0,
+    "rejectedRemovals": 0,
+    "ignoredRows": 0,
+    "unknownRows": 0,
+    "unmatchedRows": 0,
+    "sheetsRead": len(sheets),
+    "sheetsUsed": 0,
+    "cardsMatched": 0,
+  }
+
+  for sheet in sheets:
+    sheet_name = audit_str(sheet.get("name") or "Лист", 80)
+    if "инструкц" in audit_normalized(sheet_name):
+      sheet_summaries.append({"name": sheet_name, "status": "skipped", "reason": "instruction"})
+      continue
+    rows = sheet.get("rows") if isinstance(sheet.get("rows"), list) else []
+    header_index, columns = semantic_import_find_header(rows)
+    if header_index is None:
+      sheet_summaries.append({"name": sheet_name, "status": "skipped", "reason": "headers_not_found"})
+      continue
+    sheet_targets, sheet_strategy = semantic_import_sheet_targets(context, sheet_name, filename, scope, explicit_card_key)
+    sheet_rows = 0
+    sheet_matched = 0
+    sheet_unmatched = 0
+    for row_index, row in enumerate(rows[header_index + 1:], start=header_index + 2):
+      add_query = semantic_import_cell(row, columns.get("addQuery"), 250)
+      removal_query = semantic_import_cell(row, columns.get("removalQuery"), 250)
+      if not semantic_import_row_has_data(row, columns.get("addQuery"), columns.get("removalQuery")):
+        continue
+      sheet_rows += 1
+      summary["rowsRead"] += 1
+      row_descriptor = semantic_import_row_target(context, row, columns)
+      targets = [row_descriptor] if row_descriptor else sheet_targets
+      targets = [target for target in targets if target]
+      strategy = "row-identifier" if row_descriptor else sheet_strategy
+      if not targets:
+        unmatched.append({
+          "sheetName": sheet_name,
+          "rowNumber": row_index,
+          "addQuery": add_query,
+          "removalQuery": removal_query,
+          "reason": "card_not_matched",
+        })
+        sheet_unmatched += 1
+        summary["unmatchedRows"] += 1
+        continue
+
+      frequency = semantic_import_cell(row, columns.get("addFrequency"), 80)
+      removal_reason = semantic_import_cell(row, columns.get("removalReason"), 250)
+      row_meta = {
+        "fileName": filename,
+        "sheetName": sheet_name,
+        "rowNumber": row_index,
+        "frequency": frequency,
+      }
+      if add_query:
+        if columns.get("addAgreement") is None:
+          add_decision = True
+        else:
+          add_decision = semantic_import_decision(semantic_import_cell(row, columns.get("addAgreement"), 120))
+        item = semantic_import_keyword_item(add_query, "selected", row_meta)
+        if add_decision is True:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "selected", item)
+          summary["selectedToAdd"] += len(targets)
+          sheet_matched += len(targets)
+        elif add_decision is False:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "rejectedSelected", item)
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_addition"})
+          summary["rejectedAdditions"] += len(targets)
+          summary["ignoredRows"] += len(targets)
+        else:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_addition_agreement"})
+          summary["unknownRows"] += len(targets)
+          summary["ignoredRows"] += len(targets)
+      if removal_query:
+        if columns.get("removalAgreement") is None:
+          removal_decision = True
+        else:
+          removal_decision = semantic_import_decision(semantic_import_cell(row, columns.get("removalAgreement"), 120))
+        item = semantic_import_keyword_item(removal_query, "removal", {**row_meta, "reason": removal_reason})
+        if removal_decision is True:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "removal", item)
+          summary["removalToApply"] += len(targets)
+          sheet_matched += len(targets)
+        elif removal_decision is False:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "rejectedRemoval", item)
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_removal"})
+          summary["rejectedRemovals"] += len(targets)
+          summary["ignoredRows"] += len(targets)
+        else:
+          for target in targets:
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_removal_agreement"})
+          summary["unknownRows"] += len(targets)
+          summary["ignoredRows"] += len(targets)
+    if sheet_rows:
+      summary["sheetsUsed"] += 1
+    sheet_summaries.append({
+      "name": sheet_name,
+      "status": "used" if sheet_rows else "empty",
+      "rows": sheet_rows,
+      "matched": sheet_matched,
+      "unmatched": sheet_unmatched,
+      "matchStrategy": sheet_strategy,
+      "agreementDefaults": {
+        "addition": columns.get("addAgreement") is None,
+        "removal": columns.get("removalAgreement") is None and columns.get("removalQuery") is not None,
+      },
+    })
+
+  cards = sorted(groups.values(), key=lambda item: (item.get("subjectName") or "", item.get("vendorCode") or item.get("nmID") or item.get("cardKey")))
+  summary["cardsMatched"] = len([card for card in cards if card.get("selected") or card.get("removal") or card.get("rejectedSelected") or card.get("rejectedRemoval")])
+  summary["unmatchedRows"] = len(unmatched)
+  preview = {
+    "status": "ok",
+    "mode": "preview",
+    "portalId": str(context["portalId"]),
+    "scope": scope,
+    "fileName": filename,
+    "summary": summary,
+    "sheets": sheet_summaries,
+    "cards": cards,
+    "unmatched": unmatched[:500],
+  }
+  return preview, context
+
+
+def semantic_import_payload_with_final(previous_payload, group, filename, user):
+  previous_payload = normalize_card_draft_payload(previous_payload)
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  existing_final = previous_meta.get("semanticCoreFinal") if isinstance(previous_meta.get("semanticCoreFinal"), dict) else {}
+  existing_core = existing_final.get("semanticCore") if isinstance(existing_final.get("semanticCore"), dict) else {}
+  existing_selected_sources = []
+  existing_removal_sources = []
+  for source in (previous_meta.get("semanticCoreSelected"), existing_final.get("selected"), existing_core.get("selected"), existing_core.get("selectedKeywords")):
+    if isinstance(source, list):
+      existing_selected_sources.extend(source)
+  for source in (previous_meta.get("semanticCoreRemoval"), existing_final.get("removal"), existing_final.get("removed"), existing_final.get("toRemove"), existing_core.get("removal"), existing_core.get("removeKeywords")):
+    if isinstance(source, list):
+      existing_removal_sources.extend(source)
+
+  selected = semantic_import_merge_items(existing_selected_sources, group.get("selected"), group.get("rejectedSelected"), kind="selected")
+  removal = semantic_import_merge_items(existing_removal_sources, group.get("removal"), group.get("rejectedRemoval"), kind="removal")
+  removal_keys = {semantic_import_keyword_key(item) for item in removal}
+  selected = [item for item in selected if semantic_import_keyword_key(item) not in removal_keys]
+  current = semantic_import_normalize_items(existing_core.get("current") or existing_core.get("rankedKeywords") or existing_core.get("rankingRows") or [], "selected", limit=1200)
+  all_keywords = semantic_import_merge_items(current, selected, [], kind="selected", limit=5000)
+  now = utc_now().isoformat()
+  user_login = user_login_value(user)
+  semantic_core = {
+    **existing_core,
+    "source": existing_core.get("source") or "semantic-import",
+    "selected": selected,
+    "selectedKeywords": selected,
+    "removeKeywords": removal,
+    "removal": removal,
+    "recommended": existing_core.get("recommended") if isinstance(existing_core.get("recommended"), list) and existing_core.get("recommended") else selected,
+    "allKeywords": all_keywords,
+    "importedAt": now,
+    "importedFrom": filename,
+  }
+  final_export = {
+    **existing_final,
+    "id": existing_final.get("id") or f"semantic-final-import-{int(time.time() * 1000)}",
+    "reportId": existing_final.get("reportId") or existing_final.get("id") or "",
+    "createdAt": existing_final.get("createdAt") or now,
+    "updatedAt": now,
+    "createdBy": existing_final.get("createdBy") or user_login,
+    "updatedBy": user_login,
+    "seedQuery": existing_final.get("seedQuery") or existing_core.get("seedQuery") or "",
+    "selected": selected,
+    "removal": removal,
+    "semanticCore": semantic_core,
+    "source": "semantic-import",
+  }
+  import_history = previous_meta.get("semanticCoreImportHistory") if isinstance(previous_meta.get("semanticCoreImportHistory"), list) else []
+  import_history.append({
+    "at": now,
+    "by": user_login,
+    "fileName": filename,
+    "selectedAdded": len(group.get("selected") or []),
+    "removalAdded": len(group.get("removal") or []),
+    "rejectedAdditions": len(group.get("rejectedSelected") or []),
+    "rejectedRemovals": len(group.get("rejectedRemoval") or []),
+    "matchStrategy": group.get("matchStrategy") or "",
+  })
+  next_meta = {
+    **previous_meta,
+    "semanticCoreSelected": selected,
+    "semanticCoreRemoval": removal,
+    "semanticCoreFinal": final_export,
+    "semanticCoreImportHistory": import_history[-20:],
+    "card": {
+      **(previous_meta.get("card") if isinstance(previous_meta.get("card"), dict) else {}),
+      "nmID": group.get("nmID") or "",
+      "vendorCode": group.get("vendorCode") or "",
+      "subjectName": group.get("subjectName") or "",
+    },
+    "updatedIn": "opticards-semantic-import",
+  }
+  return normalize_card_draft_payload({
+    **previous_payload,
+    "meta": next_meta,
+  })
+
+
+def apply_semantic_import(preview, context, user):
+  updated = []
+  skipped = []
+  preview_cards = preview.get("cards") if isinstance(preview.get("cards"), list) else []
+  for group in preview_cards:
+    card_key = draft_card_key(group.get("cardKey"))
+    if not card_key:
+      continue
+    has_changes = any(group.get(key) for key in ("selected", "removal", "rejectedSelected", "rejectedRemoval"))
+    if not has_changes:
+      skipped.append({"cardKey": card_key, "reason": "no_changes"})
+      continue
+    previous_payload = context["draftPayloads"].get(card_key) or normalize_card_draft_payload({})
+    next_payload = semantic_import_payload_with_final(previous_payload, group, preview.get("fileName") or "", user)
+    draft = save_card_draft(
+      context["portalId"],
+      card_key,
+      group.get("nmID") or "",
+      group.get("vendorCode") or "",
+      next_payload,
+      user,
+    )
+    try:
+      log_card_work_event(context["portalId"], {
+        "cardKey": card_key,
+        "action": "semantic_final_imported",
+        "workType": "semantic",
+        "reason": preview.get("fileName") or "",
+      }, user)
+    except Exception:
+      pass
+    updated.append({
+      "cardKey": card_key,
+      "nmID": group.get("nmID") or "",
+      "vendorCode": group.get("vendorCode") or "",
+      "selected": len(next_payload.get("meta", {}).get("semanticCoreSelected") or []),
+      "removal": len(next_payload.get("meta", {}).get("semanticCoreRemoval") or []),
+      "draft": draft,
+    })
+  preview["mode"] = "apply"
+  preview["applied"] = {
+    "updatedCards": len(updated),
+    "skippedCards": len(skipped),
+    "cards": updated,
+    "skipped": skipped,
+    "workflow": approval_workflow(context["portalId"], user),
+  }
+  return preview
+
+
+def import_semantic_core_agreement(payload, user):
+  preview, context = semantic_import_prepare(payload, user)
+  mode = audit_str(payload.get("mode") or "preview")
+  if mode == "apply":
+    return apply_semantic_import(preview, context, user)
+  return preview
+
+
 def content_card_for_portal(portal_id, card_key, raw_card):
   card = raw_card if isinstance(raw_card, dict) else {}
   if portal_id and str(portal_id) != "demo-wb":
@@ -16502,6 +17347,37 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if isinstance(draft, dict):
         work_periods = draft.pop("_workPeriods", [])
       self.send_json(HTTPStatus.OK, {"draft": draft, "workPeriods": work_periods})
+      return
+
+    if path == "/api/semantic-core-import":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json(SEMANTIC_IMPORT_MAX_JSON_BYTES)
+      if payload is None:
+        try:
+          content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+          content_length = 0
+        if content_length > SEMANTIC_IMPORT_MAX_JSON_BYTES:
+          self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+            "error": "semantic_import_payload_too_large",
+            "maxBytes": SEMANTIC_IMPORT_MAX_JSON_BYTES,
+          })
+        else:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        return
+      try:
+        result = import_semantic_core_agreement(payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_semantic_import"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path == "/api/semantic-core-collections":

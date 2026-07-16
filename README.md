@@ -100,6 +100,7 @@ POST /api/card-workset/delete-tasks
 POST /api/card-workset/reorder-tasks
 POST /api/card-workset/log-event
 POST /api/card-workset/audit-task
+POST /api/semantic-core-import
 POST /api/semantic-core-collections
 POST /api/portal-work-periods
 DELETE /api/semantic-core-collections?portal_id=1&collection_id=1
@@ -135,6 +136,8 @@ SEO expansion MPStats отправляется не только с пользо
 Частотные корзины СЯ настраиваются через `MPSTATS_SEMANTIC_HIGH_FREQUENCY` и `MPSTATS_SEMANTIC_MEDIUM_FREQUENCY`; значения по умолчанию: высокий `>=5000`, средний `>=2000` и `<5000`, низкий `<2000`. Автодобавление выбирает до 36 запросов, балансируя до 12 строк из каждой корзины.
 
 Карточечная XLSX-выгрузка `Семантическое ядро` содержит вкладку `Инструкция` и рабочую вкладку `СЯ в работу`. Рабочие колонки: `Ключи в карточке (действующие)`, `Ранжируемые ключи`, `Позиция ранжируемого ключа`, `Ключ к добавлению`, `Частота запроса ключа к добавлению`, `Согласование добавления`, `Ключ к удалению из карточки`, `Причина удаления`, `Согласование удаления`. Заполненные данные защищены от редактирования; в колонках согласования доступен выбор `Да/Нет`, по умолчанию `Да` для строк с ключом к добавлению или удалению.
+
+`POST /api/semantic-core-import` загружает согласованное СЯ обратно в WB `card_drafts` без write-операций в Wildberries. Маршрут принимает JSON с `portalId`, `scope` (`card` или `portal`), `mode` (`preview` или `apply`), `fileName`, `fileData` base64 и опциональным `cardKey` для карточечного режима. Backend читает XLSX/CSV/TXT, ищет колонки ключей и `Да/Нет`, сопоставляет карточки по `cardKey`/WB `nmID`/артикулу/имени листа, а для категорийных файлов вроде `Шапки`, `Косынки`, `Панамки`, `Бейсболки` может сопоставлять карточки по предмету/названию. В `preview` возвращаются matched/unmatched строки; в `apply` обновляется только `meta.semanticCoreFinal`, `semanticCoreSelected` и `semanticCoreRemoval`, чтобы последующая переоптимизация контента работала по согласованному СЯ.
 
 `GET /api/portal-card-drafts` отдает сохраненные черновики карточек по одному кабинету после проверки доступа. Frontend использует его для кабинетных XLSX-выгрузок: итоговое СЯ по карточкам с сохраненным СЯ и итоговый контент только по карточкам, где секция `Контент` принята (`approved/exported`).
 
