@@ -6100,11 +6100,11 @@ export default function App() {
   }
 
   async function resetPortalWork(portal) {
-    if (!portal || portal.isDemo || !portal.apiConnected) {
+    if (!portal || portal.isDemo) {
       return;
     }
     const confirmed = window.confirm(
-      "Обнулить работу по кабинету? Удалятся аудиты, черновики, задачи и история согласования. Карточки WB и API-ключ останутся.",
+      "Обнулить работу по кабинету? Удалятся аудиты, черновики, итоговое СЯ, задачи и история согласования. Карточки WB, источник MPStats и API-ключ останутся.",
     );
     if (!confirmed) {
       return;
@@ -10510,7 +10510,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                         <Download size={16} />{importRunning ? "Загружаем карточки" : "Загрузить все карточки"}
                       </button>
                     ) : null}
-                    <button className="btn ghost" type="button" onClick={onResetWork} disabled={!portal.apiConnected || cardsLoading}>
+                    <button className="btn ghost" type="button" onClick={onResetWork} disabled={cardsLoading} title="Удалить черновики, итоговое СЯ, задачи и историю согласования по этому кабинету. Карточки и источник данных останутся.">
                       <Trash2 size={16} />Обнулить работу
                     </button>
                     <button className="btn" type="button" onClick={() => onOpenModal("api")}>{apiConnectButtonText(portal)}</button>
