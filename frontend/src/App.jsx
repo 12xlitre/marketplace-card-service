@@ -6267,6 +6267,35 @@ export default function App() {
     }
   }
 
+  async function updatePortalSource(portal, source) {
+    const storeUrl = String(source?.storeUrl || "").trim();
+    const manualSource = String(source?.manualSource || "").trim();
+    if (portal.isDemo) {
+      setDemoPortal((item) => ({ ...item, storeUrl, manualSource }));
+      return true;
+    }
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/manual-source`, {
+        method: "POST",
+        body: JSON.stringify({ storeUrl, manualSource }),
+      });
+      replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
+      setNotice(isOzonPortal(portal) ? "Источник Ozon сохранен." : "Источник кабинета сохранен.");
+      return true;
+    } catch (error) {
+      if (error.message === "store_url_too_long") {
+        setNotice("Ссылка или идентификатор источника слишком длинные.");
+      } else if (error.message === "manual_source_too_long") {
+        setNotice("Описание источника слишком длинное. Сократите комментарий.");
+      } else if (error.message === "portal_source_manual_only") {
+        setNotice("Источник можно менять только у manual-кабинета.");
+      } else {
+        setNotice("Не удалось сохранить источник кабинета.");
+      }
+      return false;
+    }
+  }
+
   const currentPortalCards = cardsForPortal(currentPortal);
   const selectedCardFromPortal = currentPortalCards.find((card) => cardMatchesDraftKey(card, selectedCardKey)) || null;
   const currentPortalKey = String(currentPortal?.id || "");
@@ -6372,6 +6401,7 @@ export default function App() {
             onSellerTabChange={setSellerTab}
             onUpdateTeam={(teamRoles) => updatePortalTeam(currentPortal, teamRoles)}
             onUpdateName={(name) => updatePortalName(currentPortal, name)}
+            onUpdateSource={(source) => updatePortalSource(currentPortal, source)}
             onNotice={setNotice}
             helpEnabled={helpEnabled}
           />
@@ -7240,10 +7270,14 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onNotice, helpEnabled = false }) {
+function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
+  const sourceStoreUrl = String(portal.storeUrl || "").trim();
+  const sourceManualText = String(portal.manualSource || "").trim();
+  const sourceConfigured = Boolean(sourceStoreUrl || sourceManualText);
+  const sourceSafeUrl = safeHttpsUrl(sourceStoreUrl);
   const team = getPortalTeam(portal);
   const activeSellerTab = normalizeSellerTab(sellerTab);
   const setSellerTab = onSellerTabChange || (() => {});
@@ -7253,6 +7287,12 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(displayName);
   const [nameSaving, setNameSaving] = useState(false);
+  const [sourceEditing, setSourceEditing] = useState(false);
+  const [sourceDraft, setSourceDraft] = useState({
+    storeUrl: sourceStoreUrl,
+    manualSource: sourceManualText,
+  });
+  const [sourceSaving, setSourceSaving] = useState(false);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -7265,6 +7305,15 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       setNameDraft(displayName);
     }
   }, [displayName, nameEditing]);
+
+  useEffect(() => {
+    if (!sourceEditing) {
+      setSourceDraft({
+        storeUrl: sourceStoreUrl,
+        manualSource: sourceManualText,
+      });
+    }
+  }, [portal.id, sourceStoreUrl, sourceManualText, sourceEditing]);
 
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
@@ -7298,16 +7347,38 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
+  function updateSourceDraft(field, value) {
+    setSourceDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function saveSourceDraft() {
+    if (sourceSaving) return;
+    setSourceSaving(true);
+    try {
+      const saved = await onUpdateSource?.({
+        storeUrl: sourceDraft.storeUrl,
+        manualSource: sourceDraft.manualSource,
+      });
+      if (saved !== false) {
+        setSourceEditing(false);
+      }
+    } finally {
+      setSourceSaving(false);
+    }
+  }
+
   const ozonFlowRows = [
     ["Кабинет", "Ozon beta · отдельный от WB поток"],
-    ["Карточки", "ожидают Ozon-specific источник"],
+    ["Источник", sourceConfigured ? "сохранен в кабинете" : "нужно указать"],
+    ["Карточки", sourceConfigured ? "можно готовить загрузчик Ozon" : "ожидают Ozon-specific источник"],
     ["СЯ", "MPStats по WB keyword-базе"],
     ["Задачи", "будут храниться отдельно от WB задач"],
     ["Отчеты", "отдельные Ozon периоды и выгрузки"],
   ];
   const ozonRouteRows = [
     { title: "Кабинет Ozon", status: "создан", className: "active" },
-    { title: "Карточки Ozon", status: "источник не подключен", className: "paused" },
+    { title: "Источник Ozon", status: sourceConfigured ? "задан" : "не задан", className: sourceConfigured ? "active" : "paused" },
+    { title: "Карточки Ozon", status: sourceConfigured ? "следующий шаг" : "после источника", className: "pending" },
     { title: "СЯ через MPStats", status: "WB keyword-база", className: "pending" },
     { title: "Задачи Ozon", status: "после карточек", className: "pending" },
     { title: "Отчеты Ozon", status: "после периодов", className: "pending" },
@@ -7433,10 +7504,56 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   <div className="strip-head">
                     <div>
                       <h2>Источник данных Ozon</h2>
-                      <p>Здесь будет подключаться Ozon-specific загрузка карточек, цен, остатков и отчетных периодов.</p>
+                      <p>Ручной ориентир для будущей Ozon-specific загрузки карточек, цен, остатков и отчетных периодов.</p>
                     </div>
-                    <Tag tone="amber">ожидает источник</Tag>
+                    <Tag tone={sourceConfigured ? "blue" : "amber"}>{sourceConfigured ? "источник задан" : "ожидает источник"}</Tag>
                   </div>
+                  {sourceEditing ? (
+                    <div className="ozon-source-editor">
+                      <label className="field-label">
+                        Ссылка, Seller ID или ориентир Ozon
+                        <input
+                          value={sourceDraft.storeUrl}
+                          onChange={(event) => updateSourceDraft("storeUrl", event.target.value)}
+                          placeholder="https://www.ozon.ru/seller/... или Seller ID"
+                          disabled={sourceSaving}
+                        />
+                      </label>
+                      <label className="field-label">
+                        Что есть на старте
+                        <textarea
+                          value={sourceDraft.manualSource}
+                          onChange={(event) => updateSourceDraft("manualSource", event.target.value)}
+                          placeholder="Например: список SKU, ссылка на витрину, файл клиента или комментарий по тестовой пачке."
+                          disabled={sourceSaving}
+                        />
+                      </label>
+                      <div className="team-editor-actions">
+                        <button className={loadingButtonClass("btn primary", sourceSaving)} type="button" onClick={saveSourceDraft} disabled={sourceSaving} aria-busy={sourceSaving || undefined}>
+                          <Save size={16} />{sourceSaving ? "Сохраняем" : "Сохранить источник"}
+                        </button>
+                        <button className="btn ghost" type="button" onClick={() => { setSourceDraft({ storeUrl: sourceStoreUrl, manualSource: sourceManualText }); setSourceEditing(false); }} disabled={sourceSaving}>Отмена</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="manual-source-box ozon-source-box">
+                      <div className="manual-source-row">
+                        <span>Ozon ориентир</span>
+                        {sourceStoreUrl ? (
+                          sourceSafeUrl ? <a href={sourceSafeUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />{sourceStoreUrl}</a> : <strong>{sourceStoreUrl}</strong>
+                        ) : <strong>не указан</strong>}
+                      </div>
+                      <div className="manual-source-row">
+                        <span>Исходные данные</span>
+                        <p>{sourceManualText || "Пока не описаны"}</p>
+                      </div>
+                      {canManage ? (
+                        <div className="manual-source-actions">
+                          <button className="btn" type="button" onClick={() => setSourceEditing(true)}><Pencil size={16} />Редактировать источник</button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
                   <div className="source-flow">
                     {ozonFlowRows.map(([label, value]) => (
                       <div className="list-row source-flow-row" key={label}><span>{label}</span><strong>{value}</strong></div>
@@ -7450,7 +7567,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <h2>Маршрут Ozon</h2>
                       <p>Форма работы похожа на WB, но карточки, задачи и отчеты будут храниться в Ozon-контуре.</p>
                     </div>
-                    <Tag tone="blue">1 из 5</Tag>
+                    <Tag tone="blue">{sourceConfigured ? "2 из 6" : "1 из 6"}</Tag>
                   </div>
                   <div className="pipeline">
                     {ozonRouteRows.map((step) => (

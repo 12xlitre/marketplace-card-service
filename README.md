@@ -76,6 +76,7 @@ GET /api/portals
 POST /api/portals/<portal_id>/team
 POST /api/portals/<portal_id>/client-name
 POST /api/portals/<portal_id>/client-contact
+POST /api/portals/<portal_id>/manual-source
 POST /api/portals/<portal_id>/archive
 POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
@@ -104,6 +105,8 @@ DELETE /api/portal-work-periods?portal_id=1&period_id=1
 ```
 
 `POST /api/portals` принимает необязательный `clientName`: он нужен для группировки WB/Ozon кабинетов внутри одного клиента до появления отдельной backend-сущности `Client`. `POST /api/portals/<portal_id>/client-name` меняет эту привязку у кабинета после проверки доступа; frontend уровня клиента применяет новое имя ко всем кабинетам клиента.
+
+`POST /api/portals/<portal_id>/manual-source` обновляет `storeUrl` и `manualSource` только у manual-кабинетов после проверки доступа. В текущем Ozon beta это сохраняет ссылку/Seller ID/ориентир и комментарий к будущей Ozon-specific загрузке, без подключения WB API.
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
 

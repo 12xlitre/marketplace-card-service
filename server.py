@@ -1900,6 +1900,58 @@ def update_portal_name(portal_id, name, actor=None):
   return get_portal_row(portal_id)
 
 
+def update_portal_manual_source(portal_id, store_url, manual_source, actor=None):
+  clean_store_url = clean_portal_manual_text(store_url, 500, "store_url_too_long")
+  clean_manual_source = clean_portal_manual_text(manual_source, 1200, "manual_source_too_long")
+  init_db()
+  portal_name = ""
+  marketplace = ""
+  previous_fields = []
+  with connect_db() as db:
+    portal = db.execute(
+      """
+      SELECT id, name, marketplace, api_connected, store_url, manual_source
+      FROM portals
+      WHERE id = ?
+      """,
+      (portal_id,),
+    ).fetchone()
+    if not portal:
+      return None
+    if bool(portal["api_connected"]):
+      raise ValueError("portal_source_manual_only")
+    portal_name = portal["name"] or ""
+    marketplace = portal["marketplace"] or ""
+    previous_fields = [
+      key for key, value in {
+        "storeUrl": portal["store_url"] or "",
+        "manualSource": portal["manual_source"] or "",
+      }.items()
+      if value
+    ]
+    db.execute(
+      """
+      UPDATE portals
+      SET store_url = ?, manual_source = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (clean_store_url, clean_manual_source, portal_id),
+    )
+  record_admin_event(actor, "portal_manual_source_updated", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": portal_name,
+    "marketplace": marketplace,
+    "previousFields": previous_fields,
+    "nextFields": [
+      key for key, value in {
+        "storeUrl": clean_store_url,
+        "manualSource": clean_manual_source,
+      }.items()
+      if value
+    ],
+  })
+  return get_portal_row(portal_id)
+
+
 def set_portal_active(portal_id, is_active, actor=None):
   init_db()
   portal_name = ""
@@ -14373,6 +14425,36 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       portal_payload = public_portal_from_row(row)
       portal_payload["manualBootstrap"] = bootstrap
       self.send_json(HTTPStatus.CREATED, {"portal": portal_payload})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/manual-source"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/manual-source")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        row = update_portal_manual_source(
+          portal_id,
+          payload.get("storeUrl") or payload.get("store_url"),
+          payload.get("manualSource") or payload.get("manual_source"),
+          actor=user,
+        )
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_manual_source"})
+        return
+      if not row:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
       return
 
     if path.startswith("/api/portals/") and path.endswith("/report-history"):

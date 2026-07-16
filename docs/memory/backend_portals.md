@@ -12,6 +12,7 @@
 - изменение состава проекта идет через `POST /api/portals/<portal_id>/team`;
 - изменение имени клиента идет через `POST /api/portals/<portal_id>/client-name`; frontend уровня клиента применяет одно имя ко всем кабинетам клиента до появления отдельной backend-сущности `Client`;
 - изменение контактов клиента идет через `POST /api/portals/<portal_id>/client-contact`; frontend уровня клиента применяет один контакт ко всем кабинетам клиента до появления отдельной backend-сущности `Client`;
+- изменение ручного источника кабинета идет через `POST /api/portals/<portal_id>/manual-source`; маршрут доступен только для manual-кабинетов, обновляет `store_url`/`manual_source` после проверки прав и не пишет сам текст источника в admin-журнал;
 - рабочий набор карточек кабинета хранится в SQLite `portal_workset_cards`, читается через `GET /api/card-workset?portal_id=...` и сохраняется через `POST /api/card-workset`;
 - создание массового пакета работы идет через `POST /api/card-workset/create-tasks`: backend создает внутренние `card_drafts` со статусом `draft` (`в работе`) без write-запросов в WB;
 - удаление задачи идет через `POST /api/card-workset/delete-tasks`: backend очищает `meta.batch`/выбранные `workTypes` и соответствующие `approvalSections`, но не удаляет весь `card_draft`;

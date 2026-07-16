@@ -2407,6 +2407,25 @@ tr.selected-row td {
   line-height: 1.2;
 }
 
+.ozon-source-editor {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ozon-source-box {
+  margin-bottom: 12px;
+}
+
+.manual-source-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
 .store-import-progress {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2531,11 +2550,19 @@ tr.selected-row td {
 
 .manual-source-row a {
   color: var(--brand);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.manual-source-row a svg {
+  flex: 0 0 auto;
 }
 
 .pipeline {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 
