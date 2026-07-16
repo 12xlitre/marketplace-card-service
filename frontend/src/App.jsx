@@ -7756,7 +7756,153 @@ function OzonPlaceholderPanel({ title, copy, tag }) {
   );
 }
 
+function ozonCardIdentity(card) {
+  const rawFields = rawFieldsForCard(card);
+  const sku = textOrDash(card?.sku || card?.id || rawFields.sku || rawFields.id || rawFields.productId);
+  const offerId = textOrDash(card?.offerId || card?.vendorCode || rawFields.offerId || rawFields.offer_id || rawFields.vendorCode);
+  return { sku, offerId };
+}
+
+function ozonCardCategory(card) {
+  const rawFields = rawFieldsForCard(card);
+  return textOrDash(card?.subjectName || card?.category || rawFields.category || rawFields.categoryName);
+}
+
+function ozonCardCharacteristicItems(card) {
+  const rawFields = rawFieldsForCard(card);
+  const source = card?.characteristics || rawFields.characteristics || [];
+  if (Array.isArray(source)) {
+    return source.filter((item) => !isEmptyValue(item));
+  }
+  if (source && typeof source === "object") {
+    return Object.entries(source)
+      .filter(([, value]) => !isEmptyValue(value))
+      .map(([name, value]) => ({ name, value }));
+  }
+  return [];
+}
+
+function ozonCardPhotoCount(card) {
+  const rawFields = rawFieldsForCard(card);
+  const photos = Array.isArray(card?.photos) ? card.photos : (Array.isArray(rawFields.photos) ? rawFields.photos : []);
+  return photos.length || (bestPhotoUrl(card) ? 1 : 0);
+}
+
+function ozonCardMetricValue(card, keys) {
+  const rawFields = rawFieldsForCard(card);
+  const mpstats = card?.mpstats && typeof card.mpstats === "object" ? card.mpstats : {};
+  for (const key of keys) {
+    const value = firstDefined(card?.[key], rawFields[key], mpstats[key]);
+    if (!isEmptyValue(value)) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function ozonCardProblemReasons(card) {
+  const reasons = [];
+  const rawFields = rawFieldsForCard(card);
+  const title = String(card?.title || rawFields.title || rawFields.name || "").trim();
+  const { sku } = ozonCardIdentity(card);
+  if (!title) {
+    reasons.push("нет названия");
+  }
+  if (sku === "Не указано") {
+    reasons.push("нет SKU");
+  }
+  if (!ozonCardPhotoCount(card)) {
+    reasons.push("нет фото");
+  }
+  if (!ozonCardCharacteristicItems(card).length) {
+    reasons.push("нет характеристик");
+  }
+  return reasons;
+}
+
+function ozonCardDataSignals(card) {
+  const signals = [];
+  const rawFields = rawFieldsForCard(card);
+  const brand = String(card?.brand || rawFields.brand || "").trim();
+  const category = ozonCardCategory(card);
+  const price = ozonCardMetricValue(card, ["price", "finalPrice", "final_price"]);
+  const stock = ozonCardMetricValue(card, ["stock", "balance", "available_stock"]);
+  const description = String(card?.description || rawFields.description || "").trim();
+  if (!brand) {
+    signals.push("бренд не указан");
+  }
+  if (category === "Не указано") {
+    signals.push("категория не указана");
+  }
+  if (!description) {
+    signals.push("нет описания");
+  }
+  if (isEmptyValue(price)) {
+    signals.push("нет цены");
+  }
+  if (isEmptyValue(stock)) {
+    signals.push("нет остатка");
+  }
+  return signals;
+}
+
+function ozonCardCompleteness(card) {
+  const rawFields = rawFieldsForCard(card);
+  const { sku, offerId } = ozonCardIdentity(card);
+  const checks = [
+    String(card?.title || rawFields.title || rawFields.name || "").trim(),
+    sku !== "Не указано",
+    offerId !== "Не указано",
+    ozonCardCategory(card) !== "Не указано",
+    String(card?.brand || rawFields.brand || "").trim(),
+    ozonCardPhotoCount(card) > 0,
+    ozonCardCharacteristicItems(card).length > 0,
+    !isEmptyValue(ozonCardMetricValue(card, ["price", "finalPrice", "final_price"])),
+  ];
+  const filled = checks.filter(Boolean).length;
+  const total = checks.length;
+  if (filled >= 7) {
+    return { label: `${filled}/${total}`, tone: "green" };
+  }
+  if (filled >= 5) {
+    return { label: `${filled}/${total}`, tone: "amber" };
+  }
+  return { label: `${filled}/${total}`, tone: "red" };
+}
+
+function ozonCardWorkState(card) {
+  const problems = ozonCardProblemReasons(card);
+  const status = String(card?.status || "").trim();
+  if (status && status.toLowerCase().includes("error")) {
+    return { label: "Ошибка источника", tone: "red" };
+  }
+  if (problems.length) {
+    return { label: "Проверить данные", tone: "amber" };
+  }
+  return { label: "Ozon snapshot", tone: "green" };
+}
+
+function ozonCardSearchText(card) {
+  const rawFields = rawFieldsForCard(card);
+  const { sku, offerId } = ozonCardIdentity(card);
+  return [
+    card?.title,
+    sku,
+    offerId,
+    card?.brand || rawFields.brand,
+    ozonCardCategory(card),
+    card?.sellerName || rawFields.sellerName || rawFields.seller || rawFields.shopName,
+    card?.status,
+    ...ozonCardProblemReasons(card),
+    ...ozonCardDataSignals(card),
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
 function OzonCardsPanel({ cards, onOpenCard }) {
+  const [query, setQuery] = useState("");
+  const [issueFilter, setIssueFilter] = useState("all");
+  const [workFilter, setWorkFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
   const visibleCards = Array.isArray(cards) ? cards : [];
   if (!visibleCards.length) {
     return (
@@ -7767,36 +7913,195 @@ function OzonCardsPanel({ cards, onOpenCard }) {
       />
     );
   }
+  const normalizedQuery = query.trim().toLowerCase();
+  const categories = [...new Set(visibleCards.map(ozonCardCategory).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  const problemCards = visibleCards.filter((card) => ozonCardProblemReasons(card).length);
+  const signalCards = visibleCards.filter((card) => ozonCardDataSignals(card).length);
+  const signalOnlyCards = signalCards.filter((card) => !ozonCardProblemReasons(card).length);
+  const cleanCards = visibleCards.filter((card) => !ozonCardProblemReasons(card).length && !ozonCardDataSignals(card).length);
+  const readyCards = visibleCards.filter((card) => !ozonCardProblemReasons(card).length);
+  const filteredCards = visibleCards.filter((card) => {
+    const hasProblems = ozonCardProblemReasons(card).length > 0;
+    const hasSignals = ozonCardDataSignals(card).length > 0;
+    const workState = ozonCardWorkState(card);
+    if (issueFilter === "problems" && !hasProblems) {
+      return false;
+    }
+    if (issueFilter === "signals" && (!hasSignals || hasProblems)) {
+      return false;
+    }
+    if (issueFilter === "clean" && (hasProblems || hasSignals)) {
+      return false;
+    }
+    if (workFilter === "ready" && hasProblems) {
+      return false;
+    }
+    if (workFilter === "check" && workState.label !== "Проверить данные") {
+      return false;
+    }
+    if (categoryFilter !== "all" && ozonCardCategory(card) !== categoryFilter) {
+      return false;
+    }
+    if (normalizedQuery && !ozonCardSearchText(card).includes(normalizedQuery)) {
+      return false;
+    }
+    return true;
+  });
+
+  function resetFilters() {
+    setQuery("");
+    setIssueFilter("all");
+    setWorkFilter("all");
+    setCategoryFilter("all");
+  }
+
+  function isSummaryFilterActive({ issue = "all", work = "all" }) {
+    return issueFilter === issue && workFilter === work;
+  }
+
+  function applySummaryFilter({ issue = "all", work = "all" }) {
+    setQuery("");
+    setCategoryFilter("all");
+    if (isSummaryFilterActive({ issue, work })) {
+      setIssueFilter("all");
+      setWorkFilter("all");
+      return;
+    }
+    setIssueFilter(issue);
+    setWorkFilter(work);
+  }
+
   return (
-    <section className="workspace-strip">
+    <section className="workspace-strip ozon-cards-workspace">
       <div className="strip-head">
         <div>
           <h2>Карточки Ozon</h2>
-          <p>Сохраненные карточки из Ozon MPStats probe. Это отдельный Ozon snapshot внутри клиента.</p>
+          <p>Сохраненные карточки из Ozon MPStats probe. Вид повторяет рабочий блок WB, но статусы и замечания считаются по Ozon snapshot.</p>
         </div>
         <Tag tone="blue">{formatNumber(visibleCards.length)}</Tag>
       </div>
-      <div className="ozon-cards-list">
-        {visibleCards.map((card, index) => {
-          const rawFields = rawFieldsForCard(card);
-          const sku = card.id || card.sku || rawFields.id || rawFields.sku || "";
-          const offerId = card.offerId || card.vendorCode || rawFields.offerId || rawFields.offer_id || "";
-          const photoUrl = bestPhotoUrl(card);
-          return (
-            <article className="ozon-card-row" key={`${sku || offerId || card.title}-${index}`}>
-              {photoUrl ? <img src={photoUrl} alt="" loading="lazy" /> : <div className="ozon-card-thumb">OZ</div>}
-              <div>
-                <strong>{card.title || sku || "Ozon карточка"}</strong>
-                <span>{[sku ? `SKU ${sku}` : "", offerId ? `offer ${offerId}` : "", card.brand, card.subjectName || card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
-                <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ") || "метрики появятся после расширения Ozon-логики"}</small>
-              </div>
-              <div className="ozon-card-actions">
-                <Tag tone={Number(card.issueCount || 0) ? "amber" : "green"}>{card.status || "MPStats"}</Tag>
-                <button className="btn mini" type="button" onClick={() => onOpenCard?.(card)}>Открыть</button>
-              </div>
-            </article>
-          );
-        })}
+
+      <div className="cards-workspace">
+        <div className="cards-control-panel ozon-cards-control-panel">
+          <div className="cards-work-summary">
+            <button className={`work-summary-item ${isSummaryFilterActive({ issue: "problems" }) ? "active" : ""}`} type="button" onClick={() => applySummaryFilter({ issue: "problems" })}>
+              <span>Требуют внимания</span>
+              <strong>{formatNumber(problemCards.length)}</strong>
+            </button>
+            <button className={`work-summary-item ${isSummaryFilterActive({ issue: "signals" }) ? "active" : ""}`} type="button" onClick={() => applySummaryFilter({ issue: "signals" })}>
+              <span>Некритичные замечания</span>
+              <strong>{formatNumber(signalOnlyCards.length)}</strong>
+            </button>
+            <button className={`work-summary-item ${isSummaryFilterActive({ issue: "clean" }) ? "active" : ""}`} type="button" onClick={() => applySummaryFilter({ issue: "clean" })}>
+              <span>Без замечаний</span>
+              <strong>{formatNumber(cleanCards.length)}</strong>
+            </button>
+            <button className={`work-summary-item ${isSummaryFilterActive({ work: "ready" }) ? "active" : ""}`} type="button" onClick={() => applySummaryFilter({ work: "ready" })}>
+              <span>Готовы к работе</span>
+              <strong>{formatNumber(readyCards.length)}</strong>
+            </button>
+            <div className="work-summary-note">
+              <strong>Ozon beta</strong>
+              <span>задачи и аудит подключим отдельным Ozon-потоком</span>
+            </div>
+          </div>
+
+          <div className="card-filters ozon-card-filters">
+            <label className="search-field card-search">
+              <Search size={16} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, SKU, offer, бренду" />
+            </label>
+            <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
+              <option value="all">Все карточки</option>
+              <option value="problems">Требуют внимания</option>
+              <option value="signals">Некритичные замечания</option>
+              <option value="clean">Без замечаний</option>
+            </select>
+            <select className="select" value={workFilter} onChange={(event) => setWorkFilter(event.target.value)}>
+              <option value="all">Любой статус</option>
+              <option value="ready">Готовы к работе</option>
+              <option value="check">Проверить данные</option>
+            </select>
+            <select className="select" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+              <option value="all">Все категории</option>
+              {categories.map((category) => <option value={category} key={category}>{category}</option>)}
+            </select>
+          </div>
+
+          <div className="cards-toolbar">
+            <span>Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · Ozon snapshot из MPStats</span>
+            <div className="toolbar">
+              <button className="btn ghost" type="button" onClick={resetFilters}>Сбросить фильтры</button>
+            </div>
+          </div>
+        </div>
+
+        {filteredCards.length ? (
+          <div className="table-wrap cards-table-wrap ozon-cards-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Карточка</th>
+                  <th>SKU / offer</th>
+                  <th>Заполненность</th>
+                  <th>Замечания по данным</th>
+                  <th>Статус работы</th>
+                  <th>Детали</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredCards.map((card, index) => {
+                  const rawFields = rawFieldsForCard(card);
+                  const { sku, offerId } = ozonCardIdentity(card);
+                  const reasons = ozonCardProblemReasons(card);
+                  const signals = ozonCardDataSignals(card);
+                  const completeness = ozonCardCompleteness(card);
+                  const workState = ozonCardWorkState(card);
+                  const title = card.title || rawFields.title || rawFields.name || "Ozon карточка";
+                  const brand = card.brand || rawFields.brand || "бренд не указан";
+                  const price = ozonCardMetricValue(card, ["price", "finalPrice", "final_price"]);
+                  const stock = ozonCardMetricValue(card, ["stock", "balance", "available_stock"]);
+                  return (
+                    <tr key={`${sku}-${offerId}-${index}`}>
+                      <td>
+                        <div className="product-cell">
+                          <Thumb url={bestPhotoUrl(card)} alt={index % 2 === 1} />
+                          <div className="product-name">
+                            <strong>{title}</strong>
+                            <span>категория: {ozonCardCategory(card)} · {brand}</span>
+                            <small>{[!isEmptyValue(price) ? `цена ${formatNumber(price)}` : "", !isEmptyValue(stock) ? `остаток ${formatNumber(stock)}` : ""].filter(Boolean).join(" · ") || "коммерческие метрики ожидают расширения Ozon-логики"}</small>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="ozon-id-cell">
+                          <strong>{sku}</strong>
+                          <span>{offerId}</span>
+                        </div>
+                      </td>
+                      <td><Tag tone={completeness.tone}>{completeness.label}</Tag></td>
+                      <td>
+                        <div className="problem-reasons">
+                          {reasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
+                          {!reasons.length && signals.length ? signals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>) : null}
+                          {!reasons.length && !signals.length ? <Tag tone="green">без замечаний</Tag> : null}
+                        </div>
+                      </td>
+                      <td><Tag tone={workState.tone}>{workState.label}</Tag></td>
+                      <td><IconButton icon={Eye} label="Открыть Ozon-карточку" onClick={() => onOpenCard?.(card)} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <strong>По текущим фильтрам Ozon-карточек нет</strong>
+            <span>Измените поиск, статус, замечания или категорию.</span>
+          </div>
+        )}
       </div>
     </section>
   );

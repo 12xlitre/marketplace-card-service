@@ -2601,6 +2601,70 @@ tr.selected-row td {
   gap: 6px;
 }
 
+.ozon-cards-workspace {
+  gap: 14px;
+}
+
+.ozon-card-filters {
+  grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(150px, 190px));
+}
+
+.ozon-cards-table th:nth-child(1),
+.ozon-cards-table td:nth-child(1) {
+  width: 38%;
+}
+
+.ozon-cards-table th:nth-child(2),
+.ozon-cards-table td:nth-child(2) {
+  width: 150px;
+}
+
+.ozon-cards-table th:nth-child(3),
+.ozon-cards-table td:nth-child(3) {
+  width: 132px;
+}
+
+.ozon-cards-table th:nth-child(4),
+.ozon-cards-table td:nth-child(4) {
+  width: 230px;
+}
+
+.ozon-cards-table th:nth-child(5),
+.ozon-cards-table td:nth-child(5) {
+  width: 150px;
+}
+
+.ozon-cards-table th:nth-child(6),
+.ozon-cards-table td:nth-child(6) {
+  width: 62px;
+  text-align: center;
+}
+
+.ozon-id-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ozon-id-cell strong,
+.ozon-id-cell span,
+.product-name small {
+  overflow-wrap: anywhere;
+}
+
+.ozon-id-cell strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.ozon-id-cell span,
+.product-name small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .store-import-progress {
   border: 1px solid var(--line);
   border-radius: 8px;
