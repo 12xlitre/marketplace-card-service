@@ -696,13 +696,45 @@ function marketplaceTitle(key) {
   return key === "ozon" ? "Ozon" : "Wildberries";
 }
 
+function isGenericPortalName(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return !normalized || ["кабинет wb", "кабинет wildberries", "wildberries", "wb", "кабинет ozon", "ozon"].includes(normalized);
+}
+
+function clientKeyFromName(value) {
+  return String(value || "").trim().toLowerCase() || "client";
+}
+
 function portalClientName(portal) {
   const explicitName = String(portal?.clientName || portal?.client_name || portal?.customerName || portal?.customer_name || "").trim();
-  return explicitName || portalDisplayName(portal);
+  if (explicitName) {
+    return explicitName;
+  }
+  const cardName = firstUsefulPortalCardName(portal?.realCards || []);
+  if (cardName) {
+    return cardName;
+  }
+  const displayName = portalDisplayName(portal);
+  if (!isGenericPortalName(displayName)) {
+    return displayName;
+  }
+  return "Клиент без названия";
 }
 
 function portalClientKey(portal) {
-  return String(portal?.clientId || portal?.client_id || portalClientName(portal)).trim().toLowerCase() || "client";
+  const explicitName = String(portal?.clientName || portal?.client_name || portal?.customerName || portal?.customer_name || "").trim();
+  const clientId = String(portal?.clientId || portal?.client_id || "").trim();
+  if (clientId) {
+    return clientKeyFromName(clientId);
+  }
+  if (explicitName) {
+    return clientKeyFromName(explicitName);
+  }
+  const displayName = portalClientName(portal);
+  if (displayName && !isGenericPortalName(displayName) && displayName !== "Клиент без названия") {
+    return clientKeyFromName(displayName);
+  }
+  return `portal:${String(portal?.id || "client")}`;
 }
 
 function normalizeClientContact(contact = {}) {
@@ -5540,21 +5572,25 @@ export default function App() {
     clearLocalDraftsForPortal(normalizedPortalId);
   }
 
-  async function setPortalActive(portal, isActive) {
+  async function setPortalActive(portal, isActive, options = {}) {
+    const silent = Boolean(options.silent);
+    const navigateOnCurrent = options.navigateOnCurrent !== false;
     if (!canManagePortals || !portal) {
-      return;
+      return false;
     }
     if (portal.isDemo) {
       localStorage.setItem("opticards-demo-archived", isActive ? "0" : "1");
       setDemoPortalArchived(!isActive);
       if (isActive) {
         setPortalStatusFilter("active");
-        setNotice("Кабинет восстановлен из архива.");
+        if (!silent) setNotice("Кабинет восстановлен из архива.");
+      } else if (!silent) {
+        setNotice("Кабинет отправлен в архив.");
       }
-      if (!isActive && selectedPortalId === "demo-wb") {
+      if (!isActive && navigateOnCurrent && selectedPortalId === "demo-wb") {
         setScreen("cabinets");
       }
-      return;
+      return true;
     }
 
     try {
@@ -5564,34 +5600,41 @@ export default function App() {
         body: JSON.stringify({}),
       });
       replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
-      if (!isActive && String(selectedPortalId) === String(portal.id)) {
+      if (!isActive && navigateOnCurrent && String(selectedPortalId) === String(portal.id)) {
         setScreen("cabinets");
       }
       if (isActive) {
         setPortalStatusFilter("active");
-        setNotice("Кабинет восстановлен из архива.");
+        if (!silent) setNotice("Кабинет восстановлен из архива.");
       } else {
-        setNotice("Кабинет отправлен в архив.");
+        if (!silent) setNotice("Кабинет отправлен в архив.");
       }
+      return true;
     } catch {
-      setNotice("Не удалось изменить статус кабинета. Попробуйте повторить позже.");
+      if (!silent) setNotice("Не удалось изменить статус кабинета. Попробуйте повторить позже.");
+      return false;
     }
   }
 
-  async function deletePortal(portal) {
+  async function deletePortal(portal, options = {}) {
+    const silent = Boolean(options.silent);
+    const skipConfirm = Boolean(options.skipConfirm);
+    const navigateOnCurrent = options.navigateOnCurrent !== false;
     if (!canManagePortals || !portal || portal.isDemo) {
-      return;
+      return false;
     }
     if (portal.isActive !== false) {
-      setNotice("Сначала отправьте кабинет в архив, затем его можно удалить.");
-      return;
+      if (!silent) setNotice("Сначала отправьте кабинет в архив, затем его можно удалить.");
+      return false;
     }
     const displayName = portalDisplayName(portal);
-    const confirmed = window.confirm(
-      `Удалить кабинет "${displayName}" без восстановления? Будут удалены карточки, состав проекта, черновики, задачи, конкуренты и история отчетов по этому кабинету.`,
-    );
-    if (!confirmed) {
-      return;
+    if (!skipConfirm) {
+      const confirmed = window.confirm(
+        `Удалить кабинет "${displayName}" без восстановления? Будут удалены карточки, состав проекта, черновики, задачи, конкуренты и история отчетов по этому кабинету.`,
+      );
+      if (!confirmed) {
+        return false;
+      }
     }
     try {
       await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/delete`, {
@@ -5599,16 +5642,111 @@ export default function App() {
         body: JSON.stringify({}),
       });
       removeUserPortal(portal.id);
-      if (String(selectedPortalId) === String(portal.id)) {
+      if (navigateOnCurrent && String(selectedPortalId) === String(portal.id)) {
         setSelectedPortalId("demo-wb");
         setScreen("cabinets");
       }
-      setNotice("Кабинет удален.");
+      if (!silent) setNotice("Кабинет удален.");
+      return true;
     } catch (error) {
-      setNotice(error.message === "portal_must_be_archived"
-        ? "Сначала отправьте кабинет в архив, затем его можно удалить."
-        : "Не удалось удалить кабинет. Попробуйте повторить позже.");
+      if (!silent) {
+        setNotice(error.message === "portal_must_be_archived"
+          ? "Сначала отправьте кабинет в архив, затем его можно удалить."
+          : "Не удалось удалить кабинет. Попробуйте повторить позже.");
+      }
+      return false;
     }
+  }
+
+  async function archiveClient(client) {
+    if (!canManagePortals || !client) {
+      return false;
+    }
+    const activeClientPortals = (client.portals || []).filter((portal) => portal.isActive !== false);
+    if (!activeClientPortals.length) {
+      setNotice("У клиента нет активных кабинетов для архива.");
+      return false;
+    }
+    const confirmed = window.confirm(
+      `Отправить клиента "${client.name}" в архив? В архив уйдут все активные кабинеты клиента: ${activeClientPortals.length}.`,
+    );
+    if (!confirmed) {
+      return false;
+    }
+    const results = [];
+    for (const portal of activeClientPortals) {
+      results.push(await setPortalActive(portal, false, { silent: true, navigateOnCurrent: false }));
+    }
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount === activeClientPortals.length) {
+      setPortalStatusFilter("inactive");
+      setScreen("cabinets");
+      setNotice(`Клиент "${client.name}" отправлен в архив.`);
+      return true;
+    }
+    setNotice(`В архив отправлено ${savedCount} из ${activeClientPortals.length} кабинетов клиента.`);
+    return false;
+  }
+
+  async function restoreClient(client) {
+    if (!canManagePortals || !client) {
+      return false;
+    }
+    const inactiveClientPortals = (client.portals || []).filter((portal) => portal.isActive === false);
+    if (!inactiveClientPortals.length) {
+      setNotice("У клиента нет архивных кабинетов для восстановления.");
+      return false;
+    }
+    const results = [];
+    for (const portal of inactiveClientPortals) {
+      results.push(await setPortalActive(portal, true, { silent: true, navigateOnCurrent: false }));
+    }
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount === inactiveClientPortals.length) {
+      setPortalStatusFilter("active");
+      setScreen("cabinets");
+      setNotice(`Клиент "${client.name}" восстановлен из архива.`);
+      return true;
+    }
+    setNotice(`Восстановлено ${savedCount} из ${inactiveClientPortals.length} кабинетов клиента.`);
+    return false;
+  }
+
+  async function deleteClient(client) {
+    if (!canManagePortals || !client) {
+      return false;
+    }
+    const portals = (client.portals || []).filter((portal) => !portal.isDemo);
+    const activeClientPortals = portals.filter((portal) => portal.isActive !== false);
+    if (activeClientPortals.length) {
+      setNotice("Сначала отправьте клиента в архив, затем его можно удалить.");
+      return false;
+    }
+    if (!portals.length) {
+      setNotice("У клиента нет удаляемых кабинетов.");
+      return false;
+    }
+    const confirmed = window.confirm(
+      `Удалить клиента "${client.name}" без восстановления? Будут удалены все кабинеты клиента (${portals.length}) вместе с карточками, задачами, черновиками, конкурентами и историей отчетов.`,
+    );
+    if (!confirmed) {
+      return false;
+    }
+    const results = [];
+    for (const portal of portals) {
+      results.push(await deletePortal(portal, { silent: true, skipConfirm: true, navigateOnCurrent: false }));
+    }
+    const deletedCount = results.filter(Boolean).length;
+    if (deletedCount === portals.length) {
+      setSelectedClientId("");
+      setSelectedPortalId("demo-wb");
+      setPortalStatusFilter("active");
+      setScreen("cabinets");
+      setNotice(`Клиент "${client.name}" удален.`);
+      return true;
+    }
+    setNotice(`Удалено ${deletedCount} из ${portals.length} кабинетов клиента.`);
+    return false;
   }
 
   async function showSeller(portal) {
@@ -6023,6 +6161,60 @@ export default function App() {
     return false;
   }
 
+  async function updatePortalClientName(portal, clientName) {
+    const cleanName = String(clientName || "").trim();
+    if (!cleanName) {
+      setNotice("Название клиента не может быть пустым.");
+      return false;
+    }
+    if (portal.isDemo) {
+      setDemoPortal((item) => ({ ...item, clientName: cleanName }));
+      return true;
+    }
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/client-name`, {
+        method: "POST",
+        body: JSON.stringify({ clientName: cleanName }),
+      });
+      replaceUserPortal({ ...portal, ...response.portal, realCards: portal.realCards || [] });
+      return true;
+    } catch (error) {
+      if (error.message === "client_name_too_long") {
+        setNotice("Название клиента слишком длинное. Оставьте до 120 символов.");
+      } else if (error.message === "client_name_required") {
+        setNotice("Название клиента не может быть пустым.");
+      } else {
+        setNotice("Не удалось сохранить название клиента.");
+      }
+      return false;
+    }
+  }
+
+  async function updateClientName(client, clientName) {
+    const cleanName = String(clientName || "").trim();
+    const portals = Array.isArray(client?.portals) ? client.portals : [];
+    if (!cleanName) {
+      setNotice("Название клиента не может быть пустым.");
+      return false;
+    }
+    if (!portals.length) {
+      setNotice("У клиента пока нет кабинетов для сохранения названия.");
+      return false;
+    }
+    const results = [];
+    for (const portal of portals) {
+      results.push(await updatePortalClientName(portal, cleanName));
+    }
+    const savedCount = results.filter(Boolean).length;
+    if (savedCount === portals.length) {
+      setSelectedClientId(clientKeyFromName(cleanName));
+      setNotice("Название клиента сохранено во всех кабинетах.");
+      return true;
+    }
+    setNotice(`Название клиента сохранено в ${savedCount} из ${portals.length} кабинетов.`);
+    return false;
+  }
+
   async function updatePortalName(portal, name) {
     const cleanName = String(name || "").trim();
     if (!cleanName) {
@@ -6135,8 +6327,12 @@ export default function App() {
               setPortalModalOpen(true);
             }}
             onAddOzon={() => createOzonPortal(currentClient)}
+            onUpdateName={(clientName) => updateClientName(currentClient, clientName)}
             onUpdateTeam={(teamRoles) => updateClientTeam(currentClient, teamRoles)}
             onUpdateContact={(clientContact) => updateClientContact(currentClient, clientContact)}
+            onArchiveClient={() => archiveClient(currentClient)}
+            onRestoreClient={() => restoreClient(currentClient)}
+            onDeleteClient={() => deleteClient(currentClient)}
             helpEnabled={helpEnabled}
           />
         ) : null}
@@ -6496,7 +6692,7 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
           <div className="seller-logo">{initials(client.name || "КЛ")}</div>
           <div>
             <h2>{client.name}</h2>
-            <p>Клиент · {formatNumber(client.portals.length)} кабинета</p>
+            <p>Клиент · {formatNumber(client.portals.length)} {pluralRu(client.portals.length, "кабинет", "кабинета", "кабинетов")}</p>
           </div>
         </div>
         <Tag tone="blue">Клиент</Tag>
@@ -6522,14 +6718,20 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
   );
 }
 
-function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateTeam, onUpdateContact, helpEnabled = false }) {
+function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
   const [marketplaceTab, setMarketplaceTab] = useState("overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
   const ozonPortals = clientMarketplacePortals(client, "ozon");
+  const activeClientPortals = (client.portals || []).filter((portal) => portal.isActive !== false);
+  const inactiveClientPortals = (client.portals || []).filter((portal) => portal.isActive === false);
+  const canDeleteClient = inactiveClientPortals.length > 0 && activeClientPortals.length === 0 && inactiveClientPortals.some((portal) => !portal.isDemo);
   const leadPortal = client.portals[0] || null;
   const team = leadPortal ? getPortalTeam(leadPortal) : defaultTeamFromUsers(displayUsers);
   const clientContact = clientContactFromClient(client);
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(client.name || "");
+  const [nameSaving, setNameSaving] = useState(false);
   const [teamEditing, setTeamEditing] = useState(false);
   const [teamDraft, setTeamDraft] = useState(team);
   const [teamSaving, setTeamSaving] = useState(false);
@@ -6539,6 +6741,7 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
 
   useEffect(() => {
     setMarketplaceTab("overview");
+    setNameEditing(false);
     setTeamEditing(false);
     setContactEditing(false);
   }, [client.id]);
@@ -6548,6 +6751,12 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
       setMarketplaceTab("overview");
     }
   }, [canSeeOzonBeta, marketplaceTab]);
+
+  useEffect(() => {
+    if (!nameEditing) {
+      setNameDraft(client.name || "");
+    }
+  }, [client.name, nameEditing]);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -6592,6 +6801,22 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
     }
   }
 
+  async function saveName() {
+    const cleanName = nameDraft.trim();
+    if (!cleanName || nameSaving) {
+      return;
+    }
+    setNameSaving(true);
+    try {
+      const saved = await onUpdateName?.(cleanName);
+      if (saved !== false) {
+        setNameEditing(false);
+      }
+    } finally {
+      setNameSaving(false);
+    }
+  }
+
   async function saveContact() {
     if (contactSaving) {
       return;
@@ -6611,13 +6836,48 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
     <section className="screen active">
       <header className="topbar">
         <div className="title">
-          <h1>{client.name}</h1>
+          <div className="seller-title-row">
+            {nameEditing ? (
+              <div className="seller-name-editor">
+                <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
+                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveName} disabled={nameSaving || !nameDraft.trim()} aria-busy={nameSaving || undefined}>
+                  {nameSaving ? "Сохраняем" : "Сохранить"}
+                </button>
+                <button className="btn ghost" type="button" onClick={() => { setNameDraft(client.name || ""); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
+              </div>
+            ) : (
+              <>
+                <h1>{client.name}</h1>
+                {canManage ? <IconButton icon={Pencil} label="Редактировать название клиента" onClick={() => setNameEditing(true)} /> : null}
+              </>
+            )}
+          </div>
           <p>Общая информация клиента и разделы маркетплейсов.</p>
         </div>
-        <button className="btn" type="button" onClick={onBack}>
-          <ArrowLeft size={17} />
-          Клиенты
-        </button>
+        <div className="toolbar">
+          {canManage && activeClientPortals.length ? (
+            <button className="btn" type="button" onClick={onArchiveClient}>
+              <Archive size={17} />
+              В архив
+            </button>
+          ) : null}
+          {canManage && !activeClientPortals.length && inactiveClientPortals.length ? (
+            <button className="btn" type="button" onClick={onRestoreClient}>
+              <RotateCcw size={17} />
+              Вернуть
+            </button>
+          ) : null}
+          {canManage && canDeleteClient ? (
+            <button className="btn danger" type="button" onClick={onDeleteClient}>
+              <Trash2 size={17} />
+              Удалить
+            </button>
+          ) : null}
+          <button className="btn" type="button" onClick={onBack}>
+            <ArrowLeft size={17} />
+            Клиенты
+          </button>
+        </div>
       </header>
 
       <div className="content">
@@ -6636,13 +6896,17 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
             <div className="panel-head">
               <div>
                 <span className="section-eyebrow">Общее</span>
-                <h2>Команда клиента</h2>
-                <p>{formatNumber(client.portals.length)} кабинета · {formatNumber(clientCardCount(client))} карточек · {formatNumber(clientTaskCount(client))} активных задач</p>
+                <h2>Информация клиента</h2>
+                <p>{formatNumber(client.portals.length)} {pluralRu(client.portals.length, "кабинет", "кабинета", "кабинетов")} · {formatNumber(clientCardCount(client))} карточек · {formatNumber(clientTaskCount(client))} активных задач</p>
               </div>
-              {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}><Pencil size={16} />Редактировать</button> : null}
+              {!teamEditing && canManage ? <button className="btn" type="button" onClick={() => setTeamEditing(true)}><Pencil size={16} />Команду</button> : null}
             </div>
             {!teamEditing ? (
               <div className="client-info-list">
+                <div>
+                  <span>Название клиента</span>
+                  <strong>{client.name}</strong>
+                </div>
                 {Object.entries(projectRoleLabels).map(([roleKey, label]) => {
                   const user = findUser(team[roleKey]);
                   return (

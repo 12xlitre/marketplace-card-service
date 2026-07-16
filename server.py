@@ -1839,6 +1839,39 @@ def update_portal_client_contact(portal_id, contact, actor=None):
   return get_portal_row(portal_id)
 
 
+def update_portal_client_name(portal_id, client_name, actor=None):
+  clean_name = clean_portal_manual_text(client_name, 120, "client_name_too_long")
+  if not clean_name:
+    raise ValueError("client_name_required")
+  init_db()
+  portal_name = ""
+  previous_client_name = ""
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT id, name, client_name FROM portals WHERE id = ?",
+      (portal_id,),
+    ).fetchone()
+    if not portal:
+      return None
+    portal_name = portal["name"] or ""
+    previous_client_name = portal["client_name"] or ""
+    db.execute(
+      """
+      UPDATE portals
+      SET client_name = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      """,
+      (clean_name, portal_id),
+    )
+  record_admin_event(actor, "portal_client_name_updated", "portal", portal_id, portal_id=portal_id, details={
+    "portalName": portal_name,
+    "previousClientNameSet": bool(previous_client_name),
+    "nextClientNameSet": bool(clean_name),
+    "changed": previous_client_name != clean_name,
+  })
+  return get_portal_row(portal_id)
+
+
 def update_portal_name(portal_id, name, actor=None):
   clean_name = wb_clean_portal_name(name)
   if not clean_name:
@@ -15108,6 +15141,31 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         row = update_portal_client_contact(portal_id, payload.get("clientContact"), actor=user)
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_client_contact"})
+        return
+      if not row:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"portal": public_portal_from_row(row)})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/client-name"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/client-name")].strip("/")
+      try:
+        portal_id = int(portal_id_text)
+      except ValueError:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+        return
+      if not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        row = update_portal_client_name(portal_id, payload.get("clientName") or payload.get("client_name"), actor=user)
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_client_name"})
         return
       if not row:
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
