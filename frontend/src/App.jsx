@@ -7349,6 +7349,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [probeResult, setProbeResult] = useState(null);
   const [probeSaveStatus, setProbeSaveStatus] = useState("idle");
   const [ozonWorkState, setOzonWorkState] = useState(() => readOzonWorkState(portal.id));
+  const [ozonWorkStatus, setOzonWorkStatus] = useState("idle");
 
   useEffect(() => {
     if (!teamEditing) {
@@ -7372,12 +7373,61 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   }, [portal.id, sourceStoreUrl, sourceManualText, sourceEditing]);
 
   useEffect(() => {
-    setOzonWorkState(readOzonWorkState(portal.id));
-  }, [portal.id]);
-
-  useEffect(() => {
     writeOzonWorkState(portal.id, ozonWorkState);
   }, [portal.id, ozonWorkState]);
+
+  useEffect(() => {
+    let active = true;
+    const localState = readOzonWorkState(portal.id);
+    setOzonWorkState(localState);
+    if (!portal?.id || portal.isDemo) {
+      setOzonWorkStatus("local");
+      return () => {
+        active = false;
+      };
+    }
+    setOzonWorkStatus("loading");
+    apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-tasks`)
+      .then(async (payload) => {
+        if (!active) return;
+        const backendState = {
+          selectedKeys: localState.selectedKeys || [],
+          tasks: Array.isArray(payload.tasks) ? payload.tasks : [],
+          recentEvents: Array.isArray(payload.recentEvents) ? payload.recentEvents : [],
+        };
+        if (!backendState.tasks.length && localState.tasks?.length) {
+          try {
+            const migrated = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-tasks`, {
+              method: "POST",
+              body: JSON.stringify({ tasks: localState.tasks }),
+            });
+            if (!active) return;
+            setOzonWorkState({
+              selectedKeys: localState.selectedKeys || [],
+              tasks: Array.isArray(migrated.tasks) ? migrated.tasks : localState.tasks,
+              recentEvents: Array.isArray(migrated.recentEvents) ? migrated.recentEvents : localState.recentEvents || [],
+            });
+            setOzonWorkStatus("saved");
+            return;
+          } catch {
+            if (!active) return;
+            setOzonWorkState(localState);
+            setOzonWorkStatus("local-fallback");
+            return;
+          }
+        }
+        setOzonWorkState(backendState);
+        setOzonWorkStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setOzonWorkState(localState);
+        setOzonWorkStatus("local-fallback");
+      });
+    return () => {
+      active = false;
+    };
+  }, [portal.id, portal.isDemo]);
 
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
@@ -7495,6 +7545,37 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
+  async function persistOzonWorkState(nextState) {
+    writeOzonWorkState(portal.id, nextState);
+    if (!portal?.id || portal.isDemo) {
+      setOzonWorkStatus("local");
+      return nextState;
+    }
+    setOzonWorkStatus("saving");
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-tasks`, {
+        method: "POST",
+        body: JSON.stringify({ tasks: nextState.tasks || [] }),
+      });
+      const savedState = {
+        selectedKeys: nextState.selectedKeys || [],
+        tasks: Array.isArray(payload.tasks) ? payload.tasks : nextState.tasks || [],
+        recentEvents: Array.isArray(payload.recentEvents) ? payload.recentEvents : nextState.recentEvents || [],
+      };
+      setOzonWorkState(savedState);
+      setOzonWorkStatus("saved");
+      return savedState;
+    } catch {
+      setOzonWorkStatus("local-fallback");
+      return nextState;
+    }
+  }
+
+  function applyOzonWorkState(nextState) {
+    setOzonWorkState(nextState);
+    persistOzonWorkState(nextState);
+  }
+
   function updateOzonTaskStatus(taskId, status) {
     const now = new Date().toISOString();
     setOzonWorkState((current) => {
@@ -7502,7 +7583,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         task.id === taskId ? { ...task, status, updatedAt: now } : task
       ));
       const task = tasks.find((item) => item.id === taskId);
-      return {
+      const nextState = {
         ...current,
         tasks,
         recentEvents: [
@@ -7515,18 +7596,24 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
           ...(current.recentEvents || []),
         ].slice(0, 30),
       };
+      persistOzonWorkState(nextState);
+      return nextState;
     });
   }
 
   function deleteOzonTask(taskId) {
-    setOzonWorkState((current) => ({
-      ...current,
-      tasks: (current.tasks || []).filter((task) => task.id !== taskId),
-      recentEvents: [
-        { id: `event-${Date.now()}`, action: "deleted", label: "Ozon-задача удалена из beta-набора", at: new Date().toISOString() },
-        ...(current.recentEvents || []),
-      ].slice(0, 30),
-    }));
+    setOzonWorkState((current) => {
+      const nextState = {
+        ...current,
+        tasks: (current.tasks || []).filter((task) => task.id !== taskId),
+        recentEvents: [
+          { id: `event-${Date.now()}`, action: "deleted", label: "Ozon-задача удалена из beta-набора", at: new Date().toISOString() },
+          ...(current.recentEvents || []),
+        ].slice(0, 30),
+      };
+      persistOzonWorkState(nextState);
+      return nextState;
+    });
   }
 
   const ozonFlowRows = [
@@ -7770,7 +7857,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   cards={portal.realCards || []}
                   portalId={portal.id}
                   workState={ozonWorkState}
-                  onWorkStateChange={setOzonWorkState}
+                  workStatus={ozonWorkStatus}
+                  onWorkStateChange={applyOzonWorkState}
                   onOpenCard={onOpenCard}
                   onOpenTasks={() => setSellerTab("tasks")}
                 />
@@ -7781,6 +7869,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               <OzonTasksPanel
                 cards={portal.realCards || []}
                 workState={ozonWorkState}
+                workStatus={ozonWorkStatus}
                 onOpenCard={onOpenCard}
                 onUpdateTaskStatus={updateOzonTaskStatus}
                 onDeleteTask={deleteOzonTask}
@@ -8073,7 +8162,7 @@ function ozonSemanticDraftRows(card, seedQuery = "") {
   return { current, recommendations };
 }
 
-function OzonCardsPanel({ cards, portalId, workState, onWorkStateChange, onOpenCard, onOpenTasks }) {
+function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks }) {
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
@@ -8282,7 +8371,13 @@ function OzonCardsPanel({ cards, portalId, workState, onWorkStateChange, onOpenC
           </div>
 
           <div className="cards-toolbar">
-            <span>Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · Ozon snapshot из MPStats</span>
+            <span>
+              Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · Ozon snapshot из MPStats
+              {workStatus === "loading" ? " · загружаем задачи" : ""}
+              {workStatus === "saving" ? " · сохраняем задачи" : ""}
+              {workStatus === "saved" || workStatus === "loaded" ? " · задачи в backend" : ""}
+              {workStatus === "local-fallback" ? " · задачи временно локально" : ""}
+            </span>
             <div className="toolbar">
               <button className="btn primary" type="button" onClick={createOzonTaskBatch} disabled={!selectedCards.length}>
                 <Plus size={16} />Взять в работу
@@ -8372,7 +8467,7 @@ function OzonCardsPanel({ cards, portalId, workState, onWorkStateChange, onOpenC
   );
 }
 
-function OzonTasksPanel({ cards, workState, onOpenCard, onUpdateTaskStatus, onDeleteTask }) {
+function OzonTasksPanel({ cards, workState, workStatus = "idle", onOpenCard, onUpdateTaskStatus, onDeleteTask }) {
   const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
   const events = Array.isArray(workState?.recentEvents) ? workState.recentEvents : [];
   const cardsByKey = new Map((Array.isArray(cards) ? cards : []).map((card) => [ozonCardStableKey(card), card]));
@@ -8397,9 +8492,9 @@ function OzonTasksPanel({ cards, workState, onOpenCard, onUpdateTaskStatus, onDe
       <div className="strip-head">
         <div>
           <h2>Задачи Ozon</h2>
-          <p>Beta-набор задач по Ozon-карточкам. Он не использует WB workflow, WB audit и WB exports.</p>
+          <p>Beta-набор задач по Ozon-карточкам. Он хранится в backend по кабинету и не использует WB workflow, WB audit и WB exports.</p>
         </div>
-        <Tag tone="blue">{formatNumber(tasks.length)}</Tag>
+        <Tag tone={workStatus === "local-fallback" ? "amber" : "blue"}>{workStatus === "saving" ? "сохраняем" : workStatus === "local-fallback" ? "локально" : `${formatNumber(tasks.length)} задач`}</Tag>
       </div>
 
       <div className="cards-work-summary">

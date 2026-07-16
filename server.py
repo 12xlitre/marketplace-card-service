@@ -413,6 +413,38 @@ def init_db():
         PRIMARY KEY (portal_id, card_key)
       );
 
+      CREATE TABLE IF NOT EXISTS ozon_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL,
+        card_key TEXT NOT NULL,
+        sku TEXT NOT NULL DEFAULT '',
+        offer_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft',
+        work_type TEXT NOT NULL DEFAULT 'content',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (portal_id, task_id),
+        UNIQUE (portal_id, card_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS ozon_task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL DEFAULT '',
+        card_key TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL DEFAULT '',
+        label TEXT NOT NULL DEFAULT '',
+        actor_login TEXT NOT NULL DEFAULT '',
+        event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS service_integrations (
         provider TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT 'stored',
@@ -623,6 +655,18 @@ def init_db():
       """
       CREATE INDEX IF NOT EXISTS idx_portal_workset_cards_portal
       ON portal_workset_cards(portal_id, updated_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_ozon_tasks_portal
+      ON ozon_tasks(portal_id, updated_at)
+      """
+    )
+    db.execute(
+      """
+      CREATE INDEX IF NOT EXISTS idx_ozon_task_events_portal
+      ON ozon_task_events(portal_id, event_at)
       """
     )
     db.execute(
@@ -2003,6 +2047,8 @@ def delete_portal(portal_id, actor=None):
       "portal_integrations",
       "card_drafts",
       "portal_workset_cards",
+      "ozon_tasks",
+      "ozon_task_events",
       "card_approval_events",
       "card_competitors",
       "report_history",
@@ -3414,6 +3460,229 @@ def save_portal_workset(portal_id, raw_cards, user):
         ),
       )
   return list_portal_workset(numeric_portal_id, user)
+
+
+OZON_TASK_STATUSES = {"draft", "done", "skipped", "later", "returned"}
+OZON_TASK_STATUS_LABELS = {
+  "draft": "в работе",
+  "done": "готово",
+  "skipped": "пропущено",
+  "later": "вернуться позже",
+  "returned": "возврат",
+}
+
+
+def ensure_ozon_portal_access(portal_id, user, edit=False):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if edit:
+    allowed = user_can_edit_portal(user, numeric_portal_id)
+  else:
+    allowed = user_can_access_portal(user, numeric_portal_id)
+  if not allowed:
+    raise PermissionError("forbidden")
+  init_db()
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT id, marketplace FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+  if not portal:
+    raise ValueError("portal_not_found")
+  if audit_normalized(portal["marketplace"]) != "ozon":
+    raise ValueError("ozon_portal_required")
+  return numeric_portal_id
+
+
+def normalize_ozon_task(raw_task):
+  raw_task = raw_task if isinstance(raw_task, dict) else {}
+  card_key = audit_str(raw_task.get("cardKey") or raw_task.get("card_key"), 160)
+  sku = audit_str(raw_task.get("sku") or raw_task.get("id"), 120)
+  offer_id = audit_str(raw_task.get("offerId") or raw_task.get("offer_id"), 120)
+  title = audit_str(raw_task.get("title"), 240)
+  category = audit_str(raw_task.get("category") or raw_task.get("subjectName"), 180)
+  task_id = audit_str(raw_task.get("id") or raw_task.get("taskId") or raw_task.get("task_id"), 160)
+  if not card_key:
+    card_key = draft_card_key(sku or offer_id or title)
+  if not task_id:
+    task_id = f"ozon-task-{card_key}"
+  status = audit_str(raw_task.get("status") or "draft", 40)
+  if status not in OZON_TASK_STATUSES:
+    status = "draft"
+  work_type = audit_str(raw_task.get("workType") or raw_task.get("work_type") or "content", 40)
+  payload = {
+    "id": task_id,
+    "cardKey": card_key,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title or sku or offer_id or "Ozon карточка",
+    "category": category,
+    "status": status,
+    "workType": work_type or "content",
+  }
+  return payload if card_key else None
+
+
+def public_ozon_task(row):
+  try:
+    payload = json.loads(row["payload_json"] or "{}")
+  except (TypeError, json.JSONDecodeError):
+    payload = {}
+  payload = payload if isinstance(payload, dict) else {}
+  return {
+    "id": row["task_id"],
+    "cardKey": row["card_key"],
+    "sku": row["sku"] or payload.get("sku") or "",
+    "offerId": row["offer_id"] or payload.get("offerId") or "",
+    "title": row["title"] or payload.get("title") or "Ozon карточка",
+    "category": row["category"] or payload.get("category") or "",
+    "status": row["status"] or "draft",
+    "workType": row["work_type"] or payload.get("workType") or "content",
+    "createdAt": row["created_at"] or "",
+    "updatedAt": row["updated_at"] or "",
+    "updatedBy": row["updated_by"] or "",
+  }
+
+
+def public_ozon_task_event(row):
+  return {
+    "id": str(row["id"]),
+    "taskId": row["task_id"] or "",
+    "cardKey": row["card_key"] or "",
+    "action": row["action"] or "",
+    "label": row["label"] or "",
+    "actorLogin": row["actor_login"] or "",
+    "at": row["event_at"] or "",
+  }
+
+
+def list_ozon_tasks(portal_id, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  with connect_db() as db:
+    task_rows = db.execute(
+      """
+      SELECT *
+      FROM ozon_tasks
+      WHERE portal_id = ?
+      ORDER BY created_at ASC, id ASC
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+    event_rows = db.execute(
+      """
+      SELECT *
+      FROM ozon_task_events
+      WHERE portal_id = ?
+      ORDER BY event_at DESC, id DESC
+      LIMIT 30
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  return {
+    "portalId": str(numeric_portal_id),
+    "tasks": [public_ozon_task(row) for row in task_rows],
+    "recentEvents": [public_ozon_task_event(row) for row in event_rows],
+  }
+
+
+def save_ozon_tasks(portal_id, payload, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  payload = payload if isinstance(payload, dict) else {}
+  raw_tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+  tasks = []
+  seen = set()
+  for raw_task in raw_tasks:
+    task = normalize_ozon_task(raw_task)
+    if not task or task["cardKey"] in seen:
+      continue
+    seen.add(task["cardKey"])
+    tasks.append(task)
+  tasks = tasks[:500]
+  now = utc_now().isoformat()
+  actor_login = user_login_value(user) or ""
+  with connect_db() as db:
+    previous_rows = db.execute(
+      "SELECT task_id, card_key, status, title FROM ozon_tasks WHERE portal_id = ?",
+      (numeric_portal_id,),
+    ).fetchall()
+    previous = {row["task_id"]: row for row in previous_rows}
+    next_task_ids = {task["id"] for task in tasks}
+    for task in tasks:
+      previous_row = previous.get(task["id"])
+      db.execute(
+        """
+        INSERT INTO ozon_tasks (
+          portal_id, task_id, card_key, sku, offer_id, title, category,
+          status, work_type, payload_json, created_by, updated_by, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(portal_id, task_id) DO UPDATE SET
+          card_key = excluded.card_key,
+          sku = excluded.sku,
+          offer_id = excluded.offer_id,
+          title = excluded.title,
+          category = excluded.category,
+          status = excluded.status,
+          work_type = excluded.work_type,
+          payload_json = excluded.payload_json,
+          updated_by = excluded.updated_by,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+          numeric_portal_id,
+          task["id"],
+          task["cardKey"],
+          task["sku"],
+          task["offerId"],
+          task["title"],
+          task["category"],
+          task["status"],
+          task["workType"],
+          json.dumps(task, ensure_ascii=False, separators=(",", ":")),
+          actor_login or None,
+          actor_login or None,
+        ),
+      )
+      if not previous_row:
+        action = "created"
+        label = f"Создана Ozon-задача: {task['title']}"
+      elif previous_row["status"] != task["status"]:
+        action = task["status"]
+        label = f"{task['title']}: {OZON_TASK_STATUS_LABELS.get(task['status'], task['status'])}"
+      else:
+        action = ""
+        label = ""
+      if action:
+        db.execute(
+          """
+          INSERT INTO ozon_task_events (portal_id, task_id, card_key, action, label, actor_login, event_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          """,
+          (numeric_portal_id, task["id"], task["cardKey"], action, label[:500], actor_login, now),
+        )
+    for row in previous_rows:
+      if row["task_id"] not in next_task_ids:
+        db.execute(
+          """
+          INSERT INTO ozon_task_events (portal_id, task_id, card_key, action, label, actor_login, event_at)
+          VALUES (?, ?, ?, 'deleted', ?, ?, ?)
+          """,
+          (numeric_portal_id, row["task_id"], row["card_key"], f"Удалена Ozon-задача: {row['title']}"[:500], actor_login, now),
+        )
+    db.execute(
+      """
+      DELETE FROM ozon_tasks
+      WHERE portal_id = ?
+        AND task_id NOT IN ({})
+      """.format(",".join("?" for _ in next_task_ids) or "''"),
+      [numeric_portal_id, *next_task_ids],
+    )
+  record_admin_event(user, "ozon_tasks_updated", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "taskCount": len(tasks),
+  })
+  return list_ozon_tasks(numeric_portal_id, user)
 
 
 def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, batch_options=None):
@@ -14240,6 +14509,21 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_portal_id"})
       return
 
+    if path.startswith("/api/portals/") and path.endswith("/ozon-tasks"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-tasks")].strip("/")
+      try:
+        self.send_json(HTTPStatus.OK, list_ozon_tasks(portal_id_text, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_tasks"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+      return
+
     if path == "/api/portal-work-periods":
       user = self.require_user()
       if not user:
@@ -15661,6 +15945,25 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_cards"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-tasks"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-tasks")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        result = save_ozon_tasks(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_tasks"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return
