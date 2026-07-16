@@ -26,6 +26,7 @@
 - в Ozon beta добавлен сохраняемый ручной источник кабинета: ссылка/Seller ID/ориентир Ozon и комментарий хранятся в `portals.store_url` / `portals.manual_source` через `POST /api/portals/<portal_id>/manual-source`, а статус маршрута Ozon меняется с `ожидает источник` на `источник задан`;
 - Ozon beta умеет вручную проверить сохраненный источник через MPStats (`POST /api/portals/<portal_id>/ozon-mpstats-probe`): это read-only probe с агрегацией найденных SKU до 50 карточек, sample-карточками и списком попыток endpoint-ов, без сохранения карточек и без запуска WB bootstrap;
 - найденные Ozon sample-карточки сохраняются только отдельным явным действием через `POST /api/portals/<portal_id>/ozon-mpstats-cards`; они попадают в `cards_snapshot_json` как `marketplace=ozon` и отображаются в Ozon-разделе, но пока не открываются в WB-деталке;
+- сохраненные Ozon-карточки открываются в отдельный `OzonCardDetailScreen`, который повторяет структуру WB-detail, но пока работает в режиме просмотра Ozon snapshot: вкладки СЯ/аудит/изменения являются Ozon-заглушками и не запускают WB-логику;
 - модалка добавления кабинета пока оставлена WB-only, чтобы не запускать Ozon через WB/MPStats-логику.
 
 Правило на следующие шаги: до подключения Ozon API нужно явно разделить marketplace-specific контракты загрузки карточек, задач, отчетных периодов и внешних источников. Нельзя смешивать Ozon-данные в WB-потоке только через общий `portal_id` без проверки `marketplace`.

@@ -2595,6 +2595,12 @@ tr.selected-row td {
   line-height: 1.35;
 }
 
+.ozon-card-actions {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
 .store-import-progress {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -3662,6 +3668,17 @@ tr:last-child td {
   height: 100%;
   object-fit: contain;
   image-rendering: auto;
+}
+
+.photo-preview > span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--blue);
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: .08em;
 }
 
 .photo-preview:before {

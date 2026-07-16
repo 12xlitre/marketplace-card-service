@@ -5256,7 +5256,7 @@ export default function App() {
   }, [helpEnabled]);
 
   useEffect(() => {
-    if (screen !== "card") {
+    if (!["card", "ozon-card"].includes(screen)) {
       return;
     }
     const cards = cardsForPortal(currentPortal);
@@ -5974,6 +5974,17 @@ export default function App() {
     setScreen("card");
   }
 
+  function openOzonCard(card) {
+    setSelectedCard(card);
+    setSelectedCardKey(cardDraftKey(card));
+    setCardReturnTarget({
+      sellerTab: "cabinet",
+      label: "Карточки Ozon",
+    });
+    setTaskRun(null);
+    setScreen("ozon-card");
+  }
+
   function backFromCard() {
     const nextSellerTab = normalizeSellerTab(cardReturnTarget.sellerTab);
     setTaskRun(null);
@@ -6419,6 +6430,7 @@ export default function App() {
             onUpdateName={(name) => updatePortalName(currentPortal, name)}
             onUpdateSource={(source) => updatePortalSource(currentPortal, source)}
             onPortalUpdated={replaceUserPortal}
+            onOpenCard={openOzonCard}
             onNotice={setNotice}
             helpEnabled={helpEnabled}
           />
@@ -6471,6 +6483,21 @@ export default function App() {
 
         {screen === "card" && !selectedCardFromPortal ? (
           <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
+        ) : null}
+
+        {screen === "ozon-card" && selectedCardFromPortal ? (
+          <OzonCardDetailScreen
+            key={cardDraftKey(selectedCardFromPortal)}
+            card={selectedCardFromPortal}
+            portal={currentPortal}
+            onBack={backFromCard}
+            backLabel={cardReturnTarget.label}
+            helpEnabled={helpEnabled}
+          />
+        ) : null}
+
+        {screen === "ozon-card" && !selectedCardFromPortal ? (
+          <CardRecoveryScreen loading={false} onBack={backFromCard} />
         ) : null}
 
         {screen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
@@ -7294,7 +7321,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
-function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onPortalUpdated, onNotice, helpEnabled = false }) {
+function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onPortalUpdated, onOpenCard, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
@@ -7679,7 +7706,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   </div>
                 </section>
 
-                <OzonCardsPanel cards={portal.realCards || []} />
+                <OzonCardsPanel cards={portal.realCards || []} onOpenCard={onOpenCard} />
               </>
             ) : null}
 
@@ -7729,7 +7756,7 @@ function OzonPlaceholderPanel({ title, copy, tag }) {
   );
 }
 
-function OzonCardsPanel({ cards }) {
+function OzonCardsPanel({ cards, onOpenCard }) {
   const visibleCards = Array.isArray(cards) ? cards : [];
   if (!visibleCards.length) {
     return (
@@ -7754,15 +7781,19 @@ function OzonCardsPanel({ cards }) {
           const rawFields = rawFieldsForCard(card);
           const sku = card.id || card.sku || rawFields.id || rawFields.sku || "";
           const offerId = card.offerId || card.vendorCode || rawFields.offerId || rawFields.offer_id || "";
+          const photoUrl = bestPhotoUrl(card);
           return (
             <article className="ozon-card-row" key={`${sku || offerId || card.title}-${index}`}>
-              {card.photoUrl ? <img src={card.photoUrl} alt="" loading="lazy" /> : <div className="ozon-card-thumb">OZ</div>}
+              {photoUrl ? <img src={photoUrl} alt="" loading="lazy" /> : <div className="ozon-card-thumb">OZ</div>}
               <div>
                 <strong>{card.title || sku || "Ozon карточка"}</strong>
                 <span>{[sku ? `SKU ${sku}` : "", offerId ? `offer ${offerId}` : "", card.brand, card.subjectName || card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
                 <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ") || "метрики появятся после расширения Ozon-логики"}</small>
               </div>
-              <Tag tone={Number(card.issueCount || 0) ? "amber" : "green"}>{card.status || "MPStats"}</Tag>
+              <div className="ozon-card-actions">
+                <Tag tone={Number(card.issueCount || 0) ? "amber" : "green"}>{card.status || "MPStats"}</Tag>
+                <button className="btn mini" type="button" onClick={() => onOpenCard?.(card)}>Открыть</button>
+              </div>
             </article>
           );
         })}
@@ -7837,6 +7868,214 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
         </div>
       ) : null}
     </div>
+  );
+}
+
+function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточки Ozon", helpEnabled = false }) {
+  const [activeTab, setActiveTab] = useState("card");
+  const rawFields = rawFieldsForCard(card);
+  const mpstats = card?.mpstats && typeof card.mpstats === "object" ? card.mpstats : {};
+  const photoUrl = bestPhotoUrl(card);
+  const title = textOrDash(card?.title || rawFields.title || rawFields.name);
+  const sku = textOrDash(card?.sku || card?.id || rawFields.sku || rawFields.id || rawFields.productId);
+  const offerId = textOrDash(card?.offerId || card?.vendorCode || rawFields.offerId || rawFields.offer_id || rawFields.vendorCode);
+  const category = textOrDash(card?.subjectName || card?.category || rawFields.category || rawFields.categoryName);
+  const brand = textOrDash(card?.brand || rawFields.brand);
+  const sellerName = textOrDash(card?.sellerName || rawFields.sellerName || rawFields.seller || rawFields.shopName);
+  const description = card?.description || rawFields.description || "";
+  const characteristics = card?.characteristics || rawFields.characteristics || [];
+  const photos = card?.photos || rawFields.photos || (photoUrl ? [photoUrl] : []);
+  const sizes = card?.sizes || rawFields.sizes || [];
+  const price = firstDefined(card?.price, rawFields.price, rawFields.finalPrice, rawFields.final_price);
+  const stock = firstDefined(card?.stock, rawFields.stock, rawFields.balance, rawFields.available_stock);
+  const sales = firstDefined(card?.sales, mpstats.sales, rawFields.sales);
+  const revenue = firstDefined(card?.revenue, mpstats.revenue, rawFields.revenue);
+  const rating = firstDefined(card?.rating, rawFields.rating);
+  const feedbacks = firstDefined(card?.feedbacks, rawFields.feedbacks, rawFields.reviews, rawFields.comments);
+  const status = card?.status || "MPStats";
+  const externalUrl = safeHttpsUrl(card?.url || rawFields.url || rawFields.productUrl || rawFields.link);
+  const sourceLabel = mpstats.source || rawFields.source || "Ozon MPStats";
+  const portalName = portalDisplayName(portal);
+  const issueCount = Number(card?.issueCount || 0);
+  const rawTechnicalFields = Object.keys(rawFields).length ? rawFields : card;
+
+  const pendingPanels = {
+    semantic: {
+      title: "Семантическое ядро Ozon",
+      copy: "Здесь будет СЯ для Ozon-карточки с явной пометкой источника: карточка Ozon, keyword-база MPStats/WB.",
+      tag: "следующий этап",
+    },
+    audit: {
+      title: "Рыночный аудит Ozon",
+      copy: "Ozon-аудит будет использовать Ozon snapshot, MPStats-метрики, категорию, цену, остаток, фото и будущие Ozon-правила качества.",
+      tag: "готовим",
+    },
+    changes: {
+      title: "Изменения Ozon",
+      copy: "Черновики контента, цен и остатков будут отдельными от WB. Сейчас экран открыт в режиме просмотра сохраненной карточки.",
+      tag: "без WB",
+    },
+  };
+
+  return (
+    <section className="screen active marketplace-theme-ozon">
+      <header className="topbar">
+        <div className="title">
+          <h1>Детальная карточка Ozon</h1>
+          <p>{title} · SKU {sku} · offer {offerId} · {category}</p>
+        </div>
+        <div className="toolbar">
+          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel}</button>
+          {externalUrl ? <a className="btn" href={externalUrl} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть Ozon</a> : null}
+          <Tag tone={issueCount ? "amber" : "green"}>{status}</Tag>
+        </div>
+      </header>
+
+      <div className="content">
+        <div className={`detail-layout ${activeTab === "technical" ? "wide-changes" : ""}`}>
+          <aside className="detail-aside">
+            <div className={`photo-preview ${photoUrl ? "has-image" : ""}`}>
+              {photoUrl ? <img src={photoUrl} alt={title} loading="eager" decoding="async" /> : <span>OZ</span>}
+            </div>
+            <section className="panel">
+              <h2>Данные карточки</h2>
+              <div className="panel-list">
+                <div className="list-row"><span>Кабинет</span><strong>{portalName}</strong></div>
+                <div className="list-row"><span>SKU Ozon</span><strong>{sku}</strong></div>
+                <div className="list-row"><span>Offer ID</span><strong>{offerId}</strong></div>
+                <div className="list-row"><span>Категория</span><strong>{category}</strong></div>
+                <div className="list-row"><span>Бренд</span><strong>{brand}</strong></div>
+                <div className="list-row"><span>Продавец</span><strong>{sellerName}</strong></div>
+                <div className="list-row"><span>Фото</span><strong>{valueSummary(photos)}</strong></div>
+                <div className="list-row"><span>Характеристики</span><strong>{valueSummary(characteristics)}</strong></div>
+                <div className="list-row"><span>Цена</span><strong>{valueSummary(price)}</strong></div>
+                <div className="list-row"><span>Остаток</span><strong>{valueSummary(stock)}</strong></div>
+                <div className="list-row"><span>Источник</span><strong>{sourceLabel}</strong></div>
+              </div>
+            </section>
+          </aside>
+
+          <div className="detail-main">
+            <nav className="detail-tabs" aria-label="Разделы Ozon-карточки">
+              <button className={activeTab === "semantic" ? "active" : ""} type="button" onClick={() => setActiveTab("semantic")}>Семантическое ядро</button>
+              <button className={activeTab === "card" ? "active" : ""} type="button" onClick={() => setActiveTab("card")}>Карточка</button>
+              <button className={activeTab === "audit" ? "active" : ""} type="button" onClick={() => setActiveTab("audit")}>Рыночный аудит</button>
+              <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => setActiveTab("changes")}>Изменения</button>
+              <button className={activeTab === "technical" ? "active" : ""} type="button" onClick={() => setActiveTab("technical")}>Техполя</button>
+            </nav>
+            <HelpHint enabled={helpEnabled} title="Ozon-карточка">
+              Экран повторяет рабочий контур WB-карточки, но использует сохраненный Ozon snapshot. WB API, WB-аудит и WB-экспорты здесь не запускаются.
+            </HelpHint>
+
+            {activeTab === "card" ? (
+              <>
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Заголовок</h2>
+                      <p>Название и описание из сохраненного Ozon snapshot.</p>
+                    </div>
+                    <Tag tone="blue">Ozon</Tag>
+                  </div>
+                  <div className="option-list">
+                    <div className="option-row">
+                      <div className="option-head">
+                        <strong>{title}</strong>
+                        <span className="char-counter">{title.length} симв.</span>
+                      </div>
+                      <p>Это текущее название карточки из {sourceLabel}.</p>
+                    </div>
+                  </div>
+                  <div className="snapshot-description">
+                    <span>Описание</span>
+                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                  </div>
+                </section>
+
+                <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Характеристики</h2>
+                      <p>Значения из Ozon/MPStats без подмешивания WB-справочников.</p>
+                    </div>
+                    <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
+                  </div>
+                  <CharacteristicsBlock items={characteristics} />
+                </section>
+
+                <section className="workspace-strip commerce-strip">
+                  <div className="strip-head">
+                    <div>
+                      <h2>Цены, остатки и метрики</h2>
+                      <p>Доступные коммерческие данные из Ozon MPStats snapshot.</p>
+                    </div>
+                    <Tag tone="blue">MPStats</Tag>
+                  </div>
+                  <div className="commerce-summary">
+                    <div><span>Цена</span><strong>{valueSummary(price)}</strong></div>
+                    <div><span>Остаток</span><strong>{valueSummary(stock)}</strong></div>
+                    <div><span>Продажи</span><strong>{valueSummary(sales)}</strong></div>
+                    <div><span>Выручка</span><strong>{valueSummary(revenue)}</strong></div>
+                    <div><span>Рейтинг</span><strong>{valueSummary(rating)}</strong></div>
+                    <div><span>Отзывы</span><strong>{valueSummary(feedbacks)}</strong></div>
+                    <div><span>SKU</span><strong>{sku}</strong></div>
+                    <div><span>Offer</span><strong>{offerId}</strong></div>
+                  </div>
+                  {Array.isArray(sizes) && sizes.length ? (
+                    <div className="commerce-size-scroll">
+                      <div className="commerce-size-table">
+                        <div className="commerce-size-row commerce-size-head">
+                          <span>Размер</span><span>Цена</span><span>Остаток</span><span>SKU</span>
+                        </div>
+                        {sizes.slice(0, 12).map((size, index) => (
+                          <div className="commerce-size-row" key={`${size?.techSize || index}-${size?.stock || ""}`}>
+                            <strong>{size?.techSize || size?.ozonSize || `Размер ${index + 1}`}</strong>
+                            <strong>{valueSummary(size?.price || size?.discountedPrice)}</strong>
+                            <strong>{valueSummary(size?.stock || size?.sellerStock || size?.wbStock)}</strong>
+                            <strong>{Array.isArray(size?.skus) && size.skus.length ? size.skus.join(", ") : sku}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+
+            {["semantic", "audit", "changes"].includes(activeTab) ? (
+              <OzonDetailPendingPanel {...pendingPanels[activeTab]} />
+            ) : null}
+
+            {activeTab === "technical" ? (
+              <details className="workspace-strip technical-fields" open>
+                <summary>
+                  <span>Технические поля Ozon snapshot</span>
+                  <Tag tone="blue">{Object.keys(rawTechnicalFields || {}).length}</Tag>
+                </summary>
+                <RawFieldsView fields={rawTechnicalFields} />
+              </details>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OzonDetailPendingPanel({ title, copy, tag }) {
+  return (
+    <section className="workspace-strip">
+      <div className="strip-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{copy}</p>
+        </div>
+        <Tag tone="amber">{tag}</Tag>
+      </div>
+      <div className="empty-state">
+        <span>Раздел будет подключен к Ozon-логике отдельно, без WB API и WB-экспортов.</span>
+      </div>
+    </section>
   );
 }
 
