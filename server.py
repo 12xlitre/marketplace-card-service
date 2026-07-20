@@ -11662,6 +11662,85 @@ SEMANTIC_CONTENT_GENERIC_SINGLE = {
   "вид",
 }
 
+SEMANTIC_PRODUCT_ANCHOR_STOPWORDS = {
+  *SEMANTIC_CONTENT_STOPWORDS,
+  *SEMANTIC_CONTENT_GENERIC_SINGLE,
+  "женская",
+  "женские",
+  "женский",
+  "мужская",
+  "мужские",
+  "мужской",
+  "детская",
+  "детские",
+  "детский",
+  "черный",
+  "черная",
+  "белый",
+  "белая",
+  "серый",
+  "серая",
+  "красный",
+  "красная",
+  "синий",
+  "синяя",
+  "зеленый",
+  "зеленая",
+  "желтый",
+  "желтая",
+  "сахар",
+  "сахара",
+  "вкус",
+  "аромат",
+  "упаковка",
+  "упаковке",
+  "блистер",
+  "блистера",
+  "штук",
+  "шт",
+}
+
+SEMANTIC_COMMERCIAL_MODIFIER_STEMS = {
+  "сахар",
+  "диабет",
+  "диабетик",
+  "поляризац",
+  "бренд",
+  "женск",
+  "мужск",
+  "детск",
+  "натурал",
+  "без",
+  "уф",
+  "uv",
+}
+
+SEMANTIC_INFORMATIONAL_FRAGMENT_STEMS = {
+  "заболев",
+  "лечен",
+  "нарушен",
+  "обмен",
+  "причин",
+  "симптом",
+  "синдром",
+  "профилактик",
+  "показан",
+  "противопоказан",
+  "непереносим",
+}
+
+SEMANTIC_NON_QUERY_FRAGMENT_PATTERNS = (
+  r"\bодн(?:ой|ом|ого|ую)\s+упаковк",
+  r"\bупаковк\w*\s+блистер",
+  r"\bблистер\w*\s+леденц",
+  r"\bнарушен\w*\s+\w+\s+обмен",
+  r"\bпищев\w*\s+ценност",
+  r"\bэнергетическ\w*\s+ценност",
+  r"\bуслови\w*\s+хранен",
+  r"\bсрок\s+годност",
+  r"\bиндивидуальн\w*\s+непереносим",
+)
+
 
 def semantic_content_tokens(value):
   return [
@@ -11683,6 +11762,159 @@ def semantic_content_phrase_valid(tokens):
       and bool(re.search(r"[0-9a-z]", token))
     )
   return False
+
+
+def semantic_token_stem(token):
+  return audit_stem_characteristic_token(audit_normalized(token))
+
+
+def semantic_tokens_have_stem(tokens, stems):
+  for token in tokens:
+    stemmed = semantic_token_stem(token)
+    if any(stemmed.startswith(stem) or token.startswith(stem) for stem in stems):
+      return True
+  return False
+
+
+def semantic_query_has_fragment_shape(query):
+  normalized = audit_normalized(query)
+  if not normalized:
+    return True
+  if any(re.search(pattern, normalized) for pattern in SEMANTIC_NON_QUERY_FRAGMENT_PATTERNS):
+    return True
+  tokens = audit_tokens(normalized)
+  if (
+    semantic_tokens_have_stem(tokens, {"нарушен"})
+    and semantic_tokens_have_stem(tokens, {"обмен"})
+  ):
+    return True
+  if (
+    semantic_tokens_have_stem(tokens, {"упаковк"})
+    and semantic_tokens_have_stem(tokens, {"блистер"})
+  ):
+    return True
+  if (
+    semantic_tokens_have_stem(tokens, {"пищев", "энергетическ"})
+    and semantic_tokens_have_stem(tokens, {"ценност"})
+  ):
+    return True
+  return False
+
+
+def semantic_row_has_demand(row):
+  if not isinstance(row, dict) or not row.get("query"):
+    return False
+  for field in ("wbCount", "ozonCount", "totalFound", "results", "frequency365", "uniqueDays"):
+    if audit_number(row.get(field), 0) > 0:
+      return True
+  return any(
+    audit_position_value(row.get(field)) is not None
+    for field in ("orgPos", "adPos", "avgPos", "position", "rank")
+  )
+
+
+def semantic_source_row_for_query(source_lookup, query):
+  row = source_lookup.get(audit_normalized(query or "")) if isinstance(source_lookup, dict) else None
+  return row if semantic_row_has_demand(row) else None
+
+
+def semantic_product_anchor_stems(card, seed_queries=None):
+  card = card if isinstance(card, dict) else {}
+  subject = audit_str(card.get("subjectName") or card.get("subject") or "")
+  if "/" in subject:
+    subject = subject.split("/")[-1].strip()
+  title = audit_str(card.get("title") or card.get("name") or "")
+  seeds = " ".join(audit_str(value) for value in (seed_queries or []) if audit_str(value))
+  source_text = subject or " ".join(part for part in (title, seeds) if part)
+  anchors = set()
+  for token in audit_tokens(source_text):
+    stem = semantic_token_stem(token)
+    if len(stem) < 4 or stem in SEMANTIC_PRODUCT_ANCHOR_STOPWORDS or re.fullmatch(r"\d+", stem):
+      continue
+    anchors.add(stem)
+  if any(stem.startswith("леден") for stem in anchors):
+    anchors.update({"леден", "конфет", "карамел"})
+  if any(stem.startswith("очк") for stem in anchors):
+    anchors.add("очк")
+  if any(stem.startswith("оправ") for stem in anchors):
+    anchors.add("оправ")
+  return anchors
+
+
+def semantic_query_has_product_anchor(card, query, seed_queries=None):
+  anchors = semantic_product_anchor_stems(card, seed_queries=seed_queries)
+  if not anchors:
+    return True
+  query_tokens = audit_tokens(query)
+  for token in query_tokens:
+    stem = semantic_token_stem(token)
+    if any(stem.startswith(anchor) or anchor.startswith(stem) for anchor in anchors if len(anchor) >= 4):
+      return True
+  return False
+
+
+def semantic_query_has_brand_anchor(card, query):
+  card = card if isinstance(card, dict) else {}
+  brand_tokens = [token for token in audit_tokens(card.get("brand") or "") if len(token) >= 3]
+  if not brand_tokens:
+    return False
+  query_tokens = set(audit_tokens(query))
+  return all(token in query_tokens for token in brand_tokens) and len(query_tokens) <= 4
+
+
+def semantic_query_has_commercial_modifier(query):
+  return semantic_tokens_have_stem(audit_tokens(query), SEMANTIC_COMMERCIAL_MODIFIER_STEMS)
+
+
+def semantic_query_has_informational_intent(query):
+  return semantic_tokens_have_stem(audit_tokens(query), SEMANTIC_INFORMATIONAL_FRAGMENT_STEMS)
+
+
+def semantic_query_product_relevant(card, query, seed_queries=None):
+  query = audit_str(query, 160)
+  if not query or semantic_query_has_fragment_shape(query):
+    return False
+  content = audit_normalized(" ".join([
+    card.get("title") or "",
+    card.get("name") or "",
+    card.get("subjectName") or card.get("subject") or "",
+    " ".join(seed_queries or []),
+  ]) if isinstance(card, dict) else "")
+  normalized_query = audit_normalized(query)
+  product_is_sunglasses = "солнцезащит" in content or "солнечн" in content
+  product_is_frame = "оправ" in content and not product_is_sunglasses
+  if product_is_sunglasses and "оправ" in normalized_query and "оправ" not in content:
+    return False
+  if product_is_frame and ("солнцезащит" in normalized_query or "солнечн" in normalized_query):
+    return False
+  if semantic_query_has_product_anchor(card, query, seed_queries=seed_queries):
+    return True
+  if semantic_query_has_brand_anchor(card, query):
+    return True
+  content_tokens = semantic_content_tokens(query)
+  if len(content_tokens) <= 3 and semantic_query_has_commercial_modifier(query) and not semantic_query_has_informational_intent(query):
+    return True
+  return False
+
+
+def semantic_filter_mpstats_rows(card, rows, seed_queries=None, limit=None):
+  output = []
+  seen = set()
+  for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict) or not row.get("query"):
+      continue
+    if not semantic_row_has_demand(row):
+      continue
+    if not semantic_query_product_relevant(card, row.get("query"), seed_queries=seed_queries):
+      continue
+    key = audit_normalized(row.get("query") or "")
+    if not key or key in seen:
+      continue
+    seen.add(key)
+    output.append(row)
+    if limit is not None and len(output) >= limit:
+      break
+  return output
 
 
 def semantic_card_content_texts(card):
@@ -11717,6 +11949,8 @@ def semantic_add_content_candidate(candidates, seen, query, field, score, source
   query = re.sub(r"\s+", " ", audit_str(query, 120)).strip()
   key = audit_normalized(query)
   if not key or key in seen:
+    return
+  if not semantic_row_has_demand(source_row):
     return
   tokens = semantic_content_tokens(query)
   if not semantic_content_phrase_valid(tokens):
@@ -11753,7 +11987,9 @@ def semantic_content_ngram_candidates(text, field, source_lookup, base_score, ma
     for index in range(0, max(0, len(tokens) - size + 1)):
       phrase_tokens = tokens[index:index + size]
       phrase = " ".join(phrase_tokens)
-      source_row = source_lookup.get(audit_normalized(phrase))
+      source_row = semantic_source_row_for_query(source_lookup, phrase)
+      if not source_row:
+        continue
       semantic_add_content_candidate(candidates, seen, phrase, field, base_score + size * 4 - index / 100, source_row)
       if len(candidates) >= max_items:
         return candidates
@@ -11778,24 +12014,27 @@ def semantic_characteristic_content_candidates(card, source_lookup):
       if not value_tokens:
         continue
       value_phrase = " ".join(value_tokens)
-      source_row = source_lookup.get(audit_normalized(value_phrase))
+      source_row = semantic_source_row_for_query(source_lookup, value_phrase)
       semantic_add_content_candidate(candidates, seen, value_phrase, "characteristics", 78 - index / 100, source_row)
       if name_tokens and len(name_tokens) + len(value_tokens) <= 5:
         name_value_phrase = " ".join([*name_tokens, *value_tokens])
-        source_row = source_lookup.get(audit_normalized(name_value_phrase))
+        source_row = semantic_source_row_for_query(source_lookup, name_value_phrase)
         semantic_add_content_candidate(candidates, seen, name_value_phrase, "characteristics", 74 - index / 100, source_row)
   return candidates
 
 
 def semantic_content_keywords_from_card(card, rows=None, limit=180):
-  source_lookup = semantic_content_source_lookup(rows if isinstance(rows, list) else [])
+  confirmed_rows = semantic_filter_mpstats_rows(card, rows if isinstance(rows, list) else [])
+  if not confirmed_rows:
+    return []
+  source_lookup = semantic_content_source_lookup(confirmed_rows)
   texts = semantic_card_content_texts(card)
   candidates = []
   seen = set()
   title_tokens = semantic_content_tokens(texts["title"])[:10]
   if 2 <= len(title_tokens) <= 8:
     phrase = " ".join(title_tokens)
-    semantic_add_content_candidate(candidates, seen, phrase, "title", 110, source_lookup.get(audit_normalized(phrase)))
+    semantic_add_content_candidate(candidates, seen, phrase, "title", 110, semantic_source_row_for_query(source_lookup, phrase))
   for item in semantic_content_ngram_candidates(texts["title"], "title", source_lookup, 100, max_tokens=32, max_items=80):
     semantic_add_content_candidate(candidates, seen, item.get("query"), item.get("field"), item.get("_score", 90), item)
   for item in semantic_characteristic_content_candidates(card if isinstance(card, dict) else {}, source_lookup):
@@ -11809,7 +12048,7 @@ def semantic_content_keywords_from_card(card, rows=None, limit=180):
 
 
 def semantic_current_rows_from_card_and_mpstats(card, rows, limit=1000):
-  rows = [row for row in rows if isinstance(row, dict) and row.get("query")]
+  rows = semantic_filter_mpstats_rows(card, rows if isinstance(rows, list) else [])
   current = semantic_content_keywords_from_card(card, rows, limit=180)
   seen = {audit_normalized(item.get("query") or "") for item in current}
   texts = semantic_card_content_texts(card)
@@ -13710,7 +13949,7 @@ def audit_keyword_entry(item, status, field):
 def audit_build_semantic_core(card, keywords):
   current_title = audit_str(card.get("title") or "")
   description = audit_str(card.get("description") or "", 7000)
-  keywords = [item for item in keywords if isinstance(item, dict) and item.get("query")]
+  keywords = semantic_filter_mpstats_rows(card, keywords if isinstance(keywords, list) else [])
   current = semantic_current_rows_from_card_and_mpstats(card, keywords, limit=1000)
   current_keys = {audit_normalized(item.get("query") or "") for item in current}
   missing = []
@@ -13786,7 +14025,7 @@ def fetch_mpstats_keywords_core(card, force_refresh=False):
     audit_cache_set(cache_key, payload, AUDIT_MARKET_CACHE_TTL_SECONDS)
     cached_flag = False
 
-  keywords = audit_keywords_from_payload(payload, limit=500)
+  keywords = semantic_filter_mpstats_rows(card, audit_keywords_from_payload(payload, limit=500), limit=500)
   semantic_core = audit_build_semantic_core(card, keywords)
   return {
     "source": "mpstats",
@@ -13866,16 +14105,7 @@ def mpstats_expanding_seed_queries(card, query):
 
 
 def mpstats_expanding_query_relevant(card, query, seed_queries):
-  content = audit_normalized(" ".join([
-    " ".join(seed_queries or []),
-    card.get("title") or "",
-    card.get("description") or "",
-    card.get("subjectName") or card.get("subject") or "",
-  ]))
-  normalized_query = audit_normalized(query)
-  if "очк" in content:
-    return "очк" in normalized_query
-  return True
+  return semantic_query_product_relevant(card, query, seed_queries=seed_queries)
 
 
 def normalize_mpstats_expanding_query(item):
@@ -13972,6 +14202,8 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   for item in payload.get("words") if isinstance(payload.get("words"), list) else []:
     normalized = normalize_mpstats_expanding_query(item)
     if not normalized:
+      continue
+    if not semantic_row_has_demand(normalized):
       continue
     if not mpstats_expanding_query_relevant(card, normalized["query"], seed_queries):
       continue
