@@ -3646,10 +3646,14 @@ function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCh
   ];
 }
 
+function contentApprovalStatusExportable(status) {
+  return ["submitted", "approved", "exported"].includes(String(status || ""));
+}
+
 function buildPortalContentSheet(card, draft, usedNames) {
   const normalized = contentFromStoredDraft(draft, card);
   const contentApproval = normalizeApprovalState(normalized.approvalSections.content);
-  if (!["approved", "exported"].includes(contentApproval.status)) {
+  if (!contentApprovalStatusExportable(contentApproval.status)) {
     return null;
   }
   const characteristics = draftCharacteristicsList(normalized.characteristics);
@@ -3658,13 +3662,14 @@ function buildPortalContentSheet(card, draft, usedNames) {
   return {
     name: cardExportSheetName(card, draft, usedNames),
     freezeRows: 1,
-    widths: [24, 18, 28, 64, 96, ...characteristicHeaders.map(() => 28)],
+    widths: [24, 18, 28, 22, 64, 96, ...characteristicHeaders.map(() => 28)],
     rows: [
-      ["Артикул продавца", "Номенклатура WB", "Предмет", "Заголовок", "Описание", ...characteristicHeaders],
+      ["Артикул продавца", "Номенклатура WB", "Предмет", "Статус", "Заголовок", "Описание", ...characteristicHeaders],
       [
         card?.vendorCode || draft?.vendorCode || "",
         card?.nmID || draft?.nmID || "",
         card?.subjectName || "",
+        approvalStatusLabel(contentApproval.status),
         normalized.title || "",
         normalized.description || "",
         ...characteristicValues,
@@ -10333,7 +10338,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       const sheets = buildPortalContentSheets(cards, drafts);
       if (!sheets.length) {
         setCabinetExportStatus("content-empty");
-        onNotice?.("В кабинете пока нет принятых карточек по контенту.");
+        onNotice?.("В кабинете пока нет карточек, отправленных на согласование по контенту.");
         return;
       }
       downloadXlsx(`итоговый контент - ${safeFilePart(displayName)} - ${exportDatePart()}.xlsx`, sheets);
@@ -11860,7 +11865,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
   const workflowTasks = [...(workflow.tasks || []), ...(workflow.completedTasks || [])];
   const tasksForCard = (card) => workflowTasks.filter((task) => cardMatchesApprovalTask(card, task));
   const cardHasSemanticFinal = (card) => tasksForCard(card).some((task) => task.workType === "semantic" && (taskHasSemanticFinal(task) || ["done", "approved", "exported"].includes(task.status)));
-  const cardHasFinalContent = (card) => tasksForCard(card).some((task) => task.workType === "content" && ["approved", "exported", "done"].includes(task.status));
+  const cardHasFinalContent = (card) => tasksForCard(card).some((task) => task.workType === "content" && contentApprovalStatusExportable(task.status));
   const semanticFinalCards = cards.filter(cardHasSemanticFinal);
   const contentFinalCards = cards.filter(cardHasFinalContent);
   const bulkMatchedCards = bulkFilterActive
@@ -13426,7 +13431,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
-  const canDownloadFinalContent = ["approved", "exported"].includes(normalizeApprovalState(approvalSections.content).status);
+  const canDownloadFinalContent = contentApprovalStatusExportable(normalizeApprovalState(approvalSections.content).status);
   const latestAuditEntry = auditHistory.find((item) => item?.summary || item?.competitorSelection) || {};
   const latestAuditSummary = latestAuditEntry.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
@@ -16716,7 +16721,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </div>
                 </div>
                 <div className="tab-actions">
-                  <button className="btn" type="button" onClick={() => downloadDraftTable("content")} disabled={!canDownloadFinalContent} title={canDownloadFinalContent ? "Скачать итоговый контент карточки" : "Сначала согласуйте секцию Контент"}>
+                  <button className="btn" type="button" onClick={() => downloadDraftTable("content")} disabled={!canDownloadFinalContent} title={canDownloadFinalContent ? "Скачать контент карточки для согласования" : "Сначала отправьте секцию Контент на согласование"}>
                     <Download size={17} />Скачать итоговый контент
                   </button>
                 </div>
