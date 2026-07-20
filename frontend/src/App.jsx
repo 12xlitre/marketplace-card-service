@@ -990,6 +990,11 @@ function approvalSectionLabel(section) {
   return APPROVAL_SECTION_LABELS[section] || "Изменения";
 }
 
+function normalizeApprovalSectionKey(section, fallback = "content") {
+  const fallbackKey = APPROVAL_SECTION_KEYS.includes(fallback) ? fallback : "content";
+  return APPROVAL_SECTION_KEYS.includes(section) ? section : fallbackKey;
+}
+
 function normalizeApprovalSections(value, fallbackApproval = null) {
   const source = value && typeof value === "object" ? value : {};
   const hasSectionState = APPROVAL_SECTION_KEYS.some((key) => source[key] && typeof source[key] === "object");
@@ -15597,12 +15602,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function applyApprovalChange(nextApproval, statusMessage, sectionKey = activeApprovalSection) {
+    const targetSection = normalizeApprovalSectionKey(sectionKey, activeApprovalSection);
     const previousApproval = approval;
     const previousSections = approvalSections;
     const normalized = normalizeApprovalState(nextApproval);
     const nextSections = normalizeApprovalSections({
       ...approvalSections,
-      [sectionKey]: normalized,
+      [targetSection]: normalized,
     });
     const nextOverallApproval = deriveOverallApproval(nextSections);
     setApprovalSections(nextSections);
@@ -15621,11 +15627,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function approvalHistoryItem(action, reason = "", sectionKey = activeApprovalSection) {
+    const targetSection = normalizeApprovalSectionKey(sectionKey, activeApprovalSection);
     return {
       id: `approval-${Date.now()}`,
       action,
-      section: sectionKey,
-      sectionLabel: approvalSectionLabel(sectionKey),
+      section: targetSection,
+      sectionLabel: approvalSectionLabel(targetSection),
       reason,
       userLogin: currentUser?.login || "",
       userName: currentUser?.full_name || currentUser?.login || "",
@@ -15634,14 +15641,16 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function canSubmitApprovalSection(sectionKey) {
-    const sectionApproval = normalizeApprovalState(approvalSections[sectionKey]);
+    const targetSection = normalizeApprovalSectionKey(sectionKey, activeApprovalSection);
+    const sectionApproval = normalizeApprovalState(approvalSections[targetSection]);
     const sectionReadOnly = isProjectLead || (sectionApproval.status === "submitted" && isApprovalReviewer);
     return !sectionReadOnly && ["draft", "changes_requested"].includes(sectionApproval.status);
   }
 
   async function submitForApproval(sectionKey = activeApprovalSection) {
+    const targetSection = normalizeApprovalSectionKey(sectionKey, activeApprovalSection);
     const now = new Date().toISOString();
-    const sectionApproval = normalizeApprovalState(approvalSections[sectionKey]);
+    const sectionApproval = normalizeApprovalState(approvalSections[targetSection]);
     const nextApproval = normalizeApprovalState({
       ...sectionApproval,
       status: "submitted",
@@ -15651,9 +15660,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       reviewedBy: "",
       reviewedAt: "",
       returnReason: "",
-      history: [approvalHistoryItem("submitted", "", sectionKey), ...(sectionApproval.history || [])],
+      history: [approvalHistoryItem("submitted", "", targetSection), ...(sectionApproval.history || [])],
     });
-    return applyApprovalChange(nextApproval, "approval-submitted", sectionKey);
+    return applyApprovalChange(nextApproval, "approval-submitted", targetSection);
   }
 
   async function approveChanges() {
@@ -17754,14 +17763,14 @@ function ApprovalPanel({
             <span>{status === "approval-reason-required" ? "Чтобы вернуть задачу, нужно указать причину." : "Комментарий обязателен только для возврата на доработку."}</span>
           </div>
           <div className="approval-buttons">
-            <button className={loadingButtonClass("btn", busy)} type="button" onClick={onReturn} disabled={busy || !comment.trim()} aria-busy={busy || undefined}><RotateCcw size={17} />На доработку</button>
-            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={onApprove} disabled={busy} aria-busy={busy || undefined}><CheckSquare size={17} />Принято</button>
+            <button className={loadingButtonClass("btn", busy)} type="button" onClick={() => onReturn?.()} disabled={busy || !comment.trim()} aria-busy={busy || undefined}><RotateCcw size={17} />На доработку</button>
+            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={() => onApprove?.()} disabled={busy} aria-busy={busy || undefined}><CheckSquare size={17} />Принято</button>
           </div>
         </div>
       ) : null}
       {canSubmit ? (
         <div className="approval-buttons">
-            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={onSubmit} disabled={busy} aria-busy={busy || undefined}>
+            <button className={loadingButtonClass("btn primary", busy)} type="button" onClick={() => onSubmit?.()} disabled={busy} aria-busy={busy || undefined}>
               <Upload size={17} />Отправить на согласование
             </button>
         </div>
