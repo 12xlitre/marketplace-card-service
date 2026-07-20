@@ -3201,11 +3201,12 @@ def active_task_work_types(meta):
   ]
 
 
-TASK_WORK_DONE_STATUSES = {"submitted", "approved", "exported"}
+TASK_WORK_DONE_STATUSES = {"submitted", "approved", "exported", "done"}
 TASK_WORK_STATUS_PRIORITY = {
   "changes_requested": 4,
   "submitted": 3,
   "draft": 2,
+  "done": 1,
   "approved": 1,
   "exported": 1,
 }
@@ -3231,12 +3232,24 @@ def approval_for_task_work_type(meta, work_type):
   return approval
 
 
+def manual_task_completion_for_work_type(meta, work_type):
+  meta = meta if isinstance(meta, dict) else {}
+  completions = meta.get("manualTaskCompletions") if isinstance(meta.get("manualTaskCompletions"), dict) else {}
+  completion = completions.get(work_type) if isinstance(completions.get(work_type), dict) else None
+  return completion if completion and completion.get("completedAt") else None
+
+
 def task_work_type_status(meta, work_type):
   meta = meta if isinstance(meta, dict) else {}
   if work_type == "semantic":
-    return "approved" if semantic_core_final_exists(meta) else "draft"
+    if semantic_core_final_exists(meta):
+      return "approved"
+    return "done" if manual_task_completion_for_work_type(meta, work_type) else "draft"
   approval = approval_for_task_work_type(meta, work_type)
-  return approval_status_from_approval(approval) if approval else "draft"
+  status = approval_status_from_approval(approval) if approval else "draft"
+  if status == "draft" and manual_task_completion_for_work_type(meta, work_type):
+    return "done"
+  return status
 
 
 def task_work_type_done(meta, work_type):
@@ -3252,7 +3265,9 @@ def task_status_for_work_types(meta, work_types):
 
 def task_work_completion_label(work_type, status):
   if work_type == "semantic":
-    return "добавлено в итоговое СЯ"
+    return "завершено вручную" if status == "done" else "добавлено в итоговое СЯ"
+  if status == "done":
+    return "завершено вручную"
   if status == "submitted":
     return "отправлено на согласование"
   if status == "approved":
@@ -3265,19 +3280,24 @@ def task_work_completion_label(work_type, status):
 def completed_task_work_item(meta, work_type, row=None):
   meta = meta if isinstance(meta, dict) else {}
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  manual_completion = manual_task_completion_for_work_type(meta, work_type)
   if work_type == "semantic":
     final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
-    if not semantic_core_final_exists(meta):
+    if not semantic_core_final_exists(meta) and not manual_completion:
       return None
+    manual_completed_at = manual_completion.get("completedAt") if manual_completion else ""
+    manual_completed_by = manual_completion.get("completedBy") if manual_completion else ""
     completed_at = str(
       final_export.get("updatedAt")
       or final_export.get("createdAt")
+      or manual_completed_at
       or row_value(row, "updated_at")
       or ""
     )
     completed_by = str(
       final_export.get("updatedBy")
       or final_export.get("createdBy")
+      or manual_completed_by
       or row_value(row, "updated_by")
       or row_value(row, "created_by")
       or batch.get("assigneeLogin")
@@ -3286,23 +3306,29 @@ def completed_task_work_item(meta, work_type, row=None):
     )
     return {
       "workType": work_type,
-      "status": "approved",
+      "status": "approved" if semantic_core_final_exists(meta) else "done",
       "completedAt": completed_at,
       "completedBy": completed_by,
-      "completionLabel": task_work_completion_label(work_type, "approved"),
+      "completionLabel": task_work_completion_label(work_type, "approved" if semantic_core_final_exists(meta) else "done"),
     }
 
   status = task_work_type_status(meta, work_type)
   if status not in TASK_WORK_DONE_STATUSES:
     return None
   approval = approval_for_task_work_type(meta, work_type)
+  manual_completed_at = manual_completion.get("completedAt") if manual_completion and status == "done" else ""
+  manual_completed_by = manual_completion.get("completedBy") if manual_completion and status == "done" else ""
   completed_at = str(
+    manual_completed_at
+    or
     approval.get("submittedAt")
     or approval.get("reviewedAt")
     or row_value(row, "updated_at")
     or ""
   )
   completed_by = str(
+    manual_completed_by
+    or
     approval.get("submittedBy")
     or approval.get("reviewedBy")
     or row_value(row, "updated_by")
@@ -4734,6 +4760,121 @@ def log_card_work_event(portal_id, payload, user):
   }
 
 
+def complete_card_work_task(portal_id, payload, user):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  payload = payload if isinstance(payload, dict) else {}
+  card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  work_types = normalize_optional_work_types([payload.get("workType") or payload.get("work_type")])
+  if not card_key or not work_types:
+    raise ValueError("invalid_task_complete")
+  work_type = work_types[0]
+  batch_id = str(payload.get("batchId") or payload.get("batch_id") or "").strip()[:120]
+  comment = str(payload.get("reason") or "").strip()[:400]
+  now = utc_now().isoformat()
+  actor = user_login_value(user) or ""
+  updated = False
+  already_done = False
+  updated_work_periods = []
+
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT id, card_key, nm_id, vendor_code, payload_json, updated_at, updated_by, created_by
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+    if not row:
+      raise ValueError("task_not_found")
+    try:
+      previous_payload = normalize_card_draft_payload(json.loads(row["payload_json"]))
+    except (TypeError, json.JSONDecodeError):
+      previous_payload = normalize_card_draft_payload({})
+    next_payload = normalize_card_draft_payload(previous_payload)
+    meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
+    batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+    current_work_types = normalize_optional_work_types(batch.get("workTypes"))
+    if work_type not in current_work_types and not task_work_type_done(meta, work_type):
+      raise ValueError("task_work_type_not_found")
+    already_done = task_work_type_done(meta, work_type)
+    if not already_done:
+      completions = meta.get("manualTaskCompletions") if isinstance(meta.get("manualTaskCompletions"), dict) else {}
+      completions[work_type] = {
+        "status": "done",
+        "completedAt": now,
+        "completedBy": actor,
+        "reason": comment,
+        "batchId": batch.get("id") or batch_id,
+      }
+      meta["manualTaskCompletions"] = completions
+      next_payload["meta"] = meta
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, audit_status = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND portal_id = ?
+        """,
+        (
+          json.dumps(next_payload, ensure_ascii=False, separators=(",", ":")),
+          next_payload.get("auditStatus") or "idle",
+          actor or None,
+          row["id"],
+          numeric_portal_id,
+        ),
+      )
+      updated = True
+      updated_work_periods = sync_work_period_task_statuses_for_draft_in_db(
+        db,
+        numeric_portal_id,
+        next_payload,
+        previous_payload,
+        user,
+      )
+
+    reason_parts = [CARD_WORK_EVENT_ACTIONS["quick_completed"], WORK_TYPE_LABELS.get(work_type, work_type)]
+    if batch.get("id") or batch_id:
+      reason_parts.append(f"batch {batch.get('id') or batch_id}")
+    if already_done:
+      reason_parts.append("уже была закрыта")
+    if comment:
+      reason_parts.append(comment)
+    insert_card_approval_event(db, numeric_portal_id, card_key, {
+      "status": "quick_completed",
+      "action": "quick_completed",
+      "actorLogin": actor,
+      "assigneeLogin": "",
+      "reason": " · ".join(reason_parts)[:1000],
+      "eventAt": now,
+      "nmID": str(row["nm_id"] or payload.get("nmID") or payload.get("nm_id") or "")[:80],
+      "vendorCode": str(row["vendor_code"] or payload.get("vendorCode") or payload.get("vendor_code") or "")[:120],
+    })
+
+  record_admin_event(user, "card_work_task_completed", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
+    "cardKey": card_key,
+    "workType": work_type,
+    "batchId": batch_id,
+    "updated": updated,
+    "alreadyDone": already_done,
+  })
+  return {
+    "portalId": str(numeric_portal_id),
+    "cardKey": card_key,
+    "workType": work_type,
+    "completed": True,
+    "updated": updated,
+    "alreadyDone": already_done,
+    "workflow": approval_workflow(numeric_portal_id, user),
+    "workPeriods": updated_work_periods,
+  }
+
+
 def audit_draft_payload_from_result(audit_payload, previous_payload):
   previous_payload = normalize_card_draft_payload(previous_payload)
   draft_content = audit_payload.get("draftContent") if isinstance(audit_payload.get("draftContent"), dict) else {}
@@ -5438,8 +5579,8 @@ def parse_work_period_task_link_id(value):
 
 def work_period_status_for_task_work_status(work_type, status):
   if work_type == "semantic":
-    return "done" if status == "approved" else "in_progress"
-  if status in {"approved", "exported"}:
+    return "done" if status in {"approved", "done"} else "in_progress"
+  if status in {"approved", "exported", "done"}:
     return "done"
   if status == "submitted":
     return "review"
@@ -5451,22 +5592,23 @@ def work_period_status_context_for_payload(payload, work_type, row=None):
   status = task_work_type_status(meta, work_type)
   period_status = work_period_status_for_task_work_status(work_type, status)
   batch = meta.get("batch") if isinstance(meta.get("batch"), dict) else {}
+  manual_completion = manual_task_completion_for_work_type(meta, work_type)
   if work_type == "semantic":
     final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
     return {
       "status": period_status,
       "sourceStatus": status,
-      "at": str(final_export.get("updatedAt") or final_export.get("createdAt") or row_value(row, "updated_at") or utc_now().isoformat())[:80],
-      "by": str(final_export.get("updatedBy") or final_export.get("createdBy") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or "")[:120],
+      "at": str(final_export.get("updatedAt") or final_export.get("createdAt") or (manual_completion.get("completedAt") if manual_completion else "") or row_value(row, "updated_at") or utc_now().isoformat())[:80],
+      "by": str(final_export.get("updatedBy") or final_export.get("createdBy") or (manual_completion.get("completedBy") if manual_completion else "") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or "")[:120],
       "reason": "",
     }
   approval = approval_for_task_work_type(meta, work_type)
-  event_at = (
-    approval.get("reviewedAt") if status in {"approved", "exported", "changes_requested"} else ""
-  ) or approval.get("submittedAt") or row_value(row, "updated_at") or utc_now().isoformat()
-  actor = (
-    approval.get("reviewedBy") if status in {"approved", "exported", "changes_requested"} else ""
-  ) or approval.get("submittedBy") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or ""
+  manual_event_at = manual_completion.get("completedAt") if manual_completion and status == "done" else ""
+  manual_actor = manual_completion.get("completedBy") if manual_completion and status == "done" else ""
+  reviewed_at = approval.get("reviewedAt") if status in {"approved", "exported", "changes_requested"} else ""
+  reviewed_by = approval.get("reviewedBy") if status in {"approved", "exported", "changes_requested"} else ""
+  event_at = manual_event_at or reviewed_at or approval.get("submittedAt") or row_value(row, "updated_at") or utc_now().isoformat()
+  actor = manual_actor or reviewed_by or approval.get("submittedBy") or row_value(row, "updated_by") or batch.get("assigneeLogin") or batch.get("createdBy") or ""
   return {
     "status": period_status,
     "sourceStatus": status,
@@ -9803,8 +9945,8 @@ def semantic_frequency_priority(value):
 
 
 def audit_contains_semantic_content_query(text, query):
-  text_tokens = [token for token in audit_tokens(text) if len(token) > 3]
-  query_tokens = [token for token in audit_tokens(query) if len(token) > 3]
+  text_tokens = audit_semantic_match_tokens(text)
+  query_tokens = audit_semantic_match_tokens(query)
   if not text_tokens or not query_tokens:
     return False
   text_phrase = f" {' '.join(text_tokens)} "
@@ -9815,6 +9957,236 @@ def audit_contains_semantic_content_query(text, query):
     text_token_set = set(text_tokens)
     return all(token in text_token_set for token in query_tokens)
   return False
+
+
+def audit_semantic_match_tokens(value):
+  return [
+    token
+    for token in audit_tokens(value)
+    if len(token) > 3 or re.search(r"[0-9a-z]", token)
+  ]
+
+
+SEMANTIC_CONTENT_STOPWORDS = {
+  "для",
+  "или",
+  "при",
+  "без",
+  "под",
+  "над",
+  "как",
+  "что",
+  "это",
+  "эта",
+  "этот",
+  "эти",
+  "все",
+  "всех",
+  "ваш",
+  "ваша",
+  "ваши",
+  "наш",
+  "наша",
+  "уже",
+  "еще",
+  "ещё",
+  "очень",
+  "более",
+  "менее",
+  "также",
+  "который",
+  "которая",
+  "которые",
+  "товар",
+  "товара",
+  "изделие",
+  "изделия",
+  "модель",
+  "модели",
+  "wildberries",
+}
+
+SEMANTIC_CONTENT_GENERIC_SINGLE = {
+  "цвет",
+  "размер",
+  "артикул",
+  "материал",
+  "состав",
+  "бренд",
+  "страна",
+  "пол",
+  "тип",
+  "вид",
+}
+
+
+def semantic_content_tokens(value):
+  return [
+    token
+    for token in audit_semantic_match_tokens(value)
+    if token not in SEMANTIC_CONTENT_STOPWORDS
+  ]
+
+
+def semantic_content_phrase_valid(tokens):
+  useful = [token for token in tokens if token not in SEMANTIC_CONTENT_STOPWORDS]
+  if len(useful) >= 2:
+    return True
+  if len(useful) == 1:
+    token = useful[0]
+    return (
+      token not in SEMANTIC_CONTENT_GENERIC_SINGLE
+      and len(token) >= 4
+      and bool(re.search(r"[0-9a-z]", token))
+    )
+  return False
+
+
+def semantic_card_content_texts(card):
+  card = card if isinstance(card, dict) else {}
+  return {
+    "title": audit_str(card.get("title") or "", 700),
+    "description": audit_str(card.get("description") or "", 7000),
+    "characteristics": audit_characteristics_text(card.get("characteristics") if isinstance(card.get("characteristics"), list) else []),
+  }
+
+
+def semantic_content_field_for_query(texts, query):
+  found = [
+    field
+    for field, text in texts.items()
+    if text and audit_contains_semantic_content_query(text, query)
+  ]
+  if not found:
+    return ""
+  if "title" in found and "description" in found and "characteristics" in found:
+    return "title_description_characteristics"
+  if "title" in found and "description" in found:
+    return "title_description"
+  if "title" in found and "characteristics" in found:
+    return "title_characteristics"
+  if "description" in found and "characteristics" in found:
+    return "description_characteristics"
+  return found[0]
+
+
+def semantic_add_content_candidate(candidates, seen, query, field, score, source_row=None):
+  query = re.sub(r"\s+", " ", audit_str(query, 120)).strip()
+  key = audit_normalized(query)
+  if not key or key in seen:
+    return
+  tokens = semantic_content_tokens(query)
+  if not semantic_content_phrase_valid(tokens):
+    return
+  seen.add(key)
+  source_row = source_row if isinstance(source_row, dict) else {}
+  candidates.append({
+    **source_row,
+    "query": query,
+    "field": field,
+    "status": "current",
+    "source": source_row.get("source") or "card-content",
+    "priority": source_row.get("priority") or semantic_frequency_priority(source_row.get("wbCount")),
+    "_score": score + min(audit_int(source_row.get("wbCount"), 0) / 100000, 8),
+  })
+
+
+def semantic_content_source_lookup(rows):
+  lookup = {}
+  for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+      continue
+    key = audit_normalized(row.get("query") or "")
+    if key and key not in lookup:
+      lookup[key] = row
+  return lookup
+
+
+def semantic_content_ngram_candidates(text, field, source_lookup, base_score, max_tokens=120, max_items=80):
+  tokens = semantic_content_tokens(text)[:max_tokens]
+  candidates = []
+  seen = set()
+  for size in (4, 3, 2):
+    for index in range(0, max(0, len(tokens) - size + 1)):
+      phrase_tokens = tokens[index:index + size]
+      phrase = " ".join(phrase_tokens)
+      source_row = source_lookup.get(audit_normalized(phrase))
+      semantic_add_content_candidate(candidates, seen, phrase, field, base_score + size * 4 - index / 100, source_row)
+      if len(candidates) >= max_items:
+        return candidates
+  return candidates
+
+
+def semantic_characteristic_content_candidates(card, source_lookup):
+  candidates = []
+  seen = set()
+  rows = card.get("characteristics") if isinstance(card, dict) and isinstance(card.get("characteristics"), list) else []
+  for index, item in enumerate(rows[:80]):
+    if not isinstance(item, dict):
+      continue
+    name = audit_str(item.get("name") or item.get("label") or item.get("charcName") or "")
+    name_tokens = [
+      token
+      for token in semantic_content_tokens(name)
+      if token not in SEMANTIC_CONTENT_GENERIC_SINGLE
+    ][:2]
+    for value in audit_card_values_from_characteristic(item)[:8]:
+      value_tokens = semantic_content_tokens(value)[:5]
+      if not value_tokens:
+        continue
+      value_phrase = " ".join(value_tokens)
+      source_row = source_lookup.get(audit_normalized(value_phrase))
+      semantic_add_content_candidate(candidates, seen, value_phrase, "characteristics", 78 - index / 100, source_row)
+      if name_tokens and len(name_tokens) + len(value_tokens) <= 5:
+        name_value_phrase = " ".join([*name_tokens, *value_tokens])
+        source_row = source_lookup.get(audit_normalized(name_value_phrase))
+        semantic_add_content_candidate(candidates, seen, name_value_phrase, "characteristics", 74 - index / 100, source_row)
+  return candidates
+
+
+def semantic_content_keywords_from_card(card, rows=None, limit=180):
+  source_lookup = semantic_content_source_lookup(rows if isinstance(rows, list) else [])
+  texts = semantic_card_content_texts(card)
+  candidates = []
+  seen = set()
+  title_tokens = semantic_content_tokens(texts["title"])[:10]
+  if 2 <= len(title_tokens) <= 8:
+    phrase = " ".join(title_tokens)
+    semantic_add_content_candidate(candidates, seen, phrase, "title", 110, source_lookup.get(audit_normalized(phrase)))
+  for item in semantic_content_ngram_candidates(texts["title"], "title", source_lookup, 100, max_tokens=32, max_items=80):
+    semantic_add_content_candidate(candidates, seen, item.get("query"), item.get("field"), item.get("_score", 90), item)
+  for item in semantic_characteristic_content_candidates(card if isinstance(card, dict) else {}, source_lookup):
+    semantic_add_content_candidate(candidates, seen, item.get("query"), item.get("field"), item.get("_score", 70), item)
+  for item in semantic_content_ngram_candidates(texts["description"], "description", source_lookup, 42, max_tokens=180, max_items=80):
+    semantic_add_content_candidate(candidates, seen, item.get("query"), item.get("field"), item.get("_score", 40), item)
+  return [
+    {key: value for key, value in item.items() if key != "_score"}
+    for item in sorted(candidates, key=lambda row: row.get("_score", 0), reverse=True)[:limit]
+  ]
+
+
+def semantic_current_rows_from_card_and_mpstats(card, rows, limit=1000):
+  rows = [row for row in rows if isinstance(row, dict) and row.get("query")]
+  current = semantic_content_keywords_from_card(card, rows, limit=180)
+  seen = {audit_normalized(item.get("query") or "") for item in current}
+  texts = semantic_card_content_texts(card)
+  for row in rows:
+    key = audit_normalized(row.get("query") or "")
+    if not key or key in seen:
+      continue
+    field = semantic_content_field_for_query(texts, row.get("query"))
+    if not field:
+      continue
+    seen.add(key)
+    current.append({
+      **row,
+      "field": field,
+      "status": "current",
+      "priority": row.get("priority") or semantic_frequency_priority(row.get("wbCount")),
+    })
+    if len(current) >= limit:
+      break
+  return current[:limit]
 
 
 def audit_unique(values, limit=12):
@@ -11696,9 +12068,12 @@ def audit_build_semantic_core(card, keywords):
   current_title = audit_str(card.get("title") or "")
   description = audit_str(card.get("description") or "", 7000)
   keywords = [item for item in keywords if isinstance(item, dict) and item.get("query")]
-  current = []
+  current = semantic_current_rows_from_card_and_mpstats(card, keywords, limit=1000)
+  current_keys = {audit_normalized(item.get("query") or "") for item in current}
   missing = []
   for item in keywords[:80]:
+    if audit_normalized(item.get("query") or "") in current_keys:
+      continue
     in_title = audit_contains_semantic_content_query(current_title, item.get("query"))
     in_description = audit_contains_semantic_content_query(description, item.get("query"))
     if in_title or in_description:
@@ -11706,6 +12081,7 @@ def audit_build_semantic_core(card, keywords):
       if in_title and in_description:
         field = "title_description"
       current.append(audit_keyword_entry(item, "present", field))
+      current_keys.add(audit_normalized(item.get("query") or ""))
     else:
       missing.append(audit_keyword_entry(item, "missing", ""))
   recommended = []
@@ -11725,7 +12101,7 @@ def audit_build_semantic_core(card, keywords):
   total_top = min(len(keywords), 12)
   present_top = sum(
     1 for item in keywords[:12]
-    if audit_contains_semantic_content_query(current_title, item.get("query")) or audit_contains_semantic_content_query(description, item.get("query"))
+    if audit_normalized(item.get("query") or "") in current_keys
   )
   coverage = round((present_top / total_top) * 100) if total_top else None
   reason = "MPStats SEO-запросы не получены; СЯ нужно собрать вручную."
@@ -11735,7 +12111,7 @@ def audit_build_semantic_core(card, keywords):
       reason += f" В работу стоит взять: {', '.join(item['query'] for item in recommended[:3])}."
   return {
     "coveragePercent": coverage,
-    "current": current[:40],
+    "current": current[:1000],
     "missing": missing[:60],
     "recommended": recommended,
     "totalKeywords": len(keywords),
@@ -11963,8 +12339,9 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
     rows.append(normalized)
   rows.sort(key=lambda item: (audit_int(item.get("wbCount"), 0), audit_int(item.get("ozonCount"), 0)), reverse=True)
 
-  content = f"{audit_str(card.get('title') or '')} {audit_str(card.get('description') or '')}".strip()
-  current = []
+  texts = semantic_card_content_texts(card)
+  current = semantic_current_rows_from_card_and_mpstats(card, rows, limit=1000)
+  current_keys = {audit_normalized(item.get("query") or "") for item in current}
   recommended = []
   all_keywords = []
   for row in rows:
@@ -11973,8 +12350,13 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
       "priority": semantic_frequency_priority(row.get("wbCount")),
     }
     all_keywords.append(target)
-    if content and audit_contains_semantic_content_query(content, row.get("query")):
-      current.append({**target, "field": "title_description", "status": "current"})
+    key = audit_normalized(row.get("query") or "")
+    if key in current_keys:
+      continue
+    field = semantic_content_field_for_query(texts, row.get("query"))
+    if field:
+      current.append({**target, "field": field, "status": "current"})
+      current_keys.add(key)
     else:
       recommended.append({**target, "reason": "найдено MPStats в расширении запросов"})
 
@@ -17840,6 +18222,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_event"})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path == "/api/card-workset/complete-task":
+      user = self.require_user()
+      if not user:
+        return
+      payload = self.read_json() or {}
+      try:
+        result = complete_card_work_task(payload.get("portalId"), payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_task_complete"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

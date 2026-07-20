@@ -240,7 +240,7 @@ function readSavedAppView() {
     return {
       screen: appScreens.has(saved.screen) ? saved.screen : "cabinets",
       clientId: saved.clientId ? String(saved.clientId) : "",
-      portalId: saved.portalId ? String(saved.portalId) : "demo-wb",
+      portalId: saved.portalId ? String(saved.portalId) : "",
       cardKey: saved.cardKey ? String(saved.cardKey) : "",
       sellerTab: sellerTabs.has(saved.sellerTab) ? saved.sellerTab : "cabinet",
     };
@@ -4468,6 +4468,13 @@ function semanticRemovalExportRows(removalRows, core) {
 }
 
 function semanticCoreFromRankingPayload(payload) {
+  const currentRows = semanticRowsByKey(Array.isArray(payload?.semanticCore?.current) ? payload.semanticCore.current : [])
+    .map((item) => ({
+      ...item,
+      ...semanticRankFields(item, payload?.period || item?.rankPeriod || null),
+      status: item.status || "current",
+      source: item.source || "card-content",
+    }));
   const rankedKeywords = semanticRowsByKey(Array.isArray(payload?.keywords) ? payload.keywords : [])
     .map((item) => ({
       ...item,
@@ -4480,17 +4487,17 @@ function semanticCoreFromRankingPayload(payload) {
     source: "mpstats-keywords",
     seedQuery: "",
     period: payload?.period || {},
-    current: [],
-    recommended: [],
-    missing: [],
-    allKeywords: [],
+    current: currentRows,
+    recommended: Array.isArray(payload?.semanticCore?.recommended) ? payload.semanticCore.recommended : [],
+    missing: Array.isArray(payload?.semanticCore?.missing) ? payload.semanticCore.missing : [],
+    allKeywords: Array.isArray(payload?.semanticCore?.allKeywords) ? payload.semanticCore.allKeywords : [],
     rankedKeywords,
     subjectOptions: [],
-    totalKeywords: rankedKeywords.length,
-    coveragePercent: null,
+    totalKeywords: Number(payload?.semanticCore?.totalKeywords || rankedKeywords.length),
+    coveragePercent: payload?.semanticCore?.coveragePercent ?? null,
     rankingSource: payload?.source || "mpstats",
     rankingPeriod: payload?.period || null,
-    reason: "MPStats позиции карточки собраны отдельным отчетом.",
+    reason: payload?.semanticCore?.reason || "MPStats позиции карточки собраны отдельным отчетом.",
   };
 }
 
@@ -5413,7 +5420,7 @@ export default function App() {
   const [screen, setScreen] = useState(initialView.screen || "cabinets");
   const [portalStatusFilter, setPortalStatusFilter] = useState("active");
   const [selectedClientId, setSelectedClientId] = useState(initialView.clientId || "");
-  const [selectedPortalId, setSelectedPortalId] = useState(initialView.portalId || "demo-wb");
+  const [selectedPortalId, setSelectedPortalId] = useState(initialView.portalId || "");
   const [sellerTab, setSellerTab] = useState(normalizeSellerTab(initialView.sellerTab));
   const [cardReturnTarget, setCardReturnTarget] = useState(() => ({
     sellerTab: normalizeSellerTab(initialView.sellerTab),
@@ -5437,13 +5444,15 @@ export default function App() {
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
   const canManageUsers = currentUser ? userCanManageUsers(currentUser) : false;
-  const activeDemoPortal = { ...demoPortal, isActive: !demoPortalArchived };
-  const allPortals = [activeDemoPortal, ...userPortals].map(mergePortalWorkSummary);
+  const allPortals = userPortals.map(mergePortalWorkSummary);
   const activePortals = allPortals.filter((portal) => portal.isActive !== false);
   const allClients = buildClientWorkspaces(allPortals);
   const currentClient = allClients.find((client) => client.id === selectedClientId) || allClients[0] || null;
 
-  const currentPortal = allPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || allPortals[0];
+  const currentPortal = allPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || allPortals[0] || null;
+  const screenNeedsClient = screen === "client";
+  const screenNeedsPortal = ["seller", "card", "ozon-card"].includes(screen);
+  const displayScreen = (screenNeedsClient && !currentClient) || (screenNeedsPortal && !currentPortal) ? "cabinets" : screen;
 
   function mergePortalWorkSummary(portal) {
     const localSummary = portalWorkSummaries[String(portal?.id || "")];
@@ -5483,20 +5492,20 @@ export default function App() {
       return;
     }
     localStorage.setItem(appViewStorageKey, JSON.stringify({
-      screen,
+      screen: displayScreen,
       clientId: selectedClientId,
       portalId: selectedPortalId,
       cardKey: selectedCardKey,
       sellerTab,
     }));
-  }, [currentUser, screen, selectedClientId, selectedPortalId, selectedCardKey, sellerTab]);
+  }, [currentUser, displayScreen, selectedClientId, selectedPortalId, selectedCardKey, sellerTab]);
 
   useEffect(() => {
     localStorage.setItem(helpModeStorageKey, helpEnabled ? "1" : "0");
   }, [helpEnabled]);
 
   useEffect(() => {
-    if (!["card", "ozon-card"].includes(screen)) {
+    if (!["card", "ozon-card"].includes(displayScreen)) {
       return;
     }
     const cards = cardsForPortal(currentPortal);
@@ -5507,21 +5516,21 @@ export default function App() {
     if (!selectedCard || !cardMatchesDraftKey(selectedCard, cardDraftKey(nextCard))) {
       setSelectedCard(nextCard);
     }
-  }, [screen, currentPortal, selectedCardKey, selectedCard]);
+  }, [displayScreen, currentPortal, selectedCardKey, selectedCard]);
 
   useEffect(() => {
     if (!currentUser || !currentPortal || currentPortal.isDemo || !currentPortal.apiConnected) {
       return;
     }
-    if (!["seller", "card"].includes(screen)) {
+    if (!["seller", "card"].includes(displayScreen)) {
       return;
     }
     loadPortalCards(currentPortal);
-  }, [currentUser, screen, currentPortal?.id, currentPortal?.apiConnected, currentPortal?.realCards?.length]);
+  }, [currentUser, displayScreen, currentPortal?.id, currentPortal?.apiConnected, currentPortal?.realCards?.length]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [screen, selectedPortalId, selectedCardKey]);
+  }, [displayScreen, selectedPortalId, selectedCardKey]);
 
   async function restoreSession() {
     try {
@@ -5570,7 +5579,6 @@ export default function App() {
       setMpstatsIntegration(null);
     }
 
-    await loadWbDemoSnapshot();
   }
 
   async function refreshPortals() {
@@ -5782,7 +5790,7 @@ export default function App() {
     setCurrentUser(null);
     setScreen("cabinets");
     setSelectedClientId("");
-    setSelectedPortalId("demo-wb");
+    setSelectedPortalId("");
     setSelectedCardKey(cardDraftKey(demoCards[0]));
     setSelectedCard(demoCards[0]);
     localStorage.removeItem(appViewStorageKey);
@@ -5908,7 +5916,7 @@ export default function App() {
       });
       removeUserPortal(portal.id);
       if (navigateOnCurrent && String(selectedPortalId) === String(portal.id)) {
-        setSelectedPortalId("demo-wb");
+        setSelectedPortalId("");
         setScreen("cabinets");
       }
       if (!silent) setNotice("Кабинет удален.");
@@ -6004,7 +6012,7 @@ export default function App() {
     const deletedCount = results.filter(Boolean).length;
     if (deletedCount === portals.length) {
       setSelectedClientId("");
-      setSelectedPortalId("demo-wb");
+      setSelectedPortalId("");
       setPortalStatusFilter("active");
       setScreen("cabinets");
       setNotice(`Клиент "${client.name}" удален.`);
@@ -6190,6 +6198,9 @@ export default function App() {
   }
 
   function cardsForPortal(portal) {
+    if (!portal) {
+      return [];
+    }
     return portal.realCards?.length ? portal.realCards : (portal.isDemo ? demoCards : []);
   }
 
@@ -6284,6 +6295,7 @@ export default function App() {
     const portal = normalizePortal(response.portal);
     setUserPortals((items) => [...items, portal]);
     setPortalModalOpen(false);
+    setSelectedClientId(portalClientKey(portal));
     setSelectedPortalId(portal.id);
     setSellerTab("cabinet");
     setScreen("seller");
@@ -6563,7 +6575,7 @@ export default function App() {
   const selectedCardFromPortal = currentPortalCards.find((card) => cardMatchesDraftKey(card, selectedCardKey)) || null;
   const currentPortalKey = String(currentPortal?.id || "");
   const cardScreenLoading = Boolean(
-    screen === "card"
+    displayScreen === "card"
     && !selectedCardFromPortal
     && currentPortal
     && !currentPortal.isDemo
@@ -6588,7 +6600,7 @@ export default function App() {
     <div className="app-shell">
       <Rail
         user={currentUser}
-        screen={screen}
+        screen={displayScreen}
         canManage={canManagePortals}
         helpEnabled={helpEnabled}
         onHelpToggle={setHelpEnabled}
@@ -6603,7 +6615,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {screen === "cabinets" ? (
+        {displayScreen === "cabinets" ? (
           <CabinetsScreen
             portals={visiblePortals()}
             activePortals={activePortals}
@@ -6625,7 +6637,7 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "client" && currentClient ? (
+        {displayScreen === "client" && currentClient ? (
           <ClientWorkspaceScreen
             client={currentClient}
             currentUser={currentUser}
@@ -6653,7 +6665,7 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "seller" && isOzonPortal(currentPortal) ? (
+        {displayScreen === "seller" && currentPortal && isOzonPortal(currentPortal) ? (
           <OzonSellerScreen
             portal={currentPortal}
             displayUsers={displayUsers}
@@ -6672,7 +6684,7 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "seller" && !isOzonPortal(currentPortal) ? (
+        {displayScreen === "seller" && currentPortal && !isOzonPortal(currentPortal) ? (
           <SellerScreen
             portal={currentPortal}
             cards={currentPortalCards}
@@ -6700,7 +6712,7 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "card" && selectedCardFromPortal ? (
+        {displayScreen === "card" && selectedCardFromPortal ? (
           <CardDetailScreen
             key={cardDraftKey(selectedCardFromPortal)}
             card={selectedCardFromPortal}
@@ -6717,11 +6729,11 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "card" && !selectedCardFromPortal ? (
+        {displayScreen === "card" && !selectedCardFromPortal ? (
           <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
         ) : null}
 
-        {screen === "ozon-card" && selectedCardFromPortal ? (
+        {displayScreen === "ozon-card" && selectedCardFromPortal ? (
           <OzonCardDetailScreen
             key={cardDraftKey(selectedCardFromPortal)}
             card={selectedCardFromPortal}
@@ -6732,12 +6744,12 @@ export default function App() {
           />
         ) : null}
 
-        {screen === "ozon-card" && !selectedCardFromPortal ? (
+        {displayScreen === "ozon-card" && !selectedCardFromPortal ? (
           <CardRecoveryScreen loading={false} onBack={backFromCard} />
         ) : null}
 
-        {screen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
-        {(screen === "admin" || screen === "settings") && canManagePortals ? (
+        {displayScreen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
+        {(displayScreen === "admin" || displayScreen === "settings") && canManagePortals ? (
           <SettingsScreen
             users={displayUsers}
             portals={allPortals}
@@ -14164,6 +14176,29 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     }).catch(() => {});
   }
 
+  async function completeTaskRunWork(reason = "") {
+    if (!backendDraftEnabled || !taskRunTotal || !taskRunWorkType) {
+      logTaskRunEvent("quick_completed", reason);
+      return true;
+    }
+    const payload = await apiRequest("/api/card-workset/complete-task", {
+      method: "POST",
+      body: JSON.stringify({
+        portalId: portal.id,
+        cardKey: taskRunCurrent?.cardKey || draftCardKey,
+        nmID: taskRunCurrent?.nmID || cardNmIdValue(card),
+        vendorCode: taskRunCurrent?.vendorCode || cardVendorCodeValue(card),
+        batchId: taskRun?.batchId || "",
+        workType: taskRunWorkType,
+        reason,
+      }),
+    });
+    if (payload?.workflow || Array.isArray(payload?.workPeriods)) {
+      await onDraftSaved?.();
+    }
+    return true;
+  }
+
   function moveTaskRunForward(status = "") {
     if (taskRunNext) {
       if (status) {
@@ -14190,7 +14225,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       if (taskRunWorkType === "semantic") {
         setActiveTab("semantic");
         if (semanticFinalMatchesCurrent || semanticStoredFinal) {
-          logTaskRunEvent("quick_completed");
+          await completeTaskRunWork();
           moveTaskRunForward("done");
           return;
         }
@@ -14207,7 +14242,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           setTaskRunActionStatus("semantic-missing");
           return;
         }
-        logTaskRunEvent("quick_completed");
+        await completeTaskRunWork();
         moveTaskRunForward("done");
         return;
       }
@@ -14220,12 +14255,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           return;
         }
         if (["submitted", "approved", "exported"].includes(section.approval.status)) {
-          logTaskRunEvent("quick_completed");
+          await completeTaskRunWork();
           moveTaskRunForward("done");
           return;
         }
         if (!section.changesCount) {
-          setTaskRunActionStatus("missing-changes");
+          await completeTaskRunWork("без правок для согласования");
+          moveTaskRunForward("done");
           return;
         }
         if (!canSubmitApprovalSection(taskRunWorkType)) {
@@ -14237,12 +14273,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           setTaskRunActionStatus("error");
           return;
         }
-        logTaskRunEvent("quick_completed");
+        await completeTaskRunWork();
         moveTaskRunForward("done");
         return;
       }
       await saveDraft();
-      logTaskRunEvent("quick_completed");
+      await completeTaskRunWork();
       moveTaskRunForward("done");
     } catch {
       setTaskRunActionStatus("error");
@@ -17926,6 +17962,14 @@ function semanticKeywordMeta(item) {
     parts.push("найдено в описании");
   } else if (item?.field === "title_description") {
     parts.push("заголовок и описание");
+  } else if (item?.field === "characteristics") {
+    parts.push("найдено в характеристиках");
+  } else if (item?.field === "title_characteristics") {
+    parts.push("заголовок и характеристики");
+  } else if (item?.field === "description_characteristics") {
+    parts.push("описание и характеристики");
+  } else if (item?.field === "title_description_characteristics") {
+    parts.push("заголовок, описание и характеристики");
   }
   return parts.join(" · ");
 }
