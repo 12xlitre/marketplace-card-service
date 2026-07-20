@@ -18028,13 +18028,22 @@ function semanticMatchesExclusion(query, excludedWords) {
 }
 
 function keywordHighlightTokens(value) {
-  return semanticFilterWords(value)
-    .filter((token) => token.length >= 3 && !descriptionKeywordStopwords.has(token))
-    .map((token) => ({
-      value: token,
-      stem: semanticExclusionStem(token),
-    }))
-    .filter((token) => token.stem.length >= 3);
+  const tokens = [];
+  const pattern = /[\p{L}\p{N}]+/gu;
+  const text = String(value || "");
+  let match = pattern.exec(text);
+  while (match) {
+    const token = normalizedCharacteristicOption(match[0]);
+    const hasNumber = /\p{N}/u.test(token);
+    if (token && (token.length >= 3 || hasNumber || text.split(/\s+/).length > 1)) {
+      tokens.push({
+        value: token,
+        stem: semanticExclusionStem(token),
+      });
+    }
+    match = pattern.exec(text);
+  }
+  return tokens.filter((token) => token.stem || /\p{N}/u.test(token.value));
 }
 
 function descriptionTextTokens(value) {
@@ -18123,7 +18132,7 @@ function buildDescriptionKeywordHighlights(textValue, keywords) {
     });
   accepted.sort((left, right) => left.start - right.start);
   const counts = new Map();
-  accepted.forEach((match) => {
+  potentials.forEach((match) => {
     counts.set(match.keyword.key, (counts.get(match.keyword.key) || 0) + 1);
   });
   const segments = [];

@@ -9655,7 +9655,14 @@ def content_reoptimization_target_keywords(selected, current, remove, limit=140)
 
 
 def content_exact_keyword_tokens(value):
-  return [token for token in audit_tokens(value) if len(token) >= 3]
+  tokens = [
+    token
+    for token in re.split(r"[^0-9a-zа-я]+", audit_normalized(value))
+    if token
+  ]
+  if len(tokens) == 1:
+    return [token for token in tokens if len(token) >= 3 or re.search(r"\d", token)]
+  return tokens
 
 
 def content_contains_exact_keyword(text, query):
@@ -9941,9 +9948,13 @@ def content_reoptimization_keyword_safe(query, card):
   text = audit_normalized(query)
   if not text:
     return False
+  if re.search(r"\d", text):
+    return False
+  if text in {"очки", "очки для", "очки с"}:
+    return False
   blocked_brand = any(
     blocked in text
-    for blocked in ("miu miu", "миу миу", "prada", "ray ban", "ray-ban", "gucci", "dior", "chanel")
+    for blocked in ("miu miu", "миу миу", "prada", "ray ban", "ray-ban", "gucci", "dior", "chanel", "ysl")
   )
   if blocked_brand:
     card_text = audit_normalized(" ".join([
@@ -9960,17 +9971,33 @@ def content_reoptimization_keyword_safe(query, card):
 
 def content_reoptimization_keyword_sentence(query):
   clean_query = audit_str(query, 120)
-  lowered = clean_query[:1].lower() + clean_query[1:]
+  if "без линз" in audit_normalized(clean_query):
+    return f"{clean_query[:1].upper() + clean_query[1:]}: линзы подбираются отдельно."
+  if "из пластика" in audit_normalized(clean_query):
+    return f"{clean_query[:1].upper() + clean_query[1:]}: оправа из экопластика."
   if "оправ" in audit_normalized(clean_query):
-    return f"{clean_query[:1].upper() + clean_query[1:]} подходит для установки линз у оптика и повседневного использования, если нужны аккуратная посадка, легкая конструкция и спокойный внешний вид."
+    return f"{clean_query[:1].upper() + clean_query[1:]} подходит для установки линз."
   if "линз" in audit_normalized(clean_query) or "зрени" in audit_normalized(clean_query):
-    return f"Для запроса {lowered} важно, что модель является именно оправой: линзы подбираются отдельно по рецепту, а форма и размеры помогают заранее оценить посадку."
-  return f"Запрос {lowered} связан с товаром по типу изделия: это оправа для очков, которую можно использовать как основу для индивидуально подобранных линз."
+    return f"{clean_query[:1].upper() + clean_query[1:]} используется как основа под линзы."
+  return f"{clean_query[:1].upper() + clean_query[1:]} относится к этой оправе."
 
 
 def content_reoptimization_expand_description(description, card, target_keywords, min_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
   text = audit_str(description, max_chars)
-  if len(text) >= min_chars:
+  safe_keyword_rows = [
+    item for item in target_keywords
+    if isinstance(item, dict) and item.get("query") and content_reoptimization_keyword_safe(item.get("query"), card)
+  ]
+  safe_keyword_rows = sorted(
+    safe_keyword_rows,
+    key=lambda item: (
+      0 if item.get("semanticSource") == "added" else 1,
+      -len(content_exact_keyword_tokens(item.get("query"))),
+      -audit_int(item.get("wbCount"), 0),
+    ),
+  )
+  target_match_count = min(12, len(safe_keyword_rows))
+  if len(text) >= min_chars and len(content_keyword_matches(text, safe_keyword_rows)) >= target_match_count:
     return text
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
@@ -10008,15 +10035,24 @@ def content_reoptimization_expand_description(description, card, target_keywords
   if kit:
     additions.append(f"В комплект входят: {kit}. Футляр и салфетка помогают хранить изделие и ухаживать за линзами после установки.")
 
+  reset_for_keywords = bool(safe_keyword_rows and len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count)
+  if reset_for_keywords:
+    text = " ".join(additions[:2]).strip()
+    additions = additions[2:]
+
   safe_keywords = []
-  for item in target_keywords:
+  for item in safe_keyword_rows:
     query = item.get("query") if isinstance(item, dict) else item
-    if not query or content_contains_exact_keyword(text, query) or not content_reoptimization_keyword_safe(query, card):
+    if not query or content_contains_exact_keyword(text, query):
       continue
     safe_keywords.append(audit_str(query, 120))
-    if len(safe_keywords) >= 18:
+    if len(safe_keywords) >= 24:
       break
-  additions.extend(content_reoptimization_keyword_sentence(query) for query in safe_keywords)
+  keyword_sentences = [content_reoptimization_keyword_sentence(query) for query in safe_keywords]
+  if reset_for_keywords:
+    additions = [*keyword_sentences, *additions]
+  else:
+    additions.extend(keyword_sentences)
   additions.extend([
     "Оправа не является готовыми очками с диоптриями: она предназначена для последующей установки линз под рецепт, поэтому перед покупкой важно сверить параметры с привычной посадкой и рекомендациями специалиста.",
     "Лаконичная форма без лишнего декора делает модель универсальной для офиса, учебы, прогулок и повседневных образов, а спокойная цветовая гамма помогает сочетать ее с разной одеждой.",
@@ -10024,6 +10060,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     "Модель подойдет тем, кто выбирает аккуратный аксессуар для коррекции зрения и хочет сохранить сдержанный внешний вид без яркого спортивного или декоративного акцента.",
   ])
 
+  target_max_chars = min(max_chars, CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX)
   for sentence in additions:
     sentence = audit_str(sentence, 500)
     if not sentence:
@@ -10032,7 +10069,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     if len(candidate) > max_chars:
       break
     text = candidate
-    if len(text) >= min_chars:
+    if len(text) >= target_max_chars:
       break
   return audit_str(text, max_chars)
 
