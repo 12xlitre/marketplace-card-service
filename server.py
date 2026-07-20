@@ -10093,8 +10093,27 @@ def content_reoptimization_frame_description(card, keyword_rows, facts, max_char
   return content_description_sentence_limit("\n\n".join(paragraphs), max_chars)
 
 
+def content_reoptimization_description_is_mechanical(text):
+  normalized = audit_normalized(text)
+  repeated_phrases = (
+    "подходит для установки линз",
+    "линзы подбираются отдельно",
+    "относится к этой оправе",
+    "используется как основа под линзы",
+  )
+  if any(normalized.count(phrase) >= 4 for phrase in repeated_phrases):
+    return True
+  sentences = [item.strip() for item in re.split(r"[.!?]+", normalized) if item.strip()]
+  short_keyword_sentences = [
+    sentence for sentence in sentences
+    if len(sentence) < 110 and ("оправ" in sentence or "очки" in sentence) and ("линз" in sentence or "зрен" in sentence)
+  ]
+  return len(short_keyword_sentences) >= 8
+
+
 def content_reoptimization_expand_description(description, card, target_keywords, min_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
   text = audit_str(description, max_chars)
+  mechanical_text = content_reoptimization_description_is_mechanical(text)
   safe_keyword_rows = [
     item for item in target_keywords
     if isinstance(item, dict) and item.get("query") and content_reoptimization_keyword_safe(item.get("query"), card)
@@ -10108,7 +10127,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     ),
   )
   target_match_count = min(12, len(safe_keyword_rows))
-  if len(text) >= min_chars and len(content_keyword_matches(text, safe_keyword_rows)) >= target_match_count:
+  if not mechanical_text and len(text) >= min_chars and len(content_keyword_matches(text, safe_keyword_rows)) >= target_match_count:
     return text
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
@@ -10133,7 +10152,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     if value:
       dimensions.append(f"{name.lower()} {value}")
 
-  if len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count:
+  if mechanical_text or len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count:
     frame_description = content_reoptimization_frame_description(card, safe_keyword_rows, facts)
     if frame_description and len(frame_description) >= min_chars:
       return frame_description
