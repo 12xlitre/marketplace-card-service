@@ -9544,7 +9544,13 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - описание должно стремиться к 1700-1950 символам, но не превышать 2000 символов с пробелами;
 - описание должно органично внедрять максимум релевантных ключей из allTargetKeywords прямым вхождением без изменения окончания слов, но без бессмысленного списка SEO-запросов;
 - если все ключи невозможно встроить без переспама или потери смысла, выбери максимум релевантных: сначала высокочастотные и добавленные, затем ранжируемые и действующие;
-- описание должно быть лаконичным, правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
+- описание должно строиться от товара, а не от списка ключей: что это, для кого, какую задачу решает, преимущества конструкции, материалы/комплектация, совместимость/сценарий использования, бренд и мягкий итог;
+- ключи распределяй по смысловым абзацам: высокочастотные ближе к началу, среднечастотные в блок пользы и сценариев, длинные низкочастотные в блок "кому подойдет" и "как использовать";
+- каждый ключ используй не больше одного раза, но полностью; не начинай подряд несколько предложений одинаковым шаблоном и не пиши фразы вида "Запрос ...";
+- после удаления ключей из текста должно оставаться нормальное продающее описание для покупателя, а не SEO-перечень;
+- добавляй LSI-слова по смыслу: линзы, коррекция зрения, оптика, посадка, комфорт, ежедневное ношение, стиль, бренд, материал, форма, уход;
+- описание должно быть правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
+- ключи с неподтвержденными диоптриями, чужими брендами или свойствами, которых нет в evidenceBundle, не внедряй как факт товара; лучше пропусти и укажи предупреждение;
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
@@ -9982,6 +9988,111 @@ def content_reoptimization_keyword_sentence(query):
   return f"{clean_query[:1].upper() + clean_query[1:]} относится к этой оправе."
 
 
+def content_reoptimization_preferred_query(keyword_rows, preferred=None, contains=None):
+  preferred = preferred if isinstance(preferred, list) else []
+  contains = contains if isinstance(contains, list) else []
+  by_key = {
+    audit_normalized(item.get("query")): audit_str(item.get("query"), 120)
+    for item in keyword_rows if isinstance(item, dict) and item.get("query")
+  }
+  for query in preferred:
+    value = by_key.get(audit_normalized(query))
+    if value:
+      return value
+  for item in keyword_rows:
+    query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
+    normalized = audit_normalized(query)
+    if query and all(part in normalized for part in contains):
+      return query
+  return ""
+
+
+def content_description_sentence_limit(text, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(text)
+  if len(text) <= max_chars:
+    return text
+  cut = text[:max_chars].rstrip()
+  boundary = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+  if boundary > max_chars * 0.7:
+    return cut[:boundary + 1].rstrip()
+  return cut
+
+
+def content_reoptimization_frame_description(card, keyword_rows, facts, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX):
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  brand = audit_str(card.get("brand") or raw_fields.get("brand") or "")
+  if "оправ" not in audit_normalized(" ".join([title, brand, semantic_keyword_text(keyword_rows)])):
+    return ""
+  brand_label = brand or "модель"
+  model_label = title or brand_label or "оправа"
+
+  def fact(names):
+    for name in names:
+      values = facts.get(audit_normalized(name))
+      if values:
+        return ", ".join(values[:4])
+    return ""
+
+  material = fact(["Материал оправы", "Материал"])
+  colors = fact(["Цвет"])
+  kit = fact(["Комплектация"])
+  frame_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа на очки", "оправа под очки", "оправа для линз"], contains=["оправ"])
+  under_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа под очки", "оправа на очки"])
+  women_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа для очков женская"])
+  vision_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа для очков женская для зрения", "оправа женская для очков для зрения", "очки оправа для зрения"])
+  no_lenses_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа для очков женская без линз", "оправа для очков женская для зрения без линз", "очки без линз"])
+  branded_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа для очков женская для зрения брендовая"], contains=["брендов"])
+  optics_key = content_reoptimization_preferred_query(keyword_rows, preferred=["оправа для очков женская для оптики"], contains=["оптик"])
+
+  paragraphs = []
+  paragraphs.append(
+    f"Оправа {brand_label} - стильное решение для тех, кто ценит комфорт, качество и современный дизайн. "
+    f"{model_label} разработана для длительного ежедневного ношения, поэтому отличается удобной посадкой и аккуратной конструкцией."
+  )
+  if frame_key:
+    paragraphs.append(
+      f"Эта {frame_key} надежно фиксирует линзы в правильном положении перед глазами и помогает сохранить комфорт при постоянном использовании. "
+      "Модель подходит для установки корригирующих линз из стекла или пластика, поэтому станет удачным выбором для повседневной носки и коррекции зрения."
+    )
+  if under_key:
+    paragraphs.append(
+      f"Если вы ищете вариант формата {under_key}, который сочетает функциональность, долговечность и актуальный дизайн, {brand_label} будет практичным выбором. "
+      "Оправа гармонично дополнит деловой и повседневный гардероб, подчеркнет индивидуальность и не будет перегружать образ."
+    )
+  if women_key or vision_key:
+    sentence = []
+    if women_key:
+      sentence.append(f"Стильная {women_key} выполнена с вниманием к деталям и рассчитана на регулярное использование.")
+    if vision_key:
+      sentence.append(f"Она подойдет тем, кому нужна {vision_key}, совместимая с разными видами рецептурных линз.")
+    paragraphs.append(" ".join(sentence))
+  if no_lenses_key or branded_key:
+    sentence = []
+    if no_lenses_key:
+      sentence.append(f"Модель поставляется как {no_lenses_key}, что позволяет подобрать линзы по рецепту и рекомендациям специалиста.")
+    if branded_key:
+      sentence.append(f"Благодаря фирменному дизайну {brand_label} это {branded_key}: узнаваемый стиль, качественные материалы и комфорт в течение дня.")
+    paragraphs.append(" ".join(sentence))
+  if optics_key:
+    paragraphs.append(
+      f"Оправа подходит для изготовления очков в современной оптике, поэтому {optics_key} станет хорошим выбором для тех, кто хочет получить оригинальную продукцию известного бренда."
+    )
+
+  fact_parts = []
+  if material:
+    fact_parts.append(f"Материал оправы - {material}.")
+  if colors:
+    fact_parts.append(f"Доступные оттенки: {colors}.")
+  if kit:
+    fact_parts.append(f"В комплект входят: {kit}.")
+  if fact_parts:
+    paragraphs.append(" ".join(fact_parts) + " Эти детали помогают заранее оценить посадку, уход и удобство использования.")
+
+  paragraphs.append(f"Выбирайте оправы {brand_label} для комфортной посадки, надежной фиксации линз и стильного образа каждый день.")
+  return content_description_sentence_limit("\n\n".join(paragraphs), max_chars)
+
+
 def content_reoptimization_expand_description(description, card, target_keywords, min_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
   text = audit_str(description, max_chars)
   safe_keyword_rows = [
@@ -10021,6 +10132,11 @@ def content_reoptimization_expand_description(description, card, target_keywords
     value = fact([name])
     if value:
       dimensions.append(f"{name.lower()} {value}")
+
+  if len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count:
+    frame_description = content_reoptimization_frame_description(card, safe_keyword_rows, facts)
+    if frame_description and len(frame_description) >= min_chars:
+      return frame_description
 
   additions = [
     f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужна база под индивидуальные линзы без готовой диоптрийной части.",
@@ -15262,9 +15378,10 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
-      "engine": "opticards-semantic-content-v2",
+      "engine": "opticards-semantic-content-v3",
       "provider": provider,
       "model": model,
+      "descriptionStyle": "marketplace-paragraphs",
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
       "targetKeywords": len(target_keywords),
