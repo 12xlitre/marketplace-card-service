@@ -9554,10 +9554,15 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - если все ключи невозможно встроить без переспама или потери смысла, выбери максимум релевантных: сначала высокочастотные и добавленные, затем ранжируемые и действующие;
 - описание должно строиться от товара, а не от списка ключей: что это, главное преимущество и позиционирование модели, для кого, какую задачу решает; для оправ раскрывай конструкцию и установку линз, для солнцезащитных очков - защиту от яркого света, блики, линзы, посадку, дизайн/цвет/форму, материал, комплектацию, бренд и мягкий итог;
 - ключи распределяй по смысловым абзацам: высокочастотные ближе к началу, среднечастотные в блок пользы и сценариев, длинные низкочастотные в блок "кому подойдет" и "как использовать";
+- не вставляй подряд перестановки одного и того же ключа: "солнцезащитные очки женские", "очки солнцезащитные женские", "женские солнцезащитные очки" должны раскрывать разные мысли или часть вариантов нужно пропустить;
+- не начинай соседние предложения одинаково со слов "очки", "солнцезащитные очки", "солнечные очки", "женские/мужские очки"; если фраза нужна для SEO, впиши ее в середину предложения;
 - каждый ключ используй не больше одного раза, но полностью там, где это звучит естественно; не начинай подряд несколько предложений одинаковым словом или шаблоном, заменяй повторяющиеся общие слова на "модель", "изделие", "аксессуар", "конструкция";
 - после удаления ключей из текста должно оставаться нормальное продающее описание для покупателя, а не SEO-перечень;
 - добавляй LSI-слова по смыслу товара: для оправ - линзы, коррекция зрения, оптика, посадка, комфорт, ежедневное ношение, стиль, бренд, материал, форма, уход; для солнцезащитных очков - солнце, ультрафиолет, блики, поляризация только при подтверждении, линзы, посадка, комфорт, стиль, водитель, город, отдых, уход;
 - описание должно быть правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
+- форму очков/оправы обязательно укажи в описании, если она есть в характеристиках или в подтвержденных целевых ключах;
+- не пиши "УФ-защита", "UV", "защита от ультрафиолета" как факт, если в характеристиках нет явного УФ/UV/ультрафиолетового признака; категория светопропускания сама по себе не является разрешением для фразы "УФ-защита";
+- не переноси в описание служебные формулировки из инструкции: "без неподтвержденных свойств", "описание сохраняет факты", "случайные свойства", "неподтвержденные медицинские обещания";
 - каждое предложение должно раскрывать одну логическую мысль; не смешивай установку линз, оригинальность бренда, дизайн и комплектацию в одном предложении;
 - если товар является оправой, четко разделяй роль оправы и линз: оправа фиксирует линзы и служит основой для очков, но не корректирует зрение сама;
 - если в характеристике "Цвет" несколько значений, описывай их как сочетание цветов одной модели, а не как "доступные оттенки" или выбор ассортимента;
@@ -10348,6 +10353,44 @@ def content_reoptimization_shape_for_title(keyword_rows, facts, gender=""):
   return sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[0][0]
 
 
+def content_reoptimization_shape_for_description(keyword_rows, facts, product_kind=""):
+  fact_values = content_reoptimization_fact_values(facts, ["Форма оправы", "Форма очков", "Форма линзы", "Форма линз", "Форма"])
+  for value in fact_values:
+    shape = content_reoptimization_shape_from_value(value)
+    if shape:
+      return shape
+
+  scores = {}
+  for item in keyword_rows if isinstance(keyword_rows, list) else []:
+    query = audit_normalized(item.get("query") if isinstance(item, dict) else item)
+    if not query or re.search(r"\d", query):
+      continue
+    if product_kind == "sunglasses" and not any(marker in query for marker in ("очк", "солнц", "солнеч", "поляр")):
+      continue
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+      if not any(marker in query for marker in markers):
+        continue
+      source = audit_str(item.get("semanticSource") if isinstance(item, dict) else "")
+      score = max(1, audit_int(item.get("wbCount"), 0) if isinstance(item, dict) else 1)
+      if source == "added":
+        score += 500000
+      elif source == "current":
+        score += 150000
+      scores[label] = scores.get(label, 0) + score
+  if not scores:
+    return ""
+  return sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[0][0]
+
+
+def content_reoptimization_has_explicit_uv_protection(facts):
+  fact_text = audit_normalized(" ".join(
+    " ".join(str(value or "") for value in values)
+    for values in facts.values()
+    if isinstance(values, list)
+  ))
+  return any(marker in fact_text for marker in ("уф", "uv", "ультрафиолет"))
+
+
 def content_reoptimization_title_parts_unique(parts):
   output = []
   seen = set()
@@ -10471,7 +10514,7 @@ def content_reoptimization_keyword_sentence(query, product_kind=""):
       return f"{clean_query[:1].upper() + clean_query[1:]} подходят для города, дороги, прогулок и отдыха."
     if "мужск" in normalized or "женск" in normalized:
       return f"{clean_query[:1].upper() + clean_query[1:]} легко сочетать с повседневной одеждой."
-    return f"{clean_query[:1].upper() + clean_query[1:]} описывают покупательский сценарий для этой модели."
+    return f"{clean_query[:1].upper() + clean_query[1:]} подойдут покупателям, которым важны понятная посадка, спокойный стиль и защита от яркого света."
   if "без линз" in normalized:
     return f"{clean_query[:1].upper() + clean_query[1:]}: линзы подбираются отдельно."
   if "из пластика" in normalized:
@@ -10494,12 +10537,67 @@ def content_reoptimization_preferred_query(keyword_rows, preferred=None, contain
     value = by_key.get(audit_normalized(query))
     if value:
       return value
-  for item in keyword_rows:
-    query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
-    normalized = audit_normalized(query)
-    if query and all(part in normalized for part in contains):
-      return query
+  if contains:
+    for item in keyword_rows:
+      query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
+      normalized = audit_normalized(query)
+      if query and all(part in normalized for part in contains):
+        return query
   return ""
+
+
+def content_reoptimization_preferred_query_filtered(keyword_rows, preferred=None, contains=None, blocked_markers=None):
+  preferred = preferred if isinstance(preferred, list) else []
+  contains = contains if isinstance(contains, list) else []
+  blocked_markers = blocked_markers if isinstance(blocked_markers, tuple) else tuple(blocked_markers or ())
+
+  def allowed(query):
+    normalized = audit_normalized(query)
+    return bool(query) and not any(marker in normalized for marker in blocked_markers)
+
+  by_key = {
+    audit_normalized(item.get("query")): audit_str(item.get("query"), 120)
+    for item in keyword_rows if isinstance(item, dict) and item.get("query")
+  }
+  for query in preferred:
+    value = by_key.get(audit_normalized(query))
+    if allowed(value):
+      return value
+  if contains:
+    for item in keyword_rows if isinstance(keyword_rows, list) else []:
+      query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
+      normalized = audit_normalized(query)
+      if query and all(part in normalized for part in contains) and allowed(query):
+        return query
+  return ""
+
+
+def content_reoptimization_sunglasses_keyword_family(query):
+  normalized = audit_normalized(query)
+  tokens = set(content_exact_keyword_tokens(normalized))
+  for marker, family in (
+    ("поляр", "polarized"),
+    ("уф", "uv"),
+    ("uv", "uv"),
+    ("ультраф", "uv"),
+    ("polaroid", "brand"),
+    ("полароид", "brand"),
+    ("палароид", "brand"),
+    ("поларойд", "brand"),
+    ("прямоуголь", "shape"),
+    ("кругл", "shape"),
+    ("овал", "shape"),
+    ("квадрат", "shape"),
+    ("кошач", "shape"),
+    ("авиатор", "shape"),
+    ("от солнца", "sun"),
+    ("солнеч", "sun"),
+    ("солнцезащит", "sunglasses"),
+  ):
+    if marker in normalized:
+      return family
+  normalized_tokens = tokens - {"женские", "женская", "женск", "мужские", "мужская", "мужск", "очки", "очков", "очк"}
+  return " ".join(sorted(normalized_tokens)) or normalized
 
 
 def content_description_sentence_limit(text, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
@@ -10622,12 +10720,20 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   def fact(names):
     return content_reoptimization_join_ru(fact_values(names))
 
-  def preferred(preferred_queries=None, contains=None):
-    return content_reoptimization_preferred_query(keyword_rows, preferred=preferred_queries or [], contains=contains or [])
-
   def cap(value):
     value = audit_str(value, 140)
     return f"{value[:1].upper() + value[1:]}" if value else ""
+
+  has_uv_protection = content_reoptimization_has_explicit_uv_protection(facts)
+  blocked_markers = tuple() if has_uv_protection else ("уф", "uv", "ультраф")
+
+  def preferred(preferred_queries=None, contains=None):
+    return content_reoptimization_preferred_query_filtered(
+      keyword_rows,
+      preferred=preferred_queries or [],
+      contains=contains or [],
+      blocked_markers=blocked_markers,
+    )
 
   primary = preferred([
     f"солнцезащитные очки {gender}".strip(),
@@ -10685,6 +10791,7 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   frame_material = fact(["Материал оправы", "Материал"])
   lens_material = fact(["Материал линзы"])
   protection = fact(["Степень защиты"])
+  shape = content_reoptimization_shape_for_description(keyword_rows, facts, product_kind="sunglasses")
   color_values = fact_values(["Цвет"])
   colors = content_reoptimization_join_ru(color_values)
   lens_color = fact(["Цвет линз"])
@@ -10703,56 +10810,50 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
 
   paragraphs = []
   opening_details = []
-  if reverse and audit_normalized(reverse) != audit_normalized(primary):
-    opening_details.append(f"Если вы выбираете {reverse} на каждый день, модель выглядит сдержанно и легко сочетается с повседневной одеждой.")
+  if shape:
+    opening_details.append(f"Форма очков - {shape}; такой силуэт помогает заранее оценить посадку и внешний вид модели.")
   if colors or lens_color:
     color_text = []
     if colors:
       color_text.append(f"цвет оправы: {colors}")
     if lens_color:
       color_text.append(f"цвет линз: {lens_color}")
-    opening_details.append(f"{'. '.join(part[:1].upper() + part[1:] for part in color_text)}. Эти детали помогают заранее представить аксессуар в образе.")
+    opening_details.append(f"{'. '.join(part[:1].upper() + part[1:] for part in color_text)}. Эти детали помогают представить аксессуар в повседневном образе.")
   paragraphs.append(
     f"{lead} - аксессуар для защиты глаз от яркого света, городских бликов и активного солнца. "
     + " ".join(opening_details)
   )
 
   style_sentences = []
-  if men_alt:
-    style_sentences.append(f"{cap(men_alt)} подходят для поездок, прогулок, отдыха и повседневного городского стиля.")
-  if men_direct and audit_normalized(men_direct) != audit_normalized(men_alt):
-    style_sentences.append(f"{cap(men_direct)} смотрятся лаконично и не перегружают образ.")
-  if sun_key:
-    style_sentences.append(f"{cap(sun_key)} удобно держать под рукой летом, в отпуске и в ясную погоду.")
-  if sun_gender_key and audit_normalized(sun_gender_key) != audit_normalized(sun_key):
-    style_sentences.append(f"{cap(sun_gender_key)} закрывают базовый сценарий: защита от солнца без лишнего декора.")
-  if sun_reverse_key:
-    style_sentences.append(f"{cap(sun_reverse_key)} подходят как универсальный аксессуар для дороги и отдыха.")
-  if sun_men_key:
-    style_sentences.append(f"{cap(sun_men_key)} легко сочетать с футболкой, рубашкой, курткой и повседневной обувью.")
-  if sun_from_key:
-    style_sentences.append(f"{cap(sun_from_key)} помогают снизить дискомфорт от яркого дневного света.")
+  everyday_key = men_direct or men_alt
+  if everyday_key:
+    style_sentences.append(f"Для поездок, прогулок и городского ритма подойдут {everyday_key}: модель выглядит аккуратно и не требует сложного подбора одежды.")
+  sun_scenario_key = sun_from_key or sun_key or sun_reverse_key
+  if sun_scenario_key:
+    style_sentences.append(f"Формат {sun_scenario_key} удобен летом, в отпуске, за рулем и в ясную погоду, когда хочется снизить дискомфорт от яркого дневного света.")
+  if sun_gender_key and audit_normalized(sun_gender_key) not in {audit_normalized(everyday_key), audit_normalized(sun_scenario_key)}:
+    style_sentences.append(f"{cap(sun_gender_key)} закрывают базовый сценарий: защита от солнца, спокойный дизайн и понятная посадка без лишнего декора.")
+  if reverse and audit_normalized(reverse) not in {audit_normalized(everyday_key), audit_normalized(sun_scenario_key), audit_normalized(sun_gender_key)}:
+    style_sentences.append(f"Если вы выбираете {reverse} на каждый день, обратите внимание на сочетание формы, цвета оправы и оттенка линз.")
   if style_sentences:
-    paragraphs.append(" ".join(audit_unique(style_sentences, limit=6)))
+    paragraphs.append(" ".join(audit_unique(style_sentences, limit=3)))
 
   if has_polarization:
     polar_sentences = []
-    if polar_main:
-      polar_sentences.append(f"Если нужны {polar_main}, обратите внимание на поляризационный эффект: он помогает уменьшать слепящие блики от воды, асфальта, снега и кузова автомобиля.")
-    if polar_second and audit_normalized(polar_second) != audit_normalized(polar_main):
-      polar_sentences.append(f"{cap(polar_second)} особенно уместны за рулем, на прогулке у воды и в яркий солнечный день.")
-    if polar_short:
-      polar_sentences.append(f"{cap(polar_short)} выбирают, когда важны комфорт для глаз, контрастность и спокойное восприятие света.")
+    polar_key = polar_main or polar_second or polar_short
+    if polar_key:
+      polar_sentences.append(f"Если нужны {polar_key}, обратите внимание на поляризационный эффект: он помогает уменьшать слепящие блики от воды, асфальта, снега и кузова автомобиля.")
+    if polar_second and audit_normalized(polar_second) != audit_normalized(polar_key):
+      polar_sentences.append(f"Такая модель особенно уместна за рулем, на прогулке у воды и в яркий солнечный день, когда важны контрастность и спокойное восприятие света.")
     if polar_sentences:
-      paragraphs.append(" ".join(polar_sentences))
+      paragraphs.append(" ".join(polar_sentences[:2]))
 
   brand_sentences = []
-  if brand_key:
-    brand_sentences.append(f"Это {brand_key} в узнаваемой стилистике бренда: без лишней массивности, с акцентом на практичность и повседневное ношение.")
-  if brand_reverse_key:
-    brand_sentences.append(f"Для тех, кому нужны {brand_reverse_key}, модель сохраняет баланс между защитной функцией и аккуратным внешним видом.")
-  if brand_sun_key:
-    brand_sentences.append(f"{cap(brand_sun_key)} подойдут покупателю, который ищет брендовую модель без случайных неподтвержденных свойств.")
+  if brand_label:
+    brand_sentences.append(f"Бренд {brand_label} узнаваем по сдержанному дизайну, практичному характеру и повседневной стилистике.")
+  brand_query = brand_sun_key or brand_reverse_key or brand_key
+  if brand_query:
+    brand_sentences.append(f"Для тех, кому нужны {brand_query}, эта модель сохраняет баланс между защитной функцией, аккуратным внешним видом и удобством регулярного ношения.")
   if brand_sentences:
     paragraphs.append(" ".join(brand_sentences))
 
@@ -10774,7 +10875,7 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   final_subject = f"{brand_label} {model_name}".strip() if brand_label else (model_name or "эта модель")
   paragraphs.append(
     f"{final_subject} стоит выбрать, если нужны стильные очки для солнца с понятными характеристиками, спокойной посадкой и комплектом для хранения. "
-    "Модель подходит для ежедневного использования, поездок и отдыха, а описание сохраняет факты карточки без неподтвержденных медицинских обещаний."
+    "Модель подходит для ежедневного использования, поездок и отдыха, а все ключевые свойства лучше сверить по фото и заполненным характеристикам перед заказом."
   )
 
   text = content_description_sentence_limit("\n\n".join(paragraphs), max_chars)
@@ -10783,18 +10884,49 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
 
   card_text = content_reoptimization_card_field_text(card, include_description=True)
   blocked_without_fact = ("фотохром", "хамелеон", "авиатор", "кошач", "без оправ", "спортив", "лечеб", "диоптр")
+  natural_additions = []
+  if dimensions:
+    natural_additions.append("Посадку стоит оценивать по ширине оправы, форме линз и длине дужек: эти параметры влияют на то, насколько аксессуар будет удобен в течение дня.")
+  if lens_color:
+    natural_additions.append(f"Цвет линз {lens_color} помогает заранее понять, как модель будет смотреться на лице и насколько спокойно она впишется в повседневный образ.")
+  if colors:
+    natural_additions.append("Контраст оправы делает модель заметной, но не превращает ее в вечерний или спортивный аксессуар.")
+  natural_additions.append("Такие очки удобно брать в автомобиль, на прогулку, в поездку и на отдых: они закрывают базовую задачу защиты от яркого света и дополняют повседневный гардероб.")
+  for sentence in natural_additions:
+    candidate = f"{text.rstrip()} {sentence}".strip()
+    if len(candidate) > max_chars:
+      break
+    text = candidate
+    if len(text) >= CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN:
+      return content_description_sentence_limit(text, max_chars)
+
+  used_families = {
+    content_reoptimization_sunglasses_keyword_family(query)
+    for query in (primary, everyday_key, sun_scenario_key, sun_gender_key, reverse, polar_main, polar_second, brand_query)
+    if query
+  }
+  extra_keyword_sentences = 0
   for item in keyword_rows if isinstance(keyword_rows, list) else []:
     query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
     normalized = audit_normalized(query)
     if not query or content_contains_exact_keyword(text, query) or re.search(r"\d", normalized):
       continue
+    if any(marker in normalized for marker in ("уф", "uv", "ультраф")) and not has_uv_protection:
+      continue
     if any(marker in normalized and marker not in card_text for marker in blocked_without_fact):
+      continue
+    family = content_reoptimization_sunglasses_keyword_family(query)
+    if family in used_families and family in {"sunglasses", "sun", "polarized", "brand", "shape", "uv"}:
       continue
     sentence = content_reoptimization_keyword_sentence(query, product_kind="sunglasses")
     candidate = f"{text.rstrip()} {sentence}".strip()
     if len(candidate) > max_chars:
       break
     text = candidate
+    used_families.add(family)
+    extra_keyword_sentences += 1
+    if extra_keyword_sentences >= 5:
+      break
     if len(text) >= CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN:
       break
   return content_description_sentence_limit(text, max_chars)
@@ -10937,6 +11069,10 @@ def content_reoptimization_description_is_mechanical(text):
     "совместимая с разными видами рецептурных линз",
     "оригинальную продукцию известного бренда",
     "модель поставляется как оправа",
+    "без случайных неподтвержденных свойств",
+    "описание сохраняет факты",
+    "неподтвержденных медицинских обещаний",
+    "эти детали помогают заранее представить аксессуар",
   )
   if any(phrase in normalized for phrase in awkward_phrases):
     return True
@@ -10945,7 +11081,14 @@ def content_reoptimization_description_is_mechanical(text):
     sentence for sentence in sentences
     if len(sentence) < 110 and ("оправ" in sentence or "очки" in sentence) and ("линз" in sentence or "зрен" in sentence)
   ]
-  return len(short_keyword_sentences) >= 8
+  if len(short_keyword_sentences) >= 8:
+    return True
+  product_starts = 0
+  for sentence in sentences:
+    first_words = " ".join(sentence.split()[:3])
+    if re.match(r"^(очки|очков|солнцезащитные очки|солнечные очки|женские очки|мужские очки|очки женские|очки мужские)\b", first_words):
+      product_starts += 1
+  return product_starts >= 5
 
 
 def content_reoptimization_expand_description(description, card, target_keywords, min_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
@@ -11005,8 +11148,8 @@ def content_reoptimization_expand_description(description, card, target_keywords
   is_frame_product = content_reoptimization_is_frame(card, safe_keyword_rows)
   if is_frame_product:
     additions = [
-      f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужна база под индивидуальные линзы без готовой диоптрийной части.",
-      f"Модель {brand or ''} рассчитана на ежедневное ношение: она фиксирует линзы, помогает сохранить комфортную посадку и сочетается с повседневной одеждой.".strip(),
+      f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужна оправа для установки линз по рецепту.",
+      f"Модель {brand or ''} рассчитана на ежедневное ношение: она фиксирует линзы, поддерживает комфортную посадку и сочетается с повседневной одеждой.".strip(),
     ]
   else:
     additions = [
@@ -11066,7 +11209,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     additions.extend([
       "Покупателю важно сразу увидеть назначение, материалы, цвет, комплект и реальные ограничения товара перед заказом.",
       "Фото и заполненные характеристики помогают оценить форму, цвет и размеры и понять, подойдет ли модель для ежедневного использования, дороги, прогулок и отдыха.",
-      "Модель сохраняет понятное позиционирование без неподтвержденных свойств, медицинских обещаний и чужих брендов.",
+      "Модель описана по подтвержденным характеристикам: без лишних обещаний, чужих брендов и свойств, которых нет в карточке.",
     ])
 
   target_max_chars = min(max_chars, CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX)

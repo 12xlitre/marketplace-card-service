@@ -2958,6 +2958,20 @@ const descriptionKeywordStopwords = new Set([
   "все",
 ]);
 
+const descriptionGenericSingleKeywords = new Set([
+  "очк",
+  "очки",
+  "очков",
+  "очкам",
+  "очками",
+  "линз",
+  "линза",
+  "линзы",
+  "товар",
+  "модель",
+  "аксессуар",
+]);
+
 const descriptionKeywordTones = ["blue", "green", "amber", "violet", "red", "slate"];
 
 const AMBIGUOUS_SINGLE_CHARACTERISTIC_TOKENS = new Set([
@@ -18020,7 +18034,7 @@ function DescriptionKeywordCoverage({ description, keywords, helpEnabled = false
         <Tag tone={matchedCount ? "blue" : "amber"}>{matchedCount ? "подсветка" : "нет совпадений"}</Tag>
       </div>
       <HelpHint enabled={helpEnabled} title="Как читать подсветку">
-        Цветной фрагмент показывает, какой кусок черновика закрывает конкретный ключ. Наведите на ключ в легенде или на фрагмент текста, чтобы увидеть связь; если ключ серый, его пока нет в описании.
+        Цветной фрагмент показывает, какой кусок черновика закрывает конкретный ключ. Наведите на ключ в легенде или на фрагмент текста, чтобы увидеть связь; если ключ серый, его пока нет в описании. Общие однословные ключи вроде "очки" не входят в основной счетчик.
       </HelpHint>
       {visibleKeywords.length ? (
         <div className="description-keyword-legend">
@@ -18157,6 +18171,22 @@ function keywordHighlightTokens(value) {
   return tokens.filter((token) => token.stem || /\p{N}/u.test(token.value));
 }
 
+function descriptionKeywordDisplayQuery(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[.,;:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGenericSingleDescriptionKeyword(tokens) {
+  if (!Array.isArray(tokens) || tokens.length !== 1) {
+    return false;
+  }
+  const token = tokens[0];
+  return descriptionGenericSingleKeywords.has(token.value) || descriptionGenericSingleKeywords.has(token.stem);
+}
+
 function descriptionTextTokens(value) {
   const tokens = [];
   const pattern = /[\p{L}\p{N}]+/gu;
@@ -18189,11 +18219,12 @@ function descriptionKeywordCandidates(groups, limit = 140) {
   const seen = new Set();
   groups.forEach((group, groupIndex) => {
     (Array.isArray(group.items) ? group.items : []).forEach((item) => {
-      const query = String(item?.query || item?.keyword || item?.text || "").trim();
+      const query = descriptionKeywordDisplayQuery(item?.query || item?.keyword || item?.text || "");
       const key = semanticQueryKey({ query });
       if (!query || !key || seen.has(key)) return;
       const tokens = keywordHighlightTokens(query);
       if (!tokens.length) return;
+      if (isGenericSingleDescriptionKeyword(tokens)) return;
       seen.add(key);
       rows.push({
         ...item,
