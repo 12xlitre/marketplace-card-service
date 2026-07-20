@@ -9725,6 +9725,130 @@ def content_characteristic_values(value, limit=8):
   return audit_unique(re.split(r"[,;]+", str(value or "")), limit=limit)
 
 
+CONTENT_CHARACTERISTIC_DEDUPE_SCORE = 0.9
+
+
+def content_characteristic_row_label(row):
+  if not isinstance(row, dict):
+    return ""
+  return audit_str(row.get("label") or row.get("name") or row.get("charcName") or "")
+
+
+def content_characteristic_row_charc_id(row):
+  if not isinstance(row, dict):
+    return ""
+  return audit_str(row.get("charcID") or row.get("charcId") or row.get("id") or "")
+
+
+def content_characteristic_best_match(name, rows, charc_id="", min_score=CONTENT_CHARACTERISTIC_DEDUPE_SCORE):
+  name = audit_str(name)
+  charc_id = audit_str(charc_id)
+  best = None
+  best_score = 0
+  for row in rows if isinstance(rows, list) else []:
+    if not isinstance(row, dict):
+      continue
+    row_charc_id = content_characteristic_row_charc_id(row)
+    if charc_id and row_charc_id and charc_id == row_charc_id:
+      return row
+    row_name = content_characteristic_row_label(row)
+    score = audit_characteristic_name_score(name, row_name)
+    if score > best_score:
+      best = row
+      best_score = score
+  return best if best is not None and best_score >= min_score else {}
+
+
+def content_characteristic_existing_match(output, name, charc_id="", min_score=CONTENT_CHARACTERISTIC_DEDUPE_SCORE):
+  if not isinstance(output, dict):
+    return "", {}
+  name = audit_str(name)
+  charc_id = audit_str(charc_id)
+  best_key = ""
+  best_row = {}
+  best_score = 0
+  for key, row in output.items():
+    if not isinstance(row, dict):
+      continue
+    row_charc_id = content_characteristic_row_charc_id(row)
+    if charc_id and row_charc_id and charc_id == row_charc_id:
+      return key, row
+    row_name = content_characteristic_row_label(row)
+    score = audit_characteristic_name_score(name, row_name)
+    if score > best_score:
+      best_key = key
+      best_row = row
+      best_score = score
+  if best_key and best_score >= min_score:
+    return best_key, best_row
+  return "", {}
+
+
+def content_characteristic_merge_row(existing, incoming):
+  existing = existing if isinstance(existing, dict) else {}
+  incoming = incoming if isinstance(incoming, dict) else {}
+  existing_values = content_characteristic_values(existing.get("values") if "values" in existing else existing.get("value"), limit=8)
+  incoming_values = content_characteristic_values(incoming.get("values") if "values" in incoming else incoming.get("value"), limit=8)
+  values = audit_unique([*existing_values, *incoming_values], limit=8)
+  return {
+    **incoming,
+    **existing,
+    "charcID": existing.get("charcID") or incoming.get("charcID") or incoming.get("charcId") or "",
+    "label": content_characteristic_row_label(existing) or content_characteristic_row_label(incoming),
+    "value": ", ".join(values),
+    "values": values,
+    "source": existing.get("source") or incoming.get("source") or "semantic",
+    "reason": existing.get("reason") or incoming.get("reason") or "",
+    "unitName": existing.get("unitName") or incoming.get("unitName") or "",
+    "maxCount": existing.get("maxCount") or incoming.get("maxCount"),
+    "charcType": existing.get("charcType") or incoming.get("charcType"),
+  }
+
+
+def content_reoptimization_deduplicate_characteristic_draft(characteristics, limit=24):
+  output = {}
+  if not isinstance(characteristics, dict):
+    return output
+  for raw_key, raw_row in list(characteristics.items())[:limit]:
+    if not isinstance(raw_row, dict):
+      continue
+    name = content_characteristic_row_label(raw_row)
+    charc_id = content_characteristic_row_charc_id(raw_row)
+    values = content_characteristic_values(raw_row.get("values") if "values" in raw_row else raw_row.get("value"), limit=8)
+    if not name or not values:
+      continue
+    key = content_characteristic_draft_key(name, charc_id) or audit_str(raw_key)
+    row = {
+      **raw_row,
+      "charcID": charc_id,
+      "label": name,
+      "value": ", ".join(values),
+      "values": values,
+      "source": raw_row.get("source") or "semantic",
+    }
+    existing_key, existing = content_characteristic_existing_match(output, name, charc_id)
+    if existing_key:
+      output[existing_key] = content_characteristic_merge_row(existing, row)
+    else:
+      output[key] = row
+  return output
+
+
+def content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics, limit=24):
+  output = content_reoptimization_deduplicate_characteristic_draft(fallback_characteristics, limit=limit)
+  for key, row in content_reoptimization_deduplicate_characteristic_draft(llm_characteristics, limit=limit).items():
+    name = content_characteristic_row_label(row)
+    charc_id = content_characteristic_row_charc_id(row)
+    existing_key, existing = content_characteristic_existing_match(output, name, charc_id)
+    if existing_key:
+      output[existing_key] = content_characteristic_merge_row(existing, row)
+    else:
+      output[key] = row
+    if len(output) >= limit:
+      break
+  return output
+
+
 def normalize_content_reoptimization_characteristics(value, fallback_rows=None, limit=24):
   rows = []
   if isinstance(value, dict):
@@ -9738,9 +9862,9 @@ def normalize_content_reoptimization_characteristics(value, fallback_rows=None, 
   fallback_by_name = {audit_normalized(row.get("name")): row for row in fallback_rows if isinstance(row, dict)}
   for item in rows[:limit]:
     name = audit_str(item.get("name") or item.get("label") or "")
-    fallback = fallback_by_name.get(audit_normalized(name)) or {}
+    fallback = fallback_by_name.get(audit_normalized(name)) or content_characteristic_best_match(name, fallback_rows)
     charc_id = item.get("charcID") or item.get("charcId") or fallback.get("charcId") or fallback.get("charcID") or ""
-    name = name or audit_str(fallback.get("name") or "")
+    name = audit_str(fallback.get("name") or fallback.get("label") or name)
     values = content_characteristic_values(item.get("values") if "values" in item else item.get("value"), limit=8)
     if not name or not values:
       continue
@@ -9748,7 +9872,7 @@ def normalize_content_reoptimization_characteristics(value, fallback_rows=None, 
     if not key:
       continue
     reason = audit_str(item.get("reason") or item.get("keywordFit") or "Поле предложено при переоптимизации по СЯ; проверьте соответствие фактам карточки и справочнику WB.", 700)
-    output[key] = {
+    row = {
       "charcID": charc_id,
       "label": name,
       "value": ", ".join(values),
@@ -9759,7 +9883,12 @@ def normalize_content_reoptimization_characteristics(value, fallback_rows=None, 
       "maxCount": item.get("maxCount") or fallback.get("maxCount"),
       "charcType": item.get("charcType") or fallback.get("charcType"),
     }
-  return output
+    existing_key, existing = content_characteristic_existing_match(output, name, charc_id)
+    if existing_key:
+      output[existing_key] = content_characteristic_merge_row(existing, row)
+    else:
+      output[key] = row
+  return content_reoptimization_deduplicate_characteristic_draft(output, limit=limit)
 
 
 def semantic_keyword_text(rows):
@@ -10664,6 +10793,7 @@ AUDIT_CHARACTERISTIC_ALIAS_GROUPS = (
   ("особенности модели", "особенности", "особенности товара"),
   ("декоративные элементы", "декор", "элементы декора"),
   ("конструктивные элементы", "конструктивные особенности", "элементы конструкции"),
+  ("конструкция оправы", "конструкции оправы", "тип конструкции оправы", "вид конструкции оправы"),
   ("назначение", "назначение товара", "назначение модели"),
   ("покрой", "силуэт", "крой"),
   ("тип застежки", "застежка", "вид застежки"),
@@ -15538,10 +15668,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   description_reason = audit_str(description_block.get("reason") or "Описание переписано с учетом выбранных запросов СЯ.", 700)
   llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
   fallback_characteristics = content_reoptimization_characteristic_fallback(card, target_keywords, available_characteristics=available_characteristics)
-  characteristic_draft = {
-    **fallback_characteristics,
-    **llm_characteristics,
-  }
+  characteristic_draft = content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics)
   return {
     "draftContent": {
       "title": {
@@ -15559,7 +15686,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
-      "engine": "opticards-semantic-content-v4",
+      "engine": "opticards-semantic-content-v4.1",
       "provider": provider,
       "model": model,
       "descriptionStyle": "marketplace-paragraphs",
