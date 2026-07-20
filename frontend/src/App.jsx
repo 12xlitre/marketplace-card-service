@@ -13297,6 +13297,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticRankStatus, setSemanticRankStatus] = useState("idle");
   const [semanticSaveStatus, setSemanticSaveStatus] = useState("");
   const [semanticContentStatus, setSemanticContentStatus] = useState("");
+  const [semanticContentAction, setSemanticContentAction] = useState("");
   const [semanticContentError, setSemanticContentError] = useState("");
   const [semanticDraftDirty, setSemanticDraftDirty] = useState(false);
   const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
@@ -13598,8 +13599,22 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const activeSemanticRankingPeriodLabel = semanticPeriodLabel(activeSemanticCore?.rankingPeriod || activeSemanticCore?.period);
   const activeSemanticExpansionPeriodLabel = semanticPeriodLabel(activeSemanticCore?.period);
   const semanticContentRunning = semanticContentStatus === "loading";
+  const semanticContentBusyAction = semanticContentRunning ? semanticContentAction : "";
+  const semanticContentActionText = {
+    title: "заголовок",
+    description: "описание",
+    characteristics: "характеристики",
+    all: "заголовок, описание и характеристики",
+  }[semanticContentAction || "all"];
   const semanticHasOptimizationKeywords = Boolean(activeSemanticNewRows.length || activeSemanticRowsForOptimization.length || activeSemanticRemovalRows.length);
   const canReoptimizeContent = Boolean(semanticHasOptimizationKeywords && semanticCurrentChoiceSaved && !approvalReadOnly && !semanticContentRunning);
+  const semanticReoptimizeUnavailableTitle = approvalReadOnly
+    ? "Раздел находится на согласовании: подготовка новых вариантов недоступна."
+    : !semanticHasOptimizationKeywords
+      ? "Сначала соберите или загрузите СЯ для карточки."
+      : !semanticCurrentChoiceSaved
+        ? "Сначала нажмите Сохранить текущий выбор."
+        : "";
   const auditCompetitorIds = auditCompetitorIdsFromInput(auditCompetitorInput);
   const auditContentChanged = normalizedCharacteristicOption(draftTitle) !== normalizedCharacteristicOption(currentTitle)
     || normalizedCharacteristicOption(draftDescription) !== normalizedCharacteristicOption(description);
@@ -14856,11 +14871,17 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     stageSemanticReports(nextReports);
   }
 
-  async function reoptimizeContentFromSemanticCore() {
+  async function reoptimizeContentFromSemanticCore(options = {}) {
     if (!semanticHasOptimizationKeywords || approvalReadOnly) {
       return;
     }
+    const requestedSections = (Array.isArray(options.sections) ? options.sections : [])
+      .map((section) => String(section || "").trim())
+      .filter((section) => ["title", "description", "characteristics"].includes(section));
+    const sections = requestedSections.length ? requestedSections : ["title", "description", "characteristics"];
+    const action = sections.length === 1 ? sections[0] : "all";
     setSemanticContentStatus("loading");
+    setSemanticContentAction(action);
     setSemanticContentError("");
     try {
       const payload = await apiRequest("/api/card-content-reoptimize", {
@@ -14872,6 +14893,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           selectedKeywords: activeSemanticNewRows,
           currentKeywords: activeSemanticRowsForOptimization,
           removeKeywords: activeSemanticRemovalRows,
+          sections,
           draft: {
             title: draftTitle,
             description: draftDescription,
@@ -14886,17 +14908,26 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       const titleDraft = payload.draftContent?.title || {};
       const descriptionDraft = payload.draftContent?.description || {};
       const savedDraftContent = payload.draft?.draft?.content || payload.draft?.content || {};
-      const semanticCharacteristicDrafts = normalizeDraftCharacteristics(payload.draftContent?.characteristics || savedDraftContent.characteristics || {});
+      const shouldApplyTitle = sections.includes("title");
+      const shouldApplyDescription = sections.includes("description");
+      const shouldApplyCharacteristics = sections.includes("characteristics");
+      const semanticCharacteristicDrafts = shouldApplyCharacteristics
+        ? normalizeDraftCharacteristics(payload.draftContent?.characteristics || savedDraftContent.characteristics || {})
+        : {};
       const nextDraftCharacteristics = { ...normalizeDraftCharacteristics(draftCharacteristics) };
-      Object.entries(semanticCharacteristicDrafts).forEach(([key, draft]) => {
-        nextDraftCharacteristics[key] = nextDraftCharacteristics[key]
-          ? mergeDraftCharacteristic(nextDraftCharacteristics[key], draft)
-          : draft;
-      });
-      const nextTitle = titleDraft.value || draftTitle || currentTitle;
-      const nextDescription = descriptionDraft.value || draftDescription || description;
-      const nextTitleReason = titleDraft.reason || "Заголовок переписан с учетом выбранного СЯ.";
-      const nextDescriptionReason = descriptionDraft.reason || "Описание переписано с учетом выбранного СЯ.";
+      if (shouldApplyCharacteristics) {
+        Object.entries(semanticCharacteristicDrafts).forEach(([key, draft]) => {
+          nextDraftCharacteristics[key] = nextDraftCharacteristics[key]
+            ? mergeDraftCharacteristic(nextDraftCharacteristics[key], draft)
+            : draft;
+        });
+      }
+      const nextTitle = shouldApplyTitle ? (titleDraft.value || draftTitle || currentTitle) : draftTitle;
+      const nextDescription = shouldApplyDescription ? (descriptionDraft.value || draftDescription || description) : draftDescription;
+      const nextTitleSource = shouldApplyTitle ? "semantic" : draftTitleSource;
+      const nextDescriptionSource = shouldApplyDescription ? "semantic" : draftDescriptionSource;
+      const nextTitleReason = shouldApplyTitle ? (titleDraft.reason || "Заголовок переписан с учетом выбранного СЯ.") : draftTitleReason;
+      const nextDescriptionReason = shouldApplyDescription ? (descriptionDraft.reason || "Описание переписано с учетом выбранного СЯ.") : draftDescriptionReason;
       const structuredDraft = buildStructuredCardDraft({
         auditStatus,
         auditHistory,
@@ -14904,8 +14935,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         approvalSections,
         title: nextTitle,
         description: nextDescription,
-        titleSource: "semantic",
-        descriptionSource: "semantic",
+        titleSource: nextTitleSource,
+        descriptionSource: nextDescriptionSource,
         titleReason: nextTitleReason,
         descriptionReason: nextDescriptionReason,
         characteristics: nextDraftCharacteristics,
@@ -14920,8 +14951,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       });
       setDraftTitle(nextTitle);
       setDraftDescription(nextDescription);
-      setDraftTitleSource("semantic");
-      setDraftDescriptionSource("semantic");
+      setDraftTitleSource(nextTitleSource);
+      setDraftDescriptionSource(nextDescriptionSource);
       setDraftTitleReason(nextTitleReason);
       setDraftDescriptionReason(nextDescriptionReason);
       setDraftCharacteristics(nextDraftCharacteristics);
@@ -16200,8 +16231,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем текущий выбор СЯ...</span> : null}
                   {semanticSaveStatus === "saved" ? <span className="status-note">Текущий выбор СЯ сохранен в карточке.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
-                  {semanticContentStatus === "loading" ? <span className="status-note">GigaChat переписывает заголовок, описание и характеристики...</span> : null}
-                  {semanticContentStatus === "done" ? <span className="status-note">Черновик контента и характеристик переоптимизирован по выбранному СЯ.</span> : null}
+                  {semanticContentStatus === "loading" ? <span className="status-note">GigaChat готовит {semanticContentActionText}...</span> : null}
+                  {semanticContentStatus === "done" ? <span className="status-note">Новый вариант блока “{semanticContentActionText}” сохранен в черновик.</span> : null}
                   {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
                   <button
@@ -16223,12 +16254,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   <button
                     className={loadingButtonClass("btn", semanticContentRunning)}
                     type="button"
-                    onClick={reoptimizeContentFromSemanticCore}
+                    onClick={() => reoptimizeContentFromSemanticCore()}
                     disabled={!canReoptimizeContent}
                     aria-busy={semanticContentRunning || undefined}
                     title={semanticHasOptimizationKeywords ? (semanticCurrentChoiceSaved ? "Переписать заголовок, описание и характеристики по всем ключам СЯ без ключей к удалению." : "Сначала нажмите Сохранить текущий выбор.") : "Сначала соберите или загрузите СЯ для карточки."}
                   >
-                    <WandSparkles size={17} />{semanticContentRunning ? "Переоптимизируем" : "Переоптимизировать"}
+                    <WandSparkles size={17} />{semanticContentRunning && semanticContentAction === "all" ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
                   <button className={loadingButtonClass("btn", semanticRankStatus === "loading")} type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID} aria-busy={semanticRankStatus === "loading" || undefined}>
                     <RefreshCw size={17} />{semanticRankStatus === "loading" ? "Обновляем позиции" : "Обновить позиции"}
@@ -16675,7 +16706,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     <p>{currentTitle}</p>
                   </div>
                   <div className="field-box">
-                    <strong>Черновик заголовка</strong>
+                    <div className="field-box-head">
+                      <strong>Черновик заголовка</strong>
+                      <button
+                        className={loadingButtonClass("btn mini", semanticContentBusyAction === "title")}
+                        type="button"
+                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["title"] })}
+                        disabled={!canReoptimizeContent}
+                        aria-busy={semanticContentBusyAction === "title" || undefined}
+                        title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант заголовка по сохраненному СЯ, не меняя описание и характеристики."}
+                      >
+                        <WandSparkles size={14} />{semanticContentBusyAction === "title" ? "Готовим" : "Еще вариант заголовка"}
+                      </button>
+                    </div>
                     <textarea
                       className={["audit", "semantic"].includes(draftTitleSource) ? "short audit-suggestion-field" : "short"}
                       value={draftTitle}
@@ -16698,7 +16741,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     <p>{isEmptyValue(description) ? "Пусто" : description}</p>
                   </div>
                   <div className="field-box description-box">
-                    <strong>Черновик описания</strong>
+                    <div className="field-box-head">
+                      <strong>Черновик описания</strong>
+                      <button
+                        className={loadingButtonClass("btn mini", semanticContentBusyAction === "description")}
+                        type="button"
+                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["description"] })}
+                        disabled={!canReoptimizeContent}
+                        aria-busy={semanticContentBusyAction === "description" || undefined}
+                        title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант описания по сохраненному СЯ, не меняя заголовок и характеристики."}
+                      >
+                        <WandSparkles size={14} />{semanticContentBusyAction === "description" ? "Готовим" : "Еще вариант описания"}
+                      </button>
+                    </div>
                     <textarea
                       className={`description-editor ${["audit", "semantic"].includes(draftDescriptionSource) ? "audit-suggestion-field" : ""}`}
                       value={draftDescription}
@@ -16719,7 +16774,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     />
                   </div>
                   <div className="field-box characteristics-diff-box">
-                    <strong>Характеристики</strong>
+                    <div className="field-box-head">
+                      <strong>Характеристики</strong>
+                      <button
+                        className={loadingButtonClass("btn mini", semanticContentBusyAction === "characteristics")}
+                        type="button"
+                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["characteristics"] })}
+                        disabled={!canReoptimizeContent}
+                        aria-busy={semanticContentBusyAction === "characteristics" || undefined}
+                        title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант характеристик по сохраненному СЯ, не меняя заголовок и описание."}
+                      >
+                        <WandSparkles size={14} />{semanticContentBusyAction === "characteristics" ? "Готовим" : "Еще вариант характеристик"}
+                      </button>
+                    </div>
                     <CharacteristicsDiffTable
                       rows={characteristicItems}
                       drafts={draftCharacteristics}

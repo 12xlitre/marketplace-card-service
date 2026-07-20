@@ -9641,6 +9641,19 @@ def content_title_limit(value, limit=60):
 CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT = 2000
 CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN = 1700
 CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX = 1950
+CONTENT_REOPTIMIZE_SECTIONS = ("title", "description", "characteristics")
+
+
+def content_reoptimization_sections(value):
+  values = value if isinstance(value, list) else [value]
+  output = []
+  for item in values:
+    section = audit_str(item, 40)
+    if section == "chars":
+      section = "characteristics"
+    if section in CONTENT_REOPTIMIZE_SECTIONS and section not in output:
+      output.append(section)
+  return output or list(CONTENT_REOPTIMIZE_SECTIONS)
 
 
 def content_keyword_normalized_key(item):
@@ -16103,7 +16116,8 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, draft=None, characteristics_context=None):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, draft=None, characteristics_context=None, sections=None):
+  requested_sections = content_reoptimization_sections(sections)
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
@@ -16256,20 +16270,28 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
   fallback_characteristics = content_reoptimization_characteristic_fallback(card, target_keywords, available_characteristics=available_characteristics)
   characteristic_draft = content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics)
-  return {
-    "draftContent": {
-      "title": {
-        "value": next_title,
-        "source": "semantic",
-        "reason": title_reason,
-      },
-      "description": {
-        "value": next_description,
-        "source": "semantic",
-        "reason": description_reason,
-      },
-      "characteristics": characteristic_draft,
+  draft_content = {
+    "title": {
+      "value": next_title,
+      "source": "semantic",
+      "reason": title_reason,
     },
+    "description": {
+      "value": next_description,
+      "source": "semantic",
+      "reason": description_reason,
+    },
+    "characteristics": characteristic_draft,
+  }
+  if set(requested_sections) != set(CONTENT_REOPTIMIZE_SECTIONS):
+    draft_content = {
+      key: value
+      for key, value in draft_content.items()
+      if key in requested_sections
+    }
+  return {
+    "sections": requested_sections,
+    "draftContent": draft_content,
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
@@ -16279,6 +16301,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "titleStyle": "wb-search-title",
       "titleRuleApplied": title_rule_applied,
       "titleRuleKind": title_rule_kind,
+      "sections": requested_sections,
       "descriptionStyle": "marketplace-paragraphs",
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
@@ -16388,6 +16411,15 @@ def content_reoptimization_draft_payload_from_result(reoptimization_payload, pre
   previous_content = previous_payload.get("content") if isinstance(previous_payload.get("content"), dict) else {}
   previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
   optimization = reoptimization_payload.get("contentOptimization") if isinstance(reoptimization_payload.get("contentOptimization"), dict) else {}
+  requested_sections = content_reoptimization_sections(
+    optimization.get("sections") or reoptimization_payload.get("sections") or CONTENT_REOPTIMIZE_SECTIONS
+  )
+  title_enabled = "title" in requested_sections
+  description_enabled = "description" in requested_sections
+  characteristics_enabled = "characteristics" in requested_sections
+  previous_title = previous_content.get("title") if isinstance(previous_content.get("title"), dict) else {}
+  previous_description = previous_content.get("description") if isinstance(previous_content.get("description"), dict) else {}
+  previous_characteristics = previous_content.get("characteristics") if isinstance(previous_content.get("characteristics"), dict) else {}
   previous_history = previous_meta.get("contentOptimizationHistory") if isinstance(previous_meta.get("contentOptimizationHistory"), list) else []
   next_history = [optimization, *previous_history] if optimization else previous_history
   meta = reset_content_approval_for_reoptimization({
@@ -16401,18 +16433,18 @@ def content_reoptimization_draft_payload_from_result(reoptimization_payload, pre
     "auditStatus": previous_payload.get("auditStatus") or "idle",
     "content": {
       "title": {
-        "value": title.get("value") or previous_content.get("title", {}).get("value") or "",
-        "source": title.get("source") or "semantic",
-        "reason": title.get("reason") or "Заголовок переоптимизирован по итоговому СЯ.",
+        "value": title.get("value") if title_enabled and title.get("value") else previous_title.get("value") or "",
+        "source": title.get("source") if title_enabled and title.get("source") else previous_title.get("source") or ("semantic" if title_enabled else ""),
+        "reason": title.get("reason") if title_enabled and title.get("reason") else previous_title.get("reason") or ("Заголовок переоптимизирован по итоговому СЯ." if title_enabled else ""),
       },
       "description": {
-        "value": description.get("value") or previous_content.get("description", {}).get("value") or "",
-        "source": description.get("source") or "semantic",
-        "reason": description.get("reason") or "Описание переоптимизировано по итоговому СЯ.",
+        "value": description.get("value") if description_enabled and description.get("value") else previous_description.get("value") or "",
+        "source": description.get("source") if description_enabled and description.get("source") else previous_description.get("source") or ("semantic" if description_enabled else ""),
+        "reason": description.get("reason") if description_enabled and description.get("reason") else previous_description.get("reason") or ("Описание переоптимизировано по итоговому СЯ." if description_enabled else ""),
       },
       "characteristics": {
-        **(previous_content.get("characteristics") if isinstance(previous_content.get("characteristics"), dict) else {}),
-        **characteristics,
+        **previous_characteristics,
+        **(characteristics if characteristics_enabled else {}),
       },
     },
     "prices": previous_payload.get("prices") if isinstance(previous_payload.get("prices"), dict) else {},
@@ -19377,6 +19409,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           remove_keywords=payload.get("removeKeywords") or payload.get("semanticCoreRemoval"),
           draft=payload.get("draft"),
           characteristics_context=payload.get("characteristicsContext"),
+          sections=payload.get("sections") or payload.get("contentSections"),
         )
         if str(portal_id) != "demo-wb":
           try:

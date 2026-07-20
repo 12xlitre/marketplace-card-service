@@ -5562,6 +5562,22 @@ tr:last-child td {
   gap: 12px;
 }
 
+.field-box-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+}
+
+.field-box-head strong {
+  min-width: 0;
+}
+
+.field-box-head .btn {
+  flex: 0 0 auto;
+}
+
 .issue p,
 .option-row p,
 .field-box p {
