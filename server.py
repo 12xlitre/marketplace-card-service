@@ -2744,6 +2744,29 @@ def merge_card_draft_work_context(next_payload, previous_payload):
   }
 
 
+def merge_card_draft_reoptimized_characteristics(next_payload, previous_payload):
+  if not isinstance(next_payload, dict) or not isinstance(previous_payload, dict):
+    return next_payload
+  previous_content = previous_payload.get("content") if isinstance(previous_payload.get("content"), dict) else {}
+  next_content = next_payload.get("content") if isinstance(next_payload.get("content"), dict) else {}
+  previous_characteristics = previous_content.get("characteristics") if isinstance(previous_content.get("characteristics"), dict) else {}
+  next_characteristics = next_content.get("characteristics") if isinstance(next_content.get("characteristics"), dict) else {}
+  if not previous_characteristics or next_characteristics:
+    return next_payload
+  next_meta = next_payload.get("meta") if isinstance(next_payload.get("meta"), dict) else {}
+  optimization = next_meta.get("contentOptimization") if isinstance(next_meta.get("contentOptimization"), dict) else {}
+  engine = str(optimization.get("engine") or "")
+  if not engine.startswith("opticards-semantic-content-v2") or audit_int(optimization.get("characteristics"), 0) <= 0:
+    return next_payload
+  return {
+    **next_payload,
+    "content": {
+      **next_content,
+      "characteristics": previous_characteristics,
+    },
+  }
+
+
 def sanitize_audit_summary(summary):
   if not isinstance(summary, dict):
     return summary
@@ -7005,6 +7028,7 @@ def save_card_draft(portal_id, card_key, nm_id, vendor_code, payload, user):
     previous_payload = normalize_card_draft_payload(previous_payload)
     normalized_payload = merge_card_draft_semantics(normalized_payload, previous_payload)
     normalized_payload = merge_card_draft_work_context(normalized_payload, previous_payload)
+    normalized_payload = merge_card_draft_reoptimized_characteristics(normalized_payload, previous_payload)
     payload_json = json.dumps(normalized_payload, ensure_ascii=False, separators=(",", ":"))
     if restricted_approval_changes(normalized_payload, previous_payload) and not user_can_review_portal_approval(user, numeric_portal_id):
       raise PermissionError("approval_forbidden")
@@ -9763,9 +9787,10 @@ def content_reoptimization_characteristic_fallback(card, keyword_rows, available
     ][:5]
     if not matched_queries and not (row_tokens & keyword_tokens):
       continue
-    key = content_characteristic_draft_key(row.get("name"), row.get("charcId"))
+    charc_id = row.get("charcId") or row.get("charcID") or ""
+    key = content_characteristic_draft_key(row.get("name"), charc_id)
     output[key] = {
-      "charcID": row.get("charcId") or "",
+      "charcID": charc_id,
       "label": row.get("name") or "",
       "value": ", ".join(values),
       "values": values,
@@ -9812,6 +9837,204 @@ def content_reoptimization_characteristic_fallback(card, keyword_rows, available
     if len(output) >= limit:
       break
   return output
+
+
+def content_merge_keyword_rows(*groups, limit=180):
+  output = []
+  seen = set()
+  for group in groups:
+    for item in content_keywords_from_payload(group, limit=limit):
+      key = audit_normalized(item.get("query"))
+      if not key or key in seen:
+        continue
+      seen.add(key)
+      output.append(item)
+      if len(output) >= limit:
+        return output
+  return output
+
+
+def stored_card_draft_payload(portal_id, card_key):
+  portal_text = str(portal_id or "").strip()
+  if not portal_text or portal_text == "demo-wb":
+    return {}
+  try:
+    numeric_portal_id = int(portal_text)
+  except (TypeError, ValueError):
+    return {}
+  clean_card_key = draft_card_key(card_key)
+  if not clean_card_key:
+    return {}
+  init_db()
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT payload_json
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, clean_card_key),
+    ).fetchone()
+  return safe_json_object(row["payload_json"] if row else "")
+
+
+def semantic_core_current_sources(core):
+  core = core if isinstance(core, dict) else {}
+  output = []
+  for key in (
+    "current",
+    "currentKeywords",
+    "currentContentKeywords",
+    "contentKeywords",
+    "contentRows",
+    "rankedKeywords",
+    "rankingRows",
+    "positionRows",
+  ):
+    value = core.get(key)
+    if isinstance(value, list):
+      output.extend(value)
+  return output
+
+
+def stored_semantic_reoptimization_keywords(portal_id, card_key):
+  payload = stored_card_draft_payload(portal_id, card_key)
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  selected_sources = []
+  current_sources = []
+  removal_sources = []
+
+  final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+  if final_export:
+    final_selected, final_current, final_remove = semantic_final_keyword_lists(final_export)
+    selected_sources.extend(final_selected)
+    current_sources.extend(final_current)
+    removal_sources.extend(final_remove)
+
+  if isinstance(meta.get("semanticCoreSelected"), list):
+    selected_sources.extend(meta.get("semanticCoreSelected"))
+  if isinstance(meta.get("semanticCoreRemoval"), list):
+    removal_sources.extend(meta.get("semanticCoreRemoval"))
+
+  for report in meta.get("semanticCoreReports") if isinstance(meta.get("semanticCoreReports"), list) else []:
+    if not isinstance(report, dict):
+      continue
+    if isinstance(report.get("selected"), list):
+      selected_sources.extend(report.get("selected"))
+    core = report.get("semanticCore") if isinstance(report.get("semanticCore"), dict) else {}
+    current_sources.extend(semantic_core_current_sources(core))
+
+  remove = content_merge_keyword_rows(removal_sources, limit=100)
+  remove_keys = {audit_normalized(item.get("query")) for item in remove}
+  selected = [
+    item for item in content_merge_keyword_rows(selected_sources, limit=160)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
+  current = [
+    item for item in content_merge_keyword_rows(current_sources, limit=180)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
+  return selected, current, remove
+
+
+def content_reoptimization_keyword_safe(query, card):
+  text = audit_normalized(query)
+  if not text:
+    return False
+  blocked_brand = any(
+    blocked in text
+    for blocked in ("miu miu", "миу миу", "prada", "ray ban", "ray-ban", "gucci", "dior", "chanel")
+  )
+  if blocked_brand:
+    card_text = audit_normalized(" ".join([
+      str(card.get("brand") or ""),
+      str(card.get("title") or ""),
+      str((card.get("rawFields") or {}).get("brand") if isinstance(card.get("rawFields"), dict) else ""),
+    ]))
+    if text not in card_text:
+      return False
+  tokens = set(audit_tokens(text))
+  product_tokens = {"оправа", "оправы", "очк", "очки", "линз", "линзы", "зрени", "зрение"}
+  return bool(tokens & product_tokens)
+
+
+def content_reoptimization_keyword_sentence(query):
+  clean_query = audit_str(query, 120)
+  lowered = clean_query[:1].lower() + clean_query[1:]
+  if "оправ" in audit_normalized(clean_query):
+    return f"{clean_query[:1].upper() + clean_query[1:]} подходит для установки линз у оптика и повседневного использования, если нужны аккуратная посадка, легкая конструкция и спокойный внешний вид."
+  if "линз" in audit_normalized(clean_query) or "зрени" in audit_normalized(clean_query):
+    return f"Для запроса {lowered} важно, что модель является именно оправой: линзы подбираются отдельно по рецепту, а форма и размеры помогают заранее оценить посадку."
+  return f"Запрос {lowered} связан с товаром по типу изделия: это оправа для очков, которую можно использовать как основу для индивидуально подобранных линз."
+
+
+def content_reoptimization_expand_description(description, card, target_keywords, min_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(description, max_chars)
+  if len(text) >= min_chars:
+    return text
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  brand = audit_str(card.get("brand") or raw_fields.get("brand") or "")
+  subject = audit_str(card.get("subjectName") or raw_fields.get("subjectName") or "оправа")
+  characteristics = audit_card_characteristics(card)
+  facts = {audit_normalized(row.get("name")): row.get("values") or [] for row in characteristics}
+
+  def fact(names):
+    for name in names:
+      values = facts.get(audit_normalized(name))
+      if values:
+        return ", ".join(values[:4])
+    return ""
+
+  material = fact(["Материал оправы", "Материал"])
+  colors = fact(["Цвет"])
+  kit = fact(["Комплектация"])
+  dimensions = []
+  for name in ("Высота линзы", "Ширина линзы", "Ширина оправы", "Ширина носового моста", "Длина дужки"):
+    value = fact([name])
+    if value:
+      dimensions.append(f"{name.lower()} {value}")
+
+  additions = [
+    f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужна база под индивидуальные линзы без готовой диоптрийной части.",
+    f"Модель {brand or ''} сделана с учетом ежедневного ношения: она держит форму, не перегружает образ и сочетается с повседневной одеждой.".strip(),
+  ]
+  if material:
+    additions.append(f"Материал оправы — {material}; он помогает сохранить легкость изделия и аккуратную посадку при регулярном использовании.")
+  if colors:
+    additions.append(f"Доступные оттенки: {colors}. Цвет можно выбрать под привычный стиль, рабочий гардероб или более выразительный повседневный образ.")
+  if dimensions:
+    additions.append(f"Перед заказом проверьте параметры посадки: {', '.join(dimensions[:5])}. Эти размеры помогают понять, насколько оправа будет удобна по ширине лица, мосту и длине дужек.")
+  if kit:
+    additions.append(f"В комплект входят: {kit}. Футляр и салфетка помогают хранить изделие и ухаживать за линзами после установки.")
+
+  safe_keywords = []
+  for item in target_keywords:
+    query = item.get("query") if isinstance(item, dict) else item
+    if not query or content_contains_exact_keyword(text, query) or not content_reoptimization_keyword_safe(query, card):
+      continue
+    safe_keywords.append(audit_str(query, 120))
+    if len(safe_keywords) >= 18:
+      break
+  additions.extend(content_reoptimization_keyword_sentence(query) for query in safe_keywords)
+  additions.extend([
+    "Оправа не является готовыми очками с диоптриями: она предназначена для последующей установки линз под рецепт, поэтому перед покупкой важно сверить параметры с привычной посадкой и рекомендациями специалиста.",
+    "Лаконичная форма без лишнего декора делает модель универсальной для офиса, учебы, прогулок и повседневных образов, а спокойная цветовая гамма помогает сочетать ее с разной одеждой.",
+    "Если нужна замена старой оправы, ориентируйтесь на ширину линзы, мост и длину дужки: эти параметры влияют на комфорт в течение дня и помогают избежать слишком тесной или свободной посадки.",
+    "Модель подойдет тем, кто выбирает аккуратный аксессуар для коррекции зрения и хочет сохранить сдержанный внешний вид без яркого спортивного или декоративного акцента.",
+  ])
+
+  for sentence in additions:
+    sentence = audit_str(sentence, 500)
+    if not sentence:
+      continue
+    candidate = f"{text.rstrip()} {sentence}".strip()
+    if len(candidate) > max_chars:
+      break
+    text = candidate
+    if len(text) >= min_chars:
+      break
+  return audit_str(text, max_chars)
 
 
 def audit_number(value, default=None):
@@ -14849,6 +15072,17 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
+  stored_selected, stored_current, stored_remove = stored_semantic_reoptimization_keywords(portal_id, card_key)
+  remove = content_merge_keyword_rows(remove, stored_remove, limit=100)
+  remove_keys = {audit_normalized(item.get("query")) for item in remove}
+  selected = [
+    item for item in content_merge_keyword_rows(selected, stored_selected, limit=160)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
+  current = [
+    item for item in content_merge_keyword_rows(current, stored_current, limit=180)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
   target_keywords = content_reoptimization_target_keywords(selected, current, remove, limit=140)
   if not target_keywords and not remove:
     raise ValueError("missing_semantic_keywords")
@@ -14918,6 +15152,43 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   description_block = parsed.get("description") if isinstance(parsed.get("description"), dict) else {}
   next_title = content_title_limit(title_block.get("value") or title_block.get("recommended") or draft_title or title)
   next_description = audit_str(description_block.get("value") or description_block.get("recommended") or draft_description or description, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  initial_description_used_keywords = content_keyword_matches(next_description, target_keywords, limit=140)
+  if target_keywords and (
+    len(next_description) < CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN
+    or len(initial_description_used_keywords) < min(8, max(1, len(target_keywords) // 5))
+  ):
+    retry_messages = [
+      *messages,
+      {"role": "assistant", "content": content},
+      {
+        "role": "user",
+        "content": json.dumps({
+          "correction": "Результат не принят: описание слишком короткое или почти не содержит прямых вхождений целевых ключей.",
+          "required": {
+            "descriptionChars": f"{CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN}-{CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX}",
+            "maxChars": CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT,
+            "useExactKeywordsFrom": "evidenceBundle.semanticCore.allTargetKeywords",
+            "returnCharacteristics": True,
+          },
+        }, ensure_ascii=False),
+      },
+    ]
+    try:
+      retry_payload, retry_model, retry_provider = audit_llm_chat_completion(retry_messages)
+      retry_content = retry_payload.get("choices", [{}])[0].get("message", {}).get("content", "") if retry_payload else ""
+      retry_parsed = parse_llm_json_content(retry_content)
+      if isinstance(retry_parsed, dict):
+        parsed = retry_parsed
+        model = retry_model
+        provider = retry_provider
+        content = retry_content
+        title_block = parsed.get("title") if isinstance(parsed.get("title"), dict) else {}
+        description_block = parsed.get("description") if isinstance(parsed.get("description"), dict) else {}
+        next_title = content_title_limit(title_block.get("value") or title_block.get("recommended") or draft_title or title)
+        next_description = audit_str(description_block.get("value") or description_block.get("recommended") or draft_description or description, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+    except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
+      pass
+  next_description = content_reoptimization_expand_description(next_description, card, target_keywords)
   if not next_title or not next_description:
     raise RuntimeError("llm_content_reoptimization_empty")
 
@@ -15005,18 +15276,22 @@ def semantic_final_keyword_lists(final_export):
   current_source = extend_from(
     [],
     semantic_core.get("current"),
+    semantic_core.get("currentKeywords"),
+    semantic_core.get("currentContentKeywords"),
+    semantic_core.get("contentKeywords"),
+    semantic_core.get("contentRows"),
     semantic_core.get("rankedKeywords"),
     semantic_core.get("rankingRows"),
     semantic_core.get("positionRows"),
   )
-  selected = content_keywords_from_payload(selected_source, limit=120)
-  remove = content_keywords_from_payload(removal_source, limit=80)
+  selected = content_keywords_from_payload(selected_source, limit=160)
+  remove = content_keywords_from_payload(removal_source, limit=100)
   remove_keys = {audit_normalized(item.get("query")) for item in remove}
   current = [
     item
-    for item in content_keywords_from_payload(current_source, limit=120)
+    for item in content_keywords_from_payload(current_source, limit=180)
     if audit_normalized(item.get("query")) not in remove_keys
-  ][:80]
+  ][:160]
   return selected, current, remove
 
 
@@ -18051,6 +18326,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           draft=payload.get("draft"),
           characteristics_context=payload.get("characteristicsContext"),
         )
+        if str(portal_id) != "demo-wb":
+          try:
+            previous_payload = stored_card_draft_payload(portal_id, card_key)
+            card_for_ids = content_card_for_portal(portal_id, card_key, raw_card)
+            next_payload = content_reoptimization_draft_payload_from_result(result, previous_payload)
+            saved_draft = save_card_draft(
+              portal_id,
+              card_key,
+              card_for_ids.get("nmID") or card_for_ids.get("nmId") or payload.get("nmID") or "",
+              card_for_ids.get("vendorCode") or card_for_ids.get("vendor_code") or payload.get("vendorCode") or "",
+              next_payload,
+              user,
+            )
+            result["draft"] = saved_draft
+          except (PermissionError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            result["draftSaveError"] = str(exc) or type(exc).__name__
       except ValueError as exc:
         message = str(exc) or "invalid_content_reoptimization_request"
         status = HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST

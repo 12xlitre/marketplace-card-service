@@ -14885,7 +14885,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       });
       const titleDraft = payload.draftContent?.title || {};
       const descriptionDraft = payload.draftContent?.description || {};
-      const semanticCharacteristicDrafts = normalizeDraftCharacteristics(payload.draftContent?.characteristics || {});
+      const savedDraftContent = payload.draft?.draft?.content || payload.draft?.content || {};
+      const semanticCharacteristicDrafts = normalizeDraftCharacteristics(payload.draftContent?.characteristics || savedDraftContent.characteristics || {});
       const nextDraftCharacteristics = { ...normalizeDraftCharacteristics(draftCharacteristics) };
       Object.entries(semanticCharacteristicDrafts).forEach(([key, draft]) => {
         nextDraftCharacteristics[key] = nextDraftCharacteristics[key]
