@@ -13489,6 +13489,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     : semanticInputSeedQuery || activeSemanticSeedQuery;
   const hasSemanticExpansion = Boolean(activeSemanticCore?.source === "mpstats-expanding" || activeSemanticCore?.seedQuery);
   const shouldRefreshSemanticExpansion = Boolean(hasSemanticExpansion && !semanticSeedQueryChanged);
+  const shouldConfirmSemanticCollectMore = Boolean(hasSemanticExpansion && !semanticSeedQueryChanged);
   const semanticRunButtonLabel = semanticCoreStatus === "loading"
     ? "Подбираем запросы"
     : semanticCoreStatus === "pending"
@@ -14346,7 +14347,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     if (semanticCoreStatus === "loading" || !semanticSeedQuery.trim()) {
       return;
     }
-    loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion });
+    handleRunSemanticCore();
   }
 
   async function loadSemanticCore({ forceRefresh = false, query = semanticSeedQuery } = {}) {
@@ -14408,6 +14409,19 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setSemanticCoreError(readableMessage);
       return null;
     }
+  }
+
+  function handleRunSemanticCore() {
+    if (shouldConfirmSemanticCollectMore) {
+      const seed = semanticSeedQuery.trim() || activeSemanticSeedQuery || "текущему запросу";
+      const confirmed = window.confirm(
+        `Собрать еще запросы по запросу "${seed}"? Система запросит MPStats заново и обновит текущую подборку. Выбранные вручную ключи останутся в работе, но список рекомендаций может измениться.`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion });
   }
 
   function stageSemanticSelection(nextSelection) {
@@ -14798,6 +14812,27 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     }
     setSemanticCoreError(`Автоматически добавлено ${chosen.length} запросов: высоко-, средне- и низкочастотные без дублей.`);
     stageSemanticSelection([...semanticCoreSelected, ...chosen]);
+  }
+
+  function handleAutoSelectSemanticKeywords() {
+    const count = autoSemanticCandidateRows.length;
+    const confirmed = window.confirm(
+      `Автодобавить ${formatNumber(count)} ${pluralRu(count, "запрос", "запроса", "запросов")} в работу? После автодобавления проверьте список и нажмите "Сохранить текущий выбор".`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    autoSelectSemanticKeywords();
+  }
+
+  function handleRefreshSemanticPositions() {
+    const confirmed = window.confirm(
+      "Обновить позиции карточки из MPStats? Ранжирующиеся запросы и позиции на экране будут обновлены свежим отчетом.",
+    );
+    if (!confirmed) {
+      return;
+    }
+    loadSemanticCurrentPositions({ forceRefresh: true });
   }
 
   function removeSemanticKeyword(item) {
@@ -16247,7 +16282,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   <button
                     className="btn"
                     type="button"
-                    onClick={autoSelectSemanticKeywords}
+                    onClick={handleAutoSelectSemanticKeywords}
                     disabled={!canAutoSelectSemantic}
                     title={autoSemanticTitle}
                   >
@@ -16255,7 +16290,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </button>
                   <span
                     className="semantic-help-icon"
-                    title="Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats. Затем Автодобавить запросы сразу перенесет подходящие ключи в Добавленные в работу, с сохранением в карточке."
+                    title="Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats. Затем Автодобавить запросы перенесет подходящие ключи в Добавленные в работу; после проверки нажмите Сохранить текущий выбор."
                     aria-label="Как работает автодобавление запросов"
                   >
                     <HelpCircle size={15} />
@@ -16270,13 +16305,13 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   >
                     <WandSparkles size={17} />{semanticContentRunning && semanticContentAction === "all" ? "Переоптимизируем" : "Переоптимизировать"}
                   </button>
-                  <button className={loadingButtonClass("btn", semanticRankStatus === "loading")} type="button" onClick={() => loadSemanticCurrentPositions({ forceRefresh: true })} disabled={semanticRankStatus === "loading" || !card?.nmID} aria-busy={semanticRankStatus === "loading" || undefined}>
+                  <button className={loadingButtonClass("btn", semanticRankStatus === "loading")} type="button" onClick={handleRefreshSemanticPositions} disabled={semanticRankStatus === "loading" || !card?.nmID} aria-busy={semanticRankStatus === "loading" || undefined}>
                     <RefreshCw size={17} />{semanticRankStatus === "loading" ? "Обновляем позиции" : "Обновить позиции"}
                   </button>
                   <button className={loadingButtonClass("btn", semanticSaveStatus === "saving")} type="button" onClick={saveSemanticCurrentSelection} disabled={semanticSaveCurrentDisabled} aria-busy={semanticSaveStatus === "saving" || undefined} title={semanticSaveCurrentTitle}>
                     <Save size={17} />{semanticSaveStatus === "saving" ? "Сохраняем выбор" : "Сохранить текущий выбор"}
                   </button>
-                  <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={() => loadSemanticCore({ forceRefresh: shouldRefreshSemanticExpansion })} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
+                  <button className={loadingButtonClass("btn primary", semanticCoreStatus === "loading")} type="button" onClick={handleRunSemanticCore} disabled={semanticCoreStatus === "loading" || !semanticSeedQuery.trim()} aria-busy={semanticCoreStatus === "loading" || undefined}>
                     <Search size={17} />{semanticRunButtonLabel}
                   </button>
                 </div>
