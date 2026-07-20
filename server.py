@@ -9536,10 +9536,15 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
 - работай со всеми ключами из evidenceBundle.semanticCore.allTargetKeywords: это действующие ключи без удаления, ранжируемые запросы и добавленные запросы;
 - ключи из evidenceBundle.semanticCore.removeKeywords нельзя использовать намеренно;
-- новые ключевые запросы включай естественно: высокочастотный запрос ставь в основу заголовка, средне- и низкочастотные добавляй в описание и подходящие характеристики только если они точно подходят товару;
+- новые ключевые запросы включай естественно: самые сильные товарные запросы ставь в основу заголовка, средне- и низкочастотные добавляй в описание и подходящие характеристики только если они точно подходят товару;
 - запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
-- заголовок должен быть готовым названием карточки WB длиной до 60 символов, отвечать на вопрос "что на фото", ставить важные слова в начало;
-- в заголовке нельзя использовать бренд, повторы, перечисления через запятую или слэш, оценочные слова "лучший", "хит", "супер", состав, сезон, пол, возраст, контакты, emoji, caps lock, спецсимволы / * - + @ № % & $ ! = ( ) { } [ ];
+- заголовок должен быть готовым названием карточки WB длиной до 60 символов, отвечать на вопрос покупателя "что это, кому подходит, чем отличается", ставить тип товара в начало;
+- формула заголовка: Тип товара -> Назначение -> Целевая аудитория -> Главная характеристика -> Дополнительная характеристика -> Бренд -> Модель;
+- первые слова заголовка должны быть самым частотным товарным запросом, а не брендом, артикулом или моделью; модель/артикул допустимы только в конце, если не ухудшают читаемость;
+- в заголовок включай только самые сильные поисковые признаки, которые помогают выбрать товар и подтверждены evidenceBundle: например пол, форма, объем, размер, материал только если он является конкурентным преимуществом;
+- бренд можно и нужно ставить ближе к концу, если он есть в evidenceBundle и помогает узнаваемости; не начинай заголовок с бренда;
+- цвет не ставь в заголовок, если он не является главным поисковым/выборочным признаком; для оправ цвет обычно уходит в характеристики и описание;
+- в заголовке нельзя использовать повторы, перечисления через запятую или слэш, оценочные слова "лучший", "хит", "супер", неподтвержденные свойства, контакты, emoji, caps lock, спецсимволы / * - + @ № % & $ ! = ( ) { } [ ];
 - описание должно быть готовым текстом карточки, а не советом специалисту;
 - описание должно стремиться к 1700-1950 символам, но не превышать 2000 символов с пробелами;
 - описание должно органично внедрять максимум релевантных ключей из allTargetKeywords, но нормальный русский язык важнее формального счетчика; если точный запрос звучит как набор слов, адаптируй порядок или пропусти его с предупреждением;
@@ -10084,6 +10089,204 @@ def stored_semantic_reoptimization_keywords(portal_id, card_key):
     if audit_normalized(item.get("query")) not in remove_keys
   ]
   return selected, current, remove
+
+
+def stored_semantic_title_keyword_rows(portal_id, card_key, limit=360):
+  payload = stored_card_draft_payload(portal_id, card_key)
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  sources = []
+  removal_sources = []
+
+  def add_core(core):
+    core = core if isinstance(core, dict) else {}
+    for key in (
+      "selected",
+      "selectedKeywords",
+      "recommended",
+      "current",
+      "currentKeywords",
+      "rankedKeywords",
+      "rankingRows",
+      "allKeywords",
+    ):
+      value = core.get(key)
+      if isinstance(value, list):
+        sources.extend(value)
+    for key in ("removeKeywords", "removal", "removed", "toRemove"):
+      value = core.get(key)
+      if isinstance(value, list):
+        removal_sources.extend(value)
+
+  final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
+  if final_export:
+    add_core(final_export.get("semanticCore"))
+    for key in ("selected", "semanticCoreSelected", "recommended"):
+      value = final_export.get(key)
+      if isinstance(value, list):
+        sources.extend(value)
+    for key in ("removal", "removeKeywords", "removed", "toRemove"):
+      value = final_export.get(key)
+      if isinstance(value, list):
+        removal_sources.extend(value)
+
+  if isinstance(meta.get("semanticCoreSelected"), list):
+    sources.extend(meta.get("semanticCoreSelected"))
+  if isinstance(meta.get("semanticCoreRemoval"), list):
+    removal_sources.extend(meta.get("semanticCoreRemoval"))
+
+  for report in meta.get("semanticCoreReports") if isinstance(meta.get("semanticCoreReports"), list) else []:
+    if not isinstance(report, dict):
+      continue
+    if isinstance(report.get("selected"), list):
+      sources.extend(report.get("selected"))
+    if isinstance(report.get("recommended"), list):
+      sources.extend(report.get("recommended"))
+    add_core(report.get("semanticCore"))
+
+  remove_keys = {
+    audit_normalized(item.get("query") if isinstance(item, dict) else item)
+    for item in removal_sources
+  }
+  rows = [
+    item for item in content_merge_keyword_rows(sources, limit=limit)
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
+  return rows[:limit]
+
+
+def content_reoptimization_fact_values(facts, names):
+  facts = facts if isinstance(facts, dict) else {}
+  for name in names:
+    values = facts.get(audit_normalized(name))
+    if values:
+      return content_reoptimization_clean_values(values, limit=6)
+  return []
+
+
+def content_reoptimization_brand_label(value):
+  brand = audit_str(value, 80)
+  if not brand:
+    return ""
+  brand = re.split(r"\s+by\s+", brand, flags=re.IGNORECASE)[0].strip() or brand
+  return re.sub(r"\s+", " ", brand)
+
+
+def content_reoptimization_gender_for_title(keyword_rows, facts):
+  values = content_reoptimization_fact_values(facts, ["Пол", "Пол/возраст", "Пол и возраст"])
+  fact_text = audit_normalized(" ".join(values))
+  if "жен" in fact_text:
+    return "женская"
+  if "муж" in fact_text:
+    return "мужская"
+  scores = {"женская": 0, "мужская": 0}
+  for item in keyword_rows if isinstance(keyword_rows, list) else []:
+    query = audit_normalized(item.get("query") if isinstance(item, dict) else item)
+    if not query:
+      continue
+    score = max(1, audit_int(item.get("wbCount"), 0) if isinstance(item, dict) else 1)
+    if "оправ" in query and "очк" in query:
+      score += 3000
+    if isinstance(item, dict) and item.get("semanticSource") == "added":
+      score += 1000
+    if "женск" in query:
+      scores["женская"] += score
+    if "мужск" in query:
+      scores["мужская"] += score
+  if scores["женская"] and scores["женская"] >= scores["мужская"]:
+    return "женская"
+  if scores["мужская"]:
+    return "мужская"
+  return ""
+
+
+CONTENT_FRAME_TITLE_SHAPES = (
+  ("круглая", ("кругл",)),
+  ("овальная", ("овал",)),
+  ("квадратная", ("квадрат",)),
+  ("прямоугольная", ("прямоуголь",)),
+  ("кошачий глаз", ("кошач", "cat eye", "cat-eye")),
+  ("авиатор", ("авиатор",)),
+)
+
+
+def content_reoptimization_shape_from_value(value):
+  text = audit_normalized(value)
+  for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+    if any(marker in text for marker in markers):
+      return label
+  return ""
+
+
+def content_reoptimization_shape_for_title(keyword_rows, facts, gender=""):
+  fact_values = content_reoptimization_fact_values(facts, ["Форма оправы", "Форма"])
+  for value in fact_values:
+    shape = content_reoptimization_shape_from_value(value)
+    if shape:
+      return shape
+
+  scores = {}
+  for item in keyword_rows if isinstance(keyword_rows, list) else []:
+    query = audit_normalized(item.get("query") if isinstance(item, dict) else item)
+    if not query or re.search(r"\d", query):
+      continue
+    if "оправ" not in query or "очк" not in query:
+      continue
+    if gender == "женская" and "мужск" in query:
+      continue
+    if gender == "мужская" and "женск" in query:
+      continue
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+      if not any(marker in query for marker in markers):
+        continue
+      score = max(1, audit_int(item.get("wbCount"), 0) if isinstance(item, dict) else 1)
+      if "для очк" in query:
+        score += 500
+      if gender and gender[:4] in query:
+        score += 500
+      if "оправа для очков" in query:
+        score += 700
+      scores[label] = scores.get(label, 0) + score
+  if not scores:
+    return ""
+  return sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))[0][0]
+
+
+def content_reoptimization_title_parts_unique(parts):
+  output = []
+  seen = set()
+  for part in parts:
+    part = audit_str(part, 80)
+    if not part:
+      continue
+    key = audit_normalized(part)
+    if not key or key in seen:
+      continue
+    seen.add(key)
+    output.append(part)
+  return output
+
+
+def content_reoptimization_frame_title(card, keyword_rows, facts, max_chars=60):
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  subject = audit_str(card.get("subjectName") or raw_fields.get("subjectName") or "")
+  brand = content_reoptimization_brand_label(card.get("brand") or raw_fields.get("brand") or "")
+  haystack = audit_normalized(" ".join([title, subject, brand, semantic_keyword_text(keyword_rows)]))
+  if "оправ" not in haystack:
+    return ""
+
+  gender = content_reoptimization_gender_for_title(keyword_rows, facts)
+  shape = content_reoptimization_shape_for_title(keyword_rows, facts, gender=gender)
+  title_parts = content_reoptimization_title_parts_unique([
+    "Оправа для очков",
+    gender,
+    shape,
+    brand,
+  ])
+  if len(title_parts) <= 1:
+    return ""
+  output = " ".join(title_parts)
+  return content_title_limit(output, max_chars)
 
 
 def content_reoptimization_keyword_safe(query, card):
@@ -15552,6 +15755,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
     raise ValueError("llm_key_missing")
+  title_keywords = content_merge_keyword_rows(target_keywords, stored_semantic_title_keyword_rows(portal_id, card_key), limit=360)
 
   card = content_card_for_portal(portal_id, card_key, raw_card)
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
@@ -15561,6 +15765,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
   description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
   characteristics = audit_card_characteristics(card)[:80]
+  fact_map = {audit_normalized(row.get("name")): row.get("values") or [] for row in characteristics}
   characteristics_context = characteristics_context if isinstance(characteristics_context, dict) else {}
   available_characteristics = characteristics_context.get("availableCharacteristics") if isinstance(characteristics_context.get("availableCharacteristics"), list) else []
   mpstats_characteristics = characteristics_context.get("mpstatsCharacteristics") if isinstance(characteristics_context.get("mpstatsCharacteristics"), list) else []
@@ -15587,6 +15792,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "selectedKeywords": selected,
       "currentKeywords": current,
       "allTargetKeywords": target_keywords,
+      "titleCandidateKeywords": title_keywords[:120],
       "removeKeywords": remove,
     },
     "constraints": {
@@ -15653,6 +15859,10 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
       pass
   next_description = content_reoptimization_expand_description(next_description, card, target_keywords)
+  rule_title = content_reoptimization_frame_title(card, title_keywords, fact_map)
+  title_rule_applied = bool(rule_title and audit_normalized(rule_title) != audit_normalized(next_title))
+  if rule_title:
+    next_title = rule_title
   if not next_title or not next_description:
     raise RuntimeError("llm_content_reoptimization_empty")
 
@@ -15664,7 +15874,11 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     for item in remove
     if content_contains_exact_keyword(combined_text, item["query"])
   ][:80]
-  title_reason = audit_str(title_block.get("reason") or "Заголовок переписан с учетом выбранных запросов СЯ.", 500)
+  title_reason = (
+    "Заголовок собран по формуле WB: тип товара, назначение, аудитория, главная характеристика и бренд; цвет и артикул не вынесены в начало."
+    if title_rule_applied else
+    audit_str(title_block.get("reason") or "Заголовок переписан с учетом выбранных запросов СЯ.", 500)
+  )
   description_reason = audit_str(description_block.get("reason") or "Описание переписано с учетом выбранных запросов СЯ.", 700)
   llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
   fallback_characteristics = content_reoptimization_characteristic_fallback(card, target_keywords, available_characteristics=available_characteristics)
@@ -15686,9 +15900,11 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
-      "engine": "opticards-semantic-content-v4.1",
+      "engine": "opticards-semantic-content-v4.2",
       "provider": provider,
       "model": model,
+      "titleStyle": "wb-search-title",
+      "titleRuleApplied": title_rule_applied,
       "descriptionStyle": "marketplace-paragraphs",
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
