@@ -11440,6 +11440,14 @@ function OzonAuditPanel({ card, portal, draft, status = "idle", onDraftSaved }) 
   const cardKey = ozonCardStableKey(card);
   const auditResult = draft?.draft?.auditResult || null;
   const warnings = Array.isArray(auditResult?.summary?.warnings) ? auditResult.summary.warnings : [];
+  const auditTone = auditStatus === "error" ? "red" : auditResult ? "green" : auditStatus === "loading" ? "blue" : "amber";
+  const auditLabel = auditStatus === "loading" ? "аудит идет" : auditResult ? "аудит готов" : "не запускался";
+  const hasSavedDraft = Boolean(draft?.draft?.content?.title || draft?.draft?.content?.description || draft?.draft?.auditResult);
+  const auditFlow = [
+    { title: "Снимок карточки", copy: status === "loading" ? "загружаем сохраненные данные" : "Ozon-данные готовы для проверки", status: status === "loading" ? "active" : "done" },
+    { title: "Рыночный аудит", copy: auditResult ? "результат сохранен в карточке" : "проверка заполненности и контента", status: auditResult ? "done" : auditStatus === "loading" ? "active" : "" },
+    { title: "Черновик изменений", copy: hasSavedDraft ? "можно открыть во вкладке Изменения" : "появится после аудита", status: hasSavedDraft ? "done" : "" },
+  ];
 
   async function runAudit() {
     if (!portal?.id || portal.isDemo || auditStatus === "loading") return;
@@ -11464,19 +11472,33 @@ function OzonAuditPanel({ card, portal, draft, status = "idle", onDraftSaved }) 
   }
 
   return (
-    <section className="workspace-strip changes-workspace">
+    <section className="workspace-strip audit-workspace">
       <div className="strip-head">
         <div>
           <h2>Рыночный аудит Ozon</h2>
-          <p>Отдельный Ozon-аудит по сохраненному snapshot: заполненность, фото, характеристики, цена, остаток и базовые рекомендации контента.</p>
+          <p>Проверка Ozon snapshot: заполненность, фото, характеристики, цена, остаток и стартовый черновик контента.</p>
         </div>
-        <Tag tone={auditStatus === "error" ? "red" : auditResult ? "green" : "amber"}>{auditStatus === "loading" ? "аудит идет" : auditResult ? "аудит готов" : "Ozon"}</Tag>
+        <Tag tone={auditTone}>{auditLabel}</Tag>
       </div>
-      <div className="panel-actions">
-        <button className={loadingButtonClass("btn primary", auditStatus === "loading")} type="button" onClick={runAudit} disabled={portal?.isDemo || auditStatus === "loading"} aria-busy={auditStatus === "loading" || undefined}>
-          <WandSparkles size={16} />{auditStatus === "loading" ? "Проверяем" : auditResult ? "Перезапустить аудит" : "Запустить аудит"}
-        </button>
-        <span>{status === "loading" ? "загружаем сохраненный результат" : "WB-аудит и WB API не используются"}</span>
+      <div className="audit-flow">
+        {auditFlow.map((step) => (
+          <div className={`audit-flow-step ${step.status}`} key={step.title}>
+            <strong>{step.title}</strong>
+            <span>{step.copy}</span>
+          </div>
+        ))}
+      </div>
+      <div className="audit-next-step">
+        <div>
+          <span>Следующий шаг</span>
+          <strong>{auditResult ? "Проверить черновик" : "Запустить аудит"}</strong>
+          <p>{auditResult ? "Результат сохранен. Черновик названия и описания доступен во вкладке Изменения." : "Аудит подготовит замечания и стартовые рекомендации по контенту Ozon."}</p>
+        </div>
+        <div className="audit-next-actions">
+          <button className={loadingButtonClass("btn primary", auditStatus === "loading")} type="button" onClick={runAudit} disabled={portal?.isDemo || auditStatus === "loading"} aria-busy={auditStatus === "loading" || undefined}>
+            <WandSparkles size={16} />{auditStatus === "loading" ? "Проверяем" : auditResult ? "Запустить заново" : "Запустить аудит"}
+          </button>
+        </div>
       </div>
       {auditStatus === "error" ? <p className="status-note">Не удалось выполнить Ozon-аудит. Проверьте доступ к кабинету и повторите действие.</p> : null}
       {auditResult ? (
