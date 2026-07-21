@@ -24,5 +24,6 @@
 - данные хранятся в backend-таблице `portal_work_periods`, строго в рамках `portal_id`;
 - маршрут `GET/POST/DELETE /api/portal-work-periods` обязан проверять доступ пользователя к кабинету через `user_can_access_portal`.
 - backend action `link_task` внутри `POST /api/portal-work-periods` связывает реальную задачу/пачку с пунктом плана, двигает эту связь внутри выбранного периода при повторной привязке и переводит пункт из `planned` в `in_progress`.
+- С 2026-07-21 одна задача/пачка кабинета может быть связана сразу с несколькими пунктами плана: новый frontend отправляет `allowMultiple: true` для множественной привязки, а `POST /api/card-workset/create-tasks` принимает массив `workPeriodLinks`. Старое одиночное поведение `link_task` без `allowMultiple` сохранено для совместимости и продолжает переносить связь между пунктами.
 - backend action `unlink_task` снимает связь реальной задачи/пачки с пунктом плана, а удаление задачи кабинета через `POST /api/card-workset/delete-tasks` автоматически очищает matching `linkedTaskIds`/`linkedBatchIds` в активных отчетных периодах.
 - `POST /api/card-drafts` возвращает поле `workPeriods`, если сохранение карточки изменило статус связанного пункта отчетного периода.
