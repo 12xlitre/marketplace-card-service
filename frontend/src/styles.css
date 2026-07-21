@@ -6435,6 +6435,102 @@ tr:last-child td {
   margin-bottom: 14px;
 }
 
+.semantic-work-summary {
+  display: grid;
+  grid-template-columns: minmax(220px, .95fr) minmax(0, 1.55fr);
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+  align-items: stretch;
+}
+
+.semantic-summary-title {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+}
+
+.semantic-summary-title span {
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.semantic-summary-title strong {
+  color: var(--ink);
+  font-size: 19px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.semantic-summary-title p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.semantic-work-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.semantic-work-step {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  align-content: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 9px 10px;
+  color: inherit;
+  text-align: left;
+  appearance: none;
+  font: inherit;
+}
+
+.semantic-work-step:not(:disabled) {
+  cursor: pointer;
+}
+
+.semantic-work-step:not(:disabled):hover,
+.semantic-work-step.active {
+  border-color: #a9c3e8;
+  background: var(--blue-soft);
+}
+
+.semantic-work-step:disabled {
+  opacity: 1;
+}
+
+.semantic-work-step span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.semantic-work-step strong {
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.semantic-work-step em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 .semantic-core-metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -7664,6 +7760,8 @@ tr:last-child td {
   }
 
   .ozon-card-filters,
+  .semantic-work-summary,
+  .semantic-work-steps,
   .semantic-seed-row {
     grid-template-columns: 1fr;
   }

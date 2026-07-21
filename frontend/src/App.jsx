@@ -11291,7 +11291,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
       <div className="strip-head">
         <div>
           <h2>Семантическое ядро Ozon</h2>
-          <p>Beta-черновик: карточка Ozon, текущий контент и будущая MPStats/WB keyword-база без запуска WB API.</p>
+          <p>Рабочий черновик по карточке Ozon: текущие ключи, выбранные запросы и исключения сохраняются в кабинете.</p>
         </div>
         <Tag tone={statusTone}>{statusLabel}</Tag>
       </div>
@@ -11304,10 +11304,41 @@ function OzonSemanticDraftPanel({ card, portal }) {
         <button className={loadingButtonClass("btn primary", draftStatus === "saving")} type="button" onClick={saveSemanticDraft} disabled={saveDisabled} aria-busy={draftStatus === "saving" || undefined}>
           <Save size={16} />{draftStatus === "saving" ? "Сохраняем" : "Сохранить СЯ"}
         </button>
-        <Tag tone="blue">MPStats/WB</Tag>
+        <Tag tone="blue">Ozon</Tag>
       </div>
       {savedAtLabel ? <p className="status-note">Последнее сохранение: {savedAtLabel}</p> : null}
       {draftStatus === "error" ? <p className="status-note">Не удалось загрузить или сохранить Ozon-СЯ. Проверьте доступ к кабинету и повторите действие.</p> : null}
+
+      <SemanticWorkSummary
+        title={selectedRows.length ? `${formatNumber(selectedRows.length)} ${pluralRu(selectedRows.length, "запрос", "запроса", "запросов")} выбрано для Ozon` : "Черновик готов к отбору запросов"}
+        copy={removalQueries.length ? `${formatNumber(removalQueries.length)} ${pluralRu(removalQueries.length, "ключ", "ключа", "ключей")} помечено к исключению.` : "Сейчас Ozon-СЯ работает без внешнего API-подбора: сохраняем структуру, чтобы пачки и согласование уже были в одном стиле с WB."}
+        items={[
+          {
+            label: "В карточке",
+            value: formatNumber(currentRows.length),
+            note: "из контента Ozon",
+            hint: "Ключи, найденные в текущем названии и описании.",
+          },
+          {
+            label: "В работу",
+            value: formatNumber(selectedRows.length),
+            note: "выбрано",
+            hint: "Запросы, которые попадут в итоговый черновик.",
+          },
+          {
+            label: "Исключить",
+            value: formatNumber(removalQueries.length),
+            note: "ручная пометка",
+            hint: "Ключи текущего контента, которые специалист решил не использовать.",
+          },
+          {
+            label: "Итог",
+            value: formatNumber(finalCount),
+            note: "после правок",
+            hint: "Текущие ключи без исключенных плюс выбранные запросы.",
+          },
+        ]}
+      />
 
       <div className="semantic-final-bar">
         <div>
@@ -11335,7 +11366,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
       <div className="semantic-core-grid">
         <div className="semantic-keyword-list">
           <div className="semantic-list-head">
-            <strong>Текущий контент Ozon</strong>
+            <strong>Ключи в карточке Ozon</strong>
             <span>{formatNumber(currentRows.length)}</span>
           </div>
           {currentRows.length ? currentRows.map((item) => {
@@ -11348,7 +11379,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
                 </div>
                 <div className="semantic-keyword-actions">
                   <button className="btn mini" type="button" onClick={() => toggleRemoval(item.query)}>
-                    {marked ? "Оставить" : "Убрать"}
+                    {marked ? <RotateCcw size={14} /> : <Trash2 size={14} />}{marked ? "Оставить" : "Исключить"}
                   </button>
                 </div>
               </div>
@@ -11358,7 +11389,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
 
         <div className="semantic-keyword-list">
           <div className="semantic-list-head">
-            <strong>Рекомендации MPStats/WB</strong>
+            <strong>Кандидаты к добавлению</strong>
             <span>{formatNumber(semanticDraft.recommendations.length)}</span>
           </div>
           {semanticDraft.recommendations.length ? semanticDraft.recommendations.map((item) => {
@@ -11372,7 +11403,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
                 <div className="semantic-keyword-actions">
                   <Tag tone={selected ? "green" : "blue"}>{selected ? "в работе" : "кандидат"}</Tag>
                   <button className="btn mini" type="button" onClick={() => toggleSelected(item.query)}>
-                    {selected ? "Убрать" : "Добавить"}
+                    {selected ? <X size={14} /> : <Plus size={14} />}{selected ? "Убрать" : "Добавить"}
                   </button>
                 </div>
               </div>
@@ -20245,6 +20276,34 @@ function SemanticMetric({ active = false, label, value, hint, onClick }) {
   );
 }
 
+function SemanticWorkSummary({ title, copy, items }) {
+  return (
+    <div className="semantic-work-summary">
+      <div className="semantic-summary-title">
+        <span>Рабочая сводка</span>
+        <strong>{title}</strong>
+        {copy ? <p>{copy}</p> : null}
+      </div>
+      <div className="semantic-work-steps">
+        {items.map((item) => (
+          <button
+            className={`semantic-work-step ${item.active ? "active" : ""}`}
+            type="button"
+            key={item.label}
+            onClick={item.onClick}
+            disabled={!item.onClick}
+            title={item.hint || item.label}
+          >
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            {item.note ? <em>{item.note}</em> : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", removalRows = [], onTakeKeyword = null, onRemoveKeyword = null, onToggleRemoveKeyword = null, readOnly = false }) {
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
@@ -20325,6 +20384,18 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
           ? "К удалению из карточки"
           : "Ключи в карточке и ранжирующиеся запросы";
   const showWorkColumn = metricFilter === "all";
+  const semanticSummaryTitle = selectedItems.length
+    ? `${formatNumber(selectedItems.length)} ${pluralRu(selectedItems.length, "запрос", "запроса", "запросов")} взято в работу`
+    : filteredWorkItems.length
+      ? `${formatNumber(filteredWorkItems.length)} ${pluralRu(filteredWorkItems.length, "кандидат", "кандидата", "кандидатов")} ждут отбора`
+      : positionItems.length || contentItems.length
+        ? "База СЯ собрана, новых кандидатов по фильтрам нет"
+        : "СЯ пока без данных";
+  const semanticSummaryCopy = removalItems.length
+    ? `${formatNumber(removalItems.length)} ${pluralRu(removalItems.length, "ключ", "ключа", "ключей")} помечено к исключению перед переоптимизацией.`
+    : rankingPeriod
+      ? `Позиции и частоты показаны за ${rankingPeriod}.`
+      : "Экран разделяет действующие запросы, позиции карточки и новые кандидаты.";
   return (
     <div className={`issue semantic-core-panel ${compact ? "compact" : ""} ${standalone ? "standalone" : ""}`}>
       <div className="issue-head">
@@ -20333,31 +20404,71 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       </div>
       <p>{semanticCore?.reason || "MPStats собирает действующие позиции карточки и расширение по стартовой фразе."}</p>
       {standalone ? (
+        <SemanticWorkSummary
+          title={semanticSummaryTitle}
+          copy={semanticSummaryCopy}
+          items={[
+            {
+              label: "Ранжируется",
+              value: formatNumber(positionItems.length),
+              note: "позиции карточки",
+              active: metricFilter === "positions",
+              onClick: () => toggleMetricFilter("positions"),
+              hint: "Показать запросы, по которым карточка уже видна в поиске.",
+            },
+            {
+              label: "В карточке",
+              value: formatNumber(contentItems.length),
+              note: "действующие ключи",
+              active: metricFilter === "content",
+              onClick: () => toggleMetricFilter("content"),
+              hint: "Показать запросы из текущего контента карточки.",
+            },
+            {
+              label: "В работу",
+              value: formatNumber(selectedItems.length),
+              note: "для переоптимизации",
+              active: metricFilter === "selected",
+              onClick: () => toggleMetricFilter("selected"),
+              hint: "Показать новые запросы, выбранные для итогового СЯ.",
+            },
+            {
+              label: "Кандидаты",
+              value: formatNumber(filteredWorkItems.length),
+              note: "можно добавить",
+              active: metricFilter === "all",
+              onClick: () => setMetricFilter("all"),
+              hint: "Вернуться к общему виду с кандидатами на добавление.",
+            },
+          ]}
+        />
+      ) : null}
+      {standalone ? (
         <div className="semantic-core-metrics">
           <SemanticMetric
             active={metricFilter === "positions"}
-            label="Ранжирующиеся"
+            label="Позиции"
             value={formatNumber(positionItems.length)}
             hint={`Запросы из отчета позиций карточки MPStats${rankingPeriod ? ` за ${rankingPeriod}` : ""}. По ним карточка уже ранжируется.`}
             onClick={() => toggleMetricFilter("positions")}
           />
           <SemanticMetric
             active={metricFilter === "content"}
-            label="Ключи в карточке"
+            label="Действующие"
             value={formatNumber(contentItems.length)}
             hint="Действующие ключи, которые уже заложены в заголовок или описание карточки. По ним может не быть позиции."
             onClick={() => toggleMetricFilter("content")}
           />
           <SemanticMetric
             active={metricFilter === "remove"}
-            label="К удалению"
+            label="Исключить"
             value={formatNumber(removalItems.length)}
             hint="Ключи карточки и ранжирующиеся запросы, которые попадут в отчет как предложение исключить перед переоптимизацией."
             onClick={() => toggleMetricFilter("remove")}
           />
           <SemanticMetric
             active={metricFilter === "selected"}
-            label="К добавлению"
+            label="Добавить"
             value={formatNumber(selectedItems.length)}
             hint="Новые запросы, которых нет среди ключей карточки и ранжирующихся запросов. В Excel попадут только запросы с частотностью WB."
             onClick={() => toggleMetricFilter("selected")}
@@ -20369,7 +20480,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             onClick={() => setMetricFilter("all")}
           />
           <SemanticMetric
-            label="Расширение MPStats"
+            label="База MPStats"
             value={formatNumber(reportTotal)}
             hint={`Общий размер SEO-расширения MPStats по стартовой фразе${expansionPeriod ? ` за ${expansionPeriod}` : ""}. Это не то же самое, что позиции карточки.`}
             onClick={() => setMetricFilter("all")}
