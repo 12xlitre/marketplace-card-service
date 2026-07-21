@@ -4836,8 +4836,21 @@ const sellerReportTemplates = [
   },
 ];
 
+const ozonReportTemplates = [
+  {
+    id: "ozon-client-xlsx",
+    title: "Ozon клиентский XLSX",
+    format: "XLSX",
+    description: "Рабочий отчет по Ozon: аналитика, цены, остатки, CPO/CPC, платность, локальность, финансы и источники.",
+  },
+];
+
 function sellerReportTemplate(reportId) {
   return sellerReportTemplates.find((item) => item.id === reportId) || sellerReportTemplates[0];
+}
+
+function ozonReportTemplate(reportId) {
+  return ozonReportTemplates.find((item) => item.id === reportId) || ozonReportTemplates[0];
 }
 
 function reportHistoryStorageKey(portalId) {
@@ -8313,7 +8326,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     { title: "Карточки Ozon", status: sourceConfigured ? "следующий шаг" : "после источника", className: "pending" },
     { title: "СЯ через MPStats", status: "WB keyword-база", className: "pending" },
     { title: "Задачи Ozon", status: "после карточек", className: "pending" },
-    { title: "Отчеты Ozon", status: "после периодов", className: "pending" },
+    { title: "Отчеты Ozon", status: "клиентский XLSX", className: "active" },
   ];
   const probeCards = Array.isArray(probeResult?.cards) ? probeResult.cards : [];
   const hasProbeCards = probeCards.length > 0;
@@ -8605,11 +8618,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               />
             ) : null}
             {activeSellerTab === "reports" ? (
-              <OzonPlaceholderPanel
-                title="Отчеты Ozon"
-                copy="Здесь будут Ozon-периоды и выгрузки. WB XLSX-отчет в этот поток не подключается."
-                tag="Ozon"
-              />
+              <OzonReportsPanel portal={portal} cards={portal.realCards || []} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
             {activeSellerTab === "work-periods" ? (
               <WorkPeriodsPanel portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
@@ -8996,6 +9005,567 @@ function buildOzonContentSheets(cards, drafts) {
         ],
       };
     });
+}
+
+function ozonReportOfferId(card) {
+  const { offerId, sku } = ozonCardIdentity(card);
+  if (offerId && offerId !== "Не указано") return offerId;
+  return sku && sku !== "Не указано" ? sku : "";
+}
+
+function ozonReportSku(card) {
+  const { sku } = ozonCardIdentity(card);
+  return sku && sku !== "Не указано" ? sku : "";
+}
+
+function ozonReportMetric(card, keys, fallback = "") {
+  const rawFields = rawFieldsForCard(card);
+  const mpstats = card?.mpstats && typeof card.mpstats === "object" ? card.mpstats : {};
+  for (const key of keys) {
+    const value = firstDefined(card?.[key], rawFields[key], mpstats[key]);
+    if (!isEmptyValue(value)) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function ozonReportNumberFromCard(card, keys, fallback = "") {
+  const value = ozonReportMetric(card, keys, fallback);
+  return reportNumber(value);
+}
+
+function ozonReportPriceFromCard(card) {
+  return reportPrice(ozonReportMetric(card, ["finalPrice", "final_price", "discountedPrice", "price"]));
+}
+
+function ozonReportStockFromCard(card) {
+  return reportNumber(ozonReportMetric(card, ["stock", "stocks", "balance", "available_stock", "fboStock", "stockFbo"]));
+}
+
+function ozonReportColor(card) {
+  const colorItem = ozonCardCharacteristicItems(card).find((item) => normalizedCharacteristicName(item?.name || item?.charcName || "") === "цвет");
+  if (!colorItem) return "";
+  return rawCharacteristicValueTokens(colorItem?.value ?? colorItem?.values ?? colorItem).join(", ");
+}
+
+function ozonReportCurrentOrders(card) {
+  return ozonReportNumberFromCard(card, ["orders", "ordersCount", "orderCount", "ordered", "sales", "salesCount", "orderedUnits"]);
+}
+
+function ozonReportRevenue(card) {
+  return reportPrice(ozonReportMetric(card, ["revenue", "orderSum", "ordersSum", "salesSum", "turnover", "amount"]));
+}
+
+function ozonReportCtr(card) {
+  return reportPercent(ozonReportMetric(card, ["ctr", "ctrPercent"]));
+}
+
+function ozonReportAverageSales(card) {
+  return reportNumber(ozonReportMetric(card, ["avgDailySales", "averageSalesPerDay", "salesPerDay"]), 2);
+}
+
+function ozonReportTurnoverDays(card) {
+  const direct = ozonReportMetric(card, ["turnoverDays", "daysToStockEnd", "days_stock"]);
+  if (!isEmptyValue(direct)) return reportNumber(direct, 1);
+  const stock = Number(ozonReportMetric(card, ["stock", "stocks", "balance", "available_stock", "fboStock", "stockFbo"]));
+  const avg = Number(ozonReportMetric(card, ["avgDailySales", "averageSalesPerDay", "salesPerDay"]));
+  if (Number.isFinite(stock) && Number.isFinite(avg) && avg > 0) {
+    return reportNumber(stock / avg, 1);
+  }
+  return "";
+}
+
+function ozonReportDrr(card) {
+  const direct = ozonReportMetric(card, ["drr", "acos", "adCostShare"]);
+  if (!isEmptyValue(direct)) return reportPercent(direct);
+  const spend = Number(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"]));
+  const revenue = Number(ozonReportMetric(card, ["revenue", "orderSum", "ordersSum", "salesSum", "turnover", "amount"]));
+  return Number.isFinite(spend) && Number.isFinite(revenue) && revenue > 0 ? reportPercent((spend / revenue) * 100) : "";
+}
+
+function ozonReportProposal(card) {
+  const notes = [];
+  const stockDays = Number(ozonReportTurnoverDays(card));
+  const price = ozonReportPriceFromCard(card);
+  const orders = Number(ozonReportCurrentOrders(card));
+  const drr = Number(ozonReportDrr(card));
+  if (!price) {
+    notes.push("Нет текущей цены в Ozon snapshot; проверить выгрузку цен и остатков.");
+  }
+  if (Number.isFinite(stockDays) && stockDays > 0 && stockDays < 14) {
+    notes.push(`Остатка примерно на ${reportNumber(stockDays, 1)} дн.; проверить поставку FBO.`);
+  }
+  if (Number.isFinite(orders) && orders === 0) {
+    notes.push("За выбранный период нет заказов; проверить позицию, цену и трафик.");
+  }
+  if (Number.isFinite(drr) && drr > 30) {
+    notes.push(`ДРР ${reportPercent(drr)}%; проверить CPC/CPO и отключить неэффективные расходы.`);
+  }
+  if (ozonCardProblemReasons(card).length || ozonCardDataSignals(card).length) {
+    notes.push("Есть замечания по данным карточки; перед выводами нужна ручная проверка источника.");
+  }
+  return notes.join(" ") || "Данные собраны из Ozon snapshot; специалисту нужно проверить решения по цене, рекламе и остаткам.";
+}
+
+function ozonReportInstructionRows() {
+  return [
+    ["АВТОМАТИЗАЦИЯ OZON - ПОРЯДОК ОБНОВЛЕНИЯ"],
+    ["Файл формируется из Ozon beta snapshot/MPStats. После подключения Ozon Seller API эти же вкладки будут заполняться API-выгрузками без изменения основного клиентского формата."],
+    [],
+    reportHeaderRow(["Шаг", "Что обновляется", "Вкладка", "Результат"]),
+    [1, "Карточки и ассортимент Ozon", "OZON_ТОВАРЫ_ЗАГРУЗКА", "SKU, offer ID, название и продажи товара"],
+    [2, "Аналитика товаров", "OZON_АНАЛИТИКА_ЗАГРУЗКА", "Категория АБС, заказы, выручка, позиция, CTR, индекс цен, CPC"],
+    [3, "Цены и остатки", "OZON_ЦЕНЫ_ОСТАТКИ", "Текущая цена, остаток, Ozon ID, рыночная цена конкурентов"],
+    [4, "Оплата за заказ - товары", "OZON_CPO_ЗАГРУЗКА", "Количество заказов из CPO"],
+    [5, "Оборачиваемость товаров", "OZON_ОБОРАЧИВАЕМОСТЬ", "Дни до конца остатка и среднесуточные продажи"],
+    [6, "Стоимость размещения на складе Ozon", "OZON_ПЛАТНОСТЬ", "Прогноз платности, платное количество и первая дата"],
+    [7, "Локальность продаж", "OZON_ЛОКАЛЬНОСТЬ", "Локализация и переплата за нелокальную продажу"],
+    [8, "Оплата за заказ - заказы", "OZON_ЗАКАЗЫ_ЗАГРУЗКА", "Рекламный расход, выручка, ДРР и SKU"],
+    [9, "Сток FBO", "OZON_СТОК_ЗАГРУЗКА", "Доступный остаток FBO"],
+    [10, "Финансовая выгрузка по SKU", "OZON_ФИНАНСЫ_ЗАГРУЗКА", "Маржинальность по строке"],
+    [11, "Автоматический контроль", "OZON_СВОД_ПО_SKU", "Расход, выручка, ДРР, маржа и оборачиваемость"],
+    [],
+    ["ВАЖНО", "Артикул продавца - основной ключ сопоставления. Он должен совпадать с колонкой C недельного листа.", "", ""],
+    ["ВАЖНО", "В текущем beta-режиме Ozon Seller API еще не подключен, поэтому часть коммерческих колонок может быть пустой.", "", ""],
+  ];
+}
+
+function ozonReportMainRows(portal, cards, period) {
+  const rows = [
+    ["Проверка на (дата):", clientReportDateLabel(new Date())],
+    ["За неделю:", clientReportRangeLabel(period.start, period.end)],
+    [],
+    reportHeaderRow([
+      "Товар",
+      "Цвет",
+      "Артикул",
+      "Озон ID",
+      "Категория АБС",
+      "Текущая цена",
+      "Рыночная цена конкурентов, руб.",
+      "Цена-ориентир (мин-макс)",
+      "Индекс цен",
+      "Остаток на складах, шт",
+      "Дней до конца остатка",
+      "Прогноз платности",
+      "Платно, шт",
+      "Дата первой платности",
+      "Наценка за нелокальную продажу, руб.",
+      "Кол-во заказов (Прошлая неделя)",
+      "Кол-во заказов (Текущая неделя)",
+      "Динамика заказов",
+      "Сумма заказов",
+      "CTR",
+      "CTR конкурентов",
+      "Позиция",
+      "CPC",
+      "CPO 5%",
+      "Акции",
+      "Текущая ситуация CPC",
+      "Текущая ситуация CPO, шт.",
+      "Предложение ВебОптимайз",
+      "Предложение клиента",
+      "Отметка о выполнении ВебОптимайз",
+      "Комментарии ВебОптимайз",
+      "Комментарии клиента",
+      "Комментарии ВебОптимайз",
+    ]),
+  ];
+  for (const card of Array.isArray(cards) ? cards : []) {
+    const currentOrders = ozonReportCurrentOrders(card);
+    const pastOrders = "";
+    rows.push([
+      ozonCardCategory(card) === "Не указано" ? (card?.title || "Ozon карточка") : ozonCardCategory(card),
+      ozonReportColor(card),
+      ozonReportOfferId(card),
+      ozonReportSku(card),
+      ozonReportMetric(card, ["abcCategory", "abc", "abc_group"]),
+      ozonReportPriceFromCard(card),
+      reportPrice(ozonReportMetric(card, ["marketPrice", "competitorPrice", "market_price"])),
+      ozonReportMetric(card, ["priceGuide", "priceRange", "targetPriceRange"]),
+      ozonReportMetric(card, ["priceIndex", "indexPrice", "price_index"]),
+      ozonReportStockFromCard(card),
+      ozonReportTurnoverDays(card),
+      ozonReportMetric(card, ["paidStorageForecast", "storageForecast"]),
+      reportNumber(ozonReportMetric(card, ["paidStorageCount", "paidStock"])),
+      ozonReportMetric(card, ["paidStorageDate", "firstPaidStorageDate"]),
+      reportPrice(ozonReportMetric(card, ["localityMarkup", "nonLocalMarkup", "localOverpay"])),
+      pastOrders,
+      currentOrders,
+      reportPercentDynamic(currentOrders, pastOrders),
+      ozonReportRevenue(card),
+      ozonReportCtr(card),
+      reportPercent(ozonReportMetric(card, ["competitorCtr", "marketCtr"])),
+      reportNumber(ozonReportMetric(card, ["position", "searchPosition"])),
+      reportPrice(ozonReportMetric(card, ["cpc", "avgCpc"])),
+      ozonReportMetric(card, ["cpo5", "cpo5Percent", "cpoEnabled"]),
+      ozonReportMetric(card, ["promo", "promotions", "actions"]),
+      ozonReportMetric(card, ["currentCpcSituation", "cpcSituation"]),
+      ozonReportMetric(card, ["currentCpoSituation", "cpoSituation"]),
+      ozonReportProposal(card),
+      "",
+      "",
+      "Часть коммерческих данных ожидает подключения Ozon Seller API; текущие значения взяты из Ozon snapshot/MPStats.",
+      "",
+      "",
+    ]);
+  }
+  if (rows.length === 4) {
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
+function ozonReportSkuSummaryRows(cards) {
+  const rows = [reportHeaderRow(["Артикул", "SKU", "Рекламный расход, ₽", "Локализация заказов, %", "Выручка, ₽", "ДРР", "Продажи товара, шт.", "Маржинальность, ₽", "Остатки FBO, шт.", "Среднесуточные продажи, шт.", "Оборачиваемость, дней", "Проверка", "Комментарий"])];
+  for (const card of Array.isArray(cards) ? cards : []) {
+    const hasCommercial = Boolean(ozonReportPriceFromCard(card) || ozonReportStockFromCard(card) || ozonReportCurrentOrders(card));
+    rows.push([
+      ozonReportOfferId(card),
+      ozonReportSku(card),
+      reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"])),
+      reportPercent(ozonReportMetric(card, ["localizationPercent", "localityPercent"])),
+      ozonReportRevenue(card),
+      ozonReportDrr(card),
+      ozonReportCurrentOrders(card),
+      reportPrice(ozonReportMetric(card, ["margin", "profit", "marginRub"])),
+      ozonReportStockFromCard(card),
+      ozonReportAverageSales(card),
+      ozonReportTurnoverDays(card),
+      hasCommercial ? "ОК" : "нет данных",
+      hasCommercial ? "" : "Нужна выгрузка Ozon Seller API или расширенный MPStats snapshot",
+    ]);
+  }
+  if (rows.length === 1) rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", ""]);
+  return rows;
+}
+
+function ozonReportUploadRows(cards, kind) {
+  const list = Array.isArray(cards) ? cards : [];
+  const rows = {
+    analytics: [
+      ["OZON - АНАЛИТИКА ТОВАРОВ"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Категория АБС", "Сумма заказов", "Позиция", "CTR", "Кол-во заказов", "Индекс цен", "Текущая ситуация CPC"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["abcCategory", "abc", "abc_group"]), ozonReportRevenue(card), reportNumber(ozonReportMetric(card, ["position", "searchPosition"])), ozonReportCtr(card), ozonReportCurrentOrders(card), ozonReportMetric(card, ["priceIndex", "indexPrice", "price_index"]), ozonReportMetric(card, ["currentCpcSituation", "cpcSituation"])]),
+    ],
+    prices: [
+      ["OZON - ЦЕНЫ И ОСТАТКИ"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Остаток на складах, шт", "Текущая цена", "Озон ID", "Рыночная цена конкурентов, руб."]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportStockFromCard(card), ozonReportPriceFromCard(card), ozonReportSku(card), reportPrice(ozonReportMetric(card, ["marketPrice", "competitorPrice", "market_price"]))]),
+    ],
+    cpo: [
+      ["OZON - CPO"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Текущая ситуация CPO, шт."]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["currentCpoSituation", "cpoSituation"])]),
+    ],
+    turnover: [
+      ["OZON - ОБОРАЧИВАЕМОСТЬ"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Дней до конца остатка", "Товаров в пути, шт.", "Среднесуточные продажи, шт"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportTurnoverDays(card), reportNumber(ozonReportMetric(card, ["inboundStock", "stockInTransit"])), ozonReportAverageSales(card)]),
+    ],
+    storage: [
+      ["OZON - ПЛАТНОСТЬ"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Прогноз платности", "Платно, шт", "Дата первой платности"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["paidStorageForecast", "storageForecast"]), reportNumber(ozonReportMetric(card, ["paidStorageCount", "paidStock"])), ozonReportMetric(card, ["paidStorageDate", "firstPaidStorageDate"])]),
+    ],
+    locality: [
+      ["OZON - ЛОКАЛЬНОСТЬ"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "Наценка за нелокальную продажу, руб.", "Локализация заказов, %"]),
+      ...list.map((card) => [ozonReportOfferId(card), reportPrice(ozonReportMetric(card, ["localityMarkup", "nonLocalMarkup", "localOverpay"])), reportPercent(ozonReportMetric(card, ["localizationPercent", "localityPercent"]))]),
+    ],
+    orders: [
+      ["OZON - ЗАКАЗЫ / РЕКЛАМА"],
+      ["API/выгрузка заполняет данные с 4 строки."],
+      reportHeaderRow(["Артикул", "SKU", "Название товара", "Расход, ₽, с НДС", "Заказов", "Количество, шт.", "Заказано на сумму, ₽", "Расход, ₽, с НДС"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), card?.title || "", reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"])), ozonReportCurrentOrders(card), ozonReportCurrentOrders(card), ozonReportRevenue(card), reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"]))]),
+    ],
+    products: [
+      ["OZON - ТОВАРЫ"],
+      ["Вставьте данные с заголовками в строку 3."],
+      reportHeaderRow(["Артикул", "SKU", "Название товара", "Заказано товаров"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), card?.title || "", ozonReportCurrentOrders(card)]),
+    ],
+    stock: [
+      ["OZON - СТОК FBO"],
+      ["Вставьте данные с заголовками в строку 3."],
+      reportHeaderRow(["Артикул", "SKU", "Доступно к продаже по схеме FBO, шт."]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), ozonReportStockFromCard(card)]),
+    ],
+    finance: [
+      ["OZON - ФИНАНСЫ ПО SKU"],
+      ["Вставьте исходные данные только в A:H. Колонка I в референсе рассчитывает маржинальность."],
+      reportHeaderRow(["Артикул", "SKU", "Фактическая сумма продаж", "Себестоимость товаров", "Комиссия за продажу", "Итого по весу", "Количество проданных единиц", "Количество заказанных единиц", "Маржинальность строки, ₽"]),
+      ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), ozonReportRevenue(card), "", "", "", "", ozonReportCurrentOrders(card), reportPrice(ozonReportMetric(card, ["margin", "profit", "marginRub"]))]),
+    ],
+  }[kind] || [];
+  return rows.length > 3 ? rows : [...rows, ["нет данных", "", "", "", "", "", "", "", ""]];
+}
+
+function ozonReportSourceRows(portal, cards) {
+  const hasCards = (Array.isArray(cards) ? cards : []).length > 0;
+  const hasPrices = (cards || []).some((card) => ozonReportPriceFromCard(card));
+  const hasStocks = (cards || []).some((card) => ozonReportStockFromCard(card));
+  return [
+    reportHeaderRow(["Блок", "Статус", "Источник", "Что нужно для полного автоматического отчета"]),
+    ["Карточки Ozon", hasCards ? "есть" : "нет данных", "OptiCards Ozon snapshot / MPStats", "Сохранить карточки через Ozon MPStats probe или Ozon Seller API"],
+    ["Аналитика товаров", "частично", "Ozon Seller API / аналитика товаров", "Категория АБС, заказы, выручка, позиция, CTR, индекс цен, CPC"],
+    ["Цены и остатки", hasPrices || hasStocks ? "частично" : "нет данных", "Ozon snapshot; позже Ozon Seller API", "Текущая цена, остаток, Ozon ID, цены конкурентов"],
+    ["CPO/CPC", "ожидает API", "Ozon Performance / отчеты оплаты за заказ", "Расход, CPO, CPC, ДРР и статусы рекламных решений"],
+    ["Оборачиваемость", "частично", "Ozon Seller API / отчет оборачиваемости", "Дни до конца остатка, среднесуточные продажи, товары в пути"],
+    ["Платность", "ожидает API", "Ozon Seller API / стоимость размещения", "Прогноз платности, платное количество, первая дата"],
+    ["Локальность", "ожидает API", "Ozon Seller API / локальность продаж", "Локализация заказов и наценка за нелокальную продажу"],
+    ["Финансы", "ожидает API", "Ozon Seller API / финансовые отчеты", "Маржинальность по SKU"],
+  ];
+}
+
+function buildOzonClientReportSheets(portal, cards, period) {
+  const safeCards = Array.isArray(cards) ? cards : [];
+  return [
+    { name: clientReportDateLabel(new Date()).replaceAll(".", "."), freezeRows: 4, autoFilterRow: 4, widths: [22, 16, 20, 18, 16, 16, 24, 22, 14, 20, 18, 18, 14, 18, 28, 24, 24, 18, 18, 12, 16, 12, 14, 12, 16, 24, 24, 52, 28, 24, 42, 32, 42], rows: ozonReportMainRows(portal, safeCards, period) },
+    { name: "00_ИНСТРУКЦИЯ_OZON", freezeRows: 4, autoFilterRow: 4, widths: [12, 62, 30, 70], rows: ozonReportInstructionRows() },
+    { name: "OZON_СВОД_ПО_SKU", freezeRows: 1, widths: [22, 18, 18, 22, 18, 12, 20, 18, 18, 24, 20, 16, 54], rows: ozonReportSkuSummaryRows(safeCards) },
+    { name: "OZON_АНАЛИТИКА_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 18, 14, 12, 18, 14, 24], rows: ozonReportUploadRows(safeCards, "analytics") },
+    { name: "OZON_ЦЕНЫ_ОСТАТКИ", freezeRows: 3, autoFilterRow: 3, widths: [22, 22, 18, 18, 28], rows: ozonReportUploadRows(safeCards, "prices") },
+    { name: "OZON_CPO_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 28], rows: ozonReportUploadRows(safeCards, "cpo") },
+    { name: "OZON_ОБОРАЧИВАЕМОСТЬ", freezeRows: 3, autoFilterRow: 3, widths: [22, 22, 18, 26], rows: ozonReportUploadRows(safeCards, "turnover") },
+    { name: "OZON_ПЛАТНОСТЬ", freezeRows: 3, autoFilterRow: 3, widths: [22, 22, 14, 20], rows: ozonReportUploadRows(safeCards, "storage") },
+    { name: "OZON_ЛОКАЛЬНОСТЬ", freezeRows: 3, autoFilterRow: 3, widths: [22, 34, 24], rows: ozonReportUploadRows(safeCards, "locality") },
+    { name: "OZON_ЗАКАЗЫ_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 58, 18, 14, 16, 22, 18], rows: ozonReportUploadRows(safeCards, "orders") },
+    { name: "OZON_ТОВАРЫ_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 58, 18], rows: ozonReportUploadRows(safeCards, "products") },
+    { name: "OZON_СТОК_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 34], rows: ozonReportUploadRows(safeCards, "stock") },
+    { name: "OZON_ФИНАНСЫ_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 24, 22, 20, 18, 28, 30, 24], rows: ozonReportUploadRows(safeCards, "finance") },
+    { name: "OZON_ИСТОЧНИКИ", freezeRows: 1, widths: [28, 16, 42, 74], rows: ozonReportSourceRows(portal, safeCards) },
+  ];
+}
+
+function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
+  const [period, setPeriod] = useState(defaultClientReportRange);
+  const [selectedReportId, setSelectedReportId] = useState(ozonReportTemplates[0].id);
+  const [history, setHistory] = useState([]);
+  const [historyStatus, setHistoryStatus] = useState("idle");
+  const [reportStatus, setReportStatus] = useState("idle");
+  const selectedReport = ozonReportTemplate(selectedReportId);
+  const sourceRows = ozonReportSourceRows(portal, cards).slice(1);
+  const availableCount = sourceRows.filter((row) => row[1] === "есть").length;
+  const partialCount = sourceRows.filter((row) => row[1] === "частично").length;
+  const pendingCount = sourceRows.filter((row) => row[1] === "ожидает API" || row[1] === "нет данных").length;
+  const isLoading = reportStatus === "loading";
+
+  useEffect(() => {
+    setReportStatus("idle");
+    loadReportHistory();
+  }, [portal?.id]);
+
+  async function loadReportHistory() {
+    if (!portal) {
+      setHistory([]);
+      return;
+    }
+    if (portal.isDemo) {
+      setHistory(readReportHistory(portal.id));
+      setHistoryStatus("local");
+      return;
+    }
+    setHistoryStatus("loading");
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/report-history?limit=20`);
+      setHistory(normalizeReportHistory(payload.history || []).filter((item) => item.reportId === "ozon-client-xlsx" || item.source === "Ozon snapshot"));
+      setHistoryStatus("loaded");
+    } catch {
+      setHistory(readReportHistory(portal.id).filter((item) => item.reportId === "ozon-client-xlsx"));
+      setHistoryStatus("error");
+    }
+  }
+
+  async function rememberReport(entry) {
+    const nextHistory = [entry, ...history].slice(0, 20);
+    setHistory(nextHistory);
+    if (portal?.isDemo) {
+      saveReportHistory(portal?.id, nextHistory);
+      return entry;
+    }
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/report-history`, {
+        method: "POST",
+        body: JSON.stringify(entry),
+      });
+      const savedItem = normalizeReportHistory([payload.item])[0];
+      if (savedItem) {
+        setHistory((current) => [savedItem, ...current.filter((item) => item.id !== entry.id)].slice(0, 20));
+        return savedItem;
+      }
+    } catch {
+      saveReportHistory(portal?.id, nextHistory);
+      onNotice?.("Отчет скачан, но backend-история временно недоступна. Запись оставлена локально.");
+    }
+    return entry;
+  }
+
+  async function generateReport({ reportId = selectedReportId, reportPeriod = period } = {}) {
+    if (!portal) return;
+    if (!reportPeriod.start || !reportPeriod.end || reportPeriod.start > reportPeriod.end) {
+      onNotice?.("Выберите корректный период отчета.");
+      return;
+    }
+    const template = ozonReportTemplate(reportId);
+    const datePart = `${reportPeriod.start}_${reportPeriod.end}`;
+    const fileName = `${safeFilePart(portalDisplayName(portal))}-ozon-client-report-${datePart}.xlsx`;
+    setReportStatus("loading");
+    try {
+      downloadXlsx(fileName, buildOzonClientReportSheets(portal, cards, reportPeriod));
+      await rememberReport({
+        id: `report-${Date.now()}`,
+        reportId,
+        title: template.title,
+        format: template.format,
+        period: reportPeriod,
+        fileName,
+        status: "done",
+        generatedAt: new Date().toISOString(),
+        source: "Ozon snapshot",
+      });
+      setReportStatus("done");
+    } catch {
+      setReportStatus("error");
+      onNotice?.("Не удалось сформировать Ozon-отчет.");
+    }
+  }
+
+  function repeatReport(item) {
+    const nextPeriod = item?.period || period;
+    setSelectedReportId(item?.reportId || ozonReportTemplates[0].id);
+    setPeriod(nextPeriod);
+    generateReport({ reportId: item?.reportId || ozonReportTemplates[0].id, reportPeriod: nextPeriod });
+  }
+
+  return (
+    <>
+      <section className="workspace-strip reports-strip">
+        <div className="strip-head">
+          <div>
+            <h2>Нужен отчет</h2>
+            <p>{portal ? `Ozon-кабинет: ${portalDisplayName(portal)} · выберите отчет и период.` : "Кабинет не выбран."}</p>
+          </div>
+          <Tag tone="amber">Ozon beta</Tag>
+        </div>
+        <HelpList
+          enabled={helpEnabled}
+          title="Как скачать Ozon-отчет"
+          items={[
+            "Выберите клиентский Ozon XLSX.",
+            "Выберите период С какого числа и По какое число.",
+            "Нажмите Сформировать. Файл XLSX с основным листом периода и служебными вкладками Ozon скачается автоматически.",
+          ]}
+        />
+        <div className="report-builder">
+          <div className="report-template-list">
+            {ozonReportTemplates.map((template) => (
+              <button
+                className={`report-template ${selectedReportId === template.id ? "active" : ""}`}
+                key={template.id}
+                type="button"
+                onClick={() => setSelectedReportId(template.id)}
+              >
+                <span>{template.title}</span>
+                <em>{template.description}</em>
+                <Tag tone="blue">{template.format}</Tag>
+              </button>
+            ))}
+          </div>
+          <div className="report-period-form">
+            <label className="field-label">
+              С какого числа
+              <input type="date" value={period.start} onChange={(event) => setPeriod((current) => ({ ...current, start: event.target.value }))} />
+            </label>
+            <label className="field-label">
+              По какое число
+              <input type="date" value={period.end} onChange={(event) => setPeriod((current) => ({ ...current, end: event.target.value }))} />
+            </label>
+            <button className={loadingButtonClass("btn primary", isLoading)} type="button" onClick={() => generateReport()} disabled={!portal || isLoading} aria-busy={isLoading || undefined}>
+              <Download size={17} />{isLoading ? "Формируем" : "Сформировать"}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div className="report-catalog">
+        <article className="workspace-strip report-card">
+          <div className="strip-head">
+            <div>
+              <h2>{selectedReport.title}</h2>
+              <p>{selectedReport.description}</p>
+            </div>
+            <Tag tone="blue">первый Ozon-отчет</Tag>
+          </div>
+          <div className="summary-grid">
+            <Metric label="Карточек" value={formatNumber(cards.length || portal?.cardCount || 0)} hint="Ozon snapshot" />
+            <Metric label="Данные есть" value={formatNumber(availableCount)} hint="доступные блоки" />
+            <Metric label="Частично" value={formatNumber(partialCount)} hint="есть fallback из snapshot" />
+            <Metric label="Ожидают API" value={formatNumber(pendingCount)} hint="нужен Ozon Seller API" />
+          </div>
+          <HelpHint enabled={helpEnabled} title="Что означает доступность данных">
+            В Ozon beta отчет собирается из сохраненного snapshot/MPStats. После подключения Ozon Seller API эти же служебные вкладки будут заполняться полнее.
+          </HelpHint>
+          <div className="report-availability">
+            {sourceRows.map(([label, status, source, note]) => (
+              <div className="report-availability-row" key={label}>
+                <span>{label}</span>
+                <Tag tone={status === "есть" ? "green" : status === "частично" ? "amber" : "blue"}>{status}</Tag>
+                <em>{[source, note].filter(Boolean).join(" · ")}</em>
+              </div>
+            ))}
+          </div>
+          <div className="report-card-actions">
+            <span>Период: {clientReportRangeLabel(period.start, period.end)}</span>
+            <span>Файл скачивается сразу после формирования.</span>
+          </div>
+        </article>
+      </div>
+
+      <section className="workspace-strip report-history">
+        <div className="strip-head">
+          <div>
+            <h2>История отчетов</h2>
+            <p>Последние Ozon-выгрузки по этому кабинету.</p>
+          </div>
+          <Tag tone={historyStatus === "error" ? "amber" : history.length ? "blue" : "amber"}>
+            {historyStatus === "loading"
+              ? "загрузка"
+              : historyStatus === "error"
+                ? "локально"
+                : history.length || "пусто"}
+          </Tag>
+        </div>
+        {history.length ? (
+          <div className="report-history-list">
+            {history.map((item) => (
+              <div className="report-history-row" key={item.id}>
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{clientReportRangeLabel(item.period?.start, item.period?.end)} · {item.generatedAt ? new Date(item.generatedAt).toLocaleString("ru-RU") : "без даты"}</span>
+                  <em>{item.fileName || "файл не сохранен в браузере"}</em>
+                </div>
+                <Tag tone={reportHistoryStatusTone(item.status)}>{reportHistoryStatusLabel(item.status)}</Tag>
+                <button className="btn" type="button" onClick={() => repeatReport(item)} disabled={isLoading}><Download size={16} />Скачать снова</button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <strong>История пока пустая</strong>
+            <span>После первого скачивания здесь появится запись Ozon-отчета.</span>
+          </div>
+        )}
+      </section>
+    </>
+  );
 }
 
 function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks }) {
