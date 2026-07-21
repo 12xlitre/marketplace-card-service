@@ -13048,15 +13048,28 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const originalCount = Number(firstTask.batchCardsCount || group.tasks.length || 0);
                       const remainingCount = allGroupTasks.length;
                       const visibleCount = groupTasks.length;
+                      const completedGroupTasks = group.batchId
+                        ? completedTasks.filter((task) => String(task.batchId || "") === String(group.batchId || "") && taskWorkTypes(task).includes(section.key))
+                        : [];
+                      const submittedGroupCount = completedGroupTasks.filter((task) => task.status === "submitted").length;
+                      const acceptedGroupCount = completedGroupTasks.filter((task) => ["approved", "exported", "done"].includes(task.status)).length;
+                      const inactiveGroupCount = Math.max(0, originalCount - remainingCount);
+                      const inactiveGroupLabel = submittedGroupCount
+                        ? `${formatNumber(submittedGroupCount)} на согласовании`
+                        : acceptedGroupCount
+                          ? `${formatNumber(acceptedGroupCount)} принято`
+                          : inactiveGroupCount
+                            ? `${formatNumber(inactiveGroupCount)} не в активной работе`
+                            : "";
                       const assignee = findUser(group.assigneeLogin);
                       const author = findUser(group.createdBy);
                       const openableTask = groupTasks.find(taskHasCard) || null;
                       const canOpen = Boolean(openableTask && taskHasCard(openableTask));
-	                      const cardsLabel = originalCount && originalCount !== remainingCount
-	                        ? `${formatNumber(remainingCount)} из ${formatNumber(originalCount)}`
-	                        : selectedFilterKey !== "all"
-                            ? `${formatNumber(visibleCount)} из ${formatNumber(remainingCount)}`
-	                          : formatNumber(remainingCount);
+                      const cardsLabel = selectedFilterKey !== "all"
+                        ? `Показано ${formatNumber(visibleCount)} из ${formatNumber(remainingCount)} в работе${originalCount && originalCount !== remainingCount ? ` · всего ${formatNumber(originalCount)}` : ""}`
+                        : originalCount
+                          ? `Пачка: ${formatNumber(originalCount)} ${pluralRu(originalCount, "карточка", "карточки", "карточек")}`
+                          : `В работе ${formatNumber(remainingCount)}`;
 		                      const actionBusy = taskActionStatus === group.key;
 		                      const reorderBusy = taskActionStatus === `reorder:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
@@ -13125,7 +13138,15 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const smartContentBusy = smartContentUsesSemantic ? contentBusy : auditBusy;
                       const smartContentTasks = smartContentUsesSemantic ? contentButtonTasks : auditButtonTasks;
                       const smartContentLabel = smartContentUsesSemantic
-                        ? contentButtonLabel
+                        ? (
+                          contentBusy
+                            ? "Готовим контент"
+                            : retryContentTasks.length
+                              ? "Повторить контент"
+                              : missingContentTasks.length
+                                ? "Доделать контент по СЯ"
+                                : "Подготовить контент по СЯ"
+                        )
                         : auditButtonLabel.replace("черновики", "контент").replace("Черновики", "Контент");
                       const smartContentHelp = smartContentUsesSemantic
                         ? contentButtonHelp
@@ -13139,7 +13160,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                           <div className="task-batch-main">
                             <div>
                               <strong>{taskBatchGroupTitle(group)}</strong>
-                              <span>{cardsLabel} {pluralRu(remainingCount, "карточка", "карточки", "карточек")} · {taskSectionLabel(section.key)}</span>
+                              <span>{cardsLabel} · {taskSectionLabel(section.key)}</span>
                             </div>
                             <Tag tone={approvalStatusTone(statusValue)}>{approvalStatusLabel(statusValue)}</Tag>
                           </div>
@@ -13153,6 +13174,8 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                             <div className="task-batch-status-line">
                               <Tag tone={draftCount ? "blue" : "green"}>{formatNumber(draftCount)} в работе</Tag>
                               <Tag tone={returnedCount ? "red" : "green"}>{formatNumber(returnedCount)} возвратов</Tag>
+                              {inactiveGroupLabel ? <Tag tone="amber">{inactiveGroupLabel}</Tag> : null}
+                              {isContentSection && smartContentUsesSemantic ? <Tag tone="blue">{formatNumber(contentButtonTasks.length)} к запуску по СЯ</Tag> : null}
                               <Tag tone={batchEvents.length ? "blue" : "amber"}>{formatNumber(batchEvents.length)} событий</Tag>
                             </div>
 	                          <div className="task-batch-actions">
