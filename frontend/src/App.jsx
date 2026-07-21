@@ -14949,6 +14949,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       .filter((section) => ["title", "description", "characteristics"].includes(section));
     const sections = requestedSections.length ? requestedSections : ["title", "description", "characteristics"];
     const action = sections.length === 1 ? sections[0] : "all";
+    const desiredKeywords = semanticRowsByKey(Array.isArray(options.desiredKeywords) ? options.desiredKeywords : []);
     setSemanticContentStatus("loading");
     setSemanticContentAction(action);
     setSemanticContentError("");
@@ -14962,6 +14963,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           selectedKeywords: activeSemanticNewRows,
           currentKeywords: activeSemanticRowsForOptimization,
           removeKeywords: activeSemanticRemovalRows,
+          desiredKeywords,
           sections,
           draft: {
             title: draftTitle,
@@ -14996,7 +14998,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       const nextTitleSource = shouldApplyTitle ? "semantic" : draftTitleSource;
       const nextDescriptionSource = shouldApplyDescription ? "semantic" : draftDescriptionSource;
       const nextTitleReason = shouldApplyTitle ? (titleDraft.reason || "Заголовок переписан с учетом выбранного СЯ.") : draftTitleReason;
-      const nextDescriptionReason = shouldApplyDescription ? (descriptionDraft.reason || "Описание переписано с учетом выбранного СЯ.") : draftDescriptionReason;
+      const nextDescriptionReason = shouldApplyDescription
+        ? (
+          descriptionDraft.reason
+          || (desiredKeywords.length
+            ? `Описание переписано по СЯ и с попыткой естественно учесть ${desiredKeywords.length} выбранных непокрытых ${pluralRu(desiredKeywords.length, "ключ", "ключа", "ключей")}.`
+            : "Описание переписано с учетом выбранного СЯ.")
+        )
+        : draftDescriptionReason;
       const structuredDraft = buildStructuredCardDraft({
         auditStatus,
         auditHistory,
@@ -16844,6 +16853,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                       description={draftDescription}
                       keywords={descriptionKeywordRows}
                       helpEnabled={helpEnabled}
+                      onReoptimizeMissing={(rows) => reoptimizeContentFromSemanticCore({ sections: ["description"], desiredKeywords: rows })}
+                      reoptimizeDisabled={!canReoptimizeContent}
+                      reoptimizeBusy={semanticContentBusyAction === "description"}
+                      reoptimizeTitle={semanticReoptimizeUnavailableTitle || "Попросить следующий вариант описания по возможности учесть выбранные непокрытые ключи."}
                     />
                   </div>
                   <div className="field-box characteristics-diff-box">
@@ -18027,18 +18040,44 @@ function ContentAuditSummary({
   );
 }
 
-function DescriptionKeywordCoverage({ description, keywords, helpEnabled = false }) {
+function DescriptionKeywordCoverage({
+  description,
+  keywords,
+  helpEnabled = false,
+  onReoptimizeMissing = null,
+  reoptimizeDisabled = false,
+  reoptimizeBusy = false,
+  reoptimizeTitle = "",
+}) {
   const text = String(description || "").trim();
   const [activeKey, setActiveKey] = useState("");
-  if (!text && !helpEnabled) {
-    return null;
-  }
+  const [missingOpen, setMissingOpen] = useState(false);
+  const [selectedMissingKeys, setSelectedMissingKeys] = useState([]);
   const visibleKeywords = Array.isArray(keywords) ? keywords : [];
   const highlight = buildDescriptionKeywordHighlights(text, visibleKeywords);
   const matchedCount = highlight.counts.size;
+  const matchedKeywords = visibleKeywords.filter((keyword) => (highlight.counts.get(keyword.key) || 0) > 0);
+  const missingKeywords = visibleKeywords.filter((keyword) => !(highlight.counts.get(keyword.key) || 0));
+  const missingSignature = missingKeywords.map((keyword) => keyword.key).join("|");
+  useEffect(() => {
+    const allowedKeys = new Set(missingKeywords.map((keyword) => keyword.key));
+    setSelectedMissingKeys((current) => current.filter((key) => allowedKeys.has(key)));
+  }, [missingSignature]);
+  if (!text && !helpEnabled) {
+    return null;
+  }
   const activeTitle = activeKey
     ? visibleKeywords.find((item) => item.key === activeKey)?.query || ""
     : "";
+  const selectedMissing = missingKeywords.filter((keyword) => selectedMissingKeys.includes(keyword.key));
+  const selectedMissingCount = selectedMissing.length;
+  const toggleMissingKeyword = (key) => {
+    setSelectedMissingKeys((current) => (
+      current.includes(key)
+        ? current.filter((item) => item !== key)
+        : [...current, key]
+    ));
+  };
   return (
     <div className="description-keyword-coverage">
       <div className="description-keyword-head">
@@ -18046,14 +18085,14 @@ function DescriptionKeywordCoverage({ description, keywords, helpEnabled = false
           <strong>Покрытие ключей в описании</strong>
           <span>{visibleKeywords.length ? `${matchedCount} из ${visibleKeywords.length} ${pluralRu(visibleKeywords.length, "ключ", "ключа", "ключей")} найдено в тексте` : "нет выбранных ключей для подсветки"}</span>
         </div>
-        <Tag tone={matchedCount ? "blue" : "amber"}>{matchedCount ? "подсветка" : "нет совпадений"}</Tag>
+        <Tag tone={matchedCount ? "blue" : "amber"}>{visibleKeywords.length ? `${matchedCount}/${visibleKeywords.length}` : "нет ключей"}</Tag>
       </div>
       <HelpHint enabled={helpEnabled} title="Как читать подсветку">
         Цветной фрагмент показывает, какой кусок черновика закрывает конкретный ключ. Наведите на ключ в легенде или на фрагмент текста, чтобы увидеть связь; если ключ серый, его пока нет в описании. Общие однословные ключи вроде "очки" не входят в основной счетчик.
       </HelpHint>
-      {visibleKeywords.length ? (
+      {matchedKeywords.length ? (
         <div className="description-keyword-legend">
-          {visibleKeywords.map((keyword) => {
+          {matchedKeywords.map((keyword) => {
             const count = highlight.counts.get(keyword.key) || 0;
             const active = activeKey === keyword.key;
             return (
@@ -18073,6 +18112,71 @@ function DescriptionKeywordCoverage({ description, keywords, helpEnabled = false
               </button>
             );
           })}
+        </div>
+      ) : null}
+      {visibleKeywords.length && !matchedKeywords.length ? (
+        <div className="description-keyword-empty">
+          <span>Покрытых ключей пока нет</span>
+        </div>
+      ) : null}
+      {missingKeywords.length ? (
+        <div className="description-keyword-missing">
+          <div className="description-keyword-missing-head">
+            <button
+              className="btn ghost mini"
+              type="button"
+              onClick={() => setMissingOpen((value) => !value)}
+            >
+              {missingOpen ? <X size={14} /> : <Plus size={14} />}
+              {missingOpen ? "Скрыть непокрытые" : `Показать непокрытые (${missingKeywords.length})`}
+            </button>
+            {selectedMissingCount ? (
+              <button
+                className={loadingButtonClass("btn primary mini", reoptimizeBusy)}
+                type="button"
+                onClick={() => onReoptimizeMissing?.(selectedMissing)}
+                disabled={reoptimizeDisabled || reoptimizeBusy}
+                aria-busy={reoptimizeBusy || undefined}
+                title={reoptimizeTitle || "Попросить следующий вариант описания по возможности учесть выбранные непокрытые ключи."}
+              >
+                <WandSparkles size={14} />{reoptimizeBusy ? "Готовим" : `Попробовать учесть (${selectedMissingCount})`}
+              </button>
+            ) : null}
+          </div>
+          {missingOpen ? (
+            <div className="description-keyword-missing-panel">
+              <div className="description-keyword-missing-tools">
+                <span>{selectedMissingCount ? `${selectedMissingCount} выбрано` : "Выберите желательные ключи для следующего варианта описания"}</span>
+                {selectedMissingCount ? (
+                  <button className="btn ghost mini" type="button" onClick={() => setSelectedMissingKeys([])}>
+                    <X size={14} />Снять выбор
+                  </button>
+                ) : null}
+              </div>
+              <div className="description-keyword-legend missing-list">
+                {missingKeywords.map((keyword) => {
+                  const active = activeKey === keyword.key;
+                  const selected = selectedMissingKeys.includes(keyword.key);
+                  return (
+                    <button
+                      className={`description-keyword-chip selectable missing ${selected ? "selected" : ""} ${active ? "active" : ""}`}
+                      type="button"
+                      key={keyword.key}
+                      onMouseEnter={() => setActiveKey(keyword.key)}
+                      onFocus={() => setActiveKey(keyword.key)}
+                      onMouseLeave={() => setActiveKey("")}
+                      onBlur={() => setActiveKey("")}
+                      onClick={() => toggleMissingKeyword(keyword.key)}
+                      title={selected ? "Убрать из следующей переоптимизации" : "Добавить в следующую переоптимизацию описания"}
+                    >
+                      <span>{keyword.query}</span>
+                      <em>{selected ? "выбран" : "нет"}</em>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
       <div className={`description-highlighted-text ${activeKey ? "has-active" : ""}`}>

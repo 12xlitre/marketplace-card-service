@@ -9535,6 +9535,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - используй только факты из evidenceBundle;
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
 - работай со всеми ключами из evidenceBundle.semanticCore.allTargetKeywords: это действующие ключи без удаления, ранжируемые запросы и добавленные запросы;
+- ключи из evidenceBundle.semanticCore.desiredKeywords не являются приоритетнее остальных: это непокрытые запросы, которые пользователь хочет попробовать учесть в описании, если они естественно ложатся в текст и не делают его SEO-склейкой;
 - ключи из evidenceBundle.semanticCore.removeKeywords нельзя использовать намеренно;
 - новые ключевые запросы включай естественно: самые сильные товарные запросы ставь в основу заголовка, средне- и низкочастотные добавляй в описание и подходящие характеристики только если они точно подходят товару;
 - запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
@@ -16652,11 +16653,12 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, draft=None, characteristics_context=None, sections=None):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None):
   requested_sections = content_reoptimization_sections(sections)
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
+  desired = content_keywords_from_payload(desired_keywords, limit=80)
   stored_selected, stored_current, stored_remove = stored_semantic_reoptimization_keywords(portal_id, card_key)
   remove = content_merge_keyword_rows(remove, stored_remove, limit=100)
   remove_keys = {audit_normalized(item.get("query")) for item in remove}
@@ -16668,7 +16670,13 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     item for item in content_merge_keyword_rows(current, stored_current, limit=180)
     if audit_normalized(item.get("query")) not in remove_keys
   ]
+  desired = [
+    item for item in desired
+    if audit_normalized(item.get("query")) not in remove_keys
+  ]
   target_keywords = content_reoptimization_target_keywords(selected, current, remove, limit=140)
+  if desired:
+    target_keywords = content_merge_keyword_rows(target_keywords, desired, limit=140)
   if not target_keywords and not remove:
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
@@ -16709,6 +16717,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "semanticCore": {
       "selectedKeywords": selected,
       "currentKeywords": current,
+      "desiredKeywords": desired,
       "allTargetKeywords": target_keywords,
       "titleCandidateKeywords": title_keywords[:120],
       "removeKeywords": remove,
@@ -16845,6 +16854,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "descriptionStyle": "marketplace-human-paragraphs",
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
+      "desiredKeywords": len(desired),
       "targetKeywords": len(target_keywords),
       "removeKeywords": len(remove),
       "usedKeywords": used_keywords,
@@ -19947,6 +19957,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           selected_keywords=payload.get("selectedKeywords") or payload.get("semanticCoreSelected"),
           current_keywords=payload.get("currentKeywords") or payload.get("semanticCoreCurrent"),
           remove_keywords=payload.get("removeKeywords") or payload.get("semanticCoreRemoval"),
+          desired_keywords=payload.get("desiredKeywords") or payload.get("descriptionDesiredKeywords"),
           draft=payload.get("draft"),
           characteristics_context=payload.get("characteristicsContext"),
           sections=payload.get("sections") or payload.get("contentSections"),

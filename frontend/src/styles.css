@@ -4871,6 +4871,16 @@ tr:last-child td {
   gap: 6px;
 }
 
+.description-keyword-empty {
+  border: 1px dashed var(--line);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .description-keyword-chip {
   max-width: 100%;
   min-height: 28px;
@@ -4906,8 +4916,54 @@ tr:last-child td {
   opacity: .55;
 }
 
+.description-keyword-chip.selectable.missing {
+  opacity: 1;
+  background: var(--surface);
+}
+
+.description-keyword-chip.selectable.selected {
+  border-color: #9fc5b4;
+  background: #eef8f2;
+  color: #1f5f48;
+}
+
 .description-keyword-chip.active {
   box-shadow: 0 0 0 3px rgba(55, 97, 233, .12);
+}
+
+.description-keyword-missing {
+  display: grid;
+  gap: 8px;
+}
+
+.description-keyword-missing-head,
+.description-keyword-missing-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.description-keyword-missing-tools span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.description-keyword-missing-panel {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.description-keyword-legend.missing-list {
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .description-highlighted-text {
