@@ -11925,6 +11925,19 @@ def semantic_source_row_for_query(source_lookup, query):
   return row if semantic_row_has_demand(row) else None
 
 
+def semantic_subject_is_missing(subject):
+  normalized = audit_normalized(subject)
+  if not normalized:
+    return True
+  return normalized in {
+    "категория не указана",
+    "категория не указано",
+    "не указана",
+    "не указано",
+    "без категории",
+  }
+
+
 def semantic_product_anchor_stems(card, seed_queries=None):
   card = card if isinstance(card, dict) else {}
   subject = audit_str(card.get("subjectName") or card.get("subject") or "")
@@ -11932,7 +11945,7 @@ def semantic_product_anchor_stems(card, seed_queries=None):
     subject = subject.split("/")[-1].strip()
   title = audit_str(card.get("title") or card.get("name") or "")
   seeds = " ".join(audit_str(value) for value in (seed_queries or []) if audit_str(value))
-  source_text = subject or " ".join(part for part in (title, seeds) if part)
+  source_text = subject if not semantic_subject_is_missing(subject) else " ".join(part for part in (title, seeds) if part)
   anchors = set()
   for token in audit_tokens(source_text):
     stem = semantic_token_stem(token)
@@ -11940,7 +11953,9 @@ def semantic_product_anchor_stems(card, seed_queries=None):
       continue
     anchors.add(stem)
   if any(stem.startswith("леден") for stem in anchors):
-    anchors.update({"леден", "конфет", "карамел"})
+    anchors.update({"леден", "конфет", "карамел", "пастил", "горл", "каш", "ангин", "простуд", "иммунитет"})
+  if any(stem.startswith("горл") for stem in anchors):
+    anchors.update({"горл", "каш", "ангин", "фаринг", "ларинг", "бронх", "насморк"})
   if any(stem.startswith("очк") for stem in anchors):
     anchors.add("очк")
   if any(stem.startswith("оправ") for stem in anchors):
@@ -12007,12 +12022,16 @@ def semantic_query_product_relevant(card, query, seed_queries=None):
 def semantic_filter_mpstats_rows(card, rows, seed_queries=None, limit=None):
   output = []
   seen = set()
+  texts = semantic_card_content_texts(card)
   for row in rows if isinstance(rows, list) else []:
     if not isinstance(row, dict) or not row.get("query"):
       continue
     if not semantic_row_has_demand(row):
       continue
-    if not semantic_query_product_relevant(card, row.get("query"), seed_queries=seed_queries):
+    if (
+      not semantic_query_product_relevant(card, row.get("query"), seed_queries=seed_queries)
+      and not semantic_content_field_for_query(texts, row.get("query"))
+    ):
       continue
     key = audit_normalized(row.get("query") or "")
     if not key or key in seen:
@@ -14007,7 +14026,16 @@ def audit_keywords_from_payload(payload, limit=500):
       continue
     output.append({
       "query": query,
-      "wbCount": audit_int(item.get("wb_count") or item.get("wbCount") or item.get("count"), 0),
+      "wbCount": audit_int(
+        item.get("wb_count")
+        or item.get("wbCount")
+        or item.get("wb_cluster_count")
+        or item.get("wbClusterCount")
+        or item.get("norm_query_count")
+        or item.get("normQueryCount")
+        or item.get("count"),
+        0,
+      ),
       "orgPos": audit_position_value(
         item.get("avg_organic_position"),
         item.get("avgOrganicPosition"),
@@ -14032,7 +14060,8 @@ def audit_keywords_from_payload(payload, limit=500):
         item.get("position"),
         item.get("rank"),
       ),
-      "totalFound": audit_int(item.get("total_found") or item.get("totalFound"), 0),
+      "totalFound": audit_int(item.get("total_found") or item.get("totalFound") or item.get("total"), 0),
+      "source": "mpstats-keywords",
     })
   output = sorted(output, key=lambda item: item["wbCount"], reverse=True)
   if limit is None:
@@ -14193,11 +14222,22 @@ def mpstats_expanding_seed_queries(card, query):
       content_parts.append(str(values or ""))
   content = audit_normalized(" ".join(str(part or "") for part in content_parts))
   primary_is_sunglasses = "солнцезащит" in content or "солнечн" in content
+  primary_is_lozenges = "леденц" in content or "леденец" in content
   base = "солнцезащитные очки" if primary_is_sunglasses else "очки"
   card_is_glasses = "очк" in audit_normalized(" ".join(str(part or "") for part in content_parts[1:]))
   primary_normalized = audit_normalized(primary)
   if manual_query and card_is_glasses and "очк" not in primary_normalized:
     mpstats_expanding_add_seed(seeds, seen, f"{base} {primary}")
+  if primary_is_lozenges:
+    if "горл" in content:
+      mpstats_expanding_add_seed(seeds, seen, "леденцы от горла")
+      mpstats_expanding_add_seed(seeds, seen, "леденцы при боли в горле")
+    if "каш" in content:
+      mpstats_expanding_add_seed(seeds, seen, "леденцы от кашля")
+    if "растительн" in content or "трав" in content:
+      mpstats_expanding_add_seed(seeds, seen, "растительные леденцы")
+    if "малин" in content:
+      mpstats_expanding_add_seed(seeds, seen, "леденцы малина")
   if re.search(r"\bкошк|\bкошач|cat\s*eye", content):
     mpstats_expanding_add_seed(seeds, seen, "очки кошачий глаз")
     if primary_is_sunglasses:
@@ -14227,7 +14267,15 @@ def normalize_mpstats_expanding_query(item):
     "cluster": audit_str(item.get("norm_query") or item.get("query_cluster") or ""),
     "prioritySubject": audit_str(priority_subject.get("name") or item.get("prioritySubject") or ""),
     "prioritySubjectId": priority_subject.get("id") or item.get("prioritySubjectId") or "",
-    "wbCount": audit_int(item.get("wbcount") or item.get("wb_count"), 0),
+    "wbCount": audit_int(
+      item.get("wbcount")
+      or item.get("wb_count")
+      or item.get("wb_cluster_count")
+      or item.get("wbClusterCount")
+      or item.get("norm_query_count")
+      or item.get("normQueryCount"),
+      0,
+    ),
     "ozonCount": audit_int(item.get("count"), 0),
     "results": audit_int(item.get("total") or item.get("items_count"), 0),
     "orgPos": audit_position_value(
