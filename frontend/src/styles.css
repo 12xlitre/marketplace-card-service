@@ -853,7 +853,33 @@ a {
   background: transparent;
   color: var(--muted);
   font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+}
+
+.seller-tabs button svg,
+.detail-tabs button svg {
+  flex: none;
+  opacity: .78;
+}
+
+.seller-tabs button span,
+.detail-tabs button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.seller-tabs button em,
+.detail-tabs button em {
+  color: inherit;
+  opacity: .68;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .seller-tabs button:hover:not(:disabled) {
@@ -4335,6 +4361,10 @@ tr:last-child td {
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
 }
 
 .detail-tabs button.active {
