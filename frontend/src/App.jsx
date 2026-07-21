@@ -13128,9 +13128,9 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const contentButtonLabel = contentBusy
                         ? "Готовим контент"
                         : retryContentTasks.length
-                          ? `Повторить контент (${formatNumber(retryContentTasks.length)})`
+                          ? "Повторить контент"
                           : missingContentTasks.length
-                            ? `Доделать контент (${formatNumber(missingContentTasks.length)})`
+                            ? "Доделать контент по СЯ"
                             : "Подготовить контент по СЯ";
                       const contentButtonHelp = "Подготовить контент по СЯ: берет сохраненное итоговое СЯ карточки и обновляет заголовок, описание и характеристики под согласованные ключи.";
                       const contentErrors = Array.isArray(contentState.errors) ? contentState.errors : [];
@@ -13138,15 +13138,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const smartContentBusy = smartContentUsesSemantic ? contentBusy : auditBusy;
                       const smartContentTasks = smartContentUsesSemantic ? contentButtonTasks : auditButtonTasks;
                       const smartContentLabel = smartContentUsesSemantic
-                        ? (
-                          contentBusy
-                            ? "Готовим контент"
-                            : retryContentTasks.length
-                              ? "Повторить контент"
-                              : missingContentTasks.length
-                                ? "Доделать контент по СЯ"
-                                : "Подготовить контент по СЯ"
-                        )
+                        ? contentButtonLabel
                         : auditButtonLabel.replace("черновики", "контент").replace("Черновики", "Контент");
                       const smartContentHelp = smartContentUsesSemantic
                         ? contentButtonHelp
