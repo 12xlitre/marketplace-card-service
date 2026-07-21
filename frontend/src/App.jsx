@@ -13112,6 +13112,8 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const contentFailed = Number(contentState.failed || 0);
                       const contentTotal = Number(contentState.total || 0);
                       const contentFailedKeys = new Set((Array.isArray(contentState.failedTasks) ? contentState.failedTasks : []).map(batchAuditTaskKey).filter(Boolean));
+                      const contentSemanticReadyTasks = allGroupTasks.filter((task) => taskHasCard(task) && taskHasSemanticFinal(task));
+                      const contentOptimizedTasks = allGroupTasks.filter((task) => taskHasCard(task) && task.hasContentOptimization);
                       const contentVisibleEligibleTasks = groupTasks.filter((task) => taskHasCard(task) && taskHasSemanticFinal(task));
                       const retryContentTasks = contentFailedKeys.size
                         ? allGroupTasks.filter((task) => contentFailedKeys.has(batchAuditTaskKey(task)) && taskHasCard(task) && taskHasSemanticFinal(task))
@@ -13167,6 +13169,8 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                               <Tag tone={draftCount ? "blue" : "green"}>{formatNumber(draftCount)} в работе</Tag>
                               <Tag tone={returnedCount ? "red" : "green"}>{formatNumber(returnedCount)} возвратов</Tag>
                               {inactiveGroupLabel ? <Tag tone="amber">{inactiveGroupLabel}</Tag> : null}
+                              {isContentSection && contentSemanticReadyTasks.length ? <Tag tone="green">{formatNumber(contentSemanticReadyTasks.length)} с итоговым СЯ</Tag> : null}
+                              {isContentSection && contentOptimizedTasks.length ? <Tag tone="blue">{formatNumber(contentOptimizedTasks.length)} уже подготовлено</Tag> : null}
                               {isContentSection && smartContentUsesSemantic ? <Tag tone="blue">{formatNumber(contentButtonTasks.length)} к запуску по СЯ</Tag> : null}
                               <Tag tone={batchEvents.length ? "blue" : "amber"}>{formatNumber(batchEvents.length)} событий</Tag>
                             </div>
