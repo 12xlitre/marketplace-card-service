@@ -9567,13 +9567,13 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - описание должно быть правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
 - форму очков/оправы обязательно укажи в описании, если она есть в характеристиках или в подтвержденных целевых ключах;
 - не пиши "УФ-защита", "UV", "защита от ультрафиолета" как факт, если в характеристиках нет явного УФ/UV/ультрафиолетового признака; категория светопропускания сама по себе не является разрешением для фразы "УФ-защита";
-- не переноси в описание служебные формулировки из инструкции: "без неподтвержденных свойств", "описание сохраняет факты", "случайные свойства", "неподтвержденные медицинские обещания";
+- не переноси в description.value служебные формулировки из инструкции: "если это свойство подтверждено в карточке", "если указано в характеристиках", "без неподтвержденных свойств", "описание сохраняет факты", "случайные свойства", "неподтвержденные медицинские обещания"; если факт не подтвержден, просто не пиши его в описании и вынеси ограничение в _meta.warnings;
 - каждое предложение должно раскрывать одну логическую мысль; не смешивай установку линз, оригинальность бренда, дизайн и комплектацию в одном предложении;
 - если товар является оправой, четко разделяй роль оправы и линз: оправа фиксирует линзы и служит основой для очков, но не корректирует зрение сама;
 - если в характеристике "Цвет" несколько значений, описывай их как сочетание цветов одной модели, а не как "доступные оттенки" или выбор ассортимента;
 - материал раскрывай через фактическую пользу покупателю, но без неподтвержденных обещаний: "практичный материал для регулярного использования" лучше, чем общие "качественные материалы" или "долговечность";
 - комплектацию описывай фактически: футляр защищает при хранении/транспортировке, салфетка помогает ухаживать за линзами после установки, сертификат подтверждает комплект; не связывай комплект с посадкой оправы;
-- бренд раскрывай отдельным коротким смысловым блоком, если бренд известен: позиционирование, стиль, повседневное ношение, внимание к деталям, без неподтвержденной истории и юридических утверждений;
+- бренд раскрывай только через факты из карточки: бренд указан, помогает найти модель по названию, связан с конкретной моделью/артикулом; не пиши "бренд делает ставку", "узнаваем по дизайну", "внимание к деталям", "известный бренд", если evidenceBundle этого не подтверждает;
 - финальный абзац пиши про конкретный товар в единственном числе, а не про весь ассортимент бренда;
 - ключи с неподтвержденными диоптриями, чужими брендами или свойствами, которых нет в evidenceBundle, не внедряй как факт товара; лучше пропусти и укажи предупреждение;
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
@@ -10437,9 +10437,14 @@ def content_reoptimization_sunglasses_model_name(title, brand=""):
   title = audit_str(title, 160)
   brand = audit_str(brand, 80)
   cleaned = re.sub(r"(?i)^солнцезащитные\s+очки\s*", "", title).strip()
+  cleaned = re.sub(r"(?i)^очки\s+солнцезащитные\s*", "", cleaned).strip()
+  cleaned = re.sub(r"(?i)^солнечные\s+очки\s*", "", cleaned).strip()
   cleaned = re.sub(r"(?i)^(женские|мужские|детские|унисекс)\s+", "", cleaned).strip()
+  cleaned = re.sub(r"(?i)^(поляризационные|с\s+поляризацией)\s+", "", cleaned).strip()
   if brand:
     cleaned = re.sub(re.escape(brand), "", cleaned, flags=re.IGNORECASE).strip()
+  cleaned = re.sub(r"(?i)^(женские|мужские|детские|унисекс)\s+", "", cleaned).strip()
+  cleaned = re.sub(r"(?i)^(поляризационные|с\s+поляризацией)\s+", "", cleaned).strip()
   cleaned = re.sub(r"\s+", " ", cleaned)
   return cleaned or title
 
@@ -10452,12 +10457,7 @@ def content_reoptimization_has_sunglasses_polarization(card, keyword_rows, facts
   fact_text = audit_normalized(" ".join(fact_values))
   if "поляр" in fact_text or "поляр" in card_text:
     return True
-  polar_target_count = 0
-  for item in keyword_rows if isinstance(keyword_rows, list) else []:
-    query = audit_normalized(item.get("query") if isinstance(item, dict) else item)
-    if "поляр" in query and (not isinstance(item, dict) or item.get("semanticSource") in ("added", "current")):
-      polar_target_count += 1
-  return polar_target_count >= 3
+  return False
 
 
 def content_reoptimization_sunglasses_title(card, keyword_rows, facts, max_chars=60):
@@ -10842,7 +10842,7 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
       )
     if lens_color:
       color_text.append(f"линзы имеют {lens_color} оттенок")
-    opening_details.append(f"{cap('; '.join(color_text))}. Такое сочетание проще сверить с фото и привычной одеждой перед заказом.")
+    opening_details.append(f"{cap('; '.join(color_text))}. Такое сочетание видно на фото и легко представить с повседневной одеждой.")
   paragraphs.append(
     f"{lead} подойдут для яркого дня в городе, поездок за рулем и отдыха на солнце. "
     + " ".join(opening_details)
@@ -10868,16 +10868,16 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
     if polar_key:
       polar_sentences.append(f"{cap(natural_query(polar_key))} особенно полезны там, где много бликов: на дороге, у воды, на светлом асфальте или снегу.")
     if polar_second and audit_normalized(polar_second) != audit_normalized(polar_key):
-      polar_sentences.append("Поляризационный эффект помогает спокойнее воспринимать яркий свет и контрастные отражения, если это свойство подтверждено в карточке.")
+      polar_sentences.append("Поляризационный эффект помогает спокойнее воспринимать яркий свет и контрастные отражения.")
     if polar_sentences:
       paragraphs.append(" ".join(polar_sentences[:2]))
 
   brand_sentences = []
   if brand_label:
-    brand_sentences.append(f"{brand_label} делает ставку на повседневную оптику без лишнего декора: такие очки проще сочетать с обычной одеждой и брать с собой на каждый день.")
+    brand_sentences.append(f"{brand_label} указан в карточке как бренд: такие очки проще найти по названию и сравнить с другими моделями той же марки.")
   brand_query = brand_sun_key or brand_reverse_key or brand_key
   if brand_query:
-    brand_sentences.append(f"{cap(natural_query(brand_query))} стоит оценивать по линзам на ярком свету, посадке оправы и общему виду на лице.")
+    brand_sentences.append("В этой модели важны линзы на ярком свету, посадка оправы и общий вид на лице.")
   if brand_sentences:
     paragraphs.append(" ".join(brand_sentences))
 
@@ -10889,7 +10889,7 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   if protection:
     fact_parts.append(f"Степень защиты указана как {protection}.")
   if dimensions:
-    fact_parts.append(f"Перед заказом полезно сверить размеры с привычной парой: {', '.join(dimensions[:5])}.")
+    fact_parts.append(f"Размеры модели: {', '.join(dimensions[:5])}.")
   kit_sentence = content_reoptimization_kit_sentence(kit_values, product_kind="sunglasses")
   if kit_sentence:
     fact_parts.append(kit_sentence)
@@ -10899,7 +10899,7 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   final_subject = f"{brand_label} {model_name}".strip() if brand_label and model_name else (brand_label or model_name or "эта модель")
   paragraphs.append(
     f"{final_subject} стоит рассматривать как повседневные очки для солнца: для прогулок, дороги, отпуска и яркого дневного света. "
-    "Перед покупкой лучше сверить фото, форму, размеры и комплект, чтобы посадка и внешний вид совпали с ожиданиями."
+    "Фото, форма, размеры и комплект помогают заранее понять посадку и внешний вид без лишних обещаний."
   )
 
   text = content_description_sentence_limit("\n\n".join(paragraphs), max_chars)
@@ -11100,6 +11100,10 @@ def content_reoptimization_description_is_mechanical(text):
     "без случайных неподтвержденных свойств",
     "описание сохраняет факты",
     "неподтвержденных медицинских обещаний",
+    "если это свойство подтверждено в карточке",
+    "если указано в характеристиках",
+    "если это подтверждено",
+    "если свойство подтверждено",
     "эти детали помогают заранее представить аксессуар",
     "формат очки от солнца",
     "закрывают базовый сценарий",
@@ -16743,7 +16747,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
-      "engine": "opticards-semantic-content-v4.5-human",
+      "engine": "opticards-semantic-content-v4.6-human",
       "provider": provider,
       "model": model,
       "titleStyle": "wb-search-title",
