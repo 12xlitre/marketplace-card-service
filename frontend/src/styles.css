@@ -1664,7 +1664,7 @@ tr.selected-row td {
 }
 
 .client-card {
-  grid-template-rows: auto auto auto auto;
+  grid-template-rows: auto auto auto 1fr auto;
 }
 
 .client-marketplace-badges {
@@ -1696,6 +1696,47 @@ tr.selected-row td {
   color: #0052d9;
   background: #e9f2ff;
   border-color: #c4d8f6;
+}
+
+.client-quick-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.client-quick-panel button {
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.client-quick-panel button:hover:not(:disabled) {
+  background: var(--brand-soft);
+  border-color: #c8d6ff;
+}
+
+.client-quick-panel button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.client-quick-panel span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.client-quick-panel strong {
+  font-size: 13px;
 }
 
 .client-overview-grid {

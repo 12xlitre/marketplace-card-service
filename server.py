@@ -3567,9 +3567,11 @@ def save_portal_workset(portal_id, raw_cards, user):
   return list_portal_workset(numeric_portal_id, user)
 
 
-OZON_TASK_STATUSES = {"draft", "done", "skipped", "later", "returned"}
+OZON_TASK_STATUSES = {"draft", "submitted", "approved", "done", "skipped", "later", "returned"}
 OZON_TASK_STATUS_LABELS = {
   "draft": "в работе",
+  "submitted": "на согласовании",
+  "approved": "согласовано",
   "done": "готово",
   "skipped": "пропущено",
   "later": "вернуться позже",
@@ -3617,6 +3619,18 @@ def normalize_ozon_task(raw_task):
   if status not in OZON_TASK_STATUSES:
     status = "draft"
   work_type = audit_str(raw_task.get("workType") or raw_task.get("work_type") or "content", 40)
+  raw_work_types = raw_task.get("workTypes") if isinstance(raw_task.get("workTypes"), list) else []
+  work_types = []
+  for item in raw_work_types:
+    clean_item = audit_str(item, 40)
+    if clean_item and clean_item not in work_types:
+      work_types.append(clean_item)
+  batch_id = audit_str(raw_task.get("batchId") or raw_task.get("batch_id"), 160)
+  batch_title = audit_str(raw_task.get("batchTitle") or raw_task.get("batch_title"), 240)
+  batch_created_at = audit_str(raw_task.get("batchCreatedAt") or raw_task.get("batch_created_at"), 80)
+  batch_created_by = audit_str(raw_task.get("batchCreatedBy") or raw_task.get("batch_created_by"), 120)
+  work_comment = audit_str(raw_task.get("workComment") or raw_task.get("comment"), 500)
+  batch_position = audit_str(raw_task.get("batchPosition") or raw_task.get("taskPosition") or raw_task.get("position"), 40)
   payload = {
     "id": task_id,
     "cardKey": card_key,
@@ -3627,6 +3641,20 @@ def normalize_ozon_task(raw_task):
     "status": status,
     "workType": work_type or "content",
   }
+  if work_types:
+    payload["workTypes"] = work_types
+  if batch_id:
+    payload["batchId"] = batch_id
+  if batch_title:
+    payload["batchTitle"] = batch_title
+  if batch_created_at:
+    payload["batchCreatedAt"] = batch_created_at
+  if batch_created_by:
+    payload["batchCreatedBy"] = batch_created_by
+  if work_comment:
+    payload["workComment"] = work_comment
+  if batch_position:
+    payload["batchPosition"] = batch_position
   return payload if card_key else None
 
 
@@ -3647,6 +3675,13 @@ def public_ozon_task(row, semantic_map=None, content_map=None):
     "category": row["category"] or payload.get("category") or "",
     "status": row["status"] or "draft",
     "workType": row["work_type"] or payload.get("workType") or "content",
+    "workTypes": payload.get("workTypes") if isinstance(payload.get("workTypes"), list) else [],
+    "batchId": payload.get("batchId") or "",
+    "batchTitle": payload.get("batchTitle") or "",
+    "batchCreatedAt": payload.get("batchCreatedAt") or "",
+    "batchCreatedBy": payload.get("batchCreatedBy") or "",
+    "batchPosition": payload.get("batchPosition") or "",
+    "workComment": payload.get("workComment") or "",
     "hasSemanticFinal": bool(semantic.get("hasFinal")),
     "hasFinalContent": bool(content.get("hasFinalContent")),
     "auditStatus": content.get("auditStatus") or "idle",

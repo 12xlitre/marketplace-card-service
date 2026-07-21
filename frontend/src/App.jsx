@@ -5780,6 +5780,7 @@ export default function App() {
   const [portalStatusFilter, setPortalStatusFilter] = useState("active");
   const [selectedClientId, setSelectedClientId] = useState(initialView.clientId || "");
   const [selectedPortalId, setSelectedPortalId] = useState(initialView.portalId || "");
+  const [clientInitialTab, setClientInitialTab] = useState("overview");
   const [sellerTab, setSellerTab] = useState(normalizeSellerTab(initialView.sellerTab));
   const [cardReturnTarget, setCardReturnTarget] = useState(() => ({
     sellerTab: normalizeSellerTab(initialView.sellerTab),
@@ -6171,11 +6172,12 @@ export default function App() {
     return allPortals.filter(portalMatchesFilter);
   }
 
-  function showClient(client) {
+  function showClient(client, marketplaceTab = "overview") {
     if (!client) {
       return;
     }
     setSelectedClientId(client.id);
+    setClientInitialTab(marketplaceTab);
     setScreen("client");
   }
 
@@ -6381,13 +6383,13 @@ export default function App() {
     return false;
   }
 
-  async function showSeller(portal) {
+  async function showSeller(portal, nextSellerTab = "cabinet") {
     if (!portal || portal.isActive === false) {
       return;
     }
     setSelectedClientId(portalClientKey(portal));
     setSelectedPortalId(portal.id);
-    setSellerTab("cabinet");
+    setSellerTab(normalizeSellerTab(nextSellerTab));
     setScreen("seller");
     await loadPortalCards(portal);
   }
@@ -6984,6 +6986,7 @@ export default function App() {
             canManage={canManagePortals}
             findUser={findUser}
             onOpenClient={showClient}
+            onOpenPortal={showSeller}
             onArchive={(portal) => setPortalActive(portal, false)}
             onRestore={(portal) => setPortalActive(portal, true)}
             onDelete={deletePortal}
@@ -6999,6 +7002,7 @@ export default function App() {
         {displayScreen === "client" && currentClient ? (
           <ClientWorkspaceScreen
             client={currentClient}
+            initialMarketplaceTab={clientInitialTab}
             currentUser={currentUser}
             displayUsers={displayUsers}
             canManage={canManagePortals}
@@ -7217,7 +7221,7 @@ function LoginScreen({ onLogin }) {
 
 function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
-    { key: "cabinets", label: "Кабинеты", Icon: LayoutDashboard },
+    { key: "cabinets", label: "Клиенты", Icon: LayoutDashboard },
     { key: "audit", label: "Рыночный аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
     canManage ? { key: "admin", label: "Админка", Icon: Settings } : null,
   ].filter(Boolean);
@@ -7277,7 +7281,7 @@ function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNa
   );
 }
 
-function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onStatusFilter, onOpenClient, onOpenModal, helpEnabled = false }) {
+function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onStatusFilter, onOpenClient, onOpenPortal, onOpenModal, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
@@ -7373,6 +7377,23 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
               client={client}
               canSeeOzonBeta={canSeeOzonBeta}
               onOpen={() => onOpenClient(client)}
+              onOpenMarketplace={(marketplaceKey) => {
+                const portals = clientMarketplacePortals(client, marketplaceKey).filter((portal) => portal.isActive !== false);
+                if (portals.length === 1) {
+                  onOpenPortal?.(portals[0]);
+                  return;
+                }
+                onOpenClient(client, marketplaceKey);
+              }}
+              onOpenTasks={() => {
+                const taskPortals = (client.portals || []).filter((portal) => portal.isActive !== false && portalActiveTaskCount(portal) > 0);
+                if (taskPortals.length === 1) {
+                  onOpenPortal?.(taskPortals[0], "tasks");
+                  return;
+                }
+                const firstMarketplace = taskPortals.some((portal) => portalMarketplaceKey(portal) === "wildberries") ? "wildberries" : taskPortals.some((portal) => portalMarketplaceKey(portal) === "ozon") ? "ozon" : "overview";
+                onOpenClient(client, firstMarketplace);
+              }}
             />
           ))}
           {statusFilter !== "inactive" ? (
@@ -7392,11 +7413,15 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
   );
 }
 
-function ClientCard({ client, canSeeOzonBeta, onOpen }) {
+function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenTasks }) {
   const wbCount = clientPortalCount(client, "wildberries");
   const ozonCount = clientPortalCount(client, "ozon");
   const cardCount = clientCardCount(client);
   const taskCount = clientTaskCount(client);
+  const activePortals = (client.portals || []).filter((portal) => portal.isActive !== false);
+  const activeCabinetCount = activePortals.length;
+  const issueCount = activePortals.reduce((sum, portal) => sum + Number(portal.problemCount || 0), 0);
+  const reportReadyCount = activePortals.filter((portal) => portalMarketplaceKey(portal) === "wildberries" || portalMarketplaceKey(portal) === "ozon").length;
   return (
     <article className="workspace-card client-card">
       <div className="card-head">
@@ -7404,23 +7429,43 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
           <div className="seller-logo">{initials(client.name || "КЛ")}</div>
           <div>
             <h2>{client.name}</h2>
-            <p>Клиент · {formatNumber(client.portals.length)} {pluralRu(client.portals.length, "кабинет", "кабинета", "кабинетов")}</p>
+            <p>{formatNumber(activeCabinetCount)} активных · {formatNumber(client.portals.length)} всего</p>
           </div>
         </div>
-        <Tag tone="blue">Клиент</Tag>
+        <Tag tone={taskCount ? "amber" : "blue"}>{taskCount ? "есть работа" : "спокойно"}</Tag>
       </div>
       <div className="card-stats">
-        <MiniStat value={wbCount} label="WB" />
-        <MiniStat value={canSeeOzonBeta ? ozonCount : "—"} label="Ozon" />
+        <MiniStat value={cardCount} label="карточки" />
         <MiniStat value={taskCount} label="задачи" />
+        <MiniStat value={issueCount} label="к проверке" />
       </div>
       <div className="client-marketplace-badges">
         <span className="client-marketplace-badge wb">Wildberries · {formatNumber(wbCount)}</span>
         {canSeeOzonBeta ? <span className="client-marketplace-badge ozon">Ozon beta · {formatNumber(ozonCount)}</span> : null}
       </div>
-      <div className="scope-row">
-        <span>Карточки</span>
-        <strong>{formatNumber(cardCount)}</strong>
+      <div className="client-quick-panel">
+        <button type="button" onClick={() => onOpenMarketplace?.("wildberries")} disabled={!wbCount}>
+          <Store size={15} />
+          <span>WB</span>
+          <strong>{formatNumber(wbCount)}</strong>
+        </button>
+        {canSeeOzonBeta ? (
+          <button type="button" onClick={() => onOpenMarketplace?.("ozon")} disabled={!ozonCount}>
+            <ShoppingBag size={15} />
+            <span>Ozon</span>
+            <strong>{formatNumber(ozonCount)}</strong>
+          </button>
+        ) : null}
+        <button type="button" onClick={() => onOpenTasks?.()} disabled={!taskCount}>
+          <ClipboardList size={15} />
+          <span>Задачи</span>
+          <strong>{formatNumber(taskCount)}</strong>
+        </button>
+        <button type="button" onClick={onOpen} disabled={!reportReadyCount}>
+          <FileText size={15} />
+          <span>Отчеты</span>
+          <strong>{formatNumber(reportReadyCount)}</strong>
+        </button>
       </div>
       <div className="card-actions">
         <Tag tone={taskCount ? "amber" : "green"}>{taskCount ? "есть задачи" : "без активных задач"}</Tag>
@@ -7430,9 +7475,9 @@ function ClientCard({ client, canSeeOzonBeta, onOpen }) {
   );
 }
 
-function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
+function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
-  const [marketplaceTab, setMarketplaceTab] = useState("overview");
+  const [marketplaceTab, setMarketplaceTab] = useState(initialMarketplaceTab || "overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
   const ozonPortals = clientMarketplacePortals(client, "ozon");
   const activeClientPortals = (client.portals || []).filter((portal) => portal.isActive !== false);
@@ -7452,11 +7497,11 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
   const [contactSaving, setContactSaving] = useState(false);
 
   useEffect(() => {
-    setMarketplaceTab("overview");
+    setMarketplaceTab(initialMarketplaceTab || "overview");
     setNameEditing(false);
     setTeamEditing(false);
     setContactEditing(false);
-  }, [client.id]);
+  }, [client.id, initialMarketplaceTab]);
 
   useEffect(() => {
     if (!canSeeOzonBeta && marketplaceTab === "ozon") {
@@ -7996,6 +8041,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [ozonSemanticDrafts, setOzonSemanticDrafts] = useState([]);
   const [ozonCardDrafts, setOzonCardDrafts] = useState([]);
   const [ozonDraftStatus, setOzonDraftStatus] = useState("idle");
+  const [workPeriods, setWorkPeriods] = useState([]);
+  const [workPeriodsStatus, setWorkPeriodsStatus] = useState("idle");
+  const [taskActionStatus, setTaskActionStatus] = useState("");
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
 
   useEffect(() => {
@@ -8079,6 +8127,32 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   useEffect(() => {
     loadOzonResultDrafts();
   }, [portal.id, portal.isDemo, activeSellerTab]);
+
+  useEffect(() => {
+    let active = true;
+    if (!portal?.id || portal.isDemo) {
+      setWorkPeriods([]);
+      setWorkPeriodsStatus("idle");
+      return () => {
+        active = false;
+      };
+    }
+    setWorkPeriodsStatus("loading");
+    apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}`)
+      .then((payload) => {
+        if (!active) return;
+        setWorkPeriods(normalizeWorkPeriods(payload.periods));
+        setWorkPeriodsStatus("loaded");
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkPeriods([]);
+        setWorkPeriodsStatus("error");
+      });
+    return () => {
+      active = false;
+    };
+  }, [portal?.id, portal?.isDemo, activeSellerTab]);
 
   function updateTeamDraft(roleKey, login) {
     setTeamDraft((current) => ({ ...current, [roleKey]: login }));
@@ -8270,6 +8344,101 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     persistOzonWorkState(nextState);
   }
 
+  function replaceOzonWorkPeriod(period) {
+    if (!period?.id) return;
+    const normalized = normalizeWorkPeriod(period);
+    setWorkPeriods((current) => {
+      const exists = current.some((item) => String(item.id) === normalized.id);
+      if (!exists) return [normalized, ...current];
+      return current.map((item) => (String(item.id) === normalized.id ? normalized : item));
+    });
+    setWorkPeriodsStatus("loaded");
+  }
+
+  async function linkOzonTaskGroupToWorkPeriod(group, targets) {
+    if (!portal?.id || portal.isDemo || taskActionStatus) return;
+    const targetItems = Array.isArray(targets) ? targets : [targets];
+    const nextTargets = parseWorkPeriodTaskLinkValues(targetItems.map((item) => (typeof item === "string" ? item : workPeriodTargetValue(item))));
+    const currentLinks = workPeriodLinksForGroup(workPeriods, group);
+    const currentValues = new Set(currentLinks.map((link) => link.value));
+    const nextValues = new Set(nextTargets.map(workPeriodTargetValue));
+    const linksToRemove = currentLinks.filter((link) => !nextValues.has(link.value));
+    const targetsToAdd = nextTargets.filter((target) => !currentValues.has(workPeriodTargetValue(target)));
+    if (!linksToRemove.length && !targetsToAdd.length) {
+      onNotice?.("Пункты плана не изменились.");
+      return;
+    }
+    const actionKey = `ozon-link:${group.key || group.batchId || ""}`;
+    setTaskActionStatus(actionKey);
+    try {
+      for (const linkedPlan of linksToRemove) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: linkedPlan.period.id,
+            action: "unlink_task",
+            taskKey: linkedPlan.task.key,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) replaceOzonWorkPeriod(payload.period);
+      }
+      for (const target of targetsToAdd) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: target.periodId,
+            action: "link_task",
+            taskKey: target.taskKey,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            allowMultiple: true,
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) replaceOzonWorkPeriod(payload.period);
+      }
+      onNotice?.(nextTargets.length ? "Ozon-задача привязана к плану." : "Ozon-задача отвязана от плана.");
+    } catch {
+      onNotice?.("Не удалось обновить привязку Ozon-задачи к отчетному периоду.");
+    } finally {
+      setTaskActionStatus("");
+    }
+  }
+
+  async function unlinkOzonTaskGroupFromWorkPeriod(group, linkedPlans) {
+    const links = (Array.isArray(linkedPlans) ? linkedPlans : [linkedPlans]).filter((item) => item?.period?.id && item?.task?.key);
+    if (!portal?.id || portal.isDemo || taskActionStatus || !links.length) return;
+    const actionKey = `ozon-unlink:${group.key || group.batchId || ""}`;
+    setTaskActionStatus(actionKey);
+    try {
+      for (const linkedPlan of links) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: linkedPlan.period.id,
+            action: "unlink_task",
+            taskKey: linkedPlan.task.key,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) replaceOzonWorkPeriod(payload.period);
+      }
+      onNotice?.(links.length > 1 ? "Ozon-задача отвязана от пунктов плана." : "Ozon-задача отвязана от плана.");
+    } catch {
+      onNotice?.("Не удалось отвязать Ozon-задачу от отчетного периода.");
+    } finally {
+      setTaskActionStatus("");
+    }
+  }
+
   async function downloadOzonSemanticCore() {
     setCabinetExportStatus("semantic-loading");
     try {
@@ -8323,6 +8492,56 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
             label: `${task?.title || "Ozon карточка"}: ${ozonTaskStatusMeta(status).label}`,
             at: now,
           },
+          ...(current.recentEvents || []),
+        ].slice(0, 30),
+      };
+      persistOzonWorkState(nextState);
+      return nextState;
+    });
+  }
+
+  function updateOzonTaskGroupStatus(group, status) {
+    const groupTaskIds = new Set((group?.tasks || []).map((task) => task.id).filter(Boolean));
+    if (!groupTaskIds.size) return;
+    const now = new Date().toISOString();
+    setOzonWorkState((current) => {
+      const tasks = (current.tasks || []).map((task) => (
+        groupTaskIds.has(task.id) ? { ...task, status, updatedAt: now } : task
+      ));
+      const nextState = {
+        ...current,
+        tasks,
+        recentEvents: [
+          {
+            id: `event-${Date.now()}`,
+            action: status,
+            label: `${taskBatchGroupTitle(group)}: ${ozonTaskStatusMeta(status).label}`,
+            at: now,
+          },
+          ...(current.recentEvents || []),
+        ].slice(0, 30),
+      };
+      persistOzonWorkState(nextState);
+      return nextState;
+    });
+  }
+
+  async function deleteOzonTaskGroup(group) {
+    const groupTaskIds = new Set((group?.tasks || []).map((task) => task.id).filter(Boolean));
+    if (!groupTaskIds.size) return;
+    const confirmed = window.confirm(`Удалить Ozon-задачу "${taskBatchGroupTitle(group)}"? Сохраненные СЯ и контент карточек останутся.`);
+    if (!confirmed) return;
+    const linkedPlans = workPeriodLinksForGroup(workPeriods, group);
+    if (linkedPlans.length) {
+      await unlinkOzonTaskGroupFromWorkPeriod(group, linkedPlans);
+    }
+    const now = new Date().toISOString();
+    setOzonWorkState((current) => {
+      const nextState = {
+        ...current,
+        tasks: (current.tasks || []).filter((task) => !groupTaskIds.has(task.id)),
+        recentEvents: [
+          { id: `event-${Date.now()}`, action: "deleted", label: `Ozon-задача удалена: ${taskBatchGroupTitle(group)}`, at: now },
           ...(current.recentEvents || []),
         ].slice(0, 30),
       };
@@ -8665,8 +8884,15 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 semanticDrafts={ozonSemanticDrafts}
                 cardDrafts={ozonCardDrafts}
                 draftStatus={ozonDraftStatus}
+                workPeriods={workPeriods}
+                workPeriodsStatus={workPeriodsStatus}
+                taskActionStatus={taskActionStatus}
                 onOpenCard={onOpenCard}
                 onUpdateTaskStatus={updateOzonTaskStatus}
+                onUpdateTaskGroupStatus={updateOzonTaskGroupStatus}
+                onLinkTaskGroup={linkOzonTaskGroupToWorkPeriod}
+                onUnlinkTaskGroup={unlinkOzonTaskGroupFromWorkPeriod}
+                onDeleteTaskGroup={deleteOzonTaskGroup}
                 onDeleteTask={deleteOzonTask}
               />
             ) : null}
@@ -8878,11 +9104,27 @@ function writeOzonWorkState(portalId, state) {
 }
 
 function ozonTaskStatusMeta(status) {
+  if (status === "submitted") return { label: "на согласовании", tone: "amber" };
+  if (status === "approved") return { label: "согласовано", tone: "green" };
   if (status === "done") return { label: "готово", tone: "green" };
   if (status === "skipped") return { label: "пропущено", tone: "amber" };
   if (status === "later") return { label: "вернуться позже", tone: "blue" };
   if (status === "returned") return { label: "возврат", tone: "red" };
   return { label: "в работе", tone: "blue" };
+}
+
+function ozonTaskWorkTypes(task) {
+  if (Array.isArray(task?.workTypes) && task.workTypes.length) {
+    return normalizeWorkTypes(task.workTypes);
+  }
+  const workType = String(task?.workType || "").trim();
+  if (workType === "semantic-content") {
+    return ["semantic", "content"];
+  }
+  if (workType && taskSectionOptions.some((section) => section.key === workType)) {
+    return [workType];
+  }
+  return ["content"];
 }
 
 function ozonTaskForCard(card, tasks = []) {
@@ -8980,11 +9222,74 @@ function ozonTaskResultMeta(task, semanticDrafts = [], cardDrafts = []) {
   if (task.status === "returned") return { label: "возврат", tone: "red", hasSemanticFinal, hasFinalContent };
   if (task.status === "later") return { label: "вернуться позже", tone: "blue", hasSemanticFinal, hasFinalContent };
   if (task.status === "skipped") return { label: "пропущено", tone: "amber", hasSemanticFinal, hasFinalContent };
+  if (task.status === "submitted") return { label: "на согласовании", tone: "amber", hasSemanticFinal, hasFinalContent };
+  if (task.status === "approved") return { label: "согласовано", tone: "green", hasSemanticFinal, hasFinalContent };
   if (hasSemanticFinal && hasFinalContent) return { label: "СЯ + контент готовы", tone: "green", hasSemanticFinal, hasFinalContent };
   if (hasSemanticFinal) return { label: "СЯ готово", tone: "blue", hasSemanticFinal, hasFinalContent };
   if (hasFinalContent) return { label: "контент готов", tone: "blue", hasSemanticFinal, hasFinalContent };
   if (task.status === "done") return { label: "готово вручную", tone: "green", hasSemanticFinal, hasFinalContent };
   return { label: "без итогового СЯ", tone: "amber", hasSemanticFinal, hasFinalContent };
+}
+
+function buildOzonTaskGroups(tasks, semanticDrafts = [], cardDrafts = []) {
+  const groupsByType = Object.fromEntries(taskSectionOptions.map((section) => [section.key, []]));
+  const groupMap = new Map();
+  (Array.isArray(tasks) ? tasks : []).forEach((sourceTask, fallbackIndex) => {
+    const task = { ...sourceTask, resultMeta: ozonTaskResultMeta(sourceTask, semanticDrafts, cardDrafts) };
+    ozonTaskWorkTypes(task).forEach((type) => {
+      if (!groupsByType[type]) groupsByType[type] = [];
+      const groupKey = `${type}:${task.batchId || task.cardKey || task.id || fallbackIndex}`;
+      let group = groupMap.get(groupKey);
+      if (!group) {
+        group = {
+          key: groupKey,
+          type,
+          batchId: task.batchId || "",
+          batchTitle: task.batchTitle || "",
+          comment: task.workComment || "",
+          createdBy: task.batchCreatedBy || task.updatedBy || "",
+          createdAt: task.batchCreatedAt || task.createdAt || "",
+          tasks: [],
+        };
+        groupMap.set(groupKey, group);
+        groupsByType[type].push(group);
+      }
+      group.tasks.push(task);
+    });
+  });
+  Object.values(groupsByType).forEach((groups) => {
+    groups.forEach((group) => {
+      group.tasks = orderedTaskItems(group.tasks);
+    });
+    groups.sort((left, right) => Date.parse(right.createdAt || "") - Date.parse(left.createdAt || ""));
+  });
+  return groupsByType;
+}
+
+function ozonTaskGroupStatusMeta(group) {
+  const tasks = Array.isArray(group?.tasks) ? group.tasks : [];
+  const statuses = tasks.map((task) => task.status);
+  if (!tasks.length) return { label: "пусто", tone: "amber" };
+  if (statuses.includes("returned")) return { label: "есть возврат", tone: "red" };
+  if (statuses.includes("submitted")) return { label: "на согласовании", tone: "amber" };
+  if (tasks.every((task) => ["approved", "done"].includes(task.status) || (task.resultMeta?.hasSemanticFinal && task.resultMeta?.hasFinalContent))) {
+    return { label: "готово", tone: "green" };
+  }
+  if (statuses.every((status) => status === "later")) return { label: "вернуться позже", tone: "blue" };
+  if (statuses.every((status) => status === "skipped")) return { label: "пропущено", tone: "amber" };
+  return { label: "в работе", tone: "blue" };
+}
+
+function ozonTaskGroupProgress(group) {
+  const tasks = Array.isArray(group?.tasks) ? group.tasks : [];
+  const total = tasks.length;
+  const semanticReady = tasks.filter((task) => task.resultMeta?.hasSemanticFinal).length;
+  const contentReady = tasks.filter((task) => task.resultMeta?.hasFinalContent).length;
+  const approved = tasks.filter((task) => ["approved", "done"].includes(task.status)).length;
+  const submitted = tasks.filter((task) => task.status === "submitted").length;
+  const returned = tasks.filter((task) => task.status === "returned").length;
+  const later = tasks.filter((task) => task.status === "later").length;
+  return { total, semanticReady, contentReady, approved, submitted, returned, later };
 }
 
 function buildOzonSemanticCoreSheets(cards, drafts) {
@@ -9972,6 +10277,8 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
 
   function createOzonTaskBatch() {
     const now = new Date().toISOString();
+    const batchId = `ozon-batch-${Date.now()}`;
+    const batchTitle = `Контент Ozon: ${formatNumber(selectedCards.length)} ${pluralRu(selectedCards.length, "карточка", "карточки", "карточек")}`;
     const existingKeys = new Set(tasks.map((task) => task.cardKey));
     const nextTasks = [
       ...tasks,
@@ -9989,6 +10296,12 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
             category: ozonCardCategory(card),
             status: "draft",
             workType: "semantic-content",
+            workTypes: ["semantic", "content"],
+            batchId,
+            batchTitle,
+            batchCreatedAt: now,
+            batchPosition: index,
+            workComment: "Ozon beta: СЯ, заголовки, описание и характеристики",
             createdAt: now,
             updatedAt: now,
           };
@@ -9998,7 +10311,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
       tasks: nextTasks,
       selectedKeys: [],
       recentEvents: [
-        { id: `event-${Date.now()}`, action: "created", label: `Создан Ozon-набор: ${selectedCards.length} карточек`, at: now },
+        { id: `event-${Date.now()}`, action: "created", label: `Создана Ozon-задача: ${selectedCards.length} карточек`, at: now },
         ...(workState?.recentEvents || []),
       ],
     });
@@ -10206,25 +10519,38 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
   );
 }
 
-function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onOpenCard, onUpdateTaskStatus, onDeleteTask }) {
+function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", workPeriods = [], workPeriodsStatus = "idle", taskActionStatus = "", onOpenCard, onUpdateTaskStatus, onUpdateTaskGroupStatus, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteTaskGroup, onDeleteTask }) {
   const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
   const events = Array.isArray(workState?.recentEvents) ? workState.recentEvents : [];
   const [taskFilter, setTaskFilter] = useState("all");
+  const [linkingGroup, setLinkingGroup] = useState(null);
   const cardsByKey = new Map((Array.isArray(cards) ? cards : []).map((card) => [ozonCardStableKey(card), card]));
   const enrichedTasks = tasks.map((task) => ({ ...task, resultMeta: ozonTaskResultMeta(task, semanticDrafts, cardDrafts) }));
-  const activeTasks = enrichedTasks.filter((task) => !["done", "skipped"].includes(task.status) && !(task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent));
-  const doneTasks = enrichedTasks.filter((task) => task.status === "done" || (task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent));
+  const groupsByType = buildOzonTaskGroups(tasks, semanticDrafts, cardDrafts);
+  const flatGroups = Object.values(groupsByType).flat();
+  const activeTasks = enrichedTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status) && !(task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent));
+  const doneTasks = enrichedTasks.filter((task) => ["approved", "done"].includes(task.status) || (task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent));
   const skippedTasks = tasks.filter((task) => task.status === "skipped");
   const laterTasks = tasks.filter((task) => task.status === "later");
   const returnedTasks = tasks.filter((task) => task.status === "returned");
+  const submittedTasks = tasks.filter((task) => task.status === "submitted");
   const withoutSemanticTasks = enrichedTasks.filter((task) => !task.resultMeta.hasSemanticFinal);
-  const filteredTasks = enrichedTasks.filter((task) => {
-    if (taskFilter === "unfinished") return !["done", "skipped"].includes(task.status) && !(task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent);
-    if (taskFilter === "returned") return task.status === "returned";
-    if (taskFilter === "without-semantic") return !task.resultMeta.hasSemanticFinal;
-    if (taskFilter === "done") return task.status === "done" || (task.resultMeta.hasSemanticFinal && task.resultMeta.hasFinalContent);
+  const groupMatchesFilter = (group) => {
+    const progress = ozonTaskGroupProgress(group);
+    if (taskFilter === "unfinished") return ozonTaskGroupStatusMeta(group).label !== "готово" && progress.total > 0;
+    if (taskFilter === "submitted") return progress.submitted > 0;
+    if (taskFilter === "returned") return progress.returned > 0;
+    if (taskFilter === "without-semantic") return progress.semanticReady < progress.total;
+    if (taskFilter === "done") return ozonTaskGroupStatusMeta(group).label === "готово";
     return true;
-  });
+  };
+  const visibleGroupCount = flatGroups.filter(groupMatchesFilter).length;
+
+  async function submitTaskLink(target) {
+    if (!linkingGroup) return;
+    await onLinkTaskGroup?.(linkingGroup.group, target);
+    setLinkingGroup(null);
+  }
 
   if (!tasks.length) {
     return (
@@ -10256,6 +10582,10 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
           <strong>{formatNumber(doneTasks.length)}</strong>
         </div>
         <div className="work-summary-note">
+          <span>На согласовании</span>
+          <strong>{formatNumber(submittedTasks.length)}</strong>
+        </div>
+        <div className="work-summary-note">
           <span>Вернуться позже</span>
           <strong>{formatNumber(laterTasks.length)}</strong>
         </div>
@@ -10277,6 +10607,7 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
         {[
           ["all", "Все"],
           ["unfinished", "Незавершенные"],
+          ["submitted", "На согласовании"],
           ["returned", "Возвращенные"],
           ["without-semantic", "Без итогового СЯ"],
           ["done", "Готовые"],
@@ -10285,37 +10616,115 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
             {label}
           </button>
         ))}
-        <span>{draftStatus === "loading" ? "загружаем результаты" : `${formatNumber(filteredTasks.length)} из ${formatNumber(tasks.length)}`}</span>
+        <span>{draftStatus === "loading" ? "загружаем результаты" : `${formatNumber(visibleGroupCount)} пачек · ${formatNumber(tasks.length)} карточек`}</span>
       </div>
 
-      <div className="task-card-list ozon-task-list">
-        {filteredTasks.map((task) => {
-          const card = cardsByKey.get(task.cardKey);
-          const statusMeta = ozonTaskStatusMeta(task.status);
-          const resultMeta = task.resultMeta || ozonTaskResultMeta(task, semanticDrafts, cardDrafts);
+      <div className="task-section-list ozon-task-section-list">
+        {taskSectionOptions.map((section) => {
+          const groups = (groupsByType[section.key] || []).filter(groupMatchesFilter);
+          if (!groups.length) return null;
           return (
-            <div className="task-card-row" key={task.id}>
-              <div className="task-card-row-main">
-                <Thumb url={card ? bestPhotoUrl(card) : ""} />
+            <section className="task-type-section" key={section.key}>
+              <div className="task-type-head">
                 <div>
-                  <strong>{task.title}</strong>
-                  <span>Ozon SKU {textOrDash(task.sku)} · offer {textOrDash(task.offerId)} · {textOrDash(task.category)}</span>
+                  <h3>{section.label}</h3>
+                  <span>{formatNumber(groups.length)} {pluralRu(groups.length, "пачка", "пачки", "пачек")}</span>
                 </div>
+                <Tag tone="blue">Ozon</Tag>
               </div>
-              <div className="task-card-row-actions">
-                <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
-                <Tag tone={resultMeta.tone}>{resultMeta.label}</Tag>
-                <button className="btn mini" type="button" onClick={() => card && onOpenCard?.(card)} disabled={!card}>Открыть</button>
-                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "done")} disabled={!resultMeta.hasSemanticFinal && !resultMeta.hasFinalContent}>Готово</button>
-                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "later")}>Вернуться позже</button>
-                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "skipped")}>Пропустить</button>
-                <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "returned")}>Возврат</button>
-                <button className="btn mini danger" type="button" onClick={() => onDeleteTask?.(task.id)}>Удалить</button>
+              <div className="task-batch-list">
+                {groups.map((group) => {
+                  const progress = ozonTaskGroupProgress(group);
+                  const statusMeta = ozonTaskGroupStatusMeta(group);
+                  const linkedPlans = workPeriodLinksForGroup(workPeriods, group);
+                  const linkedPlanLabel = workPeriodLinkLabelForGroup(workPeriods, group);
+                  const actionBusy = taskActionStatus.includes(group.key) || (group.batchId && taskActionStatus.includes(group.batchId));
+                  const firstOpenableTask = group.tasks.find((task) => cardsByKey.has(task.cardKey)) || group.tasks[0];
+                  const firstCard = cardsByKey.get(firstOpenableTask?.cardKey);
+                  return (
+                    <article className="task-batch-card" key={group.key}>
+                      <div className="task-batch-main">
+                        <div>
+                          <strong>{taskBatchGroupTitle(group)}</strong>
+                          <span>{formatNumber(progress.total)} {pluralRu(progress.total, "карточка", "карточки", "карточек")} · План: {linkedPlanLabel || "не привязано"}</span>
+                        </div>
+                        <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
+                      </div>
+                      {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
+                      <div className="task-batch-status-line">
+                        <Tag tone={progress.semanticReady === progress.total ? "green" : "amber"}>{formatNumber(progress.semanticReady)} с итоговым СЯ</Tag>
+                        <Tag tone={progress.contentReady === progress.total ? "green" : "blue"}>{formatNumber(progress.contentReady)} с контентом</Tag>
+                        {progress.submitted ? <Tag tone="amber">{formatNumber(progress.submitted)} на согласовании</Tag> : null}
+                        {progress.returned ? <Tag tone="red">{formatNumber(progress.returned)} возвратов</Tag> : null}
+                        {progress.later ? <Tag tone="blue">{formatNumber(progress.later)} позже</Tag> : null}
+                      </div>
+                      <div className="task-batch-actions">
+                        <button className="btn primary" type="button" onClick={() => firstCard && onOpenCard?.(firstCard)} disabled={!firstCard}>
+                          <Eye size={17} />Начать работу
+                        </button>
+                        <button className="btn" type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)}>
+                          <ClipboardList size={16} />{linkedPlans.length ? "Изменить пункты плана" : "Привязать к плану"}
+                        </button>
+                        {linkedPlans.length ? (
+                          <button className={loadingButtonClass("btn", actionBusy)} type="button" onClick={() => onUnlinkTaskGroup?.(group, linkedPlans)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
+                            <Unlink size={16} />{linkedPlans.length > 1 ? "Отвязать от всех" : "Отвязать"}
+                          </button>
+                        ) : null}
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "submitted")} disabled={Boolean(taskActionStatus)}>
+                          <Upload size={16} />На согласование
+                        </button>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "approved")} disabled={Boolean(taskActionStatus)}>
+                          <CheckSquare size={16} />Согласовано
+                        </button>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "returned")} disabled={Boolean(taskActionStatus)}>
+                          <RotateCcw size={16} />Возврат
+                        </button>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "later")} disabled={Boolean(taskActionStatus)}>
+                          <RotateCcw size={16} />Позже
+                        </button>
+                        <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
+                          <Trash2 size={16} />Удалить задачу
+                        </button>
+                      </div>
+                      <details className="task-card-details">
+                        <summary>Карточки в задаче</summary>
+                        <div className="task-card-list ozon-task-list">
+                          {group.tasks.map((task) => {
+                            const card = cardsByKey.get(task.cardKey);
+                            const statusMeta = ozonTaskStatusMeta(task.status);
+                            const resultMeta = task.resultMeta || ozonTaskResultMeta(task, semanticDrafts, cardDrafts);
+                            return (
+                              <div className="task-card-row" key={`${group.key}-${task.id}`}>
+                                <div className="task-card-row-main">
+                                  <Thumb url={card ? bestPhotoUrl(card) : ""} />
+                                  <div>
+                                    <strong>{task.title}</strong>
+                                    <span>Ozon SKU {textOrDash(task.sku)} · offer {textOrDash(task.offerId)} · {textOrDash(task.category)}</span>
+                                  </div>
+                                </div>
+                                <div className="task-card-row-actions">
+                                  <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
+                                  <Tag tone={resultMeta.tone}>{resultMeta.label}</Tag>
+                                  <button className="btn mini" type="button" onClick={() => card && onOpenCard?.(card)} disabled={!card}>Открыть</button>
+                                  <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "submitted")}>На согласование</button>
+                                  <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "approved")}>Согласовано</button>
+                                  <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "later")}>Позже</button>
+                                  <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "returned")}>Возврат</button>
+                                  <button className="btn mini danger" type="button" onClick={() => onDeleteTask?.(task.id)}>Удалить</button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </details>
+                    </article>
+                  );
+                })}
               </div>
-            </div>
+            </section>
           );
         })}
-        {!filteredTasks.length ? <div className="empty-state compact"><span>По выбранному фильтру Ozon-задач нет.</span></div> : null}
+        {!visibleGroupCount ? <div className="empty-state compact"><span>По выбранному фильтру Ozon-задач нет.</span></div> : null}
       </div>
 
       <details className="task-batch-log">
@@ -10336,6 +10745,17 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
           <div className="empty-state compact"><span>Событий пока нет.</span></div>
         )}
       </details>
+      {linkingGroup ? (
+        <WorkPeriodTaskLinkModal
+          group={linkingGroup.group}
+          workType={linkingGroup.workType}
+          workPeriods={workPeriods}
+          workPeriodsStatus={workPeriodsStatus}
+          loading={Boolean(taskActionStatus)}
+          onClose={() => setLinkingGroup(null)}
+          onSubmit={submitTaskLink}
+        />
+      ) : null}
     </section>
   );
 }
@@ -11619,7 +12039,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
           <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
         </div>
         <div className="toolbar">
-          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Кабинеты</button>
+          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
           <button className="btn" type="button" onClick={() => onOpenModal("api")}><Upload size={17} />{apiConnectButtonText(portal)}</button>
           <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
         </div>
