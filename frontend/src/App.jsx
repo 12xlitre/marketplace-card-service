@@ -13352,6 +13352,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [draftSavedAt, setDraftSavedAt] = useState("");
   const [draftSaveStatus, setDraftSaveStatus] = useState("");
   const [draftSaveError, setDraftSaveError] = useState("");
+  const [storedDraftLoadedKey, setStoredDraftLoadedKey] = useState("");
   const [competitors, setCompetitors] = useState([]);
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
@@ -13409,6 +13410,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const draftStorageKey = `opticards-draft:${portal?.id || "portal"}:${draftCardKey}`;
   const draftStorageKeys = uniqueDraftKeyValues([draftCardKey, ...draftCardKeys])
     .map((key) => `opticards-draft:${portal?.id || "portal"}:${key}`);
+  const storedDraftLoadKey = `${portal?.id || "portal"}:${draftCardKeySignature || draftCardKey || card?.nmID || card?.vendorCode || ""}`;
+  const storedDraftLoaded = Boolean(storedDraftLoadedKey && storedDraftLoadedKey === storedDraftLoadKey);
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
   const semanticPersistSucceeded = (status) => (
     backendDraftEnabled ? status === "backend" : ["backend", "local"].includes(status)
@@ -13823,6 +13826,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setCharacteristicSearch("");
     setDraftSavedAt("");
     setDraftSaveStatus("");
+    setStoredDraftLoadedKey("");
     setAuditCompetitorInput("");
     const applyDraft = (storedDraft) => {
       const normalized = contentFromStoredDraft(storedDraft, card);
@@ -13861,6 +13865,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setAuditHistory(normalized.auditHistory);
       setAuditStatus(normalized.auditStatus);
       setDraftSavedAt(normalized.savedAt);
+    };
+    const markStoredDraftLoaded = () => {
+      if (active) {
+        setStoredDraftLoadedKey(storedDraftLoadKey);
+      }
     };
     let localDraftApplied = false;
     for (const storageKey of draftStorageKeys) {
@@ -13901,18 +13910,23 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
             // Backend remains the source of truth; local cache sync is best effort.
           }
           setDraftSaveStatus("backend");
+          markStoredDraftLoaded();
           return;
         }
+        markStoredDraftLoaded();
       })().catch(() => {
         if (active) {
           setDraftSaveStatus("local-fallback");
+          markStoredDraftLoaded();
         }
       });
+    } else {
+      markStoredDraftLoaded();
     }
     return () => {
       active = false;
     };
-  }, [draftStorageKey, draftCardKey, draftCardKeySignature, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
+  }, [draftStorageKey, draftCardKey, draftCardKeySignature, storedDraftLoadKey, backendDraftEnabled, portal?.id, card?.nmID, card?.vendorCode]);
 
   useEffect(() => {
     let active = true;
@@ -14155,11 +14169,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }, [semanticCore, portal?.id, card?.nmID]);
 
   useEffect(() => {
-    if (activeTab !== "semantic" || semanticCore || semanticRankStatus !== "idle" || !portal?.id || !card?.nmID) {
+    if (activeTab !== "semantic" || !storedDraftLoaded || semanticCore || semanticStoredFinal || semanticRankStatus !== "idle" || !portal?.id || !card?.nmID) {
       return;
     }
     loadSemanticCurrentPositions({ forceRefresh: false });
-  }, [activeTab, semanticCore, semanticRankStatus, portal?.id, card?.nmID]);
+  }, [activeTab, storedDraftLoaded, semanticCore, semanticStoredFinal, semanticRankStatus, portal?.id, card?.nmID]);
 
   useEffect(() => {
     if (!semanticDraftDirty) {
