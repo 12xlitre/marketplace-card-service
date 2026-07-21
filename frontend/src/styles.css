@@ -515,6 +515,111 @@ a {
   box-shadow: 0 1px 0 rgba(31, 37, 34, .03);
 }
 
+.portal-management-menu {
+  position: relative;
+}
+
+.portal-management-menu summary,
+.cabinet-management summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.portal-management-menu summary::-webkit-details-marker,
+.cabinet-management summary::-webkit-details-marker {
+  display: none;
+}
+
+.portal-management-menu > div {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  min-width: 190px;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 8px;
+}
+
+.portal-management-menu .btn {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.cabinet-management {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.cabinet-management summary {
+  min-height: 54px;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cabinet-management summary > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  justify-content: start;
+  gap: 3px 8px;
+}
+
+.cabinet-management summary svg {
+  grid-row: span 2;
+  color: var(--brand);
+}
+
+.cabinet-management summary strong {
+  font-size: 14px;
+}
+
+.cabinet-management summary span {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cabinet-management-body {
+  border-top: 1px solid var(--line);
+  padding: 12px 14px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.management-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.management-row > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.management-row > div:first-child span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.management-row.danger-zone {
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+
 .hidden-file-input {
   display: none;
 }
@@ -7288,6 +7393,13 @@ tr:last-child td {
     width: 100%;
   }
 
+  .portal-management-menu > div {
+    right: auto;
+    left: 0;
+    bottom: auto;
+    top: calc(100% + 8px);
+  }
+
   .detail-tabs {
     top: 10px;
   }
@@ -7437,6 +7549,7 @@ tr:last-child td {
   .changes-readiness-grid,
   .audit-fact-grid,
   .report-availability-row,
+  .management-row,
   .raw-field-row,
   .characteristic-row,
   .characteristics-diff-head,

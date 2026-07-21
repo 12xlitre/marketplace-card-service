@@ -7549,42 +7549,11 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
       <header className="topbar">
         <div className="title">
           <div className="seller-title-row">
-            {nameEditing ? (
-              <div className="seller-name-editor">
-                <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
-                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveName} disabled={nameSaving || !nameDraft.trim()} aria-busy={nameSaving || undefined}>
-                  {nameSaving ? "Сохраняем" : "Сохранить"}
-                </button>
-                <button className="btn ghost" type="button" onClick={() => { setNameDraft(client.name || ""); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
-              </div>
-            ) : (
-              <>
-                <h1>{client.name}</h1>
-                {canManage ? <IconButton icon={Pencil} label="Редактировать название клиента" onClick={() => setNameEditing(true)} /> : null}
-              </>
-            )}
+            <h1>{client.name}</h1>
           </div>
           <p>Общая информация клиента и разделы маркетплейсов.</p>
         </div>
         <div className="toolbar">
-          {canManage && activeClientPortals.length ? (
-            <button className="btn" type="button" onClick={onArchiveClient}>
-              <Archive size={17} />
-              В архив
-            </button>
-          ) : null}
-          {canManage && !activeClientPortals.length && inactiveClientPortals.length ? (
-            <button className="btn" type="button" onClick={onRestoreClient}>
-              <RotateCcw size={17} />
-              Вернуть
-            </button>
-          ) : null}
-          {canManage && canDeleteClient ? (
-            <button className="btn danger" type="button" onClick={onDeleteClient}>
-              <Trash2 size={17} />
-              Удалить
-            </button>
-          ) : null}
           <button className="btn" type="button" onClick={onBack}>
             <ArrowLeft size={17} />
             Клиенты
@@ -7593,6 +7562,62 @@ function ClientWorkspaceScreen({ client, currentUser, displayUsers, canManage, f
       </header>
 
       <div className="content">
+        {canManage ? (
+          <details className="cabinet-management" open={nameEditing || undefined}>
+            <summary>
+              <div>
+                <Settings size={17} />
+                <strong>Управление клиентом</strong>
+                <span>Название, архив и удаление</span>
+              </div>
+            </summary>
+            <div className="cabinet-management-body">
+              <div className="management-row">
+                <div>
+                  <strong>Название клиента</strong>
+                  <span>Переименовать клиента без изменения кабинетов.</span>
+                </div>
+                {nameEditing ? (
+                  <div className="seller-name-editor">
+                    <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
+                    <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveName} disabled={nameSaving || !nameDraft.trim()} aria-busy={nameSaving || undefined}>
+                      {nameSaving ? "Сохраняем" : "Сохранить"}
+                    </button>
+                    <button className="btn ghost" type="button" onClick={() => { setNameDraft(client.name || ""); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
+                  </div>
+                ) : (
+                  <button className="btn" type="button" onClick={() => setNameEditing(true)}><Pencil size={16} />Редактировать</button>
+                )}
+              </div>
+              <div className="management-row danger-zone">
+                <div>
+                  <strong>Архив клиента</strong>
+                  <span>Редкое действие: активные кабинеты клиента будут скрыты из рабочего списка.</span>
+                </div>
+                <div className="portal-actions">
+                  {activeClientPortals.length ? (
+                    <button className="btn" type="button" onClick={onArchiveClient}>
+                      <Archive size={17} />
+                      В архив
+                    </button>
+                  ) : null}
+                  {!activeClientPortals.length && inactiveClientPortals.length ? (
+                    <button className="btn" type="button" onClick={onRestoreClient}>
+                      <RotateCcw size={17} />
+                      Вернуть
+                    </button>
+                  ) : null}
+                  {canDeleteClient ? (
+                    <button className="btn danger" type="button" onClick={onDeleteClient}>
+                      <Trash2 size={17} />
+                      Удалить
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </details>
+        ) : null}
         <HelpList
           enabled={helpEnabled}
           title="Структура клиента"
@@ -7911,15 +7936,25 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
         <div className="portal-actions">
           {inactive ? (
             canManage ? (
-              <>
-                <button className="btn primary" type="button" onClick={onRestore}><RotateCcw size={16} />Вернуть</button>
-                <button className="btn danger" type="button" onClick={onDelete}><Trash2 size={16} />Удалить</button>
-              </>
+              <details className="portal-management-menu">
+                <summary className="btn"><Settings size={16} />Управление</summary>
+                <div>
+                  <button className="btn primary" type="button" onClick={onRestore}><RotateCcw size={16} />Вернуть</button>
+                  <button className="btn danger" type="button" onClick={onDelete}><Trash2 size={16} />Удалить</button>
+                </div>
+              </details>
             ) : null
           ) : (
             <>
-              {canManage ? <button className="btn" type="button" onClick={onArchive}><Archive size={16} />В архив</button> : null}
               <button className="btn primary" type="button" onClick={onOpen}>Открыть</button>
+              {canManage ? (
+                <details className="portal-management-menu">
+                  <summary className="btn"><Settings size={16} />Управление</summary>
+                  <div>
+                    <button className="btn" type="button" onClick={onArchive}><Archive size={16} />В архив</button>
+                  </div>
+                </details>
+              ) : null}
             </>
           )}
         </div>
@@ -8341,20 +8376,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       <header className="topbar">
         <div className="title">
           <div className="seller-title-row">
-            {nameEditing ? (
-              <div className="seller-name-editor">
-                <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
-                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
-                  {nameSaving ? "Сохраняем" : "Сохранить"}
-                </button>
-                <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
-              </div>
-            ) : (
-              <>
-                <h1>{displayName}</h1>
-                {canManage ? <IconButton icon={Pencil} label="Редактировать название Ozon-кабинета" onClick={() => setNameEditing(true)} /> : null}
-              </>
-            )}
+            <h1>{displayName}</h1>
           </div>
           <p>Ozon · beta-кабинет · {scopeLabel} · отдельная логика данных · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
         </div>
@@ -8376,6 +8398,37 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
             <HelpHint enabled={helpEnabled} title="Ozon beta">
               Этот кабинет не использует WB API. Карточки, задачи и отчетные периоды будут развиваться как отдельный Ozon-поток, а семантика может брать ключи из MPStats по WB keyword-базе.
             </HelpHint>
+
+            {canManage ? (
+              <details className="cabinet-management" open={nameEditing || undefined}>
+                <summary>
+                  <div>
+                    <Settings size={17} />
+                    <strong>Настройки кабинета</strong>
+                    <span>Название Ozon-кабинета</span>
+                  </div>
+                </summary>
+                <div className="cabinet-management-body">
+                  <div className="management-row">
+                    <div>
+                      <strong>Название кабинета</strong>
+                      <span>Переименовать кабинет без изменения карточек и задач.</span>
+                    </div>
+                    {nameEditing ? (
+                      <div className="seller-name-editor">
+                        <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={120} autoFocus />
+                        <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
+                          {nameSaving ? "Сохраняем" : "Сохранить"}
+                        </button>
+                        <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>Отмена</button>
+                      </div>
+                    ) : (
+                      <button className="btn" type="button" onClick={() => setNameEditing(true)}><Pencil size={16} />Редактировать</button>
+                    )}
+                  </div>
+                </div>
+              </details>
+            ) : null}
 
             {activeSellerTab === "cabinet" ? (
               <>
@@ -11561,29 +11614,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       <header className="topbar">
         <div className="title">
           <div className="seller-title-row">
-            {nameEditing ? (
-              <div className="seller-name-editor">
-                <input
-                  value={nameDraft}
-                  onChange={(event) => setNameDraft(event.target.value)}
-                  maxLength={120}
-                  autoFocus
-                />
-                <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
-                  {nameSaving ? "Сохраняем" : "Сохранить"}
-                </button>
-                <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>
-                  Отмена
-                </button>
-              </div>
-            ) : (
-              <>
-                <h1>{displayName}</h1>
-                {canManage ? (
-                  <IconButton icon={Pencil} label="Редактировать название кабинета" onClick={() => setNameEditing(true)} />
-                ) : null}
-              </>
-            )}
+            <h1>{displayName}</h1>
           </div>
           <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
         </div>
@@ -11606,6 +11637,44 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             <HelpHint enabled={helpEnabled} title="Где что находится">
               Кабинет хранит общую информацию и список карточек. Задачи показывают пачки работ по СЯ, контенту, ценам и остаткам. Отчеты скачивают XLSX-выгрузки, а Отчетный период фиксирует план отдела по клиенту.
             </HelpHint>
+
+            {canManage ? (
+              <details className="cabinet-management" open={nameEditing || undefined}>
+                <summary>
+                  <div>
+                    <Settings size={17} />
+                    <strong>Настройки кабинета</strong>
+                    <span>Название WB-кабинета</span>
+                  </div>
+                </summary>
+                <div className="cabinet-management-body">
+                  <div className="management-row">
+                    <div>
+                      <strong>Название кабинета</strong>
+                      <span>Переименовать кабинет без изменения карточек, задач и API.</span>
+                    </div>
+                    {nameEditing ? (
+                      <div className="seller-name-editor">
+                        <input
+                          value={nameDraft}
+                          onChange={(event) => setNameDraft(event.target.value)}
+                          maxLength={120}
+                          autoFocus
+                        />
+                        <button className={loadingButtonClass("btn primary", nameSaving)} type="button" onClick={saveNameDraft} disabled={nameSaving} aria-busy={nameSaving || undefined}>
+                          {nameSaving ? "Сохраняем" : "Сохранить"}
+                        </button>
+                        <button className="btn ghost" type="button" onClick={() => { setNameDraft(displayName); setNameEditing(false); }} disabled={nameSaving}>
+                          Отмена
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="btn" type="button" onClick={() => setNameEditing(true)}><Pencil size={16} />Редактировать</button>
+                    )}
+                  </div>
+                </div>
+              </details>
+            ) : null}
 
             {activeSellerTab === "cabinet" ? (
               <>
