@@ -415,7 +415,11 @@ function sheetXml(sheet) {
     }).join("");
     return `<row r="${rowNumber}">${cells}</row>`;
   }).join("");
-  const autoFilter = rows.length > 1 ? `<autoFilter ref="A1:${lastCell}"/>` : "";
+  const autoFilterRow = Number(sheet.autoFilterRow || 1);
+  const autoFilterStart = Math.max(1, Math.min(autoFilterRow, rows.length || 1));
+  const autoFilter = rows.length > 1 && sheet.autoFilter !== false
+    ? `<autoFilter ref="A${autoFilterStart}:${columnName(maxColumns - 1)}${Math.max(rows.length, autoFilterStart)}"/>`
+    : "";
   const dataValidations = (sheet.dataValidations || []).length
     ? `<dataValidations count="${sheet.dataValidations.length}">${sheet.dataValidations.map((item) => `<dataValidation type="${item.type || "list"}" allowBlank="${item.allowBlank === false ? 0 : 1}" showErrorMessage="1" sqref="${xmlEscape(item.range)}"><formula1>${xmlEscape(item.formula1 || "")}</formula1></dataValidation>`).join("")}</dataValidations>`
     : "";
@@ -4828,7 +4832,7 @@ const sellerReportTemplates = [
     id: "wb-client-xlsx",
     title: "WB клиентский XLSX",
     format: "XLSX",
-    description: "Контент, цены, остатки, заказы, продажи, реклама, акции и доступность источников.",
+    description: "Рабочий отчет по воронке, рекламе, акциям, остаткам, рекомендациям и источникам данных.",
   },
 ];
 
@@ -4925,6 +4929,9 @@ function reportMetric(object, keys) {
 }
 
 function reportReadyTime(value) {
+  if (typeof value === "string") {
+    return value;
+  }
   if (!value || typeof value !== "object") {
     return "";
   }
@@ -4933,6 +4940,29 @@ function reportReadyTime(value) {
   if (Number(value.hours || 0)) parts.push(`${value.hours} ч`);
   if (Number(value.mins || 0)) parts.push(`${value.mins} мин`);
   return parts.join(" ") || "";
+}
+
+function reportHeaderRow(values) {
+  return values.map((value) => ({ value, style: 1 }));
+}
+
+function reportUniqueJoin(values, separator = ", ") {
+  const seen = new Set();
+  const items = [];
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) {
+      continue;
+    }
+    seen.add(text);
+    items.push(text);
+  }
+  return items.join(separator);
+}
+
+function reportValueFromKeys(object, keys, fallback = "") {
+  const value = reportMetric(object, keys);
+  return value === "" ? fallback : value;
 }
 
 function reportPeriodRange(period, fallbackDate = new Date()) {
@@ -4994,7 +5024,18 @@ function reportPreviousPeriod(periods, period) {
 function reportAdMetricsForCard(reportData, period, card) {
   const nmKey = reportNmKey(card);
   const ads = reportData?.ads?.stats || [];
-  const metrics = { views: 0, clicks: 0, carts: 0, orders: 0, spend: 0, orderSum: 0, present: false };
+  const metrics = {
+    views: 0,
+    clicks: 0,
+    carts: 0,
+    orders: 0,
+    spend: 0,
+    orderSum: 0,
+    present: false,
+    campaigns: [],
+    statuses: [],
+    placements: [],
+  };
   for (const advert of ads) {
     for (const day of advert?.days || []) {
       const dayText = String(day?.date || "").slice(0, 10);
@@ -5005,6 +5046,9 @@ function reportAdMetricsForCard(reportData, period, card) {
         for (const nm of app?.nms || []) {
           if (String(nm?.nmId || "") === nmKey) {
             metrics.present = true;
+            metrics.campaigns.push(firstDefined(advert?.name, advert?.advertName, advert?.advertId));
+            metrics.statuses.push(firstDefined(advert?.status, advert?.statusName));
+            metrics.placements.push(firstDefined(app?.name, app?.appType, app?.type));
             metrics.views += Number(nm.views || 0);
             metrics.clicks += Number(nm.clicks || 0);
             metrics.carts += Number(nm.atbs || 0);
@@ -5017,6 +5061,10 @@ function reportAdMetricsForCard(reportData, period, card) {
     }
   }
   metrics.ctr = metrics.views ? (metrics.clicks / metrics.views) * 100 : "";
+  metrics.drr = metrics.orderSum ? (metrics.spend / metrics.orderSum) * 100 : "";
+  metrics.campaignsText = reportUniqueJoin(metrics.campaigns);
+  metrics.statusesText = reportUniqueJoin(metrics.statuses);
+  metrics.placementsText = reportUniqueJoin(metrics.placements);
   return metrics;
 }
 
@@ -5162,6 +5210,49 @@ function reportPromotionPriceForCard(reportData, card) {
   return entry ? reportPrice(firstDefined(entry?.planPrice, entry?.price)) : "";
 }
 
+function reportPromotionPlanPriceForCard(reportData, card) {
+  const entry = reportPromotionEntriesForCard(reportData, card, false)
+    .find((item) => firstDefined(item?.planPrice, item?.actionPrice, item?.promoPrice) !== "");
+  return entry ? reportPrice(firstDefined(entry?.planPrice, entry?.actionPrice, entry?.promoPrice)) : "";
+}
+
+function reportPromotionStatusForCard(reportData, card) {
+  const entries = reportPromotionEntriesForCard(reportData, card, false);
+  if (!entries.length) {
+    return "Не участвует";
+  }
+  if (entries.some((item) => Boolean(item?.inAction))) {
+    return "Участвует";
+  }
+  return "Доступна к добавлению";
+}
+
+function reportAutoRecommendation({ currentOrders, pastOrders, daysToStockEnd, adMetrics, promotionStatus }) {
+  const notes = [];
+  const current = Number(currentOrders);
+  const past = Number(pastOrders);
+  const days = Number(daysToStockEnd);
+  if (Number.isFinite(current) && Number.isFinite(past)) {
+    if (past > 0 && current < past) {
+      notes.push(`Заказы снизились: ${current} против ${past}.`);
+    } else if (current > past) {
+      notes.push(`Заказы выросли: ${current} против ${past}.`);
+    }
+  }
+  if (Number.isFinite(days) && days > 0 && days < 14) {
+    notes.push(`Остатка примерно на ${reportNumber(days, 1)} дн.; стоит проверить поставку.`);
+  }
+  if (Number(adMetrics?.spend || 0) > 0 && Number(adMetrics?.orderSum || 0) === 0) {
+    notes.push("Есть расход РК без суммы заказов; проверить эффективность кампании.");
+  } else if (Number(adMetrics?.drr || 0) > 30) {
+    notes.push(`ДРР РК ${reportPercent(adMetrics.drr)}%; нужна проверка ставки и товаров в кампании.`);
+  }
+  if (promotionStatus === "Доступна к добавлению") {
+    notes.push("Есть доступная акция WB; проверить цену входа и маржинальность.");
+  }
+  return notes.join(" ") || "Данные собраны; решение можно отметить после проверки специалистом.";
+}
+
 function reportStockRows(reportData, cards, periods) {
   const period = periods[0] || {};
   const periodDays = reportPeriodDays(period);
@@ -5195,35 +5286,50 @@ function reportStockRows(reportData, cards, periods) {
 
 function reportWeeklyRows(reportData, portal, cards, period, periods) {
   const periodDays = reportPeriodDays(period);
+  const header = [
+    "Товар",
+    "Цвет",
+    "Артикул",
+    "Артикул WB",
+    "Текущая цена",
+    "Показы",
+    "Перешли в карточку",
+    "CTR",
+    "Положили в корзину",
+    "Cреднее время доставки",
+    "Остаток на складах, шт",
+    "Дней до конца остатка",
+    "Локальные заказы %",
+    "Кол-во заказов (неделя прошлая)",
+    "Кол-во заказов (неделя текущая)",
+    "Динамика заказов",
+    "Сумма заказов",
+    "Среднее количество заказов в день, шт",
+    "Есть отдельная РК",
+    "Название прямой РК",
+    "Статус прямой РК",
+    "Заказы РК (вкл. ассоц.)",
+    "Расход РК, ₽",
+    "Сумма заказов РК (вкл. ассоц.), ₽",
+    "ДРР РК (с ассоц.)",
+    "Участвуем сейчас",
+    "Текущая цена товара",
+    "Цена участия сейчас",
+    "Плановая цена WB",
+    "Планируем участвовать",
+    "Планируемая цена",
+    "Предложение ВебОптимайз",
+    "Предложение клиента",
+    "Отметка о выполнении ВебОптимайз",
+    "Комментарии ВебОптимайз",
+    "Комментарии клиента",
+  ];
   return [
     ["Проверка на (дата):", period?.label || clientReportDateLabel(reportData?.generatedAt || new Date())],
     ["За период:", reportPeriodRange(period, reportData?.generatedAt || new Date())],
     ["Кабинет:", portalDisplayName(portal)],
     [],
-    [
-      "Товар",
-      "Цвет",
-      "Артикул",
-      "Артикул WB",
-      "Текущая цена",
-      "Показы РК",
-      "Клики РК",
-      "CTR РК",
-      "Перешли в карточку WB",
-      "Положили в корзину WB",
-      "Cреднее время доставки",
-      "Остаток на складах, шт",
-      "Дней до конца остатка",
-      "Локальные заказы %",
-      "Кол-во заказов (прошлый период)",
-      "Кол-во заказов (выбранный период)",
-      "Динамика заказов",
-      "Сумма заказов",
-      "Среднее количество заказов в день, шт",
-      "Есть в РК",
-      "Акции",
-      "Цена в акции",
-    ],
+    reportHeaderRow(header),
     ...cards.map((card) => {
       const analytics = reportAnalyticsEntry(reportData, period, card);
       const selected = analytics.selected || {};
@@ -5232,20 +5338,26 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
       const currentOrders = reportOrdersCurrent(reportData, period, card);
       const pastOrders = reportOrdersPast(reportData, periods, period, card);
       const adMetrics = reportAdMetricsForCard(reportData, period, card);
-      const openCount = reportMetric(selected, ["openCount", "openCardCount", "clickCount"]);
+      const impressions = reportValueFromKeys(selected, ["viewCount", "views", "impressions", "openCard", "showCount"]);
+      const openCount = reportValueFromKeys(selected, ["openCount", "openCardCount", "clickCount", "openCard"]);
       const avgOrdersPerDay = firstDefined(selected.avgOrdersCountPerDay, orders.ordersCount ? Number((Number(orders.ordersCount) / periodDays).toFixed(2)) : "");
-      const stock = cardReportStock(card);
+      const stock = firstDefined(
+        selected.stocks,
+        selected.stock,
+        Number(selected.stockWb || 0) + Number(selected.stockMp || 0) || "",
+        cardReportStock(card),
+      );
       const daysToStockEnd = stock && avgOrdersPerDay ? reportNumber(Number(stock) / Number(avgOrdersPerDay), 1) : "";
+      const promotionStatus = reportPromotionStatusForCard(reportData, card);
       return [
         card?.subjectName || card?.title || "",
         cardReportColor(card),
         card?.vendorCode || "",
         reportNmKey(card),
         reportPrice(cardReportPrice(card)),
-        reportNumber(adMetrics.views),
-        reportNumber(adMetrics.clicks),
-        reportPercent(adMetrics.ctr),
+        reportNumber(impressions),
         reportNumber(openCount),
+        reportPercent(reportValueFromKeys(selected, ["ctr", "ctrPercent"])),
         reportNumber(firstDefined(selected.cartCount, selected.addToCartCount)),
         reportReadyTime(selected.timeToReady),
         reportNumber(stock),
@@ -5257,8 +5369,23 @@ function reportWeeklyRows(reportData, portal, cards, period, periods) {
         reportPrice(reportOrderSum(reportData, period, card)),
         reportNumber(avgOrdersPerDay, 2),
         adMetrics.present ? "да" : "нет",
-        reportPromotionNamesForCard(reportData, card),
+        adMetrics.campaignsText,
+        adMetrics.statusesText,
+        reportNumber(adMetrics.orders),
+        reportPrice(adMetrics.spend),
+        reportPrice(adMetrics.orderSum),
+        reportPercent(adMetrics.drr),
+        promotionStatus,
+        reportPrice(cardReportPrice(card)),
         reportPromotionPriceForCard(reportData, card),
+        reportPromotionPlanPriceForCard(reportData, card),
+        "",
+        "",
+        reportAutoRecommendation({ currentOrders, pastOrders, daysToStockEnd, adMetrics, promotionStatus }),
+        "",
+        "",
+        reportComment(reportData, period, card),
+        "",
       ];
     }),
   ];
@@ -5302,15 +5429,126 @@ function reportPeriodMetricRows(reportData, cards, periods, metricName, dataKey)
   return rows;
 }
 
+function reportInstructionRows() {
+  return [
+    ["ИНСТРУКЦИЯ ПО ЕЖЕНЕДЕЛЬНОМУ ОБНОВЛЕНИЮ ОТЧЕТА WB"],
+    ["Файл формируется автоматически из OptiCards и подключенных WB API. Основной рабочий лист с датой отчета уже содержит собранные показатели и служебные колонки для решений."],
+    [],
+    reportHeaderRow(["Лист", "Что внутри", "Источник", "Как используется"]),
+    ["Лист с датой", "Основной клиентский отчет", "Карточки WB, воронка, реклама, акции", "Специалист смотрит показатели, рекомендации и заполняет решения/отметки"],
+    ["WB_Воронка_текущая", "Показатели воронки за выбранный период", "WB Analytics sales-funnel/products", "Показы, переходы, CTR, корзина, заказы, сумма заказов, остаток, доставка, локальность"],
+    ["WB_Воронка_прошлая", "Сравнимый прошлый период", "WB Analytics pastPeriod или предыдущая неделя отчета", "Расчет динамики заказов"],
+    ["WB_Цены_загрузка", "Текущие цены и остатки из карточек", "OptiCards snapshot + WB данные кабинета", "Текущая цена товара и резервные остатки"],
+    ["WB_РК_API", "Статистика рекламы по артикулам", "WB Promotion promotion/count + fullstats", "Наличие РК, расход, заказы и ДРР"],
+    ["WB_Акции_загрузка", "Текущее участие и доступные акции", "WB Prices and Discounts calendar/promotions", "Участие сейчас и цена участия"],
+    ["WB_Акции_план", "Плановые поля по акциям", "Автоматически подготовленный лист", "Можно отметить план участия и плановую цену"],
+    ["Источники", "Статус каждого API-блока", "Ответ backend", "Быстрая диагностика, почему часть колонок может быть пустой"],
+    [],
+    ["Что заполняется вручную"],
+    ["В основном листе вручную заполняются: Планируем участвовать, Планируемая цена, Предложение клиента, Отметка о выполнении, Комментарии клиента."],
+    ["Колонка Предложение ВебОптимайз заполняется автоматической подсказкой и остается editable для специалиста."],
+  ];
+}
+
+function reportFunnelRows(reportData, cards, period, mode = "selected") {
+  const header = [
+    "Артикул продавца",
+    "Артикул WB",
+    "Название",
+    "Предмет",
+    "Показы",
+    "CTR",
+    "Переходы в карточку",
+    "Положили в корзину",
+    "Заказали товаров, шт",
+    "Заказали на сумму, ₽",
+    "Среднее количество заказов в день, шт",
+    "Остатки WB, шт",
+    "Остатки продавца, шт",
+    "Остаток всего, шт",
+    "Среднее время доставки",
+    "Локальные заказы, %",
+  ];
+  const rows = [reportHeaderRow(header)];
+  for (const card of cards) {
+    const analytics = reportAnalyticsEntry(reportData, period, card);
+    const item = mode === "past"
+      ? (String(analytics.sourceRole || "").startsWith("pastPeriod") ? analytics.selected || {} : analytics.past || analytics.selected || {})
+      : analytics.selected || {};
+    rows.push([
+      card?.vendorCode || "",
+      reportNmKey(card),
+      card?.title || "",
+      card?.subjectName || "",
+      reportNumber(reportValueFromKeys(item, ["viewCount", "views", "impressions", "openCard", "showCount"])),
+      reportPercent(reportValueFromKeys(item, ["ctr", "ctrPercent"])),
+      reportNumber(reportValueFromKeys(item, ["openCount", "openCardCount", "clickCount", "openCard"])),
+      reportNumber(firstDefined(item.cartCount, item.addToCartCount)),
+      reportNumber(firstDefined(item.orderCount, item.ordersCount)),
+      reportPrice(firstDefined(item.orderSum, item.ordersSum)),
+      reportNumber(item.avgOrdersCountPerDay, 2),
+      reportNumber(firstDefined(item.stockWb, item.stocksWb, item.wbStock)),
+      reportNumber(firstDefined(item.stockMp, item.stocksMp, item.sellerStock)),
+      reportNumber(firstDefined(item.stocks, item.stock, cardReportStock(card))),
+      reportReadyTime(item.timeToReady),
+      reportPercent(item.localizationPercent),
+    ]);
+  }
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
+function reportPriceUploadRows(cards) {
+  const rows = [reportHeaderRow(["Бренд", "Категория", "Артикул WB", "Артикул продавца", "Текущая цена", "Остатки WB", "Остатки продавца", "Цена со скидкой"])];
+  for (const card of cards) {
+    rows.push([
+      card?.brand || "",
+      card?.subjectName || "",
+      reportNmKey(card),
+      card?.vendorCode || "",
+      reportPrice(firstDefined(card?.price, card?.rawFields?.price)),
+      reportNumber(firstDefined(card?.wbStock, card?.rawFields?.wbStock)),
+      reportNumber(firstDefined(card?.sellerStock, card?.rawFields?.sellerStock)),
+      reportPrice(cardReportPrice(card)),
+    ]);
+  }
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
+function reportSourceRows(reportData, cards, portal) {
+  return [
+    reportHeaderRow(["Блок", "Статус", "Источник", "Комментарий", "Строк"]),
+    ...clientReportAvailability(cards, portal, reportData).map(([label, status, source]) => {
+      const [sourceName, ...rest] = String(source || "").split(" · ");
+      const rowsPart = rest.find((part) => part.startsWith("строк:"));
+      return [label, status, sourceName || "", rest.filter((part) => !part.startsWith("строк:")).join(" · "), rowsPart?.replace("строк:", "").trim() || ""];
+    }),
+  ];
+}
+
 function reportAdRows(reportData) {
-  const rows = [["Кампания", "Дата", "Артикул WB", "Название", "Показы", "Клики", "CTR", "Корзина", "Заказы", "ШК", "Расход", "Сумма заказов", "CPC", "CR"]];
+  const rows = [reportHeaderRow(["Период с", "Период по", "ID РК", "Название РК", "Статус РК", "Активна сейчас", "Тип оплаты", "Тип ставки", "Размещение", "Артикул WB", "Товар", "Показы", "Клики", "CTR", "Добавления в корзину", "Заказы", "Расход", "Сумма заказов", "ДРР"])];
   for (const advert of reportData?.ads?.stats || []) {
     for (const day of advert?.days || []) {
       for (const app of day?.apps || []) {
         for (const nm of app?.nms || []) {
+          const orderSum = Number(nm?.sum_price || 0);
+          const spend = Number(nm?.sum || 0);
           rows.push([
-            advert?.advertId || "",
             String(day?.date || "").slice(0, 10),
+            String(day?.date || "").slice(0, 10),
+            advert?.advertId || "",
+            firstDefined(advert?.name, advert?.advertName, advert?.advertId),
+            firstDefined(advert?.statusName, advert?.status),
+            "",
+            firstDefined(advert?.paymentType, advert?.type),
+            firstDefined(advert?.bidType, advert?.strategy),
+            firstDefined(app?.name, app?.appType, app?.type),
             nm?.nmId || "",
             nm?.name || "",
             reportNumber(nm?.views),
@@ -5318,25 +5556,23 @@ function reportAdRows(reportData) {
             reportPercent(nm?.ctr),
             reportNumber(nm?.atbs),
             reportNumber(nm?.orders),
-            reportNumber(nm?.shks),
-            reportPrice(nm?.sum),
-            reportPrice(nm?.sum_price),
-            reportPrice(nm?.cpc),
-            reportPercent(nm?.cr),
+            reportPrice(spend),
+            reportPrice(orderSum),
+            orderSum ? reportPercent((spend / orderSum) * 100) : "",
           ]);
         }
       }
     }
   }
   if (rows.length === 1) {
-    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
   }
   return rows;
 }
 
 function reportPromotionRows(reportData, cards) {
   const cardByNm = new Map(cards.map((card) => [reportNmKey(card), card]));
-  const rows = [[
+  const rows = [reportHeaderRow([
     "Акция",
     "Артикул поставщика",
     "Артикул WB",
@@ -5349,7 +5585,7 @@ function reportPromotionRows(reportData, cards) {
     "Загружаемая скидка, %",
     "Статус WB",
     "Рекомендация",
-  ]];
+  ])];
   for (const item of reportPromotionItems(reportData)) {
     const nmKey = String(item?.id || item?.nmID || item?.nmId || "").trim();
     const card = cardByNm.get(nmKey) || {};
@@ -5383,22 +5619,83 @@ function reportPromotionRows(reportData, cards) {
   return rows;
 }
 
+function reportPromotionPlanRows(reportData, cards) {
+  const activePlans = new Set();
+  const rows = [reportHeaderRow([
+    "Акция",
+    "Артикул поставщика",
+    "Артикул WB",
+    "Предмет",
+    "Наименование",
+    "Текущая цена",
+    "Плановая цена WB",
+    "Планируем участвовать",
+    "Наша планируемая цена",
+    "Комментарий",
+  ])];
+  for (const card of cards) {
+    const entries = reportPromotionEntriesForCard(reportData, card, false);
+    const entriesForRow = entries.length ? entries : [{}];
+    for (const item of entriesForRow) {
+      const key = `${reportNmKey(card)}:${reportPromotionName(item)}`;
+      if (activePlans.has(key)) {
+        continue;
+      }
+      activePlans.add(key);
+      rows.push([
+        reportPromotionName(item) || "нет доступной акции",
+        card?.vendorCode || item?.vendorCode || "",
+        reportNmKey(card),
+        card?.subjectName || item?.subjectName || item?.subject || "",
+        card?.title || item?.name || item?.title || "",
+        reportPrice(cardReportPrice(card)),
+        reportPrice(firstDefined(item?.planPrice, item?.actionPrice, item?.promoPrice)),
+        "",
+        "",
+        "",
+      ]);
+    }
+  }
+  if (rows.length === 1) {
+    rows.push(["нет данных", "", "", "", "", "", "", "", "", ""]);
+  }
+  return rows;
+}
+
 function buildClientWbReportSheets(portal, cards, reportData = null) {
   const generatedAt = reportData?.generatedAt ? new Date(reportData.generatedAt) : new Date();
   const reportCards = Array.isArray(reportData?.cards) && reportData.cards.length ? reportData.cards : cards;
   const periods = Array.isArray(reportData?.periods) && reportData.periods.length
     ? reportData.periods
     : [{ label: clientReportDateLabel(generatedAt), rangeLabel: clientReportPeriodLabel(generatedAt) }];
-  const weeklySheets = periods.map((period) => ({
-    name: period.label || "Период",
-    freezeRows: 5,
-    widths: [22, 16, 20, 18, 16, 14, 14, 12, 22, 22, 20, 18, 18, 18, 24, 26, 18, 16, 26, 12, 48, 18],
-    rows: reportWeeklyRows(reportData || {}, portal, reportCards, period, periods),
-  }));
+  const reportPayload = reportData || {};
+  const weeklySheets = periods.map((period) => {
+    const rows = reportWeeklyRows(reportPayload, portal, reportCards, period, periods);
+    return {
+      name: period.label || "Период",
+      freezeRows: 5,
+      autoFilterRow: 5,
+      widths: [22, 16, 20, 18, 16, 14, 18, 12, 18, 20, 18, 18, 18, 24, 24, 18, 16, 26, 16, 30, 18, 20, 16, 24, 18, 24, 18, 22, 18, 20, 18, 48, 28, 24, 42, 32],
+      dataValidations: rows.length > 5 ? [
+        { range: `AD6:AD${rows.length}`, formula1: "\"да,нет,нужно проверить\"" },
+        { range: `AH6:AH${rows.length}`, formula1: "\"не начато,в работе,готово,не актуально\"" },
+      ] : [],
+      rows,
+    };
+  });
+  const latestPeriod = periods[0] || {};
+  const previousPeriod = reportPreviousPeriod(periods, latestPeriod) || latestPeriod;
   return [
-    { name: "Остатки", freezeRows: 1, widths: [22, 18, 56, 22, 24, 22], rows: reportStockRows(reportData || {}, reportCards, periods) },
-    { name: "Акции", freezeRows: 1, widths: [42, 22, 18, 24, 52, 18, 22, 18, 22, 22, 48, 42], rows: reportPromotionRows(reportData || {}, reportCards) },
     ...weeklySheets,
+    { name: "00_ИНСТРУКЦИЯ_WB", freezeRows: 4, autoFilterRow: 4, widths: [26, 58, 38, 70], rows: reportInstructionRows() },
+    { name: "WB_Воронка_текущая", freezeRows: 1, widths: [22, 18, 54, 24, 14, 12, 20, 18, 20, 20, 26, 18, 20, 18, 20, 18], rows: reportFunnelRows(reportPayload, reportCards, latestPeriod, "selected") },
+    { name: "WB_Воронка_прошлая", freezeRows: 1, widths: [22, 18, 54, 24, 14, 12, 20, 18, 20, 20, 26, 18, 20, 18, 20, 18], rows: reportFunnelRows(reportPayload, reportCards, previousPeriod, "past") },
+    { name: "WB_Цены_загрузка", freezeRows: 1, widths: [18, 24, 18, 22, 16, 16, 18, 18], rows: reportPriceUploadRows(reportCards) },
+    { name: "WB_РК_API", freezeRows: 1, widths: [14, 14, 16, 34, 18, 16, 18, 18, 18, 18, 48, 14, 14, 12, 18, 14, 16, 22, 14], rows: reportAdRows(reportPayload) },
+    { name: "WB_Акции_загрузка", freezeRows: 1, widths: [42, 22, 18, 24, 52, 18, 22, 18, 22, 22, 48, 42], rows: reportPromotionRows(reportPayload, reportCards) },
+    { name: "WB_Акции_план", freezeRows: 1, widths: [42, 22, 18, 24, 52, 18, 22, 20, 22, 42], rows: reportPromotionPlanRows(reportPayload, reportCards) },
+    { name: "Остатки", freezeRows: 1, widths: [22, 18, 56, 22, 24, 22], rows: reportStockRows(reportPayload, reportCards, periods) },
+    { name: "Источники", freezeRows: 1, widths: [28, 16, 42, 80, 12], rows: reportSourceRows(reportPayload, reportCards, portal) },
   ];
 }
 
@@ -10883,7 +11180,7 @@ function ReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
           items={[
             "Выберите тип отчета. Сейчас доступен клиентский WB-отчет.",
             "Выберите период С какого числа и По какое число.",
-            "Нажмите Сформировать. Файл XLSX с вкладками Остатки, Акции и выбранным периодом скачается автоматически.",
+            "Нажмите Сформировать. Файл XLSX с основным листом периода и служебными вкладками WB скачается автоматически.",
           ]}
         />
         <div className="report-builder">
