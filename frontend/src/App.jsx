@@ -4455,7 +4455,8 @@ function semanticSelectedExportRows(selectedRows, core) {
     const key = semanticQueryKey(item);
     if (!key || seen.has(key) || currentKeys.has(key)) return;
     const merged = { ...(sourceByKey.get(key) || {}), ...item };
-    if (!semanticFrequencyValue(merged)) return;
+    const importedAgreement = merged.source === "semantic-import" || merged.fileName || merged.sheetName;
+    if (!semanticFrequencyValue(merged) && !importedAgreement) return;
     seen.add(key);
     output.push(merged);
   });
@@ -13473,7 +13474,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     competitorSelection: latestCompetitorSelection,
     riskNotes: latestRiskNotes,
   });
-  const activeSemanticCore = semanticCoreWithSelection(semanticCore, semanticCoreSelected);
+  const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
+  const activeSemanticCore = semanticCoreWithSelection(semanticCore || semanticStoredFinal?.semanticCore, semanticCoreSelected);
   const activeSemanticContentRows = semanticCurrentContentRows(activeSemanticCore);
   const activeSemanticPositionRows = semanticCurrentPositionRows(activeSemanticCore);
   const activeSemanticNewRows = semanticSelectedExportRows(semanticCoreSelected, activeSemanticCore);
@@ -13541,7 +13543,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     createdBy: currentUser?.login || "",
     updatedBy: currentUser?.login || "",
   });
-  const semanticStoredFinal = normalizeSemanticFinalExport(semanticCoreFinal);
   const semanticCurrentFinalSignature = semanticFinalExportSignature(currentSemanticFinalExport);
   const semanticStoredFinalSignature = semanticFinalExportSignature(semanticStoredFinal);
   const semanticFinalHasRows = Boolean(activeSemanticContentRows.length || activeSemanticPositionRows.length || activeSemanticNewRows.length || activeSemanticRemovalRows.length);
