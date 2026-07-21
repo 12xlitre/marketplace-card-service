@@ -94,6 +94,16 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(row["wbClusterCount"], 45349)
     self.assertEqual(row["ozonCount"], 5772)
 
+  def test_semantic_import_preserves_ozon_frequency(self):
+    item = server.semantic_import_keyword_item(
+      "витамины для женщин",
+      "selected",
+      {"frequency": "", "ozonFrequency": "5772"},
+    )
+
+    self.assertNotIn("wbCount", item)
+    self.assertEqual(item["ozonCount"], 5772)
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -3406,7 +3406,8 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, rem
       "Ранжируемые ключи",
       "Позиция ранжируемого ключа",
       "Ключ к добавлению",
-      "Частота запроса ключа к добавлению",
+      "Частота WB ключа к добавлению",
+      "Частота Ozon ключа к добавлению",
       "Согласование добавления",
       "Ключ к удалению из карточки",
       "Причина удаления",
@@ -3418,6 +3419,7 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, rem
       semanticRankExportValue(rankingRows[index]?.position),
       selectedRows[index]?.query || { value: "", style: 2 },
       selectedRows[index]?.query ? semanticFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
+      selectedRows[index]?.query ? semanticOzonFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
       selectedRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
       removalRows[index]?.query || { value: "", style: 2 },
       removalRows[index]?.query ? { value: semanticRemovalReason(removalRows[index]), style: 2 } : { value: "", style: 2 },
@@ -3471,7 +3473,8 @@ function buildSemanticCoreInstructionSheet(card = null) {
       ["Ранжируемые ключи", "Запросы из MPStats, по которым карточка уже ранжируется."],
       ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
       ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
-      ["Частота запроса ключа к добавлению", "Частотность WB по запросу из MPStats."],
+      ["Частота WB ключа к добавлению", "Прямая частотность WB по запросу из MPStats. Не подменяется кластером или wbcount из расширения."],
+      ["Частота Ozon ключа к добавлению", "Прямая частотность Ozon по запросу из MPStats, если WB-частота не передана или нужна для сравнения."],
       ["Согласование добавления", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
       ["Ключ к удалению из карточки", "Действующий ключ или ранжирующийся запрос, который специалист предлагает исключить перед переоптимизацией."],
       ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
@@ -4149,8 +4152,16 @@ function semanticFrequencyValue(item) {
   return semanticCountExportValue(item?.wbCount);
 }
 
+function semanticOzonFrequencyValue(item) {
+  return semanticCountExportValue(item?.ozonCount);
+}
+
+function semanticDirectDemandValue(item) {
+  return semanticFrequencyValue(item) || semanticOzonFrequencyValue(item);
+}
+
 function semanticFrequencyBucket(item) {
-  const frequency = Number(semanticFrequencyValue(item) || 0);
+  const frequency = Number(semanticDirectDemandValue(item) || 0);
   if (frequency >= semanticFrequencyHighThreshold) return "high";
   if (frequency >= semanticFrequencyMediumThreshold) return "medium";
   return "low";
@@ -4453,7 +4464,7 @@ function semanticCurrentContentRows(core) {
   return semanticRowsByKey((Array.isArray(core.current) ? core.current : [])
     .filter((item) => item?.status !== "selected" && semanticQueryKey(item))
     .map((item) => ({ ...item, position: semanticPrimaryPositionValue(item) })))
-    .sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+    .sort((left, right) => Number(semanticDirectDemandValue(right) || 0) - Number(semanticDirectDemandValue(left) || 0));
 }
 
 function semanticCurrentPositionRows(core) {
@@ -4477,7 +4488,7 @@ function semanticCandidateSourceRows(core) {
     ...(Array.isArray(core.recommended) ? core.recommended : []),
     ...(Array.isArray(core.missing) ? core.missing : []),
   ];
-  return semanticRowsByKey(rows).filter((item) => semanticFrequencyValue(item));
+  return semanticRowsByKey(rows).filter((item) => semanticDirectDemandValue(item));
 }
 
 function semanticReportCandidateCount(report) {
@@ -4502,11 +4513,11 @@ function semanticSelectedExportRows(selectedRows, core) {
     if (!key || seen.has(key) || currentKeys.has(key)) return;
     const merged = { ...(sourceByKey.get(key) || {}), ...item };
     const importedAgreement = merged.source === "semantic-import" || merged.fileName || merged.sheetName;
-    if (!semanticFrequencyValue(merged) && !importedAgreement) return;
+    if (!semanticDirectDemandValue(merged) && !importedAgreement) return;
     seen.add(key);
     output.push(merged);
   });
-  return output.sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+  return output.sort((left, right) => Number(semanticDirectDemandValue(right) || 0) - Number(semanticDirectDemandValue(left) || 0));
 }
 
 function semanticRemovalExportRows(removalRows, core) {
@@ -16596,7 +16607,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     const selectedKeys = new Set(semanticCoreSelected.map(semanticQueryKey));
     const additions = collectionKeywords.filter((item) => {
       const key = semanticQueryKey(item);
-      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticDirectDemandValue(item);
     });
     if (!additions.length) {
       setSemanticCollectionError("Все ключи этой подборки уже есть в карточке, ранжировании или выбранных.");
@@ -16733,8 +16744,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setSemanticCoreError("Этот запрос уже есть в контенте или среди ранжирующихся запросов карточки и не попадет в добавление.");
       return;
     }
-    if (!semanticFrequencyValue(item)) {
-      setSemanticCoreError("У запроса нет частотности WB в MPStats, поэтому он не попадет в итоговую выгрузку.");
+    if (!semanticDirectDemandValue(item)) {
+      setSemanticCoreError("У запроса нет прямой частотности WB или Ozon в MPStats, поэтому он не попадет в итоговую выгрузку.");
       return;
     }
     setSemanticCoreError("");
@@ -16755,9 +16766,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText))
       .filter((item) => {
         const key = semanticQueryKey(item);
-        return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+        return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticDirectDemandValue(item);
       })
-      .sort((left, right) => Number(semanticFrequencyValue(right) || 0) - Number(semanticFrequencyValue(left) || 0));
+      .sort((left, right) => Number(semanticDirectDemandValue(right) || 0) - Number(semanticDirectDemandValue(left) || 0));
   }
 
   function autoSelectSemanticKeywords() {
@@ -20486,7 +20497,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
   const filteredWorkItems = filteredSourceItems
     .filter((item) => {
       const key = semanticQueryKey(item);
-      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticFrequencyValue(item);
+      return key && !existingKeys.has(key) && !selectedKeys.has(key) && semanticDirectDemandValue(item);
     });
   useEffect(() => {
     setVisibleSelectedLimit(selectedLimit);
@@ -20608,7 +20619,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
             active={metricFilter === "selected"}
             label="Добавить"
             value={formatNumber(selectedItems.length)}
-            hint="Новые запросы, которых нет среди ключей карточки и ранжирующихся запросов. В Excel попадут только запросы с частотностью WB."
+            hint="Новые запросы, которых нет среди ключей карточки и ранжирующихся запросов. Берем только строки с прямой частотностью WB или Ozon."
             onClick={() => toggleMetricFilter("selected")}
           />
           <SemanticMetric
@@ -20715,7 +20726,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                   <em>{semanticKeywordMeta(item) || item.reason || "нет в текущем контенте"}</em>
                 </div>
                 <div className="semantic-keyword-actions">
-                  {semanticFrequencyValue(item) ? (
+                  {semanticDirectDemandValue(item) ? (
                     <Tag tone={semanticFrequencyBucket(item) === "high" ? "amber" : "blue"}>
                       {semanticFrequencyBucketLabel(semanticFrequencyBucket(item))}
                     </Tag>

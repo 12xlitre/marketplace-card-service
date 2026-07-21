@@ -16063,6 +16063,8 @@ def semantic_import_header_map(row):
       columns.setdefault("addAgreement", index)
     elif "соглас" in compact and ("удал" in compact or "исключ" in compact):
       columns.setdefault("removalAgreement", index)
+    elif "частот" in compact and "добав" in compact and ("ozon" in compact or "озон" in compact):
+      columns.setdefault("addOzonFrequency", index)
     elif "частот" in compact and "добав" in compact:
       columns.setdefault("addFrequency", index)
     elif "причин" in compact and ("удал" in compact or "исключ" in compact):
@@ -16127,6 +16129,9 @@ def semantic_import_keyword_item(query, kind, meta=None):
   frequency = audit_int(meta.get("frequency"), 0)
   if frequency > 0:
     item["wbCount"] = frequency
+  ozon_frequency = audit_int(meta.get("ozonFrequency"), 0)
+  if ozon_frequency > 0:
+    item["ozonCount"] = ozon_frequency
   reason = audit_str(meta.get("reason"), 250)
   if kind == "removal":
     item["removalReason"] = reason or "Согласовано к удалению из карточки перед переоптимизацией."
@@ -16150,7 +16155,7 @@ def semantic_import_normalize_items(items, kind, limit=4000):
     seen.add(key)
     item = semantic_import_keyword_item(query, kind, source if isinstance(source, dict) else {})
     if isinstance(source, dict):
-      for field in ("cluster", "prioritySubject", "prioritySubjectId", "frequency365", "priority", "orgPos", "adPos", "avgPos", "totalFound", "rankPeriod"):
+      for field in ("cluster", "prioritySubject", "prioritySubjectId", "frequency365", "priority", "orgPos", "adPos", "avgPos", "totalFound", "rankPeriod", "ozonCount"):
         if source.get(field) not in (None, ""):
           item[field] = source.get(field)
     output.append(item)
@@ -16473,12 +16478,14 @@ def semantic_import_prepare(payload, user):
         continue
 
       frequency = semantic_import_cell(row, columns.get("addFrequency"), 80)
+      ozon_frequency = semantic_import_cell(row, columns.get("addOzonFrequency"), 80)
       removal_reason = semantic_import_cell(row, columns.get("removalReason"), 250)
       row_meta = {
         "fileName": filename,
         "sheetName": sheet_name,
         "rowNumber": row_index,
         "frequency": frequency,
+        "ozonFrequency": ozon_frequency,
       }
       if add_query:
         if columns.get("addAgreement") is None:
