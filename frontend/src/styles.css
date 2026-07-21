@@ -1060,6 +1060,23 @@ a {
   line-height: 1.3;
 }
 
+.card-snapshot-panel {
+  gap: 10px;
+}
+
+.card-snapshot-summary {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.card-snapshot-summary strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.card-snapshot-reasons {
+  padding-top: 0;
+}
+
 .report-availability {
   border: 1px solid var(--line);
   border-radius: 8px;

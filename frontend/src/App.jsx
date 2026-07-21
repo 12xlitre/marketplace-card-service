@@ -5851,6 +5851,33 @@ function CardPassportPanel({ marketplace = "WB", title = "", idLabel = "ID", idV
   );
 }
 
+function CardSnapshotPanel({ title = "Состояние карточки", copy = "", statusLabel = "", statusTone = "blue", metrics = [], issueReasons = [], signals = [] }) {
+  return (
+    <section className="workspace-strip card-snapshot-panel">
+      <div className="strip-head">
+        <div>
+          <h2>{title}</h2>
+          {copy ? <p>{copy}</p> : null}
+        </div>
+        {statusLabel ? <Tag tone={statusTone}>{statusLabel}</Tag> : null}
+      </div>
+      <div className="commerce-summary card-snapshot-summary">
+        {metrics.map((item) => (
+          <div key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="problem-reasons card-snapshot-reasons">
+        {issueReasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
+        {!issueReasons.length && signals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>)}
+        {!issueReasons.length && !signals.length ? <Tag tone="green">без срочных замечаний</Tag> : null}
+      </div>
+    </section>
+  );
+}
+
 function ActionHelp({ label }) {
   return (
     <span className="action-help-icon" role="img" tabIndex={0} aria-label={label} title={label}>
@@ -11024,28 +11051,21 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                   statusLabel={workState.label}
                   statusTone={workState.tone}
                 />
-                <section className="workspace-strip ozon-card-quality">
-                  <div className="strip-head">
-                    <div>
-                      <h2>Статус карточки</h2>
-                      <p>Рабочая сводка по заполненности и замечаниям Ozon snapshot.</p>
-                    </div>
-                    <Tag tone={workState.tone}>{workState.label}</Tag>
-                  </div>
-                  <div className="commerce-summary">
-                    <div><span>Заполненность</span><strong>{completeness.label}</strong></div>
-                    <div><span>Замечания</span><strong>{formatNumber(issueReasons.length)}</strong></div>
-                    <div><span>Сигналы</span><strong>{formatNumber(dataSignals.length)}</strong></div>
-                    <div><span>Фото</span><strong>{formatNumber(ozonCardPhotoCount(card))}</strong></div>
-                    <div><span>Характеристики</span><strong>{formatNumber(ozonCardCharacteristicItems(card).length)}</strong></div>
-                    <div><span>Источник</span><strong>{sourceLabel}</strong></div>
-                  </div>
-                  <div className="problem-reasons ozon-detail-reasons">
-                    {issueReasons.map((reason) => <Tag tone="amber" key={reason}>{reason}</Tag>)}
-                    {!issueReasons.length && dataSignals.map((signal) => <Tag tone="blue" key={signal}>{signal}</Tag>)}
-                    {!issueReasons.length && !dataSignals.length ? <Tag tone="green">без замечаний</Tag> : null}
-                  </div>
-                </section>
+                <CardSnapshotPanel
+                  copy="Ozon snapshot: заполненность, контент, фото и данные, которые влияют на дальнейший аудит и изменения."
+                  statusLabel={workState.label}
+                  statusTone={workState.tone}
+                  issueReasons={issueReasons}
+                  signals={dataSignals}
+                  metrics={[
+                    { label: "Заполненность", value: completeness.label },
+                    { label: "Название", value: `${title.length} симв.` },
+                    { label: "Описание", value: isEmptyValue(description) ? "пусто" : `${String(description).length} симв.` },
+                    { label: "Фото", value: formatNumber(ozonCardPhotoCount(card)) },
+                    { label: "Характеристики", value: formatNumber(ozonCardCharacteristicItems(card).length) },
+                    { label: "Источник", value: sourceLabel },
+                  ]}
+                />
 
                 <section className="workspace-strip">
                   <div className="strip-head">
@@ -18449,6 +18469,24 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   issueCount={Number(card?.issueCount || 0)}
                   statusLabel={card?.status || cardSourceLabel}
                   statusTone={card?.statusClass || "blue"}
+                />
+                <CardSnapshotPanel
+                  copy={`WB snapshot: контент, фото, характеристики и коммерческие данные из ${cardSourceLabel}.`}
+                  statusLabel={card?.status || cardSourceLabel}
+                  statusTone={card?.statusClass || (issueCount ? "amber" : "green")}
+                  issueReasons={cardIssueReasons}
+                  signals={[
+                    hasCommercialData ? "есть цены и остатки" : "коммерческие данные не загружены",
+                    description ? "описание заполнено" : "описание пустое",
+                  ]}
+                  metrics={[
+                    { label: "Название", value: `${titleLength}/60` },
+                    { label: "Описание", value: isEmptyValue(description) ? "пусто" : `${String(description).length} симв.` },
+                    { label: "Фото", value: formatNumber(valueCount(photos)) },
+                    { label: "Характеристики", value: formatNumber(currentCardCharacteristicRows.length) },
+                    { label: "Замечания", value: formatNumber(issueCount) },
+                    { label: "Источник", value: cardSourceLabel },
+                  ]}
                 />
                 <section className="workspace-strip">
                   <div className="strip-head">
