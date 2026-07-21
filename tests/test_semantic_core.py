@@ -81,7 +81,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(rows[0]["wbClusterCount"], 6053)
     self.assertEqual(rows[0]["queryCount"], 2)
 
-  def test_mpstats_expansion_keeps_direct_wb_count_separate_from_cluster(self):
+  def test_mpstats_expansion_does_not_label_wbcount_as_direct_frequency(self):
     row = server.normalize_mpstats_expanding_query({
       "word": "витамины для женщин",
       "wbcount": 40990,
@@ -89,7 +89,8 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       "count": 5772,
     })
 
-    self.assertEqual(row["wbCount"], 40990)
+    self.assertEqual(row["wbCount"], 0)
+    self.assertEqual(row["wbExpansionCount"], 40990)
     self.assertEqual(row["wbClusterCount"], 45349)
     self.assertEqual(row["ozonCount"], 5772)
 
