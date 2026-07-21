@@ -4352,11 +4352,31 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
   work_types = normalize_work_types(options.get("workTypes"))
   comment = str(options.get("comment") or "").strip()[:700]
   title = str(options.get("title") or "").strip()[:180]
-  link_period_id, link_task_key = ensure_work_period_link_target(
-    numeric_portal_id,
-    options.get("workPeriodId") or options.get("periodId"),
-    options.get("workPeriodTaskKey") or options.get("taskKey"),
-  )
+  link_targets = []
+  seen_link_targets = set()
+  raw_links = options.get("workPeriodLinks") if isinstance(options.get("workPeriodLinks"), list) else []
+  for item in raw_links:
+    if isinstance(item, dict):
+      raw_period_id = item.get("periodId") or item.get("period_id")
+      raw_task_key = item.get("taskKey") or item.get("task_key")
+    elif isinstance(item, str) and ":" in item:
+      raw_period_id, raw_task_key = item.split(":", 1)
+    else:
+      raw_period_id = ""
+      raw_task_key = ""
+    link_period_id, link_task_key = ensure_work_period_link_target(numeric_portal_id, raw_period_id, raw_task_key)
+    target_key = f"{link_period_id}:{link_task_key}"
+    if link_period_id and link_task_key and target_key not in seen_link_targets:
+      seen_link_targets.add(target_key)
+      link_targets.append((link_period_id, link_task_key))
+  if not link_targets:
+    link_period_id, link_task_key = ensure_work_period_link_target(
+      numeric_portal_id,
+      options.get("workPeriodId") or options.get("periodId"),
+      options.get("workPeriodTaskKey") or options.get("taskKey"),
+    )
+    if link_period_id and link_task_key:
+      link_targets.append((link_period_id, link_task_key))
   team = portal_team_roles(numeric_portal_id)
   assignee_login = str(options.get("assigneeLogin") or team.get("tech") or "").strip()[:120]
   workset = save_portal_workset(numeric_portal_id, raw_cards, user)
@@ -4421,16 +4441,17 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
         kept += 1
       else:
         created += 1
-  linked_period = None
-  if link_period_id and link_task_key:
-    linked_period = update_portal_work_period(numeric_portal_id, {
+  linked_periods = []
+  for link_period_id, link_task_key in link_targets:
+    linked_periods.append(update_portal_work_period(numeric_portal_id, {
       "periodId": link_period_id,
       "action": "link_task",
       "taskKey": link_task_key,
       "linkedTaskIds": work_period_task_link_ids(batch_id, work_types),
       "linkedBatchIds": [batch_id],
+      "allowMultiple": True,
       "comment": title or comment or work_package_title(work_types, len(cards), comment),
-    }, user)
+    }, user))
   result = {
     "portalId": str(numeric_portal_id),
     "batchId": batch_id,
@@ -4444,8 +4465,9 @@ def create_workset_tasks(portal_id, raw_cards, user, options=None):
     "workset": list_portal_workset(numeric_portal_id, user),
     "workflow": approval_workflow(numeric_portal_id, user),
   }
-  if linked_period:
-    result["workPeriod"] = linked_period
+  if linked_periods:
+    result["workPeriod"] = linked_periods[0]
+    result["workPeriods"] = linked_periods
   return result
 
 
@@ -6414,16 +6436,21 @@ def update_portal_work_period(portal_id, payload, user):
       linked_batch_ids = clean_work_period_links(payload.get("linkedBatchIds") or payload.get("batchIds"))
       if not linked_task_ids and not linked_batch_ids:
         raise ValueError("invalid_work_period_link")
+      allow_multiple = bool(payload.get("allowMultiple") or payload.get("allowMultiLink") or payload.get("appendLink"))
       comment = clean_work_period_note(payload.get("comment"), 1000)
       next_tasks = []
       changed = False
       for task in tasks:
-        current_task_ids = [item for item in clean_work_period_links(task.get("linkedTaskIds")) if item not in linked_task_ids]
-        current_batch_ids = [
-          item
-          for item in clean_work_period_links(task.get("linkedBatchIds"))
-          if item not in linked_batch_ids or work_period_task_ids_reference_batch(current_task_ids, item)
-        ]
+        if allow_multiple:
+          current_task_ids = clean_work_period_links(task.get("linkedTaskIds"))
+          current_batch_ids = clean_work_period_links(task.get("linkedBatchIds"))
+        else:
+          current_task_ids = [item for item in clean_work_period_links(task.get("linkedTaskIds")) if item not in linked_task_ids]
+          current_batch_ids = [
+            item
+            for item in clean_work_period_links(task.get("linkedBatchIds"))
+            if item not in linked_batch_ids or work_period_task_ids_reference_batch(current_task_ids, item)
+          ]
         if task["key"] != task_key:
           next_tasks.append({
             **task,
@@ -20349,6 +20376,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           "title": payload.get("title"),
           "comment": payload.get("comment"),
           "assigneeLogin": payload.get("assigneeLogin"),
+          "workPeriodLinks": payload.get("workPeriodLinks") or payload.get("workPeriodTargets"),
           "workPeriodId": payload.get("workPeriodId") or payload.get("periodId"),
           "workPeriodTaskKey": payload.get("workPeriodTaskKey") or payload.get("taskKey"),
         })

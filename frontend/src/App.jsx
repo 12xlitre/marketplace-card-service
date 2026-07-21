@@ -1497,6 +1497,25 @@ function parseWorkPeriodTaskLinkValue(value) {
   return { periodId, taskKey: taskParts.join(":") };
 }
 
+function parseWorkPeriodTaskLinkValues(values) {
+  const rawValues = Array.isArray(values) ? values : [values].filter(Boolean);
+  const seen = new Set();
+  return rawValues
+    .map((item) => (typeof item === "object" && item !== null ? item : parseWorkPeriodTaskLinkValue(item)))
+    .filter((target) => {
+      if (!target.periodId || !target.taskKey) return false;
+      const key = workPeriodTargetValue(target);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function workPeriodTargetValue(target) {
+  if (!target?.periodId || !target?.taskKey) return "";
+  return `${target.periodId}:${target.taskKey}`;
+}
+
 function workPeriodLinkedLabel(task) {
   const taskCount = task.linkedTaskIds?.length || 0;
   const batchCount = task.linkedBatchIds?.length || 0;
@@ -1510,24 +1529,29 @@ function workPeriodTaskHasTaskLink(task, taskIds = [], batchIds = []) {
   return taskIds.some((item) => linkedTaskIds.has(item)) || batchIds.some((item) => linkedBatchIds.has(item));
 }
 
-function workPeriodLinkForGroup(periods, group) {
+function workPeriodLinksForGroup(periods, group) {
   const taskIds = [group?.key].filter(Boolean);
   const batchIds = taskIds.length ? [] : [group?.batchId].filter(Boolean);
+  const links = [];
   for (const period of normalizeWorkPeriods(periods)) {
-    const linkedTask = period.tasks.find((task) => workPeriodTaskHasTaskLink(task, taskIds, batchIds));
-    if (linkedTask) {
-      return {
+    period.tasks.forEach((task) => {
+      if (!workPeriodTaskHasTaskLink(task, taskIds, batchIds)) return;
+      links.push({
         period,
-        task: linkedTask,
-        label: `${period.title || "Отчетный период"} · ${linkedTask.label}`,
-      };
-    }
+        task,
+        value: `${period.id}:${task.key}`,
+        label: `${period.title || "Отчетный период"} · ${task.label}`,
+      });
+    });
   }
-  return null;
+  return links;
 }
 
 function workPeriodLinkLabelForGroup(periods, group) {
-  return workPeriodLinkForGroup(periods, group)?.label || "";
+  const links = workPeriodLinksForGroup(periods, group);
+  if (!links.length) return "";
+  if (links.length <= 2) return links.map((link) => link.label).join("; ");
+  return `${links.length} пунктов плана`;
 }
 
 function workPeriodRangeLabel(period) {
@@ -10092,55 +10116,89 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setWorkPeriodsStatus("loaded");
   }
 
-  async function linkApprovalTaskGroupToWorkPeriod(group, workType, target) {
-    if (!portal?.id || portal.isDemo || taskActionStatus || !target?.periodId || !target?.taskKey) return;
+  async function linkApprovalTaskGroupToWorkPeriod(group, workType, targets) {
+    if (!portal?.id || portal.isDemo || taskActionStatus) return;
+    const targetItems = Array.isArray(targets) ? targets : [targets];
+    const nextTargets = parseWorkPeriodTaskLinkValues(targetItems.map((item) => (typeof item === "string" ? item : workPeriodTargetValue(item))));
+    const currentLinks = workPeriodLinksForGroup(workPeriods, group);
+    const currentValues = new Set(currentLinks.map((link) => link.value));
+    const nextValues = new Set(nextTargets.map(workPeriodTargetValue));
+    const linksToRemove = currentLinks.filter((link) => !nextValues.has(link.value));
+    const targetsToAdd = nextTargets.filter((target) => !currentValues.has(workPeriodTargetValue(target)));
+    if (!linksToRemove.length && !targetsToAdd.length) {
+      onNotice?.("Пункты плана не изменились.");
+      return;
+    }
     const actionKey = `link:${group.key || `${workType}:${group.batchId || ""}`}`;
     setTaskActionStatus(actionKey);
     try {
-      const payload = await apiRequest("/api/portal-work-periods", {
-        method: "POST",
-        body: JSON.stringify({
-          portalId: portal.id,
-          periodId: target.periodId,
-          action: "link_task",
-          taskKey: target.taskKey,
-          linkedTaskIds: [group.key].filter(Boolean),
-          linkedBatchIds: [group.batchId].filter(Boolean),
-          comment: taskBatchGroupTitle(group),
-        }),
-      });
-      if (payload.period) {
-        replaceSellerWorkPeriod(payload.period);
+      for (const linkedPlan of linksToRemove) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: linkedPlan.period.id,
+            action: "unlink_task",
+            taskKey: linkedPlan.task.key,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) {
+          replaceSellerWorkPeriod(payload.period);
+        }
       }
-      onNotice?.("Задача привязана к пункту отчетного периода.");
+      for (const target of targetsToAdd) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: target.periodId,
+            action: "link_task",
+            taskKey: target.taskKey,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            allowMultiple: true,
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) {
+          replaceSellerWorkPeriod(payload.period);
+        }
+      }
+      onNotice?.(nextTargets.length ? "Привязка к плану обновлена." : "Задача отвязана от плана.");
     } catch {
-      onNotice?.("Не удалось привязать задачу к отчетному периоду.");
+      onNotice?.("Не удалось обновить привязку к отчетному периоду.");
     } finally {
       setTaskActionStatus("");
     }
   }
 
-  async function unlinkApprovalTaskGroupFromWorkPeriod(group, workType, linkedPlan) {
-    if (!portal?.id || portal.isDemo || taskActionStatus || !linkedPlan?.period?.id || !linkedPlan?.task?.key) return;
+  async function unlinkApprovalTaskGroupFromWorkPeriod(group, workType, linkedPlans) {
+    const links = (Array.isArray(linkedPlans) ? linkedPlans : [linkedPlans]).filter((item) => item?.period?.id && item?.task?.key);
+    if (!portal?.id || portal.isDemo || taskActionStatus || !links.length) return;
     const actionKey = `unlink:${group.key || `${workType}:${group.batchId || ""}`}`;
     setTaskActionStatus(actionKey);
     try {
-      const payload = await apiRequest("/api/portal-work-periods", {
-        method: "POST",
-        body: JSON.stringify({
-          portalId: portal.id,
-          periodId: linkedPlan.period.id,
-          action: "unlink_task",
-          taskKey: linkedPlan.task.key,
-          linkedTaskIds: [group.key].filter(Boolean),
-          linkedBatchIds: [group.batchId].filter(Boolean),
-          comment: taskBatchGroupTitle(group),
-        }),
-      });
-      if (payload.period) {
-        replaceSellerWorkPeriod(payload.period);
+      for (const linkedPlan of links) {
+        const payload = await apiRequest("/api/portal-work-periods", {
+          method: "POST",
+          body: JSON.stringify({
+            portalId: portal.id,
+            periodId: linkedPlan.period.id,
+            action: "unlink_task",
+            taskKey: linkedPlan.task.key,
+            linkedTaskIds: [group.key].filter(Boolean),
+            linkedBatchIds: [group.batchId].filter(Boolean),
+            comment: taskBatchGroupTitle(group),
+          }),
+        });
+        if (payload.period) {
+          replaceSellerWorkPeriod(payload.period);
+        }
       }
-      onNotice?.("Задача отвязана от пункта отчетного периода.");
+      onNotice?.(links.length > 1 ? "Задача отвязана от пунктов отчетного периода." : "Задача отвязана от пункта отчетного периода.");
     } catch {
       onNotice?.("Не удалось отвязать задачу от отчетного периода.");
     } finally {
@@ -11775,7 +11833,7 @@ function WorkPeriodModal({ value, mode = "create", loading, onChange, onClose, o
 }
 
 function defaultWorkPackageForm() {
-  return { workTypes: ["content"], title: "", comment: "", workPeriodLink: "" };
+  return { workTypes: ["content"], title: "", comment: "", workPeriodLink: "", workPeriodLinks: [] };
 }
 
 function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workPeriods = [], workPeriodsStatus = "idle", onOpenCard, onWorkflowChange, onWorkPeriodChange }) {
@@ -12013,7 +12071,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
       return;
     }
     const workTypes = normalizeWorkTypes(options.workTypes);
-    const linkTarget = parseWorkPeriodTaskLinkValue(options.workPeriodLink);
+    const linkTargets = parseWorkPeriodTaskLinkValues(options.workPeriodLinks?.length ? options.workPeriodLinks : options.workPeriodLink);
     setBatchStatus("saving");
 	    try {
 	      const payload = await apiRequest("/api/card-workset/create-tasks", {
@@ -12024,14 +12082,15 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
 	          workTypes,
 	          title: String(options.title || "").trim(),
 	          comment: String(options.comment || "").trim(),
-	          workPeriodId: linkTarget.periodId,
-	          workPeriodTaskKey: linkTarget.taskKey,
+	          workPeriodLinks: linkTargets,
 	        }),
 	      });
 	      if (payload.workflow && onWorkflowChange) {
 	        onWorkflowChange(payload.workflow);
 	      }
-	      if (payload.workPeriod) {
+	      if (Array.isArray(payload.workPeriods)) {
+	        payload.workPeriods.forEach((period) => onWorkPeriodChange?.(period));
+	      } else if (payload.workPeriod) {
 	        onWorkPeriodChange?.(payload.workPeriod);
 	      }
 	      const keys = (payload.workset?.cards || []).map((card) => String(card.cardKey || "")).filter(Boolean);
@@ -12262,21 +12321,39 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
   );
 }
 
-function WorkPeriodTaskLinkPicker({ options = [], value = "", disabled = false, allowEmpty = false, emptyLabel = "Не привязывать к плану", emptyDescription = "Можно связать задачу с пунктом позднее.", onChange }) {
+function WorkPeriodTaskLinkPicker({ options = [], value = "", values = [], multiple = false, disabled = false, allowEmpty = false, emptyLabel = "Не привязывать к плану", emptyDescription = "Можно связать задачу с пунктом позднее.", onChange }) {
+  const selectedValues = new Set(multiple ? (Array.isArray(values) ? values.map(String) : []) : [String(value || "")].filter(Boolean));
   const allOptions = allowEmpty
     ? [{ value: "", label: emptyLabel, empty: true, description: emptyDescription }, ...options]
     : options;
+  const updateSelection = (option) => {
+    if (option.empty) {
+      onChange?.(multiple ? [] : "");
+      return;
+    }
+    if (!multiple) {
+      onChange?.(option.value || "");
+      return;
+    }
+    const optionValue = String(option.value || "");
+    const nextValues = Array.isArray(values) ? values.map(String) : [];
+    const next = selectedValues.has(optionValue)
+      ? nextValues.filter((item) => item !== optionValue)
+      : [...nextValues, optionValue];
+    onChange?.(next);
+  };
   return (
-    <div className="work-period-link-picker" role="radiogroup" aria-label="Пункт отчетного периода">
+    <div className="work-period-link-picker" role={multiple ? "group" : "radiogroup"} aria-label="Пункт отчетного периода">
       {allOptions.map((option) => {
-        const selected = String(value || "") === String(option.value || "");
+        const optionValue = String(option.value || "");
+        const selected = option.empty ? (multiple ? !selectedValues.size : !String(value || "")) : selectedValues.has(optionValue);
         const rangeLabel = option.empty ? "" : workPeriodRangeLabel(option.period);
         return (
           <button
             className={`work-period-link-option ${selected ? "active" : ""} ${option.empty ? "empty" : ""}`}
             type="button"
             key={option.value || "empty"}
-            onClick={() => onChange?.(option.value || "")}
+            onClick={() => updateSelection(option)}
             disabled={disabled}
             aria-pressed={selected}
           >
@@ -12297,7 +12374,7 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
   const workTypes = normalizeWorkTypes(value.workTypes);
   const title = value.title || "";
   const comment = value.comment || "";
-  const workPeriodLink = value.workPeriodLink || "";
+  const workPeriodLinks = Array.isArray(value.workPeriodLinks) ? value.workPeriodLinks : [value.workPeriodLink].filter(Boolean);
   const periodTaskOptions = workPeriodTaskLinkOptions(workPeriods);
   const toggleType = (key) => {
     if (workTypes.length === 1 && workTypes.includes(key)) {
@@ -12314,12 +12391,13 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
   const updateTitle = (event) => {
     onChange({ ...value, title: event.target.value });
   };
-  const updateWorkPeriodLink = (event) => {
-    onChange({ ...value, workPeriodLink: event.target.value });
+  const updateWorkPeriodLinks = (nextValues) => {
+    const cleanValues = Array.isArray(nextValues) ? nextValues : [nextValues].filter(Boolean);
+    onChange({ ...value, workPeriodLinks: cleanValues, workPeriodLink: cleanValues[0] || "" });
   };
   const submit = (event) => {
     event.preventDefault();
-    onSubmit({ workTypes, title, comment, workPeriodLink });
+    onSubmit({ workTypes, title, comment, workPeriodLinks, workPeriodLink: workPeriodLinks[0] || "" });
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -12348,10 +12426,12 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
             <span>Пункт отчетного периода</span>
             <WorkPeriodTaskLinkPicker
               options={periodTaskOptions}
-              value={workPeriodLink}
-              onChange={(nextValue) => updateWorkPeriodLink({ target: { value: nextValue } })}
+              values={workPeriodLinks}
+              multiple
+              onChange={updateWorkPeriodLinks}
               disabled={workPeriodsStatus === "loading"}
               allowEmpty
+              emptyLabel="Не привязывать к плану"
             />
           </div>
           {!periodTaskOptions.length ? (
@@ -12377,17 +12457,18 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
   const periodTaskOptions = workPeriodTaskLinkOptions(workPeriods);
   const groupTaskIds = [group?.key].filter(Boolean);
   const groupBatchIds = groupTaskIds.length ? [] : [group?.batchId].filter(Boolean);
-  const currentOption = periodTaskOptions.find((option) => workPeriodTaskHasTaskLink(option.task, groupTaskIds, groupBatchIds));
-  const [selectedValue, setSelectedValue] = useState(currentOption?.value || periodTaskOptions[0]?.value || "");
+  const currentValues = periodTaskOptions
+    .filter((option) => workPeriodTaskHasTaskLink(option.task, groupTaskIds, groupBatchIds))
+    .map((option) => option.value);
+  const [selectedValues, setSelectedValues] = useState(currentValues);
   const optionSignature = periodTaskOptions.map((option) => option.value).join("|");
   useEffect(() => {
-    if (!selectedValue && periodTaskOptions[0]?.value) {
-      setSelectedValue(periodTaskOptions[0].value);
-    }
-  }, [optionSignature, selectedValue]);
+    const availableValues = new Set(periodTaskOptions.map((option) => option.value));
+    setSelectedValues((current) => current.filter((item) => availableValues.has(item)));
+  }, [optionSignature]);
   const submit = (event) => {
     event.preventDefault();
-    onSubmit(parseWorkPeriodTaskLinkValue(selectedValue));
+    onSubmit(parseWorkPeriodTaskLinkValues(selectedValues));
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -12404,8 +12485,12 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
             <span>Пункт отчетного периода</span>
             <WorkPeriodTaskLinkPicker
               options={periodTaskOptions}
-              value={selectedValue}
-              onChange={setSelectedValue}
+              values={selectedValues}
+              multiple
+              allowEmpty
+              emptyLabel="Снять привязку"
+              emptyDescription="Задача останется в кабинете, но исчезнет из пунктов плана."
+              onChange={setSelectedValues}
               disabled={loading || workPeriodsStatus === "loading" || !periodTaskOptions.length}
             />
           </div>
@@ -12415,8 +12500,8 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !selectedValue} aria-busy={loading || undefined}>
-            {loading ? "Привязываем" : "Привязать"}
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !periodTaskOptions.length} aria-busy={loading || undefined}>
+            {loading ? "Сохраняем" : (selectedValues.length ? "Сохранить" : "Снять привязку")}
           </button>
         </div>
       </form>
@@ -12623,15 +12708,15 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
       .filter((task) => task?.cardKey && taskHasCard(task) && taskHasSemanticFinal(task));
     if (!runnableTasks.length) return;
     const confirmTitle = options.retryMode === "failed"
-      ? "Повторить переоптимизацию по СЯ"
+      ? "Повторить подготовку контента"
       : options.retryMode === "missing"
-        ? "Доделать переоптимизацию по СЯ"
-        : "Переоптимизировать по СЯ";
+        ? "Доделать контент по СЯ"
+        : "Подготовить контент по СЯ";
     if (options.confirm !== false && !confirmBatchAction(
       group,
       runnableTasks,
       confirmTitle,
-      "Сервис возьмет сохраненное итоговое СЯ и обновит черновики заголовка и описания.",
+      "Сервис возьмет сохраненное итоговое СЯ и обновит черновики заголовка, описания и характеристик.",
     )) {
       return;
     }
@@ -12976,8 +13061,8 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
 		                      const reorderBusy = taskActionStatus === `reorder:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const linkBusy = taskActionStatus === `link:${group.key || `${section.key}:${group.batchId || ""}`}`;
 		                      const unlinkBusy = taskActionStatus === `unlink:${group.key || `${section.key}:${group.batchId || ""}`}`;
-		                      const linkedPlan = workPeriodLinkForGroup(workPeriods, group);
-		                      const linkedPlanLabel = linkedPlan?.label || "";
+		                      const linkedPlans = workPeriodLinksForGroup(workPeriods, group);
+		                      const linkedPlanLabel = workPeriodLinkLabelForGroup(workPeriods, group);
 		                      const orderDirty = isGroupOrderDirty(group);
                       const runGroup = { ...group, tasks: groupTasks };
                       const batchEvents = eventsForTaskGroup(group);
@@ -13026,15 +13111,29 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                       const contentRetryMode = retryContentTasks.length ? "failed" : (missingContentTasks.length ? "missing" : "");
                       const contentButtonTasks = contentRetryTasks.length ? contentRetryTasks : contentVisibleEligibleTasks;
                       const showContentReoptimize = ["semantic", "content"].includes(section.key);
+                      const isContentSection = section.key === "content";
                       const contentButtonLabel = contentBusy
-                        ? "Переоптимизация идет"
+                        ? "Готовим контент"
                         : retryContentTasks.length
-                          ? `Повторить СЯ (${formatNumber(retryContentTasks.length)})`
+                          ? `Повторить контент (${formatNumber(retryContentTasks.length)})`
                           : missingContentTasks.length
-                            ? `Доделать СЯ (${formatNumber(missingContentTasks.length)})`
-                            : "Переоптимизировать по СЯ";
-                      const contentButtonHelp = "Переоптимизировать по СЯ: берет уже сохраненное итоговое СЯ карточки и переписывает заголовок/описание под согласованные ключи. Используйте после загрузки или сохранения итогового СЯ.";
+                            ? `Доделать контент (${formatNumber(missingContentTasks.length)})`
+                            : "Подготовить контент по СЯ";
+                      const contentButtonHelp = "Подготовить контент по СЯ: берет сохраненное итоговое СЯ карточки и обновляет заголовок, описание и характеристики под согласованные ключи.";
                       const contentErrors = Array.isArray(contentState.errors) ? contentState.errors : [];
+                      const smartContentUsesSemantic = isContentSection && Boolean(contentButtonTasks.length);
+                      const smartContentBusy = smartContentUsesSemantic ? contentBusy : auditBusy;
+                      const smartContentTasks = smartContentUsesSemantic ? contentButtonTasks : auditButtonTasks;
+                      const smartContentLabel = smartContentUsesSemantic
+                        ? contentButtonLabel
+                        : auditButtonLabel.replace("черновики", "контент").replace("Черновики", "Контент");
+                      const smartContentHelp = smartContentUsesSemantic
+                        ? contentButtonHelp
+                        : "Подготовить черновики контента: запускает первичную подготовку заголовка, описания и характеристик по текущей карточке, MPStats, конкурентам и характеристикам.";
+                      const smartContentTitle = smartContentUsesSemantic
+                        ? "Обновить заголовок, описание и характеристики по сохраненному итоговому СЯ."
+                        : "Подготовить первичные черновики заголовка, описания и характеристик.";
+                      const smartContentCanRun = smartContentTasks.some(taskHasCard);
 	                      return (
                         <article className="task-batch-card" key={group.key}>
                           <div className="task-batch-main">
@@ -13060,16 +13159,20 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
 	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, runGroup, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
-                              <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, auditButtonTasks, { retryMode: auditRetryMode })} disabled={Boolean(taskActionStatus) || auditBusy || !auditButtonTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
-                                <WandSparkles size={16} />{auditButtonLabel}
-                              </button>
-                              <ActionHelp label={auditButtonHelp} />
+                              {!isContentSection ? (
+                                <>
+                                  <button className={loadingButtonClass("btn", auditBusy)} type="button" onClick={() => runGroupAudit(group, section.key, auditButtonTasks, { retryMode: auditRetryMode })} disabled={Boolean(taskActionStatus) || auditBusy || !auditButtonTasks.some(taskHasCard)} aria-busy={auditBusy || undefined}>
+                                    <WandSparkles size={16} />{auditButtonLabel}
+                                  </button>
+                                  <ActionHelp label={auditButtonHelp} />
+                                </>
+                              ) : null}
                               {showContentReoptimize ? (
                                 <>
-                                  <button className={loadingButtonClass("btn", contentBusy)} type="button" onClick={() => runGroupContentReoptimization(group, section.key, contentButtonTasks, { retryMode: contentRetryMode })} disabled={Boolean(taskActionStatus) || contentBusy || !contentButtonTasks.length} aria-busy={contentBusy || undefined} title={contentButtonTasks.length ? "Обновить заголовок и описание по сохраненному итоговому СЯ." : "Сначала добавьте итоговое СЯ в карточках пачки."}>
-                                    <FileText size={16} />{contentButtonLabel}
+                                  <button className={loadingButtonClass("btn", isContentSection ? smartContentBusy : contentBusy)} type="button" onClick={() => (isContentSection && !smartContentUsesSemantic ? runGroupAudit(group, section.key, smartContentTasks, { retryMode: auditRetryMode }) : runGroupContentReoptimization(group, section.key, contentButtonTasks, { retryMode: contentRetryMode }))} disabled={Boolean(taskActionStatus) || (isContentSection ? smartContentBusy || !smartContentCanRun : contentBusy || !contentButtonTasks.length)} aria-busy={(isContentSection ? smartContentBusy : contentBusy) || undefined} title={isContentSection ? smartContentTitle : (contentButtonTasks.length ? "Обновить заголовок, описание и характеристики по сохраненному итоговому СЯ." : "Сначала добавьте итоговое СЯ в карточках пачки.")}>
+                                    <FileText size={16} />{isContentSection ? smartContentLabel : contentButtonLabel}
                                   </button>
-                                  <ActionHelp label={contentButtonHelp} />
+                                  <ActionHelp label={isContentSection ? smartContentHelp : contentButtonHelp} />
                                 </>
                               ) : null}
 	                            {isOrdering ? (
@@ -13087,11 +13190,11 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
 	                              </button>
 	                            )}
 	                            <button className={loadingButtonClass("btn", linkBusy)} type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)} aria-busy={linkBusy || undefined}>
-	                              <ClipboardList size={16} />{linkedPlanLabel ? "Сменить пункт плана" : "Привязать к плану"}
+	                              <ClipboardList size={16} />{linkedPlans.length ? "Изменить пункты плана" : "Привязать к плану"}
 	                            </button>
-	                            {linkedPlan ? (
-	                              <button className={loadingButtonClass("btn", unlinkBusy)} type="button" onClick={() => onUnlinkTaskGroup?.(group, section.key, linkedPlan)} disabled={Boolean(taskActionStatus)} aria-busy={unlinkBusy || undefined}>
-	                                <Unlink size={16} />Отвязать от плана
+	                            {linkedPlans.length ? (
+	                              <button className={loadingButtonClass("btn", unlinkBusy)} type="button" onClick={() => onUnlinkTaskGroup?.(group, section.key, linkedPlans)} disabled={Boolean(taskActionStatus)} aria-busy={unlinkBusy || undefined}>
+	                                <Unlink size={16} />{linkedPlans.length > 1 ? "Отвязать от всех" : "Отвязать от плана"}
 	                              </button>
 	                            ) : null}
 	                            <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group, section.key)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
@@ -13122,7 +13225,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                             {contentTotal ? (
                               <div className={`task-batch-audit-progress ${contentState.status || ""}`}>
                                 <div>
-                                  <strong>{contentBusy ? "Переоптимизация по СЯ" : contentFailed ? "Переоптимизация завершена с ошибками" : "Переоптимизация завершена"}</strong>
+                                  <strong>{contentBusy ? "Контент по СЯ готовится" : contentFailed ? "Контент подготовлен с ошибками" : "Контент подготовлен"}</strong>
                                   <span>{formatNumber(contentDone)} из {formatNumber(contentTotal)}{contentFailed ? ` · ошибок ${formatNumber(contentFailed)}` : ""}</span>
                                 </div>
                                 <div className="task-batch-audit-bar">
