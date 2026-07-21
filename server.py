@@ -12095,6 +12095,8 @@ def semantic_filter_mpstats_rows(card, rows, seed_queries=None, limit=None):
   for row in rows if isinstance(rows, list) else []:
     if not isinstance(row, dict) or not row.get("query"):
       continue
+    if semantic_query_has_fragment_shape(row.get("query")):
+      continue
     if not semantic_row_has_demand(row):
       continue
     if (
@@ -14077,6 +14079,19 @@ def audit_position_value(*values):
   return None
 
 
+def audit_int_from_first_present(item, keys, default=0):
+  if not isinstance(item, dict):
+    return default
+  for key in keys:
+    if key not in item:
+      continue
+    value = item.get(key)
+    if value is None or value == "":
+      continue
+    return audit_int(value, default)
+  return default
+
+
 def audit_keywords_from_payload(payload, limit=500):
   data = payload.get("data") if isinstance(payload, dict) else {}
   words = []
@@ -14095,16 +14110,9 @@ def audit_keywords_from_payload(payload, limit=500):
       continue
     output.append({
       "query": query,
-      "wbCount": audit_int(
-        item.get("wb_count")
-        or item.get("wbCount")
-        or item.get("wb_cluster_count")
-        or item.get("wbClusterCount")
-        or item.get("norm_query_count")
-        or item.get("normQueryCount")
-        or item.get("count"),
-        0,
-      ),
+      "wbCount": audit_int_from_first_present(item, ("wb_count", "wbCount", "wbcount"), 0),
+      "wbClusterCount": audit_int_from_first_present(item, ("wb_cluster_count", "wbClusterCount", "norm_query_count", "normQueryCount"), 0),
+      "queryCount": audit_int_from_first_present(item, ("count", "query_count", "queryCount"), 0),
       "orgPos": audit_position_value(
         item.get("avg_organic_position"),
         item.get("avgOrganicPosition"),
@@ -14336,15 +14344,8 @@ def normalize_mpstats_expanding_query(item):
     "cluster": audit_str(item.get("norm_query") or item.get("query_cluster") or ""),
     "prioritySubject": audit_str(priority_subject.get("name") or item.get("prioritySubject") or ""),
     "prioritySubjectId": priority_subject.get("id") or item.get("prioritySubjectId") or "",
-    "wbCount": audit_int(
-      item.get("wbcount")
-      or item.get("wb_count")
-      or item.get("wb_cluster_count")
-      or item.get("wbClusterCount")
-      or item.get("norm_query_count")
-      or item.get("normQueryCount"),
-      0,
-    ),
+    "wbCount": audit_int_from_first_present(item, ("wbcount", "wb_count", "wbCount"), 0),
+    "wbClusterCount": audit_int_from_first_present(item, ("wb_cluster_count", "wbClusterCount", "norm_query_count", "normQueryCount"), 0),
     "ozonCount": audit_int(item.get("count"), 0),
     "results": audit_int(item.get("total") or item.get("items_count"), 0),
     "orgPos": audit_position_value(

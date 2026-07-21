@@ -19935,6 +19935,9 @@ function semanticKeywordMeta(item) {
   if (Number(item?.wbCount || 0) > 0) {
     parts.push(`${formatNumber(item.wbCount)} частота WB`);
   }
+  if (Number(item?.wbClusterCount || 0) > 0 && Number(item?.wbClusterCount || 0) !== Number(item?.wbCount || 0)) {
+    parts.push(`${formatNumber(item.wbClusterCount)} кластер WB`);
+  }
   if (Number(item?.ozonCount || 0) > 0) {
     parts.push(`${formatNumber(item.ozonCount)} Ozon`);
   }

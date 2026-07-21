@@ -61,6 +61,38 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     self.assertEqual(queries, {"очки солнцезащитные женские"})
 
+  def test_mpstats_keyword_frequency_does_not_fallback_to_cluster(self):
+    payload = {
+      "data": {
+        "words": [
+          {
+            "query": "мультивитамин c",
+            "wb_count": 0,
+            "wb_cluster_count": 6053,
+            "count": 2,
+          }
+        ]
+      }
+    }
+
+    rows = server.audit_keywords_from_payload(payload)
+
+    self.assertEqual(rows[0]["wbCount"], 0)
+    self.assertEqual(rows[0]["wbClusterCount"], 6053)
+    self.assertEqual(rows[0]["queryCount"], 2)
+
+  def test_mpstats_expansion_keeps_direct_wb_count_separate_from_cluster(self):
+    row = server.normalize_mpstats_expanding_query({
+      "word": "витамины для женщин",
+      "wbcount": 40990,
+      "norm_query_count": 45349,
+      "count": 5772,
+    })
+
+    self.assertEqual(row["wbCount"], 40990)
+    self.assertEqual(row["wbClusterCount"], 45349)
+    self.assertEqual(row["ozonCount"], 5772)
+
 
 if __name__ == "__main__":
   unittest.main()
