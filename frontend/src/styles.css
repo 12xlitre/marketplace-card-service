@@ -4962,6 +4962,11 @@ tr:last-child td {
   gap: 10px;
 }
 
+.ozon-changes-readiness-grid {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 520px;
+}
+
 .changes-readiness-card {
   border: 1px solid var(--line);
   border-radius: 8px;

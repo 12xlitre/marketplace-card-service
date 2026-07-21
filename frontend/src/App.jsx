@@ -11538,16 +11538,26 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const rawFields = rawFieldsForCard(card);
   const cardKey = ozonCardStableKey(card);
   const { sku, offerId } = ozonCardIdentity(card);
+  const photoUrl = bestPhotoUrl(card);
+  const currentTitle = String(card?.title || rawFields.title || rawFields.name || "");
+  const currentDescription = String(card?.description || rawFields.description || "");
   const savedContent = draft?.draft?.content || {};
   const savedApproval = draft?.draft?.approval || {};
-  const [titleDraft, setTitleDraft] = useState(savedContent.title || card?.title || rawFields.title || rawFields.name || "");
-  const [descriptionDraft, setDescriptionDraft] = useState(savedContent.description || card?.description || rawFields.description || "");
+  const [titleDraft, setTitleDraft] = useState(savedContent.title || currentTitle);
+  const [descriptionDraft, setDescriptionDraft] = useState(savedContent.description || currentDescription);
   const [saveStatus, setSaveStatus] = useState("idle");
   const approvalMeta = ozonCardContentStatusMeta(draft);
+  const contentApproval = normalizeApprovalState({ status: savedApproval.contentStatus || "draft" });
+  const titleChanged = normalizedCharacteristicOption(titleDraft) !== normalizedCharacteristicOption(currentTitle);
+  const descriptionChanged = normalizedCharacteristicOption(descriptionDraft) !== normalizedCharacteristicOption(currentDescription);
+  const changesCount = [titleChanged, descriptionChanged].filter(Boolean).length;
+  const readinessSummary = changesCount
+    ? `${formatNumber(changesCount)} ${pluralRu(changesCount, "правка", "правки", "правок")} в Ozon-контенте`
+    : "Ozon-черновик совпадает с текущим снимком";
 
   useEffect(() => {
-    setTitleDraft(savedContent.title || card?.title || rawFields.title || rawFields.name || "");
-    setDescriptionDraft(savedContent.description || card?.description || rawFields.description || "");
+    setTitleDraft(savedContent.title || currentTitle);
+    setDescriptionDraft(savedContent.description || currentDescription);
   }, [draft?.updatedAt, cardKey]);
 
   async function saveContent(nextStatus = savedApproval.contentStatus || "draft") {
@@ -11580,13 +11590,46 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   }
 
   return (
-    <section className="workspace-strip">
+    <section className="workspace-strip changes-workspace">
+      <div className="changes-context">
+        <Thumb url={photoUrl} alt={false} />
+        <div className="changes-context-main">
+          <strong>{currentTitle || "Ozon карточка"}</strong>
+          <span>SKU {sku} · offer {offerId} · {ozonCardCategory(card)}</span>
+        </div>
+        <Tag tone={saveStatus === "error" ? "red" : approvalMeta.tone}>{saveStatus === "saving" ? "сохраняем" : approvalMeta.label}</Tag>
+      </div>
       <div className="strip-head">
         <div>
           <h2>Изменения Ozon</h2>
-          <p>Черновик итогового контента Ozon хранится отдельно от WB и попадает в Ozon-выгрузку после принятия.</p>
+          <p>Черновик итогового контента Ozon хранится отдельно от WB и готовится к согласованию по тем же статусам.</p>
         </div>
         <Tag tone={saveStatus === "error" ? "red" : approvalMeta.tone}>{saveStatus === "saving" ? "сохраняем" : approvalMeta.label}</Tag>
+      </div>
+      <div className="changes-readiness">
+        <div className="changes-readiness-head">
+          <div>
+            <span>Что готово к согласованию</span>
+            <strong>{readinessSummary}</strong>
+          </div>
+        </div>
+        <div className="changes-readiness-grid ozon-changes-readiness-grid">
+          <article className="changes-readiness-card active">
+            <div className="changes-readiness-title">
+              <FileText size={18} />
+              <strong>Контент</strong>
+              <Tag tone={approvalStatusTone(contentApproval.status)}>{approvalStatusLabel(contentApproval.status)}</Tag>
+            </div>
+            <p>{changesReadinessStatusText({ approval: contentApproval, changesCount })}</p>
+            <span>{titleChanged ? "заголовок изменен" : "заголовок без изменений"} · {descriptionChanged ? "описание изменено" : "описание без изменений"}</span>
+            <div className="changes-readiness-actions">
+              <button className={loadingButtonClass("btn mini", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
+                <Save size={14} />Сохранить
+              </button>
+              {changesCount > 0 ? <em>{changesCount} {pluralRu(changesCount, "правка", "правки", "правок")}</em> : null}
+            </div>
+          </article>
+        </div>
       </div>
       <div className="commerce-summary">
         <div><span>Заголовок</span><strong>{titleDraft.trim() ? `${titleDraft.length} симв.` : "пусто"}</strong></div>
