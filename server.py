@@ -11887,9 +11887,15 @@ def semantic_query_has_fragment_shape(query):
   normalized = audit_normalized(query)
   if not normalized:
     return True
-  if any(re.search(pattern, normalized) for pattern in SEMANTIC_NON_QUERY_FRAGMENT_PATTERNS):
+  dangling_tokens = {"в", "во", "к", "ко", "с", "со", "и", "а", "по", "до", "на", "за", "из", "от", "у", "о", "об", "про"}
+  raw_tokens = [token for token in normalized.split() if token]
+  if raw_tokens and raw_tokens[-1] in dangling_tokens:
+    return True
+  if any(token in dangling_tokens and len(token) <= 1 for token in raw_tokens):
     return True
   tokens = audit_tokens(normalized)
+  if any(re.search(pattern, normalized) for pattern in SEMANTIC_NON_QUERY_FRAGMENT_PATTERNS):
+    return True
   if (
     semantic_tokens_have_stem(tokens, {"нарушен"})
     and semantic_tokens_have_stem(tokens, {"обмен"})
