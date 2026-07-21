@@ -9084,6 +9084,244 @@ function ozonReportDrr(card) {
   return Number.isFinite(spend) && Number.isFinite(revenue) && revenue > 0 ? reportPercent((spend / revenue) * 100) : "";
 }
 
+function ozonReportHasValue(value) {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "string") {
+    const text = value.trim();
+    return Boolean(text) && text !== "Не указано";
+  }
+  return true;
+}
+
+function ozonReportCoverageStatus(filled, total, waitsApi = false) {
+  if (!total) return "нет карточек";
+  if (filled >= total) return "есть";
+  if (filled > 0) return "частично";
+  return waitsApi ? "ожидает API" : "нет данных";
+}
+
+function ozonReportCoverageTone(status) {
+  if (status === "есть") return "green";
+  if (status === "частично") return "amber";
+  return "blue";
+}
+
+function ozonReportCoveragePercent(filled, total) {
+  if (!total) return 0;
+  return Math.round((filled / total) * 100);
+}
+
+function ozonReportCoverageItems(cards) {
+  const list = Array.isArray(cards) ? cards : [];
+  const total = list.length;
+  const count = (predicate) => list.filter((card) => predicate(card)).length;
+  const item = ({ block, label, filled, source, action, waitsApi = false }) => ({
+    block,
+    label,
+    filled,
+    total,
+    percent: ozonReportCoveragePercent(filled, total),
+    status: ozonReportCoverageStatus(filled, total, waitsApi),
+    source,
+    action,
+    waitsApi,
+  });
+
+  return [
+    item({
+      block: "Карточка",
+      label: "Название товара",
+      filled: count((card) => ozonReportHasValue(card?.title || ozonReportMetric(card, ["name", "productName"]))),
+      source: "Ozon snapshot / MPStats",
+      action: "Сохранить карточки из Ozon-проверки",
+    }),
+    item({
+      block: "Карточка",
+      label: "Артикул продавца",
+      filled: count((card) => ozonReportHasValue(ozonReportOfferId(card))),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить, что offer ID сохранен в карточке",
+    }),
+    item({
+      block: "Карточка",
+      label: "Ozon ID / SKU",
+      filled: count((card) => ozonReportHasValue(ozonReportSku(card))),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить идентификаторы товара",
+    }),
+    item({
+      block: "Карточка",
+      label: "Категория",
+      filled: count((card) => ozonReportHasValue(ozonCardCategory(card))),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить категорию в исходной карточке",
+    }),
+    item({
+      block: "Карточка",
+      label: "Бренд",
+      filled: count((card) => ozonReportHasValue(ozonReportMetric(card, ["brand", "brandName"]))),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить бренд в исходной карточке",
+    }),
+    item({
+      block: "Карточка",
+      label: "Фото",
+      filled: count((card) => ozonCardPhotoCount(card) > 0),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить, что фото пришли в snapshot",
+    }),
+    item({
+      block: "Карточка",
+      label: "Характеристики",
+      filled: count((card) => ozonCardCharacteristicItems(card).length > 0),
+      source: "Ozon snapshot / MPStats",
+      action: "Проверить характеристики в сохраненной карточке",
+    }),
+    item({
+      block: "Цены и остатки",
+      label: "Текущая цена",
+      filled: count((card) => ozonReportHasValue(ozonReportPriceFromCard(card))),
+      source: "Ozon snapshot; позже Ozon Seller API",
+      action: "Подключить цены и остатки Ozon API для полного обновления",
+    }),
+    item({
+      block: "Цены и остатки",
+      label: "Остаток",
+      filled: count((card) => ozonReportHasValue(ozonReportStockFromCard(card))),
+      source: "Ozon snapshot; позже Ozon Seller API",
+      action: "Подключить складские остатки Ozon API",
+    }),
+    item({
+      block: "Аналитика",
+      label: "Заказы",
+      filled: count((card) => ozonReportHasValue(ozonReportCurrentOrders(card))),
+      source: "Ozon snapshot / MPStats; позже Ozon Seller API",
+      action: "Подключить аналитику товаров Ozon API",
+      waitsApi: true,
+    }),
+    item({
+      block: "Аналитика",
+      label: "Выручка",
+      filled: count((card) => ozonReportHasValue(ozonReportRevenue(card))),
+      source: "Ozon snapshot / MPStats; позже Ozon Seller API",
+      action: "Подключить аналитику заказов Ozon API",
+      waitsApi: true,
+    }),
+    item({
+      block: "Аналитика",
+      label: "CTR",
+      filled: count((card) => ozonReportHasValue(ozonReportCtr(card))),
+      source: "Ozon snapshot / MPStats; позже Ozon Seller API",
+      action: "Подключить аналитику показов и кликов",
+      waitsApi: true,
+    }),
+    item({
+      block: "Аналитика",
+      label: "Позиция",
+      filled: count((card) => ozonReportHasValue(reportNumber(ozonReportMetric(card, ["position", "searchPosition"])))),
+      source: "Ozon snapshot / MPStats; позже Ozon Seller API",
+      action: "Подключить отчет по позициям или MPStats-ранжирование",
+      waitsApi: true,
+    }),
+    item({
+      block: "Реклама",
+      label: "Рекламный расход",
+      filled: count((card) => ozonReportHasValue(reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"])))),
+      source: "Ozon Performance API / выгрузка рекламы",
+      action: "Подключить рекламные расходы Ozon",
+      waitsApi: true,
+    }),
+    item({
+      block: "Реклама",
+      label: "CPC",
+      filled: count((card) => ozonReportHasValue(reportPrice(ozonReportMetric(card, ["cpc", "avgCpc"])))),
+      source: "Ozon Performance API / выгрузка рекламы",
+      action: "Подключить CPC и статусы рекламы",
+      waitsApi: true,
+    }),
+    item({
+      block: "Реклама",
+      label: "CPO",
+      filled: count((card) => ozonReportHasValue(ozonReportMetric(card, ["cpo5", "cpo5Percent", "cpoEnabled", "currentCpoSituation", "cpoSituation"]))),
+      source: "Ozon Performance API / отчеты CPO",
+      action: "Подключить CPO-выгрузку",
+      waitsApi: true,
+    }),
+    item({
+      block: "Реклама",
+      label: "ДРР",
+      filled: count((card) => ozonReportHasValue(ozonReportDrr(card))),
+      source: "Ozon Performance API + заказы",
+      action: "Подключить расход и выручку за период",
+      waitsApi: true,
+    }),
+    item({
+      block: "Оборачиваемость",
+      label: "Среднесуточные продажи",
+      filled: count((card) => ozonReportHasValue(ozonReportAverageSales(card))),
+      source: "Ozon Seller API / отчет оборачиваемости",
+      action: "Подключить оборачиваемость Ozon",
+      waitsApi: true,
+    }),
+    item({
+      block: "Оборачиваемость",
+      label: "Дней до конца остатка",
+      filled: count((card) => ozonReportHasValue(ozonReportTurnoverDays(card))),
+      source: "Ozon Seller API / отчет оборачиваемости",
+      action: "Подключить остатки и среднесуточные продажи",
+      waitsApi: true,
+    }),
+    item({
+      block: "Платность",
+      label: "Прогноз платности",
+      filled: count((card) => ozonReportHasValue(ozonReportMetric(card, ["paidStorageForecast", "storageForecast", "paidStorageCount", "paidStock", "paidStorageDate", "firstPaidStorageDate"]))),
+      source: "Ozon Seller API / стоимость размещения",
+      action: "Подключить отчет платного хранения",
+      waitsApi: true,
+    }),
+    item({
+      block: "Локальность",
+      label: "Локализация и наценка",
+      filled: count((card) => ozonReportHasValue(ozonReportMetric(card, ["localityMarkup", "nonLocalMarkup", "localOverpay", "localizationPercent", "localityPercent"]))),
+      source: "Ozon Seller API / локальность продаж",
+      action: "Подключить локальность продаж",
+      waitsApi: true,
+    }),
+    item({
+      block: "Финансы",
+      label: "Маржинальность",
+      filled: count((card) => ozonReportHasValue(reportPrice(ozonReportMetric(card, ["margin", "profit", "marginRub"])))),
+      source: "Ozon Seller API / финансовый отчет",
+      action: "Подключить финансы по SKU",
+      waitsApi: true,
+    }),
+  ];
+}
+
+function ozonReportCoverageRows(cards) {
+  return [
+    reportHeaderRow(["Блок", "Поле", "Заполнено", "Всего карточек", "Покрытие", "Статус", "Источник", "Что делать"]),
+    ...ozonReportCoverageItems(cards).map((item) => [
+      item.block,
+      item.label,
+      item.filled,
+      item.total,
+      `${item.percent}%`,
+      item.status,
+      item.source,
+      item.action,
+    ]),
+  ];
+}
+
+function ozonReportCoverageBlockStatus(items, block, waitsApi = false) {
+  const blockItems = items.filter((item) => item.block === block);
+  const filled = blockItems.reduce((sum, item) => sum + item.filled, 0);
+  const total = blockItems.reduce((sum, item) => sum + item.total, 0);
+  return ozonReportCoverageStatus(filled, total, waitsApi);
+}
+
 function ozonReportProposal(card) {
   const notes = [];
   const stockDays = Number(ozonReportTurnoverDays(card));
@@ -9309,19 +9547,20 @@ function ozonReportUploadRows(cards, kind) {
 }
 
 function ozonReportSourceRows(portal, cards) {
-  const hasCards = (Array.isArray(cards) ? cards : []).length > 0;
-  const hasPrices = (cards || []).some((card) => ozonReportPriceFromCard(card));
-  const hasStocks = (cards || []).some((card) => ozonReportStockFromCard(card));
+  const list = Array.isArray(cards) ? cards : [];
+  const hasCards = list.length > 0;
+  const coverageItems = ozonReportCoverageItems(list);
   return [
     reportHeaderRow(["Блок", "Статус", "Источник", "Что нужно для полного автоматического отчета"]),
     ["Карточки Ozon", hasCards ? "есть" : "нет данных", "OptiCards Ozon snapshot / MPStats", "Сохранить карточки через Ozon MPStats probe или Ozon Seller API"],
-    ["Аналитика товаров", "частично", "Ozon Seller API / аналитика товаров", "Категория АБС, заказы, выручка, позиция, CTR, индекс цен, CPC"],
-    ["Цены и остатки", hasPrices || hasStocks ? "частично" : "нет данных", "Ozon snapshot; позже Ozon Seller API", "Текущая цена, остаток, Ozon ID, цены конкурентов"],
-    ["CPO/CPC", "ожидает API", "Ozon Performance / отчеты оплаты за заказ", "Расход, CPO, CPC, ДРР и статусы рекламных решений"],
-    ["Оборачиваемость", "частично", "Ozon Seller API / отчет оборачиваемости", "Дни до конца остатка, среднесуточные продажи, товары в пути"],
-    ["Платность", "ожидает API", "Ozon Seller API / стоимость размещения", "Прогноз платности, платное количество, первая дата"],
-    ["Локальность", "ожидает API", "Ozon Seller API / локальность продаж", "Локализация заказов и наценка за нелокальную продажу"],
-    ["Финансы", "ожидает API", "Ozon Seller API / финансовые отчеты", "Маржинальность по SKU"],
+    ["Контент карточек", ozonReportCoverageBlockStatus(coverageItems, "Карточка"), "Ozon snapshot / MPStats", "Название, артикулы, категория, бренд, фото и характеристики"],
+    ["Аналитика товаров", ozonReportCoverageBlockStatus(coverageItems, "Аналитика", true), "Ozon snapshot / MPStats; позже Ozon Seller API", "Категория АБС, заказы, выручка, позиция, CTR, индекс цен, CPC"],
+    ["Цены и остатки", ozonReportCoverageBlockStatus(coverageItems, "Цены и остатки"), "Ozon snapshot; позже Ozon Seller API", "Текущая цена, остаток, Ozon ID, цены конкурентов"],
+    ["CPO/CPC", ozonReportCoverageBlockStatus(coverageItems, "Реклама", true), "Ozon Performance / отчеты оплаты за заказ", "Расход, CPO, CPC, ДРР и статусы рекламных решений"],
+    ["Оборачиваемость", ozonReportCoverageBlockStatus(coverageItems, "Оборачиваемость", true), "Ozon Seller API / отчет оборачиваемости", "Дни до конца остатка, среднесуточные продажи, товары в пути"],
+    ["Платность", ozonReportCoverageBlockStatus(coverageItems, "Платность", true), "Ozon Seller API / стоимость размещения", "Прогноз платности, платное количество, первая дата"],
+    ["Локальность", ozonReportCoverageBlockStatus(coverageItems, "Локальность", true), "Ozon Seller API / локальность продаж", "Локализация заказов и наценка за нелокальную продажу"],
+    ["Финансы", ozonReportCoverageBlockStatus(coverageItems, "Финансы", true), "Ozon Seller API / финансовые отчеты", "Маржинальность по SKU"],
   ];
 }
 
@@ -9341,6 +9580,7 @@ function buildOzonClientReportSheets(portal, cards, period) {
     { name: "OZON_ТОВАРЫ_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 58, 18], rows: ozonReportUploadRows(safeCards, "products") },
     { name: "OZON_СТОК_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 34], rows: ozonReportUploadRows(safeCards, "stock") },
     { name: "OZON_ФИНАНСЫ_ЗАГРУЗКА", freezeRows: 3, autoFilterRow: 3, widths: [22, 18, 24, 22, 20, 18, 28, 30, 24], rows: ozonReportUploadRows(safeCards, "finance") },
+    { name: "OZON_ПОКРЫТИЕ_ДАННЫХ", freezeRows: 1, autoFilterRow: 1, widths: [20, 28, 14, 16, 12, 16, 46, 64], rows: ozonReportCoverageRows(safeCards) },
     { name: "OZON_ИСТОЧНИКИ", freezeRows: 1, widths: [28, 16, 42, 74], rows: ozonReportSourceRows(portal, safeCards) },
   ];
 }
@@ -9352,10 +9592,19 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   const [historyStatus, setHistoryStatus] = useState("idle");
   const [reportStatus, setReportStatus] = useState("idle");
   const selectedReport = ozonReportTemplate(selectedReportId);
-  const sourceRows = ozonReportSourceRows(portal, cards).slice(1);
-  const availableCount = sourceRows.filter((row) => row[1] === "есть").length;
-  const partialCount = sourceRows.filter((row) => row[1] === "частично").length;
-  const pendingCount = sourceRows.filter((row) => row[1] === "ожидает API" || row[1] === "нет данных").length;
+  const cardsList = Array.isArray(cards) ? cards : [];
+  const coverageItems = ozonReportCoverageItems(cardsList);
+  const snapshotItems = coverageItems.filter((item) => !item.waitsApi);
+  const snapshotFilled = snapshotItems.reduce((sum, item) => sum + item.filled, 0);
+  const snapshotTotal = snapshotItems.reduce((sum, item) => sum + item.total, 0);
+  const snapshotPercent = `${ozonReportCoveragePercent(snapshotFilled, snapshotTotal)}%`;
+  const partialCount = coverageItems.filter((item) => item.status === "частично").length;
+  const apiPendingCount = coverageItems.filter((item) => item.waitsApi && item.status !== "есть").length;
+  const coveragePreviewItems = [
+    ...coverageItems.filter((item) => item.block === "Карточка").slice(0, 3),
+    ...coverageItems.filter((item) => item.block === "Цены и остатки").slice(0, 2),
+    ...coverageItems.filter((item) => item.waitsApi).slice(0, 3),
+  ];
   const isLoading = reportStatus === "loading";
 
   useEffect(() => {
@@ -9505,20 +9754,20 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
             <Tag tone="blue">первый Ozon-отчет</Tag>
           </div>
           <div className="summary-grid">
-            <Metric label="Карточек" value={formatNumber(cards.length || portal?.cardCount || 0)} hint="Ozon snapshot" />
-            <Metric label="Данные есть" value={formatNumber(availableCount)} hint="доступные блоки" />
-            <Metric label="Частично" value={formatNumber(partialCount)} hint="есть fallback из snapshot" />
-            <Metric label="Ожидают API" value={formatNumber(pendingCount)} hint="нужен Ozon Seller API" />
+            <Metric label="Карточек" value={formatNumber(cardsList.length || portal?.cardCount || 0)} hint="Ozon snapshot" />
+            <Metric label="Snapshot" value={snapshotPercent} hint="поля уже в системе" />
+            <Metric label="Частично" value={formatNumber(partialCount)} hint="заполнены не у всех" />
+            <Metric label="Ждет API" value={formatNumber(apiPendingCount)} hint="будущие блоки" />
           </div>
           <HelpHint enabled={helpEnabled} title="Что означает доступность данных">
-            В Ozon beta отчет собирается из сохраненного snapshot/MPStats. После подключения Ozon Seller API эти же служебные вкладки будут заполняться полнее.
+            В Ozon beta отчет собирается из сохраненного snapshot/MPStats. Полная таблица покрытия добавляется в XLSX отдельной вкладкой.
           </HelpHint>
           <div className="report-availability">
-            {sourceRows.map(([label, status, source, note]) => (
-              <div className="report-availability-row" key={label}>
-                <span>{label}</span>
-                <Tag tone={status === "есть" ? "green" : status === "частично" ? "amber" : "blue"}>{status}</Tag>
-                <em>{[source, note].filter(Boolean).join(" · ")}</em>
+            {coveragePreviewItems.map((item) => (
+              <div className="report-availability-row" key={`${item.block}-${item.label}`}>
+                <span>{item.label}</span>
+                <Tag tone={ozonReportCoverageTone(item.status)}>{item.status}</Tag>
+                <em>{item.percent}% · {item.source}</em>
               </div>
             ))}
           </div>
