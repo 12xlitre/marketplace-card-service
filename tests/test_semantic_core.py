@@ -1,4 +1,6 @@
+import json
 import unittest
+from unittest.mock import patch
 
 import server
 
@@ -103,6 +105,187 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     self.assertNotIn("wbCount", item)
     self.assertEqual(item["ozonCount"], 5772)
+
+  def test_desired_keywords_are_promoted_for_direct_entry(self):
+    target = server.content_reoptimization_target_keywords(
+      [{"query": "оправа для очков женская круглая", "wbCount": 5000}],
+      [],
+      [],
+    )
+
+    prioritized = server.content_reoptimization_prioritize_desired_keywords(
+      target,
+      [{"query": "оправа для очков женская круглая"}],
+    )
+
+    self.assertEqual(prioritized[0]["query"], "оправа для очков женская круглая")
+    self.assertEqual(prioritized[0]["semanticSource"], "desired")
+    self.assertEqual(prioritized[0]["semanticOrigin"], "added")
+    self.assertTrue(prioritized[0]["desired"])
+    self.assertTrue(prioritized[0]["directEntry"])
+
+  def test_direct_desired_keyword_is_inserted_into_description(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid мужские",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города и отдыха.",
+      "characteristics": [
+        {"name": "Цвет", "value": "черный"},
+        {"name": "Цвет линз", "value": "серый"},
+      ],
+    }
+    query = "очки мужские солнцезащитные стильные"
+
+    result = server.content_reoptimization_apply_direct_desired_keywords(
+      "Солнцезащитные очки Polaroid подходят для яркого дня, прогулок и поездок.",
+      card,
+      [{"query": query, "semanticSource": "desired", "desired": True, "directEntry": True}],
+    )
+
+    self.assertTrue(server.content_contains_exact_keyword(result, query))
+    self.assertLessEqual(len(result), server.CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
+  def test_direct_desired_keyword_skips_unconfirmed_polarization(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid мужские",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города и отдыха.",
+      "characteristics": [{"name": "Цвет линз", "value": "серый"}],
+    }
+    query = "очки солнцезащитные мужские поляризационные"
+
+    result = server.content_reoptimization_apply_direct_desired_keywords(
+      "Солнцезащитные очки Polaroid подходят для яркого дня, прогулок и поездок.",
+      card,
+      [{"query": query, "semanticSource": "desired", "desired": True, "directEntry": True}],
+    )
+
+    self.assertFalse(server.content_contains_exact_keyword(result, query))
+
+  def test_reoptimization_result_reports_desired_direct_entry_usage(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid мужские",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города и отдыха.",
+      "characteristics": [
+        {"name": "Цвет", "value": "черный"},
+        {"name": "Цвет линз", "value": "серый"},
+      ],
+    }
+    query = "очки мужские солнцезащитные стильные"
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки мужские Polaroid", "reason": "test"},
+      "description": {
+        "value": "Солнцезащитные очки Polaroid подходят для яркого дня, прогулок и поездок.",
+        "reason": "test",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "367373520",
+        card,
+        desired_keywords=[{"query": query}],
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    optimization = result["contentOptimization"]
+    self.assertTrue(server.content_contains_exact_keyword(description, query))
+    self.assertIn(query, optimization["desiredKeywordsUsed"])
+    self.assertEqual(optimization["desiredKeywordsUnused"], [])
+    self.assertEqual(list(result["draftContent"].keys()), ["description"])
+
+  def test_output_leaks_and_unconfirmed_claims_are_removed(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла малина",
+      "subjectName": "категория не указана",
+      "description": "Леденцы для горла со вкусом малины.",
+      "characteristics": [
+        {"name": "Вкус", "value": "малина"},
+        {"name": "Возрастные ограничения", "value": "18+"},
+      ],
+    }
+    text = (
+      "ТРАВЕРИН относится к категории категория не указана. "
+      "Модель МД ТРЕЙД рассчитана на прогулки и отдых. "
+      "Леденцы без сахара подходят для диабетиков. "
+      "Леденцы для горла помогают смягчить слизистую."
+    )
+
+    cleaned = server.content_reoptimization_remove_output_leaks(text, card=card)
+
+    self.assertNotIn("категория не указана", cleaned)
+    self.assertNotIn("Модель МД ТРЕЙД", cleaned)
+    self.assertNotIn("без сахара", cleaned)
+    self.assertNotIn("диабет", cleaned)
+    self.assertIn("Леденцы для горла помогают смягчить слизистую", cleaned)
+
+  def test_lozenge_reoptimization_recovers_from_generic_template_output(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла малина",
+      "subjectName": "категория не указана",
+      "brand": "МД ТРЕЙД",
+      "description": "Растительные леденцы для горла со вкусом малины. Для взрослых старше 18 лет.",
+      "characteristics": [
+        {"name": "Вкус", "value": "малина"},
+        {"name": "Количество в упаковке", "value": "2 блистера по 8 леденцов"},
+        {"name": "Способ применения", "value": "по 1 леденцу 3 раза в день после еды"},
+        {"name": "Возрастные ограничения", "value": "18+"},
+      ],
+    }
+    llm_body = {
+      "title": {"value": "Леденцы для горла ТРАВЕРИН", "reason": "test"},
+      "description": {
+        "value": (
+          "ТРАВЕРИН относится к категории категория не указана. "
+          "Модель МД ТРЕЙД рассчитана на регулярное использование, дорогу, прогулки и отдых. "
+          "Назначение, материалы, цвет, комплект и размеры лучше держать в отдельных фразах. "
+          "Леденцы без сахара подходят для диабетиков."
+        ),
+        "reason": "test",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "936467969",
+        card,
+        selected_keywords=[
+          {"query": "леденцы от боли в горле", "wbCount": 1000},
+          {"query": "леденцы от кашля", "wbCount": 900},
+        ],
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertIn("леденцы для горла", description.lower())
+    self.assertNotIn("категория не указана", description)
+    self.assertNotIn("Модель МД ТРЕЙД", description)
+    self.assertNotIn("материалы", description.lower())
+    self.assertNotIn("без сахара", description.lower())
+    self.assertNotIn("диабет", description.lower())
 
 
 if __name__ == "__main__":

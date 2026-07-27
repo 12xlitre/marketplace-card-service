@@ -9596,8 +9596,18 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 Правила:
 - используй только факты из evidenceBundle;
 - не выдумывай состав, материал, размер, назначение, бренд, комплектацию и свойства;
+- технические заглушки и пустые поля нельзя переносить в результат: "категория не указана", "не указано", "нет данных", "null", "undefined" просто игнорируй;
+- перед текстом составь для себя тип товара и список допустимых характеристик именно для него; если характеристика не относится к типу товара, не используй ее даже как общую фразу;
+- для пищевых продуктов, БАД, леденцов, пастилок и средств для горла не используй универсальные слова "модель", "материалы", "размеры", "цвет", "комплект", "внешний вид", "повседневный образ", "прогулки и отдых", если это не подтвержденная и релевантная характеристика карточки;
+- для таких товаров важны: название, форма выпуска, вкус, количество в упаковке, состав только из evidenceBundle, назначение, способ применения, возрастные ограничения, противопоказания и мягкие ограничения;
+- не вставляй в description.value инструкции для автора или генератора: "лучше описывать", "проверьте характеристики", "держать в отдельных фразах", "нужно указать", "если указано" и похожие редакторские комментарии;
 - работай со всеми ключами из evidenceBundle.semanticCore.allTargetKeywords: это действующие ключи без удаления, ранжируемые запросы и добавленные запросы;
-- ключи из evidenceBundle.semanticCore.desiredKeywords не являются приоритетнее остальных: это непокрытые запросы, которые пользователь хочет попробовать учесть в описании, если они естественно ложатся в текст и не делают его SEO-склейкой;
+- ключи из evidenceBundle.semanticCore.desiredKeywords пользователь специально выбрал в блоке непокрытых ключей: для описания они имеют приоритет выше остальных allTargetKeywords, но не выше фактической точности и нормального русского языка;
+- для desiredKeywords сначала пытайся прямое вхождение в description.value: используй поисковую фразу без изменения слов, их окончаний и порядка, без дополнительных слов и знаков препинания внутри самой фразы;
+- пример прямого вхождения: ключ "оправа для очков женская круглая" можно вставить как "Эта оправа для очков женская круглая подходит для установки линз для коррекции зрения.";
+- не является прямым вхождением: "женская круглая оправа подходит для очков", "круглая оправа для женских очков", "оправа для женских круглых очков";
+- знаки препинания ставь до или после ключа, а не внутри ключевой фразы; один desired-запрос достаточно использовать в прямом вхождении один раз;
+- desiredKeywords распределяй по смысловым предложениям в тексте, а не отдельным перечнем; если ключ звучит неестественно, противоречит карточке или делает фразу грамматически некорректной, используй разбавленное/морфологическое вхождение или пропусти его и укажи предупреждение;
 - ключи из evidenceBundle.semanticCore.removeKeywords нельзя использовать намеренно;
 - новые ключевые запросы включай естественно: самые сильные товарные запросы ставь в основу заголовка, средне- и низкочастотные добавляй в описание и подходящие характеристики только если они точно подходят товару;
 - запросы из evidenceBundle.semanticCore.removeKeywords предложены к удалению: не включай их намеренно и переформулируй текст без точной фразы, если это не ломает фактическое свойство товара;
@@ -9617,6 +9627,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - если все ключи невозможно встроить без переспама или потери смысла, выбери максимум релевантных: сначала высокочастотные и добавленные, затем ранжируемые и действующие;
 - не пытайся любой ценой сохранить точную форму ключа: лучше естественная русская фраза и предупреждение, чем строка, похожая на SEO-склейку;
 - описание должно строиться от товара, а не от списка ключей: что это, главное преимущество и позиционирование модели, для кого, какую задачу решает; для оправ раскрывай конструкцию и установку линз, для солнцезащитных очков - защиту от яркого света, блики, линзы, посадку, дизайн/цвет/форму, материал, комплектацию, бренд и мягкий итог;
+- для леденцов для горла структура описания: что за леденцы, чем могут помочь слизистой/горлу, при каких ощущениях уместны, как принимать, сколько в упаковке, какие ограничения проверить; не пиши про одежду, аксессуары, модели, материалы и размеры;
 - ключи распределяй по смысловым абзацам: высокочастотные ближе к началу, среднечастотные в блок пользы и сценариев, длинные низкочастотные в блок "кому подойдет" и "как использовать";
 - не вставляй подряд перестановки одного и того же ключа: "солнцезащитные очки женские", "очки солнцезащитные женские", "женские солнцезащитные очки" должны раскрывать разные мысли или часть вариантов нужно пропустить;
 - не начинай соседние предложения одинаково со слов "очки", "солнцезащитные очки", "солнечные очки", "женские/мужские очки"; если фраза нужна для SEO, впиши ее в середину предложения;
@@ -9627,6 +9638,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - каждый абзац должен отвечать на простой вопрос покупателя: что это, кому подойдет, как носить/использовать, какие факты проверить перед покупкой; не добавляй абзац только ради нового ключа;
 - не используй "мы", "наш товар", "данная модель", "изделие является", "представляет собой", "обладает рядом преимуществ" и похожий канцелярит;
 - добавляй LSI-слова по смыслу товара: для оправ - линзы, коррекция зрения, оптика, посадка, комфорт, ежедневное ношение, стиль, бренд, материал, форма, уход; для солнцезащитных очков - солнце, ультрафиолет, блики, поляризация только при подтверждении, линзы, посадка, комфорт, стиль, водитель, город, отдых, уход;
+- для леденцов и средств для горла используй только мягкий словарь: горло, слизистая, першение, дискомфорт, рассасывание, вкус, упаковка, взрослым, первые признаки простуды, вспомогательное средство; не обещай лечение;
 - описание должно быть правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
 - форму очков/оправы обязательно укажи в описании, если она есть в характеристиках или в подтвержденных целевых ключах;
 - не пиши "УФ-защита", "UV", "защита от ультрафиолета" как факт, если в характеристиках нет явного УФ/UV/ультрафиолетового признака; категория светопропускания сама по себе не является разрешением для фразы "УФ-защита";
@@ -9639,6 +9651,8 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - бренд вписывай как часть названия, модели и покупательского контекста; не пиши мета-комментарии "бренд указан", "указан в карточке", "как бренд", "помогает найти по названию", "узнаваемый стиль бренда", если это не звучит как описание самого товара;
 - финальный абзац пиши про конкретный товар в единственном числе, а не про весь ассортимент бренда;
 - ключи с неподтвержденными диоптриями, чужими брендами или свойствами, которых нет в evidenceBundle, не внедряй как факт товара; лучше пропусти и укажи предупреждение;
+- ключи и свойства "без сахара", "для диабетиков", "натуральные подсластители", конкретные экстракты, "безопасно для полости рта" используй только если эти факты прямо есть в evidenceBundle.card.characteristics/title/description;
+- для медицинских и околомедицинских товаров не пиши "лечит", "устраняет боль", "быстрое облегчение", "эффективное средство", "вылечит ангину/ОРВИ/бронхит"; замени на "помогает смягчить", "способствует уменьшению першения", "помогает снизить дискомфорт", "может использоваться как вспомогательное средство";
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
@@ -9758,6 +9772,61 @@ def content_reoptimization_target_keywords(selected, current, remove, limit=140)
 
   add_rows(selected, "added")
   add_rows(current, "current")
+  return output[:limit]
+
+
+def content_reoptimization_is_desired_keyword(item):
+  if not isinstance(item, dict):
+    return False
+  return bool(
+    item.get("desired")
+    or item.get("directEntry")
+    or audit_str(item.get("semanticSource") or "", 40) == "desired"
+  )
+
+
+def content_reoptimization_prioritize_desired_keywords(target_keywords, desired_keywords, limit=140):
+  target_rows = content_keywords_from_payload(target_keywords, limit=limit)
+  desired_rows = content_keywords_from_payload(desired_keywords, limit=limit)
+  if not desired_rows:
+    return target_rows[:limit]
+
+  target_by_key = {}
+  for row in target_rows:
+    key = content_keyword_normalized_key(row)
+    if key and key not in target_by_key:
+      target_by_key[key] = row
+
+  output = []
+  seen = set()
+  for row in desired_rows:
+    key = content_keyword_normalized_key(row)
+    if not key or key in seen:
+      continue
+    base = target_by_key.get(key, {})
+    origin = audit_str(base.get("semanticSource") or row.get("semanticSource") or "", 40)
+    output.append({
+      **base,
+      **row,
+      "semanticSource": "desired",
+      "semanticOrigin": origin,
+      "desired": True,
+      "directEntry": True,
+      "priority": row.get("priority") or base.get("priority") or semantic_frequency_priority(row.get("wbCount") or base.get("wbCount")),
+      "wbCount": row.get("wbCount") or base.get("wbCount") or 0,
+    })
+    seen.add(key)
+    if len(output) >= limit:
+      return output
+
+  for row in target_rows:
+    key = content_keyword_normalized_key(row)
+    if not key or key in seen:
+      continue
+    output.append(row)
+    seen.add(key)
+    if len(output) >= limit:
+      break
   return output[:limit]
 
 
@@ -10278,6 +10347,50 @@ CONTENT_SUNGLASSES_MARKERS = (
   "uv",
 )
 
+CONTENT_THROAT_LOZENGE_MARKERS = (
+  "леденц",
+  "пастил",
+  "карамел",
+  "для горла",
+  "от горла",
+  "от кашл",
+  "першен",
+)
+
+CONTENT_TECHNICAL_OUTPUT_LEAKS = (
+  "категория не указана",
+  "категория не указано",
+  "относится к категории категория",
+  "модель мд трейд",
+  "назначение материалы цвет комплект и размеры",
+  "назначение, материалы, цвет, комплект и размеры",
+  "материалы комплект и размеры лучше",
+  "материалы, комплект и размеры лучше",
+  "фото и заполненные характеристики помогают оценить форму цвет и размеры",
+  "фото и заполненные характеристики помогают оценить форму, цвет и размеры",
+  "подойдет ли модель",
+  "подойдет ли модель для ежедневного использования",
+  "в комплект входят в одной упаковке",
+  "null",
+  "undefined",
+)
+
+CONTENT_MEDICAL_PROMISE_MARKERS = (
+  "лечит",
+  "вылечит",
+  "вылечивает",
+  "устраняет боль",
+  "полностью устраняет",
+  "гарантированно",
+  "быстрое облегчение",
+  "быстро облегчает",
+  "эффективное средство",
+  "эффективные леденцы",
+  "не вызывает побочных эффектов",
+  "безопасен для всех",
+  "безопасно для всех",
+)
+
 
 def content_reoptimization_card_field_text(card, include_description=False):
   card = card if isinstance(card, dict) else {}
@@ -10320,6 +10433,86 @@ def content_reoptimization_is_frame(card, keyword_rows=None):
   subject_is_generic = not field_text or "категория не указана" in field_text
   keyword_text = audit_normalized(semantic_keyword_text(keyword_rows or []))
   return bool(subject_is_generic and "оправ" in keyword_text and "очк" in keyword_text)
+
+
+def content_reoptimization_is_throat_lozenge(card, keyword_rows=None):
+  field_text = content_reoptimization_card_field_text(card, include_description=True)
+  keyword_text = audit_normalized(semantic_keyword_text(keyword_rows or []))
+  combined = f"{field_text} {keyword_text}".strip()
+  if not combined:
+    return False
+  has_form = any(marker in combined for marker in ("леденц", "пастил", "карамел"))
+  has_throat_context = any(marker in combined for marker in ("горл", "кашл", "першен", "простуд", "ангин", "орви"))
+  return has_form and has_throat_context
+
+
+def content_reoptimization_clean_product_label(*values, fallback="Товар"):
+  for value in values:
+    label = audit_str(value, 180)
+    if not label:
+      continue
+    for leak in CONTENT_TECHNICAL_OUTPUT_LEAKS:
+      label = re.sub(re.escape(leak), "", label, flags=re.IGNORECASE).strip()
+    label = re.sub(r"\s+", " ", label).strip(" -.,;:")
+    if label and not semantic_subject_is_missing(label):
+      return label
+  return fallback
+
+
+def content_reoptimization_sentence_has_output_leak(sentence):
+  normalized = audit_normalized(sentence)
+  if not normalized:
+    return False
+  if any(leak in normalized for leak in CONTENT_TECHNICAL_OUTPUT_LEAKS):
+    return True
+  if re.search(r"\b(материал\w*|комплект|размер\w*|назначение)\b.*\bлучше\b", normalized):
+    return True
+  if re.search(r"\bмодель\b.*\b(дорог|прогул|отдых|повседневн\w+\s+сценари)", normalized):
+    return True
+  if re.search(r"\bотносится\s+к\s+категории\s+(не\s+указан|категория)", normalized):
+    return True
+  return False
+
+
+def content_reoptimization_sentence_has_unconfirmed_claim(sentence, card):
+  normalized = audit_normalized(sentence)
+  if not normalized:
+    return False
+  if any(marker in normalized for marker in CONTENT_MEDICAL_PROMISE_MARKERS):
+    return True
+  fact_text = audit_normalized(" ".join([
+    content_reoptimization_card_field_text(card, include_description=True),
+    " ".join(
+      str(row.get("name") or "") + " " + " ".join(str(value or "") for value in row.get("values") or [])
+      for row in audit_card_characteristics(card)
+    ),
+  ]))
+  gated = (
+    (("без сахар",), ("без сахар",)),
+    (("диабет", "диабетик"), ("диабет", "углеводн")),
+    (("подсласт",), ("подсласт",)),
+    (("поляризац", "поляризацион", "поляризован"), ("поляризац", "поляризацион", "поляризован")),
+    (("уф", "uv", "ультрафиолет"), ("уф", "uv", "ультрафиолет")),
+  )
+  for claim_markers, evidence_markers in gated:
+    if any(marker in normalized for marker in claim_markers) and not any(marker in fact_text for marker in evidence_markers):
+      return True
+  return False
+
+
+def content_reoptimization_remove_output_leaks(text, card=None):
+  text = audit_str(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  if not text:
+    return ""
+  parts = re.split(r"(?<=[.!?])\s+", text)
+  kept = [
+    part.strip()
+    for part in parts
+    if part.strip()
+    and not content_reoptimization_sentence_has_output_leak(part)
+    and not (card is not None and content_reoptimization_sentence_has_unconfirmed_claim(part, card))
+  ]
+  return content_description_sentence_limit(" ".join(kept), CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
 
 def content_reoptimization_plural_gender_for_title(keyword_rows, facts):
@@ -10553,6 +10746,39 @@ def content_reoptimization_sunglasses_title(card, keyword_rows, facts, max_chars
   return content_title_limit(output, max_chars)
 
 
+def content_reoptimization_card_has_marker(card, markers):
+  card = card if isinstance(card, dict) else {}
+  facts = audit_card_characteristics(card)
+  fact_text = " ".join([
+    str(row.get("name") or "")
+    + " "
+    + " ".join(str(value or "") for value in row.get("values") or [])
+    for row in facts
+  ])
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  text = audit_normalized(" ".join([
+    str(card.get("title") or ""),
+    str(raw_fields.get("title") or ""),
+    str(card.get("description") or ""),
+    str(raw_fields.get("description") or ""),
+    fact_text,
+  ]))
+  return any(marker in text for marker in markers)
+
+
+def content_reoptimization_lozenge_query_allowed(query, card):
+  normalized = audit_normalized(query)
+  if any(marker in normalized for marker in ("лечит", "вылеч", "избав", "устраня", "гарант", "безопасн для")):
+    return False
+  if "без сахар" in normalized and not content_reoptimization_card_has_marker(card, ("без сахар",)):
+    return False
+  if "диабет" in normalized and not content_reoptimization_card_has_marker(card, ("диабет", "углеводн")):
+    return False
+  if "подсласт" in normalized and not content_reoptimization_card_has_marker(card, ("подсласт",)):
+    return False
+  return True
+
+
 def content_reoptimization_keyword_safe(query, card):
   text = audit_normalized(query)
   if not text:
@@ -10574,6 +10800,25 @@ def content_reoptimization_keyword_safe(query, card):
     if text not in card_text:
       return False
   tokens = set(audit_tokens(text))
+  if content_reoptimization_is_throat_lozenge(card, [{"query": query}]):
+    lozenge_tokens = {
+      "леденцы",
+      "леденцов",
+      "леденца",
+      "леденец",
+      "пастилки",
+      "пастилок",
+      "горла",
+      "горло",
+      "кашля",
+      "кашель",
+      "простуды",
+      "простуда",
+      "ангины",
+      "ангина",
+      "першения",
+    }
+    return bool(tokens & lozenge_tokens) and content_reoptimization_lozenge_query_allowed(query, card)
   product_tokens = {"оправа", "оправы", "очк", "очки", "линз", "линзы", "зрени", "зрение"}
   return bool(tokens & product_tokens)
 
@@ -10581,6 +10826,16 @@ def content_reoptimization_keyword_safe(query, card):
 def content_reoptimization_keyword_sentence(query, product_kind=""):
   clean_query = audit_str(query, 120)
   normalized = audit_normalized(clean_query)
+  if product_kind == "lozenges":
+    if "сух" in normalized and "каш" in normalized:
+      return f"Если нужны {clean_query}, медленное рассасывание помогает увлажнить слизистую и уменьшить ощущение раздражения."
+    if "каш" in normalized:
+      return f"{clean_query[:1].upper() + clean_query[1:]} удобно использовать как вспомогательный формат для смягчения горла после еды."
+    if "горл" in normalized or "перш" in normalized:
+      return f"{clean_query[:1].upper() + clean_query[1:]} помогают дольше удерживать растительные компоненты на слизистой при рассасывании."
+    if "простуд" in normalized or "орви" in normalized or "ангин" in normalized:
+      return f"При первых признаках простуды {clean_query} можно рассматривать как вспомогательное средство, если нет индивидуальной непереносимости."
+    return f"Если нужны {clean_query}, сверяйте вкус, состав, возрастные ограничения и способ применения на упаковке."
   if product_kind == "sunglasses":
     if "polaroid" in normalized or "полароид" in normalized or "палароид" in normalized or "поларойд" in normalized:
       return f"{clean_query[:1].upper() + clean_query[1:]} удобно носить в городе, за рулем и в отпуске."
@@ -10602,6 +10857,115 @@ def content_reoptimization_keyword_sentence(query, product_kind=""):
   if "линз" in normalized or "зрени" in normalized:
     return f"{clean_query[:1].upper() + clean_query[1:]} используется как основа под линзы."
   return f"{clean_query[:1].upper() + clean_query[1:]} описывают покупательский сценарий для этой модели."
+
+
+def content_reoptimization_direct_keyword_allowed(query, card):
+  query = audit_str(query, 120)
+  normalized = audit_normalized(query)
+  if not content_reoptimization_keyword_safe(query, card):
+    return False
+  card_text = content_reoptimization_card_field_text(card, include_description=True)
+  if "женск" in normalized and "мужск" not in normalized and "мужск" in card_text:
+    return False
+  if "мужск" in normalized and "женск" not in normalized and "женск" in card_text:
+    return False
+  facts = {audit_normalized(row.get("name")): row.get("values") or [] for row in audit_card_characteristics(card)}
+  if content_reoptimization_is_sunglasses(card, [{"query": query}]):
+    if any(marker in normalized for marker in ("уф", "uv", "ультраф")) and not content_reoptimization_has_explicit_uv_protection(facts):
+      return False
+    if "поляр" in normalized and not content_reoptimization_has_sunglasses_polarization(card, [{"query": query}], facts):
+      return False
+  return True
+
+
+def content_reoptimization_direct_keyword_sentence(query, card, product_kind="", index=0):
+  clean_query = audit_str(query, 120)
+  normalized = audit_normalized(clean_query)
+  if not clean_query:
+    return ""
+  if product_kind == "lozenges":
+    variants = [
+      f"Если нужны {clean_query}, ориентируйтесь на состав, вкус, возрастные ограничения и способ применения.",
+      f"{clean_query[:1].upper() + clean_query[1:]} удобно медленно рассасывать после еды, если такой режим указан на упаковке.",
+      f"Такие {clean_query} стоит использовать как вспомогательное средство при дискомфорте в горле.",
+    ]
+    return variants[index % len(variants)]
+  if product_kind == "sunglasses" or any(marker in normalized for marker in ("солнц", "солнеч", "от солнца")):
+    variants = [
+      f"Если нужны {clean_query}, обратите внимание на форму, посадку, оттенок линз и комфорт в яркую погоду.",
+      f"Такие {clean_query} стоит выбирать по ширине оправы, форме линз и посадке по фото.",
+      f"{clean_query[:1].upper() + clean_query[1:]} должны не только подходить по стилю, но и удобно сидеть при дневном свете.",
+    ]
+    return variants[index % len(variants)]
+  if "оправ" in normalized:
+    variants = [
+      f"Если нужна {clean_query}, модель стоит оценивать по форме, материалу, ширине посадки и возможности установки линз по рецепту.",
+      f"Такая {clean_query} требует проверки размеров, моста и длины дужек с привычной посадкой.",
+      f"{clean_query[:1].upper() + clean_query[1:]} должна подходить по форме, цвету и рекомендациям специалиста по линзам.",
+    ]
+    return variants[index % len(variants)]
+  if "очк" in normalized:
+    variants = [
+      f"Если нужны {clean_query}, модель стоит оценивать по форме, посадке, материалу и тому, как она смотрится на лице.",
+      f"Такие {clean_query} стоит сравнивать по размерам, форме и ощущениям от посадки перед заказом.",
+    ]
+    return variants[index % len(variants)]
+  if "линз" in normalized or "зрен" in normalized:
+    return f"Если нужен вариант под запрос {clean_query}, заранее проверьте параметры посадки и возможность установки подходящих линз."
+  return f"Если нужен {clean_query}, сверяйте его с фактическими характеристиками, фото и привычным сценарием использования."
+
+
+def content_reoptimization_append_sentence_with_room(text, sentence, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(text, max_chars)
+  sentence = audit_str(sentence, 420)
+  if not sentence:
+    return text
+  candidate = f"{text.rstrip()} {sentence}".strip()
+  if len(candidate) <= max_chars:
+    return candidate
+  reserved_chars = len(sentence) + 1
+  text_limit = max_chars - reserved_chars
+  if text_limit < 900:
+    return text
+  trimmed = content_description_sentence_limit(text, text_limit)
+  candidate = f"{trimmed.rstrip()} {sentence}".strip()
+  return candidate if len(candidate) <= max_chars else text
+
+
+def content_reoptimization_missing_direct_desired_keywords(text, card, desired_keywords, limit=80):
+  output = []
+  for item in desired_keywords if isinstance(desired_keywords, list) else []:
+    query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
+    if not query or content_contains_exact_keyword(text, query):
+      continue
+    if not content_reoptimization_direct_keyword_allowed(query, card):
+      continue
+    output.append(query)
+    if len(output) >= limit:
+      break
+  return output
+
+
+def content_reoptimization_apply_direct_desired_keywords(description, card, desired_keywords, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(description, max_chars)
+  if not text or not desired_keywords:
+    return text
+  product_kind = (
+    "sunglasses" if content_reoptimization_is_sunglasses(card, desired_keywords) else
+    "frame" if content_reoptimization_is_frame(card, desired_keywords) else
+    "lozenges" if content_reoptimization_is_throat_lozenge(card, desired_keywords) else
+    ""
+  )
+  added = 0
+  for query in content_reoptimization_missing_direct_desired_keywords(text, card, desired_keywords):
+    sentence = content_reoptimization_direct_keyword_sentence(query, card, product_kind=product_kind, index=added)
+    next_text = content_reoptimization_append_sentence_with_room(text, sentence, max_chars=max_chars)
+    if next_text != text and content_contains_exact_keyword(next_text, query):
+      text = next_text
+      added += 1
+    if added >= 8:
+      break
+  return content_description_sentence_limit(text, max_chars)
 
 
 def content_reoptimization_preferred_query(keyword_rows, preferred=None, contains=None):
@@ -11043,6 +11407,107 @@ def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max
   return content_description_sentence_limit(text, max_chars)
 
 
+def content_reoptimization_lozenge_description(card, keyword_rows, facts, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX):
+  if not content_reoptimization_is_throat_lozenge(card, keyword_rows):
+    return ""
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  title = audit_str(card.get("title") or raw_fields.get("title") or "")
+  description = audit_str(card.get("description") or raw_fields.get("description") or "", 3000)
+  card_text = audit_normalized(" ".join([title, description, semantic_keyword_text(keyword_rows)]))
+  product_label = content_reoptimization_clean_product_label(title, fallback="Леденцы для горла")
+
+  def fact_values(names):
+    for name in names:
+      values = facts.get(audit_normalized(name))
+      if values:
+        return content_reoptimization_clean_values(values, limit=6)
+    return []
+
+  def fact(names):
+    return content_reoptimization_join_ru(fact_values(names))
+
+  taste = fact(["Вкус", "Аромат"])
+  if not taste and "малин" in card_text:
+    taste = "малина"
+  quantity = fact(["Количество предметов в упаковке", "Количество в упаковке", "Комплектация"])
+  dosage = fact(["Способ применения", "Рекомендации по применению"])
+  composition = fact(["Состав"])
+  contraindications = fact(["Противопоказания", "Ограничения"])
+  adult_only = any(marker in card_text for marker in ("18+", "18 лет", "старше 18", "взросл"))
+  plant_based = any(marker in card_text for marker in ("раститель", "трав"))
+
+  throat_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы для горла", "леденцы от горла", "леденцы от боли в горле"], contains=["горл"])
+  cough_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы от кашля", "от кашля взрослым"], contains=["каш"])
+  dry_cough_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы от сухого кашля"], contains=["сух"])
+  cold_key = content_reoptimization_preferred_query(keyword_rows, preferred=["от простуды", "от простуды и первых признаков орви"], contains=["простуд"])
+
+  details = []
+  if taste:
+    details.append(f"вкус - {taste}")
+  if quantity:
+    details.append(f"упаковка - {quantity}")
+  opening = f"{product_label} - леденцы для горла"
+  if plant_based:
+    opening = f"{product_label} - растительные леденцы для горла"
+  if details:
+    opening = f"{opening}; {', '.join(details[:2])}"
+  opening = f"{opening}. Они подходят для медленного рассасывания, когда нужно смягчить слизистую и уменьшить ощущение першения."
+
+  paragraphs = [opening]
+  use_sentences = []
+  if throat_key:
+    use_sentences.append(f"{throat_key[:1].upper() + throat_key[1:]} помогают поддерживать увлажнение слизистой за счет рассасывания и слюноотделения.")
+  if cough_key:
+    use_sentences.append(f"{cough_key[:1].upper() + cough_key[1:]} можно использовать как вспомогательный формат при дискомфорте в горле.")
+  if dry_cough_key and audit_normalized(dry_cough_key) not in {audit_normalized(throat_key), audit_normalized(cough_key)}:
+    use_sentences.append(f"Если беспокоит сухость, {dry_cough_key} помогают смягчить раздражение без обещания лечебного эффекта.")
+  if cold_key:
+    use_sentences.append(f"При первых признаках простуды леденцы удобно держать под рукой дома, на работе или в поездке.")
+  if use_sentences:
+    paragraphs.append(" ".join(use_sentences[:4]))
+
+  facts_block = []
+  if dosage:
+    facts_block.append(f"Способ применения: {dosage}.")
+  elif adult_only:
+    facts_block.append("Для взрослых старше 18 лет: рассасывайте леденец медленно и соблюдайте способ применения, указанный на упаковке.")
+  if composition:
+    facts_block.append(f"Состав: {composition}.")
+  if quantity and "упаков" not in audit_normalized(opening):
+    facts_block.append(f"В упаковке: {quantity}.")
+  if facts_block:
+    paragraphs.append(" ".join(facts_block))
+
+  if adult_only or contraindications:
+    limit_parts = []
+    if adult_only:
+      limit_parts.append("Продукт предназначен для взрослых.")
+    if contraindications:
+      limit_parts.append(f"Ограничения: {contraindications}.")
+    else:
+      limit_parts.append("Перед применением проверьте состав и не используйте продукт при индивидуальной непереносимости компонентов.")
+    paragraphs.append(" ".join(limit_parts))
+
+  text = content_description_sentence_limit("\n\n".join(paragraphs), max_chars)
+  safe_queries = []
+  for item in keyword_rows if isinstance(keyword_rows, list) else []:
+    query = audit_str(item.get("query") if isinstance(item, dict) else item, 120)
+    if not query or content_contains_exact_keyword(text, query) or not content_reoptimization_keyword_safe(query, card):
+      continue
+    safe_queries.append(query)
+    if len(safe_queries) >= 8:
+      break
+  for query in safe_queries:
+    sentence = content_reoptimization_keyword_sentence(query, product_kind="lozenges")
+    candidate = f"{text.rstrip()} {sentence}".strip()
+    if len(candidate) > max_chars:
+      break
+    text = candidate
+    if len(text) >= CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN:
+      break
+  return content_description_sentence_limit(text, max_chars)
+
+
 def content_reoptimization_frame_description(card, keyword_rows, facts, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX):
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
@@ -11159,6 +11624,8 @@ def content_reoptimization_frame_description(card, keyword_rows, facts, max_char
 
 def content_reoptimization_description_is_mechanical(text):
   normalized = audit_normalized(text)
+  if content_reoptimization_sentence_has_output_leak(text):
+    return True
   repeated_phrases = (
     "подходит для установки линз",
     "линзы подбираются отдельно",
@@ -11168,6 +11635,7 @@ def content_reoptimization_description_is_mechanical(text):
   if any(normalized.count(phrase) >= 4 for phrase in repeated_phrases):
     return True
   awkward_phrases = (
+    *CONTENT_TECHNICAL_OUTPUT_LEAKS,
     "вариант формата оправа",
     "стильная оправа для очков женская",
     "это оправа для очков женская для зрения брендовая",
@@ -11271,13 +11739,16 @@ def content_reoptimization_expand_description(description, card, target_keywords
   safe_keyword_rows = sorted(
     safe_keyword_rows,
     key=lambda item: (
-      0 if item.get("semanticSource") == "added" else 1,
+      0 if content_reoptimization_is_desired_keyword(item) else 1 if item.get("semanticSource") == "added" else 2,
       -len(content_exact_keyword_tokens(item.get("query"))),
       -audit_int(item.get("wbCount"), 0),
     ),
   )
   target_match_count = min(12, len(safe_keyword_rows))
-  if not mechanical_text and len(text) >= min_chars and len(content_keyword_matches(text, safe_keyword_rows)) >= target_match_count:
+  missing_desired = content_reoptimization_missing_direct_desired_keywords(text, card, [
+    item for item in safe_keyword_rows if content_reoptimization_is_desired_keyword(item)
+  ])
+  if not mechanical_text and len(text) >= min_chars and len(content_keyword_matches(text, safe_keyword_rows)) >= target_match_count and not missing_desired:
     return text
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
@@ -11307,7 +11778,10 @@ def content_reoptimization_expand_description(description, card, target_keywords
     if value:
       dimensions.append(f"{name.lower()} {value}")
 
-  if mechanical_text or len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count:
+  if mechanical_text or len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count or missing_desired:
+    lozenge_description = content_reoptimization_lozenge_description(card, safe_keyword_rows, facts)
+    if lozenge_description:
+      return lozenge_description
     sunglasses_description = content_reoptimization_sunglasses_description(card, safe_keyword_rows, facts)
     if sunglasses_description:
       return sunglasses_description
@@ -11316,16 +11790,34 @@ def content_reoptimization_expand_description(description, card, target_keywords
       return frame_description
 
   is_frame_product = content_reoptimization_is_frame(card, safe_keyword_rows)
+  product_label = content_reoptimization_clean_product_label(title, subject, fallback="Товар")
+  subject_label = "" if semantic_subject_is_missing(subject) else content_reoptimization_clean_product_label(subject, fallback="")
   if is_frame_product:
+    frame_label = content_reoptimization_clean_product_label(title, subject, fallback="Оправа")
     additions = [
-      f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужна оправа для установки линз по рецепту.",
+      f"{frame_label} - {subject_label.lower()} для установки линз по рецепту." if subject_label else f"{frame_label} подходит для установки линз по рецепту.",
       f"Модель {brand or ''} рассчитана на ежедневное ношение: она фиксирует линзы, поддерживает комфортную посадку и сочетается с повседневной одеждой.".strip(),
     ]
   else:
-    additions = [
-      f"{title or subject} относится к категории {subject.lower()} и подходит для покупателей, которым нужен понятный товар с подтвержденными характеристиками.",
-      f"Модель {brand or ''} рассчитана на регулярное использование, аккуратный внешний вид и простое сочетание с повседневными сценариями.".strip(),
-    ]
+    opening = (
+      f"{product_label} - {subject_label.lower()} с характеристиками, указанными в карточке."
+      if subject_label and audit_normalized(subject_label) not in audit_normalized(product_label) else
+      f"{product_label}: основные свойства товара указаны в карточке."
+    )
+    additions = [opening]
+    if brand and audit_normalized(brand) not in audit_normalized(product_label):
+      additions.append(f"Бренд: {brand}.")
+    for row in characteristics[:12]:
+      name = audit_str(row.get("name") or "", 80)
+      values = content_reoptimization_clean_values(row.get("values") or [], limit=4)
+      if not name or not values:
+        continue
+      normalized_name = audit_normalized(name)
+      if normalized_name in {"предмет", "категория"} or semantic_subject_is_missing(" ".join(values)):
+        continue
+      additions.append(f"{name}: {content_reoptimization_join_ru(values)}.")
+      if len(additions) >= 7:
+        break
   if material:
     material_label = "Материал оправы" if is_frame_product else "Материал"
     additions.append(f"{material_label}: {material}. Это практичная основа для регулярного использования и простого ухода.")
@@ -11342,7 +11834,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
         if len(color_values) > 1 else
         f"Цвет: {colors}."
       )
-    additions.append(f"{color_sentence} Это помогает заранее представить, как аксессуар будет смотреться в привычном стиле.")
+    additions.append(f"{color_sentence} Это помогает заранее понять внешний вид товара по карточке.")
   if dimensions:
     dimension_subject = "оправа" if is_frame_product else "модель"
     additions.append(f"Перед заказом проверьте параметры посадки: {', '.join(dimensions[:5])}. Эти размеры помогают понять, насколько {dimension_subject} будет удобна по ширине лица, мосту и длине дужек.")
@@ -11350,7 +11842,10 @@ def content_reoptimization_expand_description(description, card, target_keywords
   if kit_sentence:
     additions.append(kit_sentence)
 
-  reset_for_keywords = bool(safe_keyword_rows and len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count)
+  reset_for_keywords = bool(
+    safe_keyword_rows
+    and (len(content_keyword_matches(text, safe_keyword_rows)) < target_match_count or missing_desired)
+  )
   if reset_for_keywords:
     text = " ".join(additions[:2]).strip()
     additions = additions[2:]
@@ -11377,9 +11872,8 @@ def content_reoptimization_expand_description(description, card, target_keywords
     ])
   else:
     additions.extend([
-      "Назначение, материалы, цвет, комплект и размеры лучше описывать рядом с реальными сценариями использования.",
-      "Фото и заполненные характеристики помогают оценить форму, цвет и размеры и понять, подойдет ли модель для ежедневного использования, дороги, прогулок и отдыха.",
-      "Материалы, комплект и размеры лучше держать в отдельных фразах, чтобы описание читалось спокойно и без повторов.",
+      "Заполненные характеристики помогают сравнить товар с задачей покупателя и заранее понять основные параметры перед заказом.",
+      "Перед покупкой ориентируйтесь на подтвержденные данные карточки, фото и рекомендации продавца.",
     ])
 
   target_max_chars = min(max_chars, CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX)
@@ -11393,7 +11887,7 @@ def content_reoptimization_expand_description(description, card, target_keywords
     text = candidate
     if len(text) >= target_max_chars:
       break
-  return audit_str(text, max_chars)
+  return audit_str(content_reoptimization_remove_output_leaks(text, card=card) or text, max_chars)
 
 
 def audit_number(value, default=None):
@@ -16745,9 +17239,10 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     item for item in desired
     if audit_normalized(item.get("query")) not in remove_keys
   ]
+  desired = content_reoptimization_prioritize_desired_keywords([], desired, limit=80)
   target_keywords = content_reoptimization_target_keywords(selected, current, remove, limit=140)
   if desired:
-    target_keywords = content_merge_keyword_rows(target_keywords, desired, limit=140)
+    target_keywords = content_reoptimization_prioritize_desired_keywords(target_keywords, desired, limit=140)
   if not target_keywords and not remove:
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
@@ -16822,9 +17317,11 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   next_description = audit_str(description_block.get("value") or description_block.get("recommended") or draft_description or description, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
   initial_description_used_keywords = content_keyword_matches(next_description, target_keywords, limit=140)
   initial_description_mechanical = content_reoptimization_description_is_mechanical(next_description)
+  initial_missing_desired_keywords = content_reoptimization_missing_direct_desired_keywords(next_description, card, desired)
   if target_keywords and (
     len(next_description) < CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN
     or len(initial_description_used_keywords) < min(8, max(1, len(target_keywords) // 5))
+    or initial_missing_desired_keywords
     or initial_description_mechanical
   ):
     retry_messages = [
@@ -16838,6 +17335,8 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
             "descriptionChars": f"{CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN}-{CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX}",
             "maxChars": CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT,
             "keywordSource": "evidenceBundle.semanticCore.allTargetKeywords",
+            "missingDesiredKeywords": initial_missing_desired_keywords,
+            "directEntryPrinciple": "Для missingDesiredKeywords попробуй прямое вхождение: сохрани все слова, исходный порядок, формы и окончания, не ставь дополнительные слова или пунктуацию внутри ключевой фразы. Один ключ достаточно использовать один раз. Если фраза противоречит фактам или ломает русский язык, не вставляй ее насильно и вынеси предупреждение.",
             "naturalLanguagePriority": "нормальный русский текст важнее exact-вхождения кривого ключа",
             "style": "живое описание карточки для покупателя: разные начала предложений, конкретные факты, без SEO-склейки, канцелярита и рекламных штампов",
             "returnCharacteristics": True,
@@ -16861,6 +17360,8 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
       pass
   next_description = content_reoptimization_expand_description(next_description, card, target_keywords)
+  next_description = content_reoptimization_apply_direct_desired_keywords(next_description, card, desired)
+  next_description = content_reoptimization_remove_output_leaks(next_description, card=card) or next_description
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
   rule_title = sunglasses_rule_title or frame_rule_title
@@ -16874,6 +17375,13 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   combined_text = f"{next_title} {next_description}"
   used_keywords = content_keyword_matches(combined_text, target_keywords, limit=140)
   description_used_keywords = content_keyword_matches(next_description, target_keywords, limit=140)
+  desired_used_keywords = content_keyword_matches(next_description, desired, limit=80)
+  desired_used_keys = {audit_normalized(query) for query in desired_used_keywords}
+  desired_keywords_unused = [
+    item["query"]
+    for item in desired
+    if item.get("query") and audit_normalized(item.get("query")) not in desired_used_keys
+  ][:80]
   remove_keywords_still_present = [
     item["query"]
     for item in remove
@@ -16887,6 +17395,12 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     audit_str(title_block.get("reason") or "Заголовок переписан с учетом выбранных запросов СЯ.", 500)
   )
   description_reason = audit_str(description_block.get("reason") or "Описание переписано с учетом выбранных запросов СЯ.", 700)
+  warnings = parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else []
+  if desired_keywords_unused:
+    warnings = [
+      *warnings,
+      "Часть выбранных ключей не добавлена прямым вхождением, потому что это могло ухудшить читаемость или противоречить фактам карточки.",
+    ]
   llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
   fallback_characteristics = content_reoptimization_characteristic_fallback(card, target_keywords, available_characteristics=available_characteristics)
   characteristic_draft = content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics)
@@ -16915,7 +17429,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     "contentOptimization": {
       "id": f"semantic-content-{int(time.time() * 1000)}",
       "createdAt": utc_now().isoformat(),
-      "engine": "opticards-semantic-content-v4.7-human",
+      "engine": "opticards-semantic-content-v4.8-direct-entry",
       "provider": provider,
       "model": model,
       "titleStyle": "wb-search-title",
@@ -16930,6 +17444,8 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "removeKeywords": len(remove),
       "usedKeywords": used_keywords,
       "descriptionUsedKeywords": description_used_keywords,
+      "desiredKeywordsUsed": desired_used_keywords,
+      "desiredKeywordsUnused": desired_keywords_unused,
       "unusedKeywords": [item["query"] for item in target_keywords if item["query"] not in used_keywords][:140],
       "removeKeywordsStillPresent": remove_keywords_still_present,
       "titleLength": len(next_title),
@@ -16937,7 +17453,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "descriptionTargetMinChars": CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MIN,
       "descriptionMaxChars": CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT,
       "characteristics": len(characteristic_draft),
-      "warnings": parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else [],
+      "warnings": warnings,
     },
   }
 
