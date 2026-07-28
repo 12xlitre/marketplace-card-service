@@ -10787,6 +10787,19 @@ def content_reoptimization_fact_values(facts, names):
   return []
 
 
+def content_reoptimization_confirmed_audience_from_facts(facts):
+  values = content_reoptimization_fact_values(facts, ["Пол", "Пол/возраст", "Пол и возраст", "Возрастная группа"])
+  normalized = audit_normalized(" ".join(values))
+  audiences = set()
+  if "жен" in normalized:
+    audiences.add("female")
+  if "муж" in normalized:
+    audiences.add("male")
+  if any(marker in normalized for marker in ("дет", "ребен", "ребён", "девоч", "мальч", "подрост")):
+    audiences.add("kids")
+  return audiences
+
+
 def content_reoptimization_brand_label(value):
   brand = audit_str(value, 80)
   if not brand:
@@ -11439,12 +11452,14 @@ def content_reoptimization_direct_keyword_allowed(query, card):
   normalized = audit_normalized(query)
   if not content_reoptimization_keyword_safe(query, card):
     return False
-  card_text = content_reoptimization_card_field_text(card, include_description=True)
-  if "женск" in normalized and "мужск" not in normalized and "мужск" in card_text:
-    return False
-  if "мужск" in normalized and "женск" not in normalized and "женск" in card_text:
-    return False
   facts = {audit_normalized(row.get("name")): row.get("values") or [] for row in audit_card_characteristics(card)}
+  confirmed_audiences = content_reoptimization_confirmed_audience_from_facts(facts)
+  if "женск" in normalized and "мужск" not in normalized and "male" in confirmed_audiences:
+    return False
+  if "мужск" in normalized and "женск" not in normalized and "female" in confirmed_audiences:
+    return False
+  if any(marker in normalized for marker in ("детск", "ребен", "ребён")) and {"male", "female"} & confirmed_audiences and "kids" not in confirmed_audiences:
+    return False
   if content_reoptimization_is_sunglasses(card, [{"query": query}]):
     if any(marker in normalized for marker in ("уф", "uv", "ультраф")) and not content_reoptimization_has_explicit_uv_protection(facts):
       return False

@@ -89,6 +89,19 @@ npm run frontend:check
 
 Основной discovery-документ: `docs/discovery.md`.
 
+## Статус на 2026-07-28 — desired keywords fix для карточки 391030226
+
+Сделано:
+- Исправлен кейс `Оптимист`, карточка `391030226`: кнопка `Попробовать учесть` для непокрытых ключей описания теперь не блокирует выбранные специалистом мужские запросы только из-за старого слова `женская` в текущем title/description.
+- Guard стал точнее: conflicting gender desired-keyword блокируется только если пол подтвержден характеристикой (`Пол`, `Пол/возраст`, `Пол и возраст`, `Возрастная группа`), а не просто найден в старом SEO-тексте карточки.
+- Добавлены регрессионные тесты для exact desired-вставки `оправа для очков мужская`, `оправы для очков мужские`, `оправа для очков` и для сохранения защиты при факте `Пол: женский`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_reoptimization_try_include_desired_frame_keywords_changes_description` -> OK.
+- `python3 -m unittest discover -s tests` -> `32 tests OK`.
+- `npm run frontend:build`.
+- `git diff --check`.
+
 ## Статус на 2026-07-28 — guided title fix для карточки 367374601
 
 Сделано:

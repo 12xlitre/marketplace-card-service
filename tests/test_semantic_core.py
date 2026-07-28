@@ -164,6 +164,49 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     self.assertFalse(server.content_contains_exact_keyword(result, query))
 
+  def test_direct_desired_male_frame_keywords_ignore_unconfirmed_female_text(self):
+    card = {
+      "title": "Оправа для очков женская Optimist",
+      "subjectName": "Оправы",
+      "brand": "Optimist",
+      "description": "Женская оправа для очков подходит для установки линз.",
+      "characteristics": [
+        {"name": "Материал оправы", "value": "пластик"},
+      ],
+    }
+    desired = [
+      {"query": "оправа для очков мужская", "semanticSource": "desired", "desired": True, "directEntry": True},
+      {"query": "оправы для очков мужские", "semanticSource": "desired", "desired": True, "directEntry": True},
+      {"query": "оправа для очков", "semanticSource": "desired", "desired": True, "directEntry": True},
+    ]
+
+    result = server.content_reoptimization_apply_direct_desired_keywords(
+      "Женская оправа для очков Optimist подходит для установки линз.",
+      card,
+      desired,
+    )
+
+    self.assertTrue(server.content_contains_exact_keyword(result, "оправа для очков мужская"))
+    self.assertTrue(server.content_contains_exact_keyword(result, "оправы для очков мужские"))
+
+  def test_direct_desired_male_keyword_respects_confirmed_female_fact(self):
+    card = {
+      "title": "Оправа для очков Optimist",
+      "subjectName": "Оправы",
+      "description": "Оправа для очков подходит для установки линз.",
+      "characteristics": [
+        {"name": "Пол", "value": "женский"},
+      ],
+    }
+
+    result = server.content_reoptimization_apply_direct_desired_keywords(
+      "Оправа для очков Optimist подходит для установки линз.",
+      card,
+      [{"query": "оправа для очков мужская", "semanticSource": "desired", "desired": True, "directEntry": True}],
+    )
+
+    self.assertFalse(server.content_contains_exact_keyword(result, "оправа для очков мужская"))
+
   def test_characteristic_fallback_uses_mpstats_market_values(self):
     card = {
       "title": "Солнцезащитные очки женские",
@@ -229,6 +272,51 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertIn(query, optimization["desiredKeywordsUsed"])
     self.assertEqual(optimization["desiredKeywordsUnused"], [])
     self.assertEqual(list(result["draftContent"].keys()), ["description"])
+
+  def test_reoptimization_try_include_desired_frame_keywords_changes_description(self):
+    card = {
+      "title": "Оправа для очков женская Optimist",
+      "subjectName": "Оправы",
+      "brand": "Optimist",
+      "description": "Женская оправа для очков Optimist подходит для установки линз.",
+      "characteristics": [{"name": "Материал оправы", "value": "пластик"}],
+    }
+    desired = [
+      {"query": "оправа для очков мужская"},
+      {"query": "оправы для очков мужские"},
+      {"query": "оправа для очков"},
+    ]
+    llm_body = {
+      "title": {"value": "Оправа для очков Optimist", "reason": "test"},
+      "description": {
+        "value": "Женская оправа для очков Optimist подходит для установки линз.",
+        "reason": "test",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "391030226",
+        card,
+        selected_keywords=[{"query": "оправа для очков", "wbCount": 1000}],
+        desired_keywords=desired,
+        draft={"description": "Женская оправа для очков Optimist подходит для установки линз."},
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertTrue(server.content_contains_exact_keyword(description, "оправа для очков мужская"))
+    self.assertTrue(server.content_contains_exact_keyword(description, "оправы для очков мужские"))
+    self.assertIn("оправа для очков мужская", result["contentOptimization"]["desiredKeywordsUsed"])
 
   def test_reoptimization_passes_specialist_revision_instruction(self):
     card = {
