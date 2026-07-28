@@ -8217,6 +8217,10 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [workPeriodsStatus, setWorkPeriodsStatus] = useState("idle");
   const [taskActionStatus, setTaskActionStatus] = useState("");
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
+  const [semanticImportStatus, setSemanticImportStatus] = useState("");
+  const [semanticImportError, setSemanticImportError] = useState("");
+  const [semanticImportPreview, setSemanticImportPreview] = useState(null);
+  const [semanticImportFile, setSemanticImportFile] = useState(null);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -8629,6 +8633,60 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
+  async function previewOzonPortalSemanticImport(file) {
+    if (!file || portal.isDemo) return;
+    setSemanticImportStatus("reading");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    try {
+      const fileData = await readFileAsBase64(file);
+      const filePayload = { fileName: file.name, fileData };
+      setSemanticImportFile(filePayload);
+      setSemanticImportStatus("previewing");
+      const preview = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-import`, {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "portal",
+          mode: "preview",
+          ...filePayload,
+        }),
+      });
+      setSemanticImportPreview(preview);
+      setSemanticImportStatus("preview");
+      onNotice?.(`Ozon-СЯ прочитано: ${semanticImportSummaryText(preview)}.`);
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+      onNotice?.(message);
+    }
+  }
+
+  async function applyOzonPortalSemanticImport() {
+    if (!semanticImportFile || portal.isDemo) return;
+    setSemanticImportStatus("applying");
+    setSemanticImportError("");
+    try {
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-import`, {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "portal",
+          mode: "apply",
+          ...semanticImportFile,
+        }),
+      });
+      setSemanticImportPreview(result);
+      setSemanticImportStatus("applied");
+      await loadOzonResultDrafts();
+      onNotice?.(`Ozon-СЯ применено: обновлено ${formatNumber(result.applied?.updatedCards || 0)} ${pluralRu(result.applied?.updatedCards || 0, "карточка", "карточки", "карточек")}.`);
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+      onNotice?.(message);
+    }
+  }
+
   async function downloadOzonFinalContent() {
     setCabinetExportStatus("content-loading");
     try {
@@ -8809,6 +8867,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   ];
   const launchReadyCount = ozonLaunchChecks.filter((item) => item.ready).length;
   const launchNextStep = ozonLaunchChecks.find((item) => !item.ready);
+  const semanticImportBusy = ["reading", "previewing", "applying"].includes(semanticImportStatus);
 
   return (
     <section className="screen active marketplace-theme-ozon">
@@ -9057,6 +9116,16 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
                     </button>
                   </div>
+                  <SemanticCoreImportPanel
+                    status={semanticImportStatus}
+                    error={semanticImportError}
+                    preview={semanticImportPreview}
+                    onPickFile={previewOzonPortalSemanticImport}
+                    onApply={applyOzonPortalSemanticImport}
+                    disabled={portal.isDemo || semanticImportBusy}
+                    title="Загрузить согласованное СЯ"
+                    applyTitle="Применить по Ozon-кабинету"
+                  />
                   {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Итоговое Ozon-СЯ нечего скачать: откройте карточку, сохраните финальный набор во вкладке СЯ и повторите выгрузку.</p> : null}
                   {cabinetExportStatus === "content-empty" ? <p className="status-note">Итоговый Ozon-контент нечего скачать: сначала примите контент хотя бы по одной карточке во вкладке Изменения.</p> : null}
                 </section>
@@ -9084,6 +9153,12 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 semanticDrafts={ozonSemanticDrafts}
                 cardDrafts={ozonCardDrafts}
                 draftStatus={ozonDraftStatus}
+                semanticImportStatus={semanticImportStatus}
+                semanticImportError={semanticImportError}
+                semanticImportPreview={semanticImportPreview}
+                semanticImportDisabled={portal.isDemo || semanticImportBusy}
+                onPickSemanticImportFile={previewOzonPortalSemanticImport}
+                onApplySemanticImport={applyOzonPortalSemanticImport}
                 workPeriods={workPeriods}
                 workPeriodsStatus={workPeriodsStatus}
                 taskActionStatus={taskActionStatus}
@@ -10828,7 +10903,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
   );
 }
 
-function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", workPeriods = [], workPeriodsStatus = "idle", taskActionStatus = "", onOpenCard, onUpdateTaskStatus, onUpdateTaskGroupStatus, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteTaskGroup, onDeleteTask }) {
+function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", semanticImportStatus = "", semanticImportError = "", semanticImportPreview = null, semanticImportDisabled = false, onPickSemanticImportFile, onApplySemanticImport, workPeriods = [], workPeriodsStatus = "idle", taskActionStatus = "", onOpenCard, onUpdateTaskStatus, onUpdateTaskGroupStatus, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteTaskGroup, onDeleteTask }) {
   const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
   const events = Array.isArray(workState?.recentEvents) ? workState.recentEvents : [];
   const [taskFilter, setTaskFilter] = useState("all");
@@ -10917,6 +10992,17 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
           <strong>{formatNumber(withoutSemanticTasks.length)}</strong>
         </div>
       </div>
+
+      <SemanticCoreImportPanel
+        status={semanticImportStatus}
+        error={semanticImportError}
+        preview={semanticImportPreview}
+        onPickFile={onPickSemanticImportFile}
+        onApply={onApplySemanticImport}
+        disabled={semanticImportDisabled}
+        title="Загрузить согласованное СЯ"
+        applyTitle="Применить по Ozon-задачам"
+      />
 
       <div className="task-batch-filter" role="group" aria-label="Фильтр Ozon-задач">
         {[
