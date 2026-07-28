@@ -11292,13 +11292,49 @@ def content_reoptimization_revision_target_audience(revision_instruction):
   return matched[0] if len(matched) == 1 else ""
 
 
+def content_reoptimization_shapes_in_text(text):
+  normalized = audit_normalized(text)
+  return {
+    label
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES
+    if any(marker in normalized for marker in markers)
+  }
+
+
+def content_reoptimization_revision_target_shape(revision_instruction):
+  normalized = audit_normalized(revision_instruction)
+  if not normalized:
+    return ""
+  for match in re.finditer(r"\b(?:на|в)\s+(.{0,48})", normalized):
+    segment = match.group(1)
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+      if any(marker in segment for marker in markers):
+        return label
+  action_markers = ("замен", "помен", "исправ", "вместо", "сдел", "напиш", "форм")
+  if not any(marker in normalized for marker in action_markers):
+    return ""
+  matched = [
+    label
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES
+    if any(marker in normalized for marker in markers)
+  ]
+  return matched[0] if len(matched) == 1 else ""
+
+
 def content_reoptimization_preserve_guided_title(next_title, rule_title, revision_instruction):
   target_audience = content_reoptimization_revision_target_audience(revision_instruction)
-  if not target_audience:
-    return False
-  next_audiences = content_reoptimization_audiences_in_text(next_title)
-  rule_audiences = content_reoptimization_audiences_in_text(rule_title)
-  return target_audience in next_audiences and target_audience not in rule_audiences
+  if target_audience:
+    next_audiences = content_reoptimization_audiences_in_text(next_title)
+    rule_audiences = content_reoptimization_audiences_in_text(rule_title)
+    if target_audience in next_audiences and target_audience not in rule_audiences:
+      return True
+  target_shape = content_reoptimization_revision_target_shape(revision_instruction)
+  if target_shape:
+    next_shapes = content_reoptimization_shapes_in_text(next_title)
+    rule_shapes = content_reoptimization_shapes_in_text(rule_title)
+    if target_shape in next_shapes and target_shape not in rule_shapes:
+      return True
+  return False
 
 
 def content_reoptimization_card_has_marker(card, markers):

@@ -401,6 +401,46 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertNotIn("женские", title.lower())
     self.assertFalse(result["contentOptimization"]["titleRuleApplied"])
 
+  def test_guided_shape_revision_is_not_overwritten_by_frame_rule(self):
+    card = {
+      "title": "Оправа для очков Polaroid",
+      "subjectName": "Оправы",
+      "brand": "Polaroid",
+      "description": "Оправа для очков Polaroid подходит для установки линз.",
+      "characteristics": [{"name": "Материал оправы", "value": "пластик"}],
+    }
+    llm_body = {
+      "title": {"value": "Оправа для очков женская квадратная Polaroid", "reason": "Учтена просьба специалиста."},
+      "description": {
+        "value": "Оправа для очков Polaroid подходит для установки линз.",
+        "reason": "test",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "391030226",
+        card,
+        selected_keywords=[{"query": "оправа для очков женская круглая", "wbCount": 1000}],
+        draft={"title": "Оправа для очков женская круглая Polaroid"},
+        revision_instruction="замени форму оправы с круглой на квадратную",
+        sections=["title"],
+      )
+
+    title = result["draftContent"]["title"]["value"]
+    self.assertIn("квадратная", title.lower())
+    self.assertNotIn("круглая", title.lower())
+    self.assertFalse(result["contentOptimization"]["titleRuleApplied"])
+
   def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
     card = {
       "sku": "oz-100",

@@ -1,5 +1,16 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-28 — guided shape fix для карточки 391030226
+
+Сделано:
+- исправлена защита guided-переоптимизации заголовка для оправ: если специалист просит заменить форму, например `круглая` -> `квадратная`, формульный заголовок из старого СЯ больше не перетирает ответ LLM;
+- добавлен регрессионный тест `test_guided_shape_revision_is_not_overwritten_by_frame_rule` под кейс карточки `391030226`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_shape_revision_is_not_overwritten_by_frame_rule`
+- `python3 -m unittest discover -s tests`
+- `git diff --check`
+
 ## Идея
 
 Внутренний сервис для компании, которая ведет клиентов-продавцов на маркетплейсах.
