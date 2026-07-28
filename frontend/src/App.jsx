@@ -3670,14 +3670,14 @@ function SemanticCoreImportPanel({ status = "", error = "", preview = null, onPi
             <div className="semantic-import-card-list">
               {visibleCards.map((item) => (
                 <div className="semantic-import-card-row" key={item.cardKey}>
-                  <span>{item.vendorCode || item.nmID || item.cardKey}</span>
+                  <span>{item.offerId || item.sku || item.vendorCode || item.nmID || item.cardKey}</span>
                   <strong>{formatNumber(item.selected?.length || 0)} добавить · {formatNumber(item.removal?.length || 0)} удалить</strong>
                   <em>{item.matchStrategy || "сопоставлено"}</em>
                 </div>
               ))}
             </div>
           ) : null}
-          {preview.unmatched?.length ? <span className="status-note">Есть строки без карточки: проверьте артикулы, WB ID или название листа.</span> : null}
+          {preview.unmatched?.length ? <span className="status-note">Есть строки без карточки: проверьте артикулы, SKU, offer ID или название листа.</span> : null}
           {usesDefaultAgreement ? <span className="status-note">В части листов нет колонки Да/Нет: предпросмотр считает найденные ключи согласованными только после кнопки Применить.</span> : null}
         </div>
       ) : null}
@@ -9447,6 +9447,40 @@ function ozonSemanticDraftRows(card, seedQuery = "") {
   return { current, recommendations };
 }
 
+function ozonSemanticRowKey(item) {
+  return semanticQueryKey(item?.query || item);
+}
+
+function normalizeOzonSemanticRows(rows, fallbackSource = "Ozon итог") {
+  const seen = new Set();
+  const output = [];
+  (Array.isArray(rows) ? rows : []).forEach((item) => {
+    const query = String(item?.query || item || "").trim();
+    const key = semanticQueryKey(query);
+    if (!query || !key || seen.has(key)) return;
+    seen.add(key);
+    output.push({
+      ...(item && typeof item === "object" ? item : {}),
+      query,
+      source: String(item?.source || fallbackSource),
+    });
+  });
+  return output;
+}
+
+function mergeOzonSemanticRows(...groups) {
+  const seen = new Set();
+  const output = [];
+  groups.flat().forEach((item) => {
+    const row = normalizeOzonSemanticRows([item])[0];
+    const key = ozonSemanticRowKey(row);
+    if (!row || !key || seen.has(key)) return;
+    seen.add(key);
+    output.push(row);
+  });
+  return output;
+}
+
 function ozonDraftMap(drafts = []) {
   return new Map((Array.isArray(drafts) ? drafts : []).map((draft) => [String(draft.cardKey || ""), draft]).filter(([key]) => key));
 }
@@ -11390,25 +11424,52 @@ function OzonSemanticDraftPanel({ card, portal }) {
   const [seedQuery, setSeedQuery] = useState(defaultSeed);
   const [selectedQueries, setSelectedQueries] = useState([]);
   const [removalQueries, setRemovalQueries] = useState([]);
+  const [savedSelectedRows, setSavedSelectedRows] = useState([]);
+  const [savedRemovalRows, setSavedRemovalRows] = useState([]);
   const [draftStatus, setDraftStatus] = useState("idle");
   const [draftUpdatedAt, setDraftUpdatedAt] = useState("");
+  const [semanticImportStatus, setSemanticImportStatus] = useState("");
+  const [semanticImportError, setSemanticImportError] = useState("");
+  const [semanticImportPreview, setSemanticImportPreview] = useState(null);
+  const [semanticImportFile, setSemanticImportFile] = useState(null);
   const semanticDraft = ozonSemanticDraftRows(card, seedQuery);
-  const selectedSet = new Set(selectedQueries);
-  const removalSet = new Set(removalQueries);
-  const selectedRows = semanticDraft.recommendations.filter((item) => selectedSet.has(item.query));
+  const recommendationRows = mergeOzonSemanticRows(semanticDraft.recommendations, savedSelectedRows);
+  const selectedSet = new Set(selectedQueries.map(semanticQueryKey).filter(Boolean));
+  const removalSet = new Set(removalQueries.map(semanticQueryKey).filter(Boolean));
+  const selectedRows = mergeOzonSemanticRows(savedSelectedRows, recommendationRows)
+    .filter((item) => selectedSet.has(semanticQueryKey(item)));
   const currentRows = semanticDraft.current;
+  const removalRows = mergeOzonSemanticRows(savedRemovalRows, currentRows)
+    .filter((item) => removalSet.has(semanticQueryKey(item)));
   const finalRows = [
-    ...currentRows.filter((item) => !removalSet.has(item.query)),
+    ...currentRows.filter((item) => !removalSet.has(semanticQueryKey(item))),
     ...selectedRows,
   ];
   const finalCount = finalRows.length;
+
+  function applySavedOzonSemanticDraft(saved, updatedAt = "") {
+    const selected = normalizeOzonSemanticRows(saved?.selected, "Согласованное СЯ");
+    const removal = normalizeOzonSemanticRows(saved?.removal, "Согласовано к исключению");
+    setSeedQuery(saved?.seedQuery || defaultSeed);
+    setSavedSelectedRows(selected);
+    setSavedRemovalRows(removal);
+    setSelectedQueries(selected.map((item) => item.query));
+    setRemovalQueries(removal.map((item) => item.query));
+    setDraftUpdatedAt(updatedAt || "");
+  }
 
   useEffect(() => {
     let active = true;
     setSeedQuery(defaultSeed);
     setSelectedQueries([]);
     setRemovalQueries([]);
+    setSavedSelectedRows([]);
+    setSavedRemovalRows([]);
     setDraftUpdatedAt("");
+    setSemanticImportStatus("");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    setSemanticImportFile(null);
     if (!portal?.id || portal.isDemo || !cardKey) {
       setDraftStatus(portal?.isDemo ? "local" : "idle");
       return () => {
@@ -11421,10 +11482,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
         if (!active) return;
         const saved = payload?.draft?.draft;
         if (saved) {
-          setSeedQuery(saved.seedQuery || defaultSeed);
-          setSelectedQueries((Array.isArray(saved.selected) ? saved.selected : []).map((item) => String(item?.query || "")).filter(Boolean));
-          setRemovalQueries((Array.isArray(saved.removal) ? saved.removal : []).map((item) => String(item?.query || "")).filter(Boolean));
-          setDraftUpdatedAt(payload.draft?.updatedAt || "");
+          applySavedOzonSemanticDraft(saved, payload.draft?.updatedAt || "");
           setDraftStatus("loaded");
           return;
         }
@@ -11440,14 +11498,20 @@ function OzonSemanticDraftPanel({ card, portal }) {
   }, [portal?.id, portal?.isDemo, cardKey, defaultSeed]);
 
   function toggleSelected(query) {
+    const key = semanticQueryKey(query);
     setSelectedQueries((current) => (
-      current.includes(query) ? current.filter((item) => item !== query) : [...current, query]
+      current.some((item) => semanticQueryKey(item) === key)
+        ? current.filter((item) => semanticQueryKey(item) !== key)
+        : [...current, query]
     ));
   }
 
   function toggleRemoval(query) {
+    const key = semanticQueryKey(query);
     setRemovalQueries((current) => (
-      current.includes(query) ? current.filter((item) => item !== query) : [...current, query]
+      current.some((item) => semanticQueryKey(item) === key)
+        ? current.filter((item) => semanticQueryKey(item) !== key)
+        : [...current, query]
     ));
   }
 
@@ -11466,21 +11530,80 @@ function OzonSemanticDraftPanel({ card, portal }) {
           title,
           seedQuery,
           current: currentRows,
-          recommendations: semanticDraft.recommendations,
+          recommendations: recommendationRows,
           selected: selectedRows,
-          removal: currentRows.filter((item) => removalSet.has(item.query)),
+          removal: removalRows,
           final: finalRows,
           meta: { source: "ozon-semantic-beta" },
         }),
       });
-      setDraftUpdatedAt(payload?.draft?.updatedAt || new Date().toISOString());
+      applySavedOzonSemanticDraft(payload?.draft?.draft || {}, payload?.draft?.updatedAt || new Date().toISOString());
       setDraftStatus("saved");
     } catch {
       setDraftStatus("error");
     }
   }
 
+  async function previewOzonSemanticImport(file) {
+    if (!file || !portal?.id || portal.isDemo || !cardKey) return;
+    setSemanticImportStatus("reading");
+    setSemanticImportError("");
+    setSemanticImportPreview(null);
+    try {
+      const fileData = await readFileAsBase64(file);
+      const filePayload = { fileName: file.name, fileData };
+      setSemanticImportFile(filePayload);
+      setSemanticImportStatus("previewing");
+      const preview = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-import`, {
+        method: "POST",
+        body: JSON.stringify({
+          cardKey,
+          scope: "card",
+          mode: "preview",
+          ...filePayload,
+        }),
+      });
+      setSemanticImportPreview(preview);
+      setSemanticImportStatus("preview");
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+    }
+  }
+
+  async function applyOzonSemanticImport() {
+    if (!semanticImportFile || !portal?.id || portal.isDemo || !cardKey) return;
+    setSemanticImportStatus("applying");
+    setSemanticImportError("");
+    try {
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-import`, {
+        method: "POST",
+        body: JSON.stringify({
+          cardKey,
+          scope: "card",
+          mode: "apply",
+          ...semanticImportFile,
+        }),
+      });
+      setSemanticImportPreview(result);
+      const appliedCards = Array.isArray(result?.applied?.cards) ? result.applied.cards : [];
+      const applied = appliedCards.find((item) => String(item.cardKey || "") === String(cardKey)) || appliedCards[0];
+      const publicDraft = applied?.draft || null;
+      if (publicDraft?.draft) {
+        applySavedOzonSemanticDraft(publicDraft.draft, publicDraft.updatedAt || new Date().toISOString());
+        setDraftStatus("loaded");
+      }
+      setSemanticImportStatus("applied");
+    } catch (error) {
+      const message = semanticImportErrorText(error);
+      setSemanticImportStatus("error");
+      setSemanticImportError(message);
+    }
+  }
+
   const saveDisabled = !portal?.id || portal.isDemo || draftStatus === "saving";
+  const importDisabled = saveDisabled || ["reading", "previewing", "applying"].includes(semanticImportStatus);
   const statusLabel = draftStatus === "loading"
     ? "загружаем"
     : draftStatus === "saving"
@@ -11519,6 +11642,17 @@ function OzonSemanticDraftPanel({ card, portal }) {
       </div>
       {savedAtLabel ? <p className="status-note">Последнее сохранение: {savedAtLabel}</p> : null}
       {draftStatus === "error" ? <p className="status-note">Не удалось загрузить или сохранить Ozon-СЯ. Проверьте доступ к кабинету и повторите действие.</p> : null}
+
+      <SemanticCoreImportPanel
+        status={semanticImportStatus}
+        error={semanticImportError}
+        preview={semanticImportPreview}
+        onPickFile={previewOzonSemanticImport}
+        onApply={applyOzonSemanticImport}
+        disabled={importDisabled}
+        title="Загрузить согласованное СЯ"
+        applyTitle="Применить в Ozon"
+      />
 
       <SemanticWorkSummary
         title={selectedRows.length ? `${formatNumber(selectedRows.length)} ${pluralRu(selectedRows.length, "запрос", "запроса", "запросов")} выбрано для Ozon` : "Черновик готов к отбору запросов"}
@@ -11581,7 +11715,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
             <span>{formatNumber(currentRows.length)}</span>
           </div>
           {currentRows.length ? currentRows.map((item) => {
-            const marked = removalSet.has(item.query);
+            const marked = removalSet.has(semanticQueryKey(item));
             return (
               <div className={`semantic-keyword ${marked ? "remove" : ""}`} key={item.query}>
                 <div className="semantic-keyword-main">
@@ -11601,10 +11735,10 @@ function OzonSemanticDraftPanel({ card, portal }) {
         <div className="semantic-keyword-list">
           <div className="semantic-list-head">
             <strong>Кандидаты к добавлению</strong>
-            <span>{formatNumber(semanticDraft.recommendations.length)}</span>
+            <span>{formatNumber(recommendationRows.length)}</span>
           </div>
-          {semanticDraft.recommendations.length ? semanticDraft.recommendations.map((item) => {
-            const selected = selectedSet.has(item.query);
+          {recommendationRows.length ? recommendationRows.map((item) => {
+            const selected = selectedSet.has(semanticQueryKey(item));
             return (
               <div className={`semantic-keyword recommended ${selected ? "selected" : ""}`} key={item.query}>
                 <div className="semantic-keyword-main">
@@ -11619,7 +11753,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
                 </div>
               </div>
             );
-          }) : <div className="empty-state compact"><span>Добавьте стартовую фразу, чтобы собрать кандидаты.</span></div>}
+          }) : <div className="empty-state compact"><span>Добавьте стартовую фразу или загрузите согласованное СЯ.</span></div>}
         </div>
       </div>
     </section>

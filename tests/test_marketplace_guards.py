@@ -1,3 +1,5 @@
+import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -109,6 +111,78 @@ class MarketplaceGuardTest(unittest.TestCase):
 
     self.assertEqual(payload["recommendations"][0]["source"], "MPStats keyword-база")
     self.assertEqual(payload["selected"][0]["source"], "MPStats keyword-база")
+
+  def test_ozon_semantic_import_applies_agreement_by_sku(self):
+    with server.connect_db() as db:
+      db.execute(
+        "UPDATE portals SET cards_snapshot_json = ? WHERE id = ?",
+        (
+          json.dumps([{
+            "id": "123456789",
+            "sku": "123456789",
+            "offerId": "SUN-001",
+            "title": "Солнцезащитные очки Polaroid",
+            "category": "Солнцезащитные очки",
+          }], ensure_ascii=False),
+          self.ozon_portal_id,
+        ),
+      )
+    csv_body = (
+      "SKU,Ключ к добавлению,Согласовано добавление,Частотность добавление Ozon,Ключ к удалению,Согласовано удаление,Причина удаления\n"
+      "123456789,очки солнцезащитные женские,Да,5772,старый ключ,Да,не нужен\n"
+    )
+    payload = {
+      "fileName": "ozon-semantic.csv",
+      "fileData": base64.b64encode(csv_body.encode("utf-8")).decode("ascii"),
+      "scope": "portal",
+      "mode": "preview",
+    }
+
+    preview = server.import_ozon_semantic_core_agreement(self.ozon_portal_id, payload, self.manager)
+
+    self.assertEqual(preview["summary"]["cardsMatched"], 1)
+    self.assertEqual(preview["summary"]["selectedToAdd"], 1)
+    self.assertEqual(preview["summary"]["removalToApply"], 1)
+
+    applied = server.import_ozon_semantic_core_agreement(
+      self.ozon_portal_id,
+      {**payload, "mode": "apply"},
+      self.manager,
+    )
+    draft = applied["applied"]["cards"][0]["draft"]["draft"]
+
+    self.assertEqual(applied["applied"]["updatedCards"], 1)
+    self.assertEqual(draft["cardKey"], "123456789")
+    self.assertEqual(draft["sku"], "123456789")
+    self.assertEqual(draft["offerId"], "SUN-001")
+    self.assertEqual(draft["selected"][0]["query"], "очки солнцезащитные женские")
+    self.assertEqual(draft["selected"][0]["ozonCount"], 5772)
+    self.assertEqual(draft["removal"][0]["query"], "старый ключ")
+    self.assertEqual(draft["final"][0]["query"], "очки солнцезащитные женские")
+
+  def test_readonly_user_cannot_apply_ozon_semantic_import(self):
+    csv_body = "SKU,Ключ к добавлению,Согласовано добавление\n123456789,очки,Да\n"
+    payload = {
+      "fileName": "ozon-semantic.csv",
+      "fileData": base64.b64encode(csv_body.encode("utf-8")).decode("ascii"),
+      "scope": "portal",
+      "mode": "apply",
+    }
+
+    with self.assertRaises(PermissionError):
+      server.import_ozon_semantic_core_agreement(self.ozon_portal_id, payload, self.readonly)
+
+  def test_ozon_semantic_import_rejects_wildberries_portal(self):
+    csv_body = "SKU,Ключ к добавлению,Согласовано добавление\n123456789,очки,Да\n"
+    payload = {
+      "fileName": "ozon-semantic.csv",
+      "fileData": base64.b64encode(csv_body.encode("utf-8")).decode("ascii"),
+      "scope": "portal",
+      "mode": "preview",
+    }
+
+    with self.assertRaisesRegex(ValueError, "ozon_portal_required"):
+      server.import_ozon_semantic_core_agreement(self.wb_portal_id, payload, self.manager)
 
 
 if __name__ == "__main__":

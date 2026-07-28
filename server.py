@@ -3741,12 +3741,21 @@ def normalize_ozon_semantic_keyword(item, fallback_source=""):
     status = audit_str(item.get("status"), 40)
     frequency = audit_str(item.get("frequency"), 40)
     position = audit_str(item.get("position"), 40)
+    ozon_count = audit_int(item.get("ozonCount") or item.get("ozon_count"), 0)
+    wb_count = audit_int(item.get("wbCount") or item.get("wb_count"), 0)
+    removal_reason = audit_str(item.get("removalReason") or item.get("reason"), 250)
     if status:
       payload["status"] = status
     if frequency:
       payload["frequency"] = frequency
     if position:
       payload["position"] = position
+    if ozon_count > 0:
+      payload["ozonCount"] = ozon_count
+    if wb_count > 0:
+      payload["wbCount"] = wb_count
+    if removal_reason:
+      payload["removalReason"] = removal_reason
   if source:
     payload["source"] = source
   return payload
@@ -3786,6 +3795,35 @@ def normalize_ozon_semantic_payload(payload):
   removal = normalize_ozon_semantic_keywords(payload.get("removal"), fallback_source="Ozon карточка")
   final_keywords = normalize_ozon_semantic_keywords(payload.get("final"), fallback_source="Ozon итог")
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  normalized_meta = {
+    "source": audit_str(meta.get("source") or "ozon-semantic-beta", 80),
+    "marketplace": "Ozon",
+  }
+  for key, limit in (
+    ("importedAt", 80),
+    ("importedFrom", 180),
+    ("updatedBy", 120),
+  ):
+    value = audit_str(meta.get(key), limit)
+    if value:
+      normalized_meta[key] = value
+  import_history = meta.get("importHistory") if isinstance(meta.get("importHistory"), list) else []
+  clean_history = []
+  for item in import_history[-20:]:
+    if not isinstance(item, dict):
+      continue
+    clean_history.append({
+      "at": audit_str(item.get("at"), 80),
+      "by": audit_str(item.get("by"), 120),
+      "fileName": audit_str(item.get("fileName"), 180),
+      "selectedAdded": audit_int(item.get("selectedAdded"), 0),
+      "removalAdded": audit_int(item.get("removalAdded"), 0),
+      "rejectedAdditions": audit_int(item.get("rejectedAdditions"), 0),
+      "rejectedRemovals": audit_int(item.get("rejectedRemovals"), 0),
+      "matchStrategy": audit_str(item.get("matchStrategy"), 120),
+    })
+  if clean_history:
+    normalized_meta["importHistory"] = clean_history
   normalized = {
     "version": 1,
     "cardKey": card_key,
@@ -3798,10 +3836,7 @@ def normalize_ozon_semantic_payload(payload):
     "selected": selected,
     "removal": removal,
     "final": final_keywords,
-    "meta": {
-      "source": audit_str(meta.get("source") or "ozon-semantic-beta", 80),
-      "marketplace": "Ozon",
-    },
+    "meta": normalized_meta,
   }
   return normalized if card_key else None
 
@@ -16931,6 +16966,9 @@ def semantic_import_add_identifier(identifier_map, value, descriptor):
   for key in (value, audit_normalized(value)):
     if not key:
       continue
+    if key not in identifier_map:
+      identifier_map[key] = descriptor
+      continue
     existing = identifier_map.get(key)
     if existing is None:
       continue
@@ -17085,6 +17123,8 @@ def semantic_import_new_group(descriptor, strategy):
     "cardKey": descriptor.get("cardKey") or "",
     "nmID": descriptor.get("nmID") or "",
     "vendorCode": descriptor.get("vendorCode") or "",
+    "sku": descriptor.get("sku") or "",
+    "offerId": descriptor.get("offerId") or "",
     "title": descriptor.get("title") or "",
     "subjectName": descriptor.get("subjectName") or "",
     "matchStrategy": strategy or "",
@@ -17433,6 +17473,364 @@ def import_semantic_core_agreement(payload, user):
   mode = audit_str(payload.get("mode") or "preview")
   if mode == "apply":
     return apply_semantic_import(preview, context, user)
+  return preview
+
+
+def ozon_semantic_import_card_descriptor(card=None, draft_row=None, draft_payload=None):
+  card = card if isinstance(card, dict) else {}
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  draft_payload = draft_payload if isinstance(draft_payload, dict) else {}
+  sku = audit_str(
+    card.get("sku")
+    or card.get("id")
+    or raw_fields.get("sku")
+    or raw_fields.get("id")
+    or raw_fields.get("productId")
+    or draft_payload.get("sku")
+    or (draft_row["sku"] if draft_row else ""),
+    120,
+  )
+  offer_id = audit_str(
+    card.get("offerId")
+    or card.get("offer_id")
+    or card.get("vendorCode")
+    or raw_fields.get("offerId")
+    or raw_fields.get("offer_id")
+    or raw_fields.get("vendorCode")
+    or draft_payload.get("offerId")
+    or (draft_row["offer_id"] if draft_row else ""),
+    120,
+  )
+  title = audit_str(
+    card.get("title")
+    or raw_fields.get("title")
+    or raw_fields.get("name")
+    or draft_payload.get("title")
+    or (draft_row["title"] if draft_row else ""),
+    240,
+  )
+  card_key = draft_card_key(
+    draft_payload.get("cardKey")
+    or (draft_row["card_key"] if draft_row else "")
+    or sku
+    or offer_id
+    or card_key_from_snapshot_card(card)
+    or title
+  )
+  return {
+    "cardKey": card_key,
+    "nmID": sku,
+    "vendorCode": offer_id,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title,
+    "subjectName": audit_str(card.get("subjectName") or card.get("category") or raw_fields.get("category") or raw_fields.get("categoryName") or "", 180),
+  }
+
+
+def ozon_semantic_import_load_context(portal_id, user, edit=False):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=edit)
+  with connect_db() as db:
+    portal = db.execute(
+      "SELECT id, cards_snapshot_json FROM portals WHERE id = ?",
+      (numeric_portal_id,),
+    ).fetchone()
+    if not portal:
+      raise ValueError("portal_not_found")
+    draft_rows = db.execute(
+      """
+      SELECT *
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ?
+      """,
+      (numeric_portal_id,),
+    ).fetchall()
+  cards = wb_snapshot_cards_from_row(portal)
+  descriptors_by_key = {}
+  identifier_map = {}
+  for card in cards:
+    descriptor = ozon_semantic_import_card_descriptor(card=card)
+    if not descriptor.get("cardKey"):
+      continue
+    descriptors_by_key[descriptor["cardKey"]] = descriptor
+    for value in (descriptor.get("cardKey"), descriptor.get("sku"), descriptor.get("offerId"), descriptor.get("title")):
+      semantic_import_add_identifier(identifier_map, value, descriptor)
+
+  draft_payloads = {}
+  for row in draft_rows:
+    try:
+      draft_payload = json.loads(row["payload_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+      draft_payload = {}
+    draft_payload = normalize_ozon_semantic_payload(draft_payload) or {}
+    draft_payloads[row["card_key"]] = draft_payload
+    descriptor = descriptors_by_key.get(row["card_key"]) or ozon_semantic_import_card_descriptor(draft_row=row, draft_payload=draft_payload)
+    if descriptor.get("cardKey"):
+      descriptors_by_key[descriptor["cardKey"]] = descriptor
+      for value in (descriptor.get("cardKey"), descriptor.get("sku"), descriptor.get("offerId"), descriptor.get("title")):
+        semantic_import_add_identifier(identifier_map, value, descriptor)
+  return {
+    "portalId": numeric_portal_id,
+    "descriptors": list(descriptors_by_key.values()),
+    "descriptorsByKey": descriptors_by_key,
+    "identifierMap": identifier_map,
+    "draftPayloads": draft_payloads,
+  }
+
+
+def ozon_semantic_import_prepare(portal_id, payload, user, edit=False):
+  payload = payload if isinstance(payload, dict) else {}
+  scope = audit_str(payload.get("scope") or "portal")
+  if scope not in {"portal", "card"}:
+    raise ValueError("semantic_import_invalid_scope")
+  explicit_card_key = draft_card_key(payload.get("cardKey") or payload.get("card_key"))
+  if scope == "card" and not explicit_card_key:
+    raise ValueError("invalid_card_key")
+  filename, raw = semantic_import_decode_file(payload)
+  sheets = semantic_import_parse_file(filename, raw)
+  if not sheets:
+    raise ValueError("semantic_import_empty_file")
+  context = ozon_semantic_import_load_context(portal_id, user, edit=edit)
+  groups = {}
+  unmatched = []
+  sheet_summaries = []
+  summary = {
+    "rowsRead": 0,
+    "selectedToAdd": 0,
+    "removalToApply": 0,
+    "rejectedAdditions": 0,
+    "rejectedRemovals": 0,
+    "ignoredRows": 0,
+    "unknownRows": 0,
+    "unmatchedRows": 0,
+    "sheetsRead": len(sheets),
+    "sheetsUsed": 0,
+    "cardsMatched": 0,
+  }
+
+  for sheet in sheets:
+    sheet_name = audit_str(sheet.get("name") or "Лист", 80)
+    if "инструкц" in audit_normalized(sheet_name):
+      sheet_summaries.append({"name": sheet_name, "status": "skipped", "reason": "instruction"})
+      continue
+    rows = sheet.get("rows") if isinstance(sheet.get("rows"), list) else []
+    header_index, columns = semantic_import_find_header(rows)
+    if header_index is None:
+      sheet_summaries.append({"name": sheet_name, "status": "skipped", "reason": "headers_not_found"})
+      continue
+    sheet_targets, sheet_strategy = semantic_import_sheet_targets(context, sheet_name, filename, scope, explicit_card_key)
+    sheet_rows = 0
+    sheet_matched = 0
+    sheet_unmatched = 0
+    for row_index, row in enumerate(rows[header_index + 1:], start=header_index + 2):
+      add_query = semantic_import_cell(row, columns.get("addQuery"), 250)
+      removal_query = semantic_import_cell(row, columns.get("removalQuery"), 250)
+      if not semantic_import_row_has_data(row, columns.get("addQuery"), columns.get("removalQuery")):
+        continue
+      sheet_rows += 1
+      summary["rowsRead"] += 1
+      row_descriptor = semantic_import_row_target(context, row, columns)
+      targets = [row_descriptor] if row_descriptor else sheet_targets
+      targets = [target for target in targets if target]
+      strategy = "row-identifier" if row_descriptor else sheet_strategy
+      if not targets:
+        unmatched.append({
+          "sheetName": sheet_name,
+          "rowNumber": row_index,
+          "addQuery": add_query,
+          "removalQuery": removal_query,
+          "reason": "ozon_card_not_matched",
+        })
+        sheet_unmatched += 1
+        summary["unmatchedRows"] += 1
+        continue
+
+      frequency = semantic_import_cell(row, columns.get("addFrequency"), 80)
+      ozon_frequency = semantic_import_cell(row, columns.get("addOzonFrequency"), 80)
+      removal_reason = semantic_import_cell(row, columns.get("removalReason"), 250)
+      row_meta = {
+        "fileName": filename,
+        "sheetName": sheet_name,
+        "rowNumber": row_index,
+        "frequency": frequency,
+        "ozonFrequency": ozon_frequency,
+      }
+      if add_query:
+        add_decision = True if columns.get("addAgreement") is None else semantic_import_decision(semantic_import_cell(row, columns.get("addAgreement"), 120))
+        item = semantic_import_keyword_item(add_query, "selected", row_meta)
+        if add_decision is True:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "selected", item):
+              added_count += 1
+          summary["selectedToAdd"] += added_count
+          sheet_matched += added_count
+        elif add_decision is False:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "rejectedSelected", item):
+              added_count += 1
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_addition"})
+          summary["rejectedAdditions"] += added_count
+          summary["ignoredRows"] += added_count
+        else:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_addition_agreement"}):
+              added_count += 1
+          summary["unknownRows"] += added_count
+          summary["ignoredRows"] += added_count
+      if removal_query:
+        removal_decision = True if columns.get("removalAgreement") is None else semantic_import_decision(semantic_import_cell(row, columns.get("removalAgreement"), 120))
+        item = semantic_import_keyword_item(removal_query, "removal", {**row_meta, "reason": removal_reason})
+        if removal_decision is True:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "removal", item):
+              added_count += 1
+          summary["removalToApply"] += added_count
+          sheet_matched += added_count
+        elif removal_decision is False:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "rejectedRemoval", item):
+              added_count += 1
+            semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "not_agreed_removal"})
+          summary["rejectedRemovals"] += added_count
+          summary["ignoredRows"] += added_count
+        else:
+          added_count = 0
+          for target in targets:
+            if semantic_import_add_group_item(groups, target, strategy, "ignored", {**item, "reason": "unknown_removal_agreement"}):
+              added_count += 1
+          summary["unknownRows"] += added_count
+          summary["ignoredRows"] += added_count
+    if sheet_rows:
+      summary["sheetsUsed"] += 1
+    sheet_summaries.append({
+      "name": sheet_name,
+      "status": "used" if sheet_rows else "empty",
+      "rows": sheet_rows,
+      "matched": sheet_matched,
+      "unmatched": sheet_unmatched,
+      "matchStrategy": sheet_strategy,
+      "agreementDefaults": {
+        "addition": columns.get("addAgreement") is None,
+        "removal": columns.get("removalAgreement") is None and columns.get("removalQuery") is not None,
+      },
+    })
+
+  cards = sorted((semantic_import_public_group(group) for group in groups.values()), key=lambda item: (item.get("subjectName") or "", item.get("offerId") or item.get("sku") or item.get("cardKey")))
+  summary["cardsMatched"] = len([card for card in cards if card.get("selected") or card.get("removal") or card.get("rejectedSelected") or card.get("rejectedRemoval")])
+  summary["unmatchedRows"] = len(unmatched)
+  return {
+    "status": "ok",
+    "mode": "preview",
+    "marketplace": "Ozon",
+    "portalId": str(context["portalId"]),
+    "scope": scope,
+    "fileName": filename,
+    "summary": summary,
+    "sheets": sheet_summaries,
+    "cards": cards,
+    "unmatched": unmatched[:500],
+  }, context
+
+
+def ozon_semantic_import_payload_with_final(previous_payload, group, filename, user):
+  previous_payload = normalize_ozon_semantic_payload(previous_payload) or {}
+  existing_selected = previous_payload.get("selected") if isinstance(previous_payload.get("selected"), list) else []
+  existing_removal = previous_payload.get("removal") if isinstance(previous_payload.get("removal"), list) else []
+  current = normalize_ozon_semantic_keywords(previous_payload.get("current"), limit=1200, fallback_source="Ozon карточка")
+  recommendations = normalize_ozon_semantic_keywords(previous_payload.get("recommendations"), limit=1200, fallback_source="MPStats keyword-база")
+  selected = semantic_import_merge_items(existing_selected, group.get("selected"), group.get("rejectedSelected"), kind="selected", limit=1200)
+  removal = semantic_import_merge_items(existing_removal, group.get("removal"), group.get("rejectedRemoval"), kind="removal", limit=1200)
+  removal_keys = {semantic_import_keyword_key(item) for item in removal}
+  selected = [item for item in selected if semantic_import_keyword_key(item) not in removal_keys]
+  final_keywords = semantic_import_merge_items(
+    [item for item in current if semantic_import_keyword_key(item) not in removal_keys],
+    selected,
+    [],
+    kind="selected",
+    limit=2000,
+  )
+  now = utc_now().isoformat()
+  user_login = user_login_value(user)
+  previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
+  import_history = previous_meta.get("importHistory") if isinstance(previous_meta.get("importHistory"), list) else []
+  import_history.append({
+    "at": now,
+    "by": user_login,
+    "fileName": filename,
+    "selectedAdded": len(group.get("selected") or []),
+    "removalAdded": len(group.get("removal") or []),
+    "rejectedAdditions": len(group.get("rejectedSelected") or []),
+    "rejectedRemovals": len(group.get("rejectedRemoval") or []),
+    "matchStrategy": group.get("matchStrategy") or "",
+  })
+  return normalize_ozon_semantic_payload({
+    **previous_payload,
+    "cardKey": group.get("cardKey") or previous_payload.get("cardKey") or "",
+    "sku": group.get("sku") or group.get("nmID") or previous_payload.get("sku") or "",
+    "offerId": group.get("offerId") or group.get("vendorCode") or previous_payload.get("offerId") or "",
+    "title": group.get("title") or previous_payload.get("title") or "",
+    "current": current,
+    "recommendations": semantic_import_merge_items(recommendations, selected, [], kind="selected", limit=1200),
+    "selected": selected,
+    "removal": removal,
+    "final": final_keywords,
+    "meta": {
+      **previous_meta,
+      "source": "ozon-semantic-import",
+      "importedAt": now,
+      "importedFrom": filename,
+      "updatedBy": user_login,
+      "importHistory": import_history[-20:],
+    },
+  })
+
+
+def apply_ozon_semantic_import(portal_id, preview, context, user):
+  updated = []
+  skipped = []
+  preview_cards = preview.get("cards") if isinstance(preview.get("cards"), list) else []
+  for group in preview_cards:
+    card_key = draft_card_key(group.get("cardKey"))
+    if not card_key:
+      continue
+    has_changes = any(group.get(key) for key in ("selected", "removal", "rejectedSelected", "rejectedRemoval"))
+    if not has_changes:
+      skipped.append({"cardKey": card_key, "reason": "no_changes"})
+      continue
+    previous_payload = context["draftPayloads"].get(card_key) or {}
+    next_payload = ozon_semantic_import_payload_with_final(previous_payload, group, preview.get("fileName") or "", user)
+    draft = save_ozon_semantic_draft(portal_id, next_payload, user)
+    updated.append({
+      "cardKey": card_key,
+      "sku": next_payload.get("sku") or "",
+      "offerId": next_payload.get("offerId") or "",
+      "selected": len(next_payload.get("selected") or []),
+      "removal": len(next_payload.get("removal") or []),
+      "final": len(next_payload.get("final") or []),
+      "draft": draft.get("draft") if isinstance(draft, dict) else draft,
+    })
+  preview["mode"] = "apply"
+  preview["applied"] = {
+    "updatedCards": len(updated),
+    "skippedCards": len(skipped),
+    "cards": updated,
+    "skipped": skipped,
+  }
+  return preview
+
+
+def import_ozon_semantic_core_agreement(portal_id, payload, user):
+  mode = audit_str((payload if isinstance(payload, dict) else {}).get("mode") or "preview")
+  if mode not in {"preview", "apply"}:
+    raise ValueError("semantic_import_invalid_mode")
+  preview, context = ozon_semantic_import_prepare(portal_id, payload, user, edit=mode == "apply")
+  if mode == "apply":
+    return apply_ozon_semantic_import(portal_id, preview, context, user)
   return preview
 
 
@@ -20956,6 +21354,38 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_semantic_import"
+        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-semantic-import"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-semantic-import")].strip("/")
+      payload = self.read_json(SEMANTIC_IMPORT_MAX_JSON_BYTES)
+      if payload is None:
+        try:
+          content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+          content_length = 0
+        if content_length > SEMANTIC_IMPORT_MAX_JSON_BYTES:
+          self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+            "error": "semantic_import_payload_too_large",
+            "maxBytes": SEMANTIC_IMPORT_MAX_JSON_BYTES,
+          })
+        else:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        return
+      try:
+        result = import_ozon_semantic_core_agreement(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_ozon_semantic_import"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
         return
