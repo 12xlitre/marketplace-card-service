@@ -3759,8 +3759,8 @@ def normalize_ozon_semantic_payload(payload):
   if not card_key:
     card_key = draft_card_key(sku or offer_id or title)
   current = normalize_ozon_semantic_keywords(payload.get("current"), fallback_source="Ozon карточка")
-  recommendations = normalize_ozon_semantic_keywords(payload.get("recommendations"), fallback_source="MPStats/WB keyword-база")
-  selected = normalize_ozon_semantic_keywords(payload.get("selected"), fallback_source="MPStats/WB keyword-база")
+  recommendations = normalize_ozon_semantic_keywords(payload.get("recommendations"), fallback_source="MPStats keyword-база")
+  selected = normalize_ozon_semantic_keywords(payload.get("selected"), fallback_source="MPStats keyword-база")
   removal = normalize_ozon_semantic_keywords(payload.get("removal"), fallback_source="Ozon карточка")
   final_keywords = normalize_ozon_semantic_keywords(payload.get("final"), fallback_source="Ozon итог")
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
@@ -3972,7 +3972,7 @@ def get_ozon_card_draft(portal_id, card_key, user):
 
 
 def save_ozon_semantic_draft(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   draft = normalize_ozon_semantic_payload(payload)
   if not draft:
     raise ValueError("invalid_ozon_semantic_draft")
@@ -4021,7 +4021,7 @@ def save_ozon_semantic_draft(portal_id, payload, user):
 
 
 def save_ozon_card_draft(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   draft = normalize_ozon_content_payload(payload)
   if not draft:
     raise ValueError("invalid_ozon_card_draft")
@@ -4084,7 +4084,7 @@ def ozon_card_value(raw_card, *keys):
 
 
 def build_ozon_card_audit(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   payload = payload if isinstance(payload, dict) else {}
   raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else payload
   card_key = audit_str(payload.get("cardKey") or raw_card.get("cardKey"), 160)
@@ -4218,7 +4218,7 @@ def list_ozon_tasks(portal_id, user):
 
 
 def save_ozon_tasks(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   payload = payload if isinstance(payload, dict) else {}
   raw_tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
   tasks = []
@@ -9628,6 +9628,11 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - не пытайся любой ценой сохранить точную форму ключа: лучше естественная русская фраза и предупреждение, чем строка, похожая на SEO-склейку;
 - описание должно строиться от товара, а не от списка ключей: что это, главное преимущество и позиционирование модели, для кого, какую задачу решает; для оправ раскрывай конструкцию и установку линз, для солнцезащитных очков - защиту от яркого света, блики, линзы, посадку, дизайн/цвет/форму, материал, комплектацию, бренд и мягкий итог;
 - для леденцов для горла структура описания: что за леденцы, чем могут помочь слизистой/горлу, при каких ощущениях уместны, как принимать, сколько в упаковке, какие ограничения проверить; не пиши про одежду, аксессуары, модели, материалы и размеры;
+- для ТРАВЕРИН делай первые 200-300 символов SEO-насыщенными и живыми: растительные леденцы/пастилки для горла, вкус, мягкая польза, составные компоненты из evidenceBundle, сухость/першение/дискомфорт/голос; не начинай все вкусы одинаково;
+- для ТРАВЕРИН разные вкусы должны иметь разные смысловые акценты: лимон - свежесть и голос, малина - натуральность и мягкий вкус, имбирь/мед - согревающий вкус, апельсин - ежедневное использование, мед/лимон - классическое сочетание;
+- для ТРАВЕРИН раскрывай состав через мягкую пользу, если компонент подтвержден: солодка - комфорт слизистой, имбирь - теплый пряный вкус, амла - растительный компонент с кислой нотой, терминалия - часть растительного комплекса; не приписывай ингредиентам лечебный эффект;
+- для ТРАВЕРИН добавляй покупательские преимущества, если они подтверждены или прямо следуют из карточки: растительный комплекс, 16 леденцов в упаковке, удобно брать с собой, приятный вкус, медленное рассасывание;
+- для леденцов снижай повторы слов "леденцы для горла" и "леденцы от кашля": чередуй "пастилки", "растительный комплекс", "формат для рассасывания", "упаковка", "вкус", но не меняй тип товара в заголовке;
 - ключи распределяй по смысловым абзацам: высокочастотные ближе к началу, среднечастотные в блок пользы и сценариев, длинные низкочастотные в блок "кому подойдет" и "как использовать";
 - не вставляй подряд перестановки одного и того же ключа: "солнцезащитные очки женские", "очки солнцезащитные женские", "женские солнцезащитные очки" должны раскрывать разные мысли или часть вариантов нужно пропустить;
 - не начинай соседние предложения одинаково со слов "очки", "солнцезащитные очки", "солнечные очки", "женские/мужские очки"; если фраза нужна для SEO, впиши ее в середину предложения;
@@ -9639,6 +9644,9 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - не используй "мы", "наш товар", "данная модель", "изделие является", "представляет собой", "обладает рядом преимуществ" и похожий канцелярит;
 - добавляй LSI-слова по смыслу товара: для оправ - линзы, коррекция зрения, оптика, посадка, комфорт, ежедневное ношение, стиль, бренд, материал, форма, уход; для солнцезащитных очков - солнце, ультрафиолет, блики, поляризация только при подтверждении, линзы, посадка, комфорт, стиль, водитель, город, отдых, уход;
 - для леденцов и средств для горла используй только мягкий словарь: горло, слизистая, першение, дискомфорт, рассасывание, вкус, упаковка, взрослым, первые признаки простуды, вспомогательное средство; не обещай лечение;
+- для леденцов и БАД не перечисляй диагнозы и показания вроде "фарингит, ларингит, трахеит, бронхит, ангина, ОРВИ"; для карточки товара используй ощущения и сценарии, а не список заболеваний;
+- для Авитабс делай описания уникальными по назначению конкретной карточки и объясняй ценность компонентов простым языком: например магний - для поддержки работы мышц и нервной системы, витамины группы B - для обменных процессов и энергии, витамин C - для антиоксидантной поддержки; используй только компоненты из evidenceBundle;
+- для Авитабс Men и Авитабс Women обязательно укажи "для взрослых с 18 лет", если возрастное ограничение не противоречит evidenceBundle; не переноси детские сценарии во взрослые витамины;
 - описание должно быть правдивым и читабельным, без артикулов, доменов, лишнего перечисления цветов/размеров и чужих брендов;
 - форму очков/оправы обязательно укажи в описании, если она есть в характеристиках или в подтвержденных целевых ключах;
 - не пиши "УФ-защита", "UV", "защита от ультрафиолета" как факт, если в характеристиках нет явного УФ/UV/ультрафиолетового признака; категория светопропускания сама по себе не является разрешением для фразы "УФ-защита";
@@ -10379,6 +10387,7 @@ CONTENT_MEDICAL_PROMISE_MARKERS = (
   "лечит",
   "вылечит",
   "вылечивает",
+  "лечебный эффект",
   "устраняет боль",
   "полностью устраняет",
   "гарантированно",
@@ -10389,6 +10398,20 @@ CONTENT_MEDICAL_PROMISE_MARKERS = (
   "не вызывает побочных эффектов",
   "безопасен для всех",
   "безопасно для всех",
+)
+
+CONTENT_MEDICAL_DISEASE_MARKERS = (
+  "фарингит",
+  "фарингите",
+  "ларингит",
+  "ларингите",
+  "трахеит",
+  "трахеите",
+  "бронхит",
+  "бронхите",
+  "ангина",
+  "ангине",
+  "орви",
 )
 
 
@@ -10446,6 +10469,15 @@ def content_reoptimization_is_throat_lozenge(card, keyword_rows=None):
   return has_form and has_throat_context
 
 
+def content_reoptimization_is_supplement_or_vitamin(card, keyword_rows=None):
+  field_text = content_reoptimization_card_field_text(card, include_description=True)
+  keyword_text = audit_normalized(semantic_keyword_text(keyword_rows or []))
+  combined = f"{field_text} {keyword_text}".strip()
+  if not combined:
+    return False
+  return any(marker in combined for marker in ("бад", "витамин", "мультивитамин", "авитабс", "avitabs"))
+
+
 def content_reoptimization_clean_product_label(*values, fallback="Товар"):
   for value in values:
     label = audit_str(value, 180)
@@ -10480,6 +10512,12 @@ def content_reoptimization_sentence_has_unconfirmed_claim(sentence, card):
     return False
   if any(marker in normalized for marker in CONTENT_MEDICAL_PROMISE_MARKERS):
     return True
+  if any(marker in normalized for marker in CONTENT_MEDICAL_DISEASE_MARKERS):
+    if card and (
+      content_reoptimization_is_throat_lozenge(card)
+      or content_reoptimization_is_supplement_or_vitamin(card)
+    ):
+      return True
   fact_text = audit_normalized(" ".join([
     content_reoptimization_card_field_text(card, include_description=True),
     " ".join(
@@ -10770,11 +10808,18 @@ def content_reoptimization_lozenge_query_allowed(query, card):
   normalized = audit_normalized(query)
   if any(marker in normalized for marker in ("лечит", "вылеч", "избав", "устраня", "гарант", "безопасн для")):
     return False
+  if any(marker in normalized for marker in CONTENT_MEDICAL_DISEASE_MARKERS):
+    return False
   if "без сахар" in normalized and not content_reoptimization_card_has_marker(card, ("без сахар",)):
     return False
   if "диабет" in normalized and not content_reoptimization_card_has_marker(card, ("диабет", "углеводн")):
     return False
   if "подсласт" in normalized and not content_reoptimization_card_has_marker(card, ("подсласт",)):
+    return False
+  ingredient_markers = ("солод", "имбир", "амл", "терминал")
+  if any(marker in normalized for marker in ingredient_markers) and not content_reoptimization_card_has_marker(card, ingredient_markers):
+    return False
+  if "натураль" in normalized and not content_reoptimization_card_has_marker(card, ("натураль", "раститель", "трав")):
     return False
   return True
 
@@ -10808,15 +10853,31 @@ def content_reoptimization_keyword_safe(query, card):
       "леденец",
       "пастилки",
       "пастилок",
+      "пастилка",
+      "растительные",
+      "растительный",
+      "натуральный",
+      "натуральные",
+      "состав",
+      "состава",
+      "солодка",
+      "солодки",
+      "имбирь",
+      "имбиря",
+      "амла",
+      "амлы",
+      "сухость",
+      "сухости",
       "горла",
       "горло",
       "кашля",
       "кашель",
       "простуды",
       "простуда",
-      "ангины",
-      "ангина",
       "першения",
+      "першение",
+      "голоса",
+      "голос",
     }
     return bool(tokens & lozenge_tokens) and content_reoptimization_lozenge_query_allowed(query, card)
   product_tokens = {"оправа", "оправы", "очк", "очки", "линз", "линзы", "зрени", "зрение"}
@@ -10827,13 +10888,23 @@ def content_reoptimization_keyword_sentence(query, product_kind=""):
   clean_query = audit_str(query, 120)
   normalized = audit_normalized(clean_query)
   if product_kind == "lozenges":
+    if any(marker in normalized for marker in CONTENT_MEDICAL_DISEASE_MARKERS):
+      return ""
+    if "голос" in normalized:
+      return f"{clean_query[:1].upper() + clean_query[1:]} уместны после долгих разговоров, выступлений или работы с клиентами, когда хочется смягчить ощущение сухости."
+    if "сух" in normalized and "горл" in normalized:
+      return f"{clean_query[:1].upper() + clean_query[1:]} помогают поддержать комфорт слизистой за счет медленного рассасывания."
+    if any(marker in normalized for marker in ("солод", "имбир", "амл")):
+      return f"Запрос {clean_query} раскрывается через подтвержденный состав и растительный комплекс без медицинских обещаний."
+    if "натураль" in normalized or "раститель" in normalized or "состав" in normalized:
+      return f"{clean_query[:1].upper() + clean_query[1:]} важны покупателям, которые выбирают мягкий формат для горла по компонентам и вкусу."
     if "сух" in normalized and "каш" in normalized:
       return f"Если нужны {clean_query}, медленное рассасывание помогает увлажнить слизистую и уменьшить ощущение раздражения."
     if "каш" in normalized:
-      return f"{clean_query[:1].upper() + clean_query[1:]} удобно использовать как вспомогательный формат для смягчения горла после еды."
+      return f"{clean_query[:1].upper() + clean_query[1:]} удобно использовать как вспомогательный формат при дискомфорте и раздражении в горле."
     if "горл" in normalized or "перш" in normalized:
       return f"{clean_query[:1].upper() + clean_query[1:]} помогают дольше удерживать растительные компоненты на слизистой при рассасывании."
-    if "простуд" in normalized or "орви" in normalized or "ангин" in normalized:
+    if "простуд" in normalized:
       return f"При первых признаках простуды {clean_query} можно рассматривать как вспомогательное средство, если нет индивидуальной непереносимости."
     return f"Если нужны {clean_query}, сверяйте вкус, состав, возрастные ограничения и способ применения на упаковке."
   if product_kind == "sunglasses":
@@ -10885,9 +10956,9 @@ def content_reoptimization_direct_keyword_sentence(query, card, product_kind="",
     return ""
   if product_kind == "lozenges":
     variants = [
-      f"Если нужны {clean_query}, ориентируйтесь на состав, вкус, возрастные ограничения и способ применения.",
+      f"Если нужны {clean_query}, ориентируйтесь на растительный состав, вкус, возрастные ограничения и способ применения.",
       f"{clean_query[:1].upper() + clean_query[1:]} удобно медленно рассасывать после еды, если такой режим указан на упаковке.",
-      f"Такие {clean_query} стоит использовать как вспомогательное средство при дискомфорте в горле.",
+      f"Такие {clean_query} можно использовать как вспомогательный формат при сухости, першении и дискомфорте в горле.",
     ]
     return variants[index % len(variants)]
   if product_kind == "sunglasses" or any(marker in normalized for marker in ("солнц", "солнеч", "от солнца")):
@@ -11141,6 +11212,102 @@ def content_reoptimization_kit_sentence(values, product_kind="frame"):
     details_text = "; ".join(details)
     return f"В комплект входят {kit_text}. {details_text[:1].upper() + details_text[1:]}."
   return f"В комплект входят {kit_text}."
+
+
+def content_reoptimization_lozenge_taste_phrase(taste, card_text):
+  text = audit_normalized(f"{taste} {card_text}")
+  if ("мед" in text or "мёд" in text) and "лимон" in text:
+    return "медом и лимоном"
+  if ("мед" in text or "мёд" in text) and "имбир" in text:
+    return "медом и имбирем"
+  if "малин" in text:
+    return "малиновым вкусом"
+  if "апельс" in text:
+    return "апельсиновым вкусом"
+  if "лимон" in text:
+    return "лимонным вкусом"
+  if "имбир" in text:
+    return "имбирным вкусом"
+  if "мед" in text or "мёд" in text:
+    return "медовым вкусом"
+  taste = audit_str(taste, 80)
+  return f"вкусом {taste}" if taste else ""
+
+
+def content_reoptimization_lozenge_taste_accent(taste, card_text):
+  text = audit_normalized(f"{taste} {card_text}")
+  if ("мед" in text or "мёд" in text) and "лимон" in text:
+    return "Классическое сочетание меда и лимона воспринимается привычно: мягкая сладость сочетается со свежей цитрусовой нотой."
+  if ("мед" in text or "мёд" in text) and "имбир" in text:
+    return "Медово-имбирный вкус дает теплую пряную ноту, поэтому пастилки приятно рассасывать в холодный сезон или после долгих разговоров."
+  if "лимон" in text:
+    return "Лимонный вкус освежает и хорошо подходит тем, кто много говорит, выступает, работает с клиентами или хочет поддержать комфорт голоса."
+  if "малин" in text:
+    return "Малиновый вкус делает формат мягким и знакомым, без ощущения лекарственной инструкции в карточке товара."
+  if "апельс" in text:
+    return "Апельсиновый вкус легко вписывается в ежедневный сценарий: упаковку удобно держать дома, в офисе, сумке или автомобиле."
+  if "имбир" in text:
+    return "Имбирный вкус дает согревающую пряную ноту и помогает сделать рассасывание более приятным."
+  return "Приятный вкус помогает медленно рассасывать пастилку без спешки, а сам формат удобно брать с собой."
+
+
+def content_reoptimization_lozenge_ingredient_names(composition, card_text):
+  text = audit_normalized(f"{composition} {card_text}")
+  ingredients = []
+  for marker, label in (
+    ("солод", "солодкой"),
+    ("имбир", "имбирем"),
+    ("амл", "амлой"),
+    ("терминал", "терминалией белерикой"),
+  ):
+    if marker in text:
+      ingredients.append(label)
+  return ingredients
+
+
+def content_reoptimization_lozenge_ingredient_benefits(composition, card_text):
+  text = audit_normalized(f"{composition} {card_text}")
+  benefits = []
+  if "солод" in text:
+    benefits.append("солодка поддерживает ощущение мягкости и комфорта слизистой")
+  if "имбир" in text:
+    benefits.append("имбирь добавляет теплую пряную ноту")
+  if "амл" in text:
+    benefits.append("амла дополняет растительный комплекс кислой фруктовой нотой")
+  if "терминал" in text:
+    benefits.append("терминалия белерика работает как часть растительного комплекса")
+  return benefits
+
+
+def content_reoptimization_quantity_pack_label(quantity):
+  normalized = audit_normalized(quantity)
+  if "16" in normalized or ("2" in normalized and "8" in normalized):
+    return "16 леденцов в упаковке"
+  return audit_str(quantity, 120)
+
+
+def content_reoptimization_is_avitabs_adult_line(card):
+  card_text = content_reoptimization_card_field_text(card, include_description=True)
+  if not any(marker in card_text for marker in ("авитабс", "avitabs")):
+    return False
+  return any(marker in card_text for marker in (" men", "мен", "муж", " women", "вумен", "жен"))
+
+
+def content_reoptimization_has_18_plus(text):
+  normalized = audit_normalized(text)
+  return any(marker in normalized for marker in ("18+", "18 лет", "с 18", "старше 18", "взросл"))
+
+
+def content_reoptimization_apply_client_postprocess(description, card):
+  text = audit_str(description, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  if not text:
+    return ""
+  if content_reoptimization_is_avitabs_adult_line(card) and not content_reoptimization_has_18_plus(text):
+    text = content_reoptimization_append_sentence_with_room(
+      text,
+      "Подходит для взрослых с 18 лет; перед применением проверьте состав, способ приема и индивидуальные ограничения.",
+    )
+  return content_description_sentence_limit(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
 
 def content_reoptimization_sunglasses_description(card, keyword_rows, facts, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_TARGET_MAX):
@@ -11435,34 +11602,64 @@ def content_reoptimization_lozenge_description(card, keyword_rows, facts, max_ch
   contraindications = fact(["Противопоказания", "Ограничения"])
   adult_only = any(marker in card_text for marker in ("18+", "18 лет", "старше 18", "взросл"))
   plant_based = any(marker in card_text for marker in ("раститель", "трав"))
+  is_traverin = "траверин" in card_text
+  taste_phrase = content_reoptimization_lozenge_taste_phrase(taste, card_text)
+  taste_accent = content_reoptimization_lozenge_taste_accent(taste, card_text)
+  ingredient_names = content_reoptimization_lozenge_ingredient_names(composition, card_text)
+  ingredient_benefits = content_reoptimization_lozenge_ingredient_benefits(composition, card_text)
+  pack_label = content_reoptimization_quantity_pack_label(quantity)
 
   throat_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы для горла", "леденцы от горла", "леденцы от боли в горле"], contains=["горл"])
   cough_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы от кашля", "от кашля взрослым"], contains=["каш"])
   dry_cough_key = content_reoptimization_preferred_query(keyword_rows, preferred=["леденцы от сухого кашля"], contains=["сух"])
   cold_key = content_reoptimization_preferred_query(keyword_rows, preferred=["от простуды", "от простуды и первых признаков орви"], contains=["простуд"])
 
-  details = []
-  if taste:
-    details.append(f"вкус - {taste}")
-  if quantity:
-    details.append(f"упаковка - {quantity}")
-  opening = f"{product_label} - леденцы для горла"
-  if plant_based:
-    opening = f"{product_label} - растительные леденцы для горла"
-  if details:
-    opening = f"{opening}; {', '.join(details[:2])}"
-  opening = f"{opening}. Они подходят для медленного рассасывания, когда нужно смягчить слизистую и уменьшить ощущение першения."
+  if is_traverin:
+    ingredient_intro = content_reoptimization_join_ru(ingredient_names)
+    if taste_phrase and ingredient_intro:
+      opening_details = f" с {taste_phrase}, {ingredient_intro}"
+    elif taste_phrase:
+      opening_details = f" с {taste_phrase}"
+    elif ingredient_intro:
+      opening_details = f" с {ingredient_intro}"
+    else:
+      opening_details = ""
+    opening = (
+      f"ТРАВЕРИН - растительные леденцы для горла{opening_details}. "
+      "Натуральный растительный комплекс способствует смягчению слизистой, помогает уменьшить ощущение першения, сухости и дискомфорта в горле."
+    )
+  else:
+    details = []
+    if taste:
+      details.append(f"вкус - {taste}")
+    if quantity:
+      details.append(f"упаковка - {quantity}")
+    opening = f"{product_label} - леденцы для горла"
+    if plant_based:
+      opening = f"{product_label} - растительные леденцы для горла"
+    if details:
+      opening = f"{opening}; {', '.join(details[:2])}"
+    opening = f"{opening}. Они подходят для медленного рассасывания, когда нужно смягчить слизистую и уменьшить ощущение першения."
 
   paragraphs = [opening]
+  if is_traverin:
+    paragraphs.append(taste_accent)
+    benefit_sentences = []
+    if ingredient_benefits:
+      benefit_sentences.append(f"В составе: {content_reoptimization_join_ru(ingredient_benefits, limit=4)}.")
+    if pack_label:
+      benefit_sentences.append(f"Формат {pack_label} удобно брать с собой, держать на рабочем столе или использовать в дороге.")
+    benefit_sentences.append("Медленное рассасывание помогает дольше сохранять контакт растительного комплекса со слизистой и поддерживать комфорт верхних дыхательных путей.")
+    paragraphs.append(" ".join(benefit_sentences))
   use_sentences = []
   if throat_key:
     use_sentences.append(f"{throat_key[:1].upper() + throat_key[1:]} помогают поддерживать увлажнение слизистой за счет рассасывания и слюноотделения.")
   if cough_key:
     use_sentences.append(f"{cough_key[:1].upper() + cough_key[1:]} можно использовать как вспомогательный формат при дискомфорте в горле.")
   if dry_cough_key and audit_normalized(dry_cough_key) not in {audit_normalized(throat_key), audit_normalized(cough_key)}:
-    use_sentences.append(f"Если беспокоит сухость, {dry_cough_key} помогают смягчить раздражение без обещания лечебного эффекта.")
+    use_sentences.append(f"Если беспокоит сухость, {dry_cough_key} помогают смягчить ощущение раздражения в мягком формате.")
   if cold_key:
-    use_sentences.append(f"При первых признаках простуды леденцы удобно держать под рукой дома, на работе или в поездке.")
+    use_sentences.append(f"В сезон простуд пастилки удобно держать под рукой дома, на работе или в поездке.")
   if use_sentences:
     paragraphs.append(" ".join(use_sentences[:4]))
 
@@ -11474,7 +11671,7 @@ def content_reoptimization_lozenge_description(card, keyword_rows, facts, max_ch
   if composition:
     facts_block.append(f"Состав: {composition}.")
   if quantity and "упаков" not in audit_normalized(opening):
-    facts_block.append(f"В упаковке: {quantity}.")
+    facts_block.append(f"В упаковке: {pack_label or quantity}.")
   if facts_block:
     paragraphs.append(" ".join(facts_block))
 
@@ -14803,10 +15000,21 @@ def mpstats_expanding_seed_queries(card, query):
     if "горл" in content:
       mpstats_expanding_add_seed(seeds, seen, "леденцы от горла")
       mpstats_expanding_add_seed(seeds, seen, "леденцы при боли в горле")
+      mpstats_expanding_add_seed(seeds, seen, "пастилки для горла")
+      mpstats_expanding_add_seed(seeds, seen, "сухость в горле")
+      mpstats_expanding_add_seed(seeds, seen, "першение в горле")
+      mpstats_expanding_add_seed(seeds, seen, "для голоса")
     if "каш" in content:
       mpstats_expanding_add_seed(seeds, seen, "леденцы от кашля")
     if "растительн" in content or "трав" in content:
       mpstats_expanding_add_seed(seeds, seen, "растительные леденцы")
+      mpstats_expanding_add_seed(seeds, seen, "натуральный состав")
+    if "солод" in content:
+      mpstats_expanding_add_seed(seeds, seen, "солодка")
+    if "имбир" in content:
+      mpstats_expanding_add_seed(seeds, seen, "имбирь")
+    if "амл" in content:
+      mpstats_expanding_add_seed(seeds, seen, "амла")
     if "малин" in content:
       mpstats_expanding_add_seed(seeds, seen, "леденцы малина")
   if re.search(r"\bкошк|\bкошач|cat\s*eye", content):
@@ -14819,7 +15027,7 @@ def mpstats_expanding_seed_queries(card, query):
     mpstats_expanding_add_seed(seeds, seen, f"{base} поляризационные")
   if "авиатор" in content:
     mpstats_expanding_add_seed(seeds, seen, f"{base} авиаторы")
-  return seeds[:6]
+  return seeds[:12 if primary_is_lozenges else 6]
 
 
 def mpstats_expanding_query_relevant(card, query, seed_queries):
@@ -17362,6 +17570,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   next_description = content_reoptimization_expand_description(next_description, card, target_keywords)
   next_description = content_reoptimization_apply_direct_desired_keywords(next_description, card, desired)
   next_description = content_reoptimization_remove_output_leaks(next_description, card=card) or next_description
+  next_description = content_reoptimization_apply_client_postprocess(next_description, card)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
   rule_title = sunglasses_rule_title or frame_rule_title

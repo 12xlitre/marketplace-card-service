@@ -8025,7 +8025,7 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
           <h2>{isOzon && !hasPortals ? emptyOzonTitle : `${label}: кабинеты клиента`}</h2>
           <p>
             {isOzon && !hasPortals
-              ? "У клиента пока нет Ozon-контура. Создайте beta-кабинет, чтобы тестировать Ozon отдельно от WB."
+              ? "У клиента пока нет Ozon-контура. Создайте beta-кабинет, чтобы тестировать Ozon отдельно от других маркетплейсов."
               : `${label}: карточки, задачи и отчетные периоды внутри клиента.`}
           </p>
         </div>
@@ -8080,7 +8080,7 @@ function OzonEmptyCard({ client, onAddOzon }) {
       <div className="ozon-empty-list">
         <span>Сначала укажите ссылку на кабинет, Seller ID или SKU.</span>
         <span>После создания можно проверить источник через MPStats.</span>
-        <span>Карточки, задачи и периоды будут отдельными от WB.</span>
+        <span>Карточки, задачи и периоды будут отдельными от других маркетплейсов.</span>
       </div>
       <div className="card-actions">
         <Tag tone="amber">MPStats beta</Tag>
@@ -8099,7 +8099,7 @@ function EmptyMarketplaceState({ marketplaceTab }) {
       <Tags size={20} />
       <div>
         <strong>{marketplaceTitle(marketplaceTab)}: кабинетов пока нет</strong>
-        <p>{marketplaceTab === "ozon" ? "Раздел включен как beta-каркас без API и без влияния на WB." : "Добавьте WB-кабинет, чтобы начать работу по клиенту."}</p>
+        <p>{marketplaceTab === "ozon" ? "Раздел включен как beta-каркас без API и без влияния на другие маркетплейсы." : "Добавьте WB-кабинет, чтобы начать работу по клиенту."}</p>
       </div>
     </div>
   );
@@ -8729,16 +8729,74 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     { title: "Кабинет Ozon", status: "создан", className: "active" },
     { title: "Источник Ozon", status: sourceConfigured ? "задан" : "не задан", className: sourceConfigured ? "active" : "paused" },
     { title: "Карточки Ozon", status: sourceConfigured ? "следующий шаг" : "после источника", className: "pending" },
-    { title: "СЯ через MPStats", status: "WB keyword-база", className: "pending" },
+    { title: "СЯ через MPStats", status: "keyword-база", className: "pending" },
     { title: "Задачи Ozon", status: "после карточек", className: "pending" },
     { title: "Отчеты Ozon", status: "клиентский XLSX", className: "active" },
   ];
   const sourceDescription = sourceConfigured
-    ? "Кабинет заведен без Ozon Seller API, а карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Ozon API можно подключить позже."
-    : "Кабинет заведен без Ozon Seller API. Здесь фиксируем ссылку на магазин, Seller ID, список SKU или исходные данные клиента; карточки можно загрузить через MPStats или позже подключить API.";
+    ? "Кабинет заведен без Ozon Seller API, а карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Ozon Seller API можно подключить позже."
+    : "Кабинет заведен без Ozon Seller API. Здесь фиксируем ссылку на магазин, Seller ID, список SKU или исходные данные клиента; карточки можно загрузить через MPStats или позже подключить Ozon Seller API.";
   const ozonTasks = Array.isArray(ozonWorkState.tasks) ? ozonWorkState.tasks : [];
   const ozonActiveTasks = ozonTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status)).length;
   const ozonSubmittedTasks = ozonTasks.filter((task) => task.status === "submitted").length;
+  const ozonCards = Array.isArray(portal.realCards) ? portal.realCards : [];
+  const semanticDraftMap = ozonDraftMap(ozonSemanticDrafts);
+  const contentDraftMap = ozonDraftMap(ozonCardDrafts);
+  const ozonSemanticFinalCount = ozonCards.filter((card) => ozonSemanticDraftHasFinal(semanticDraftMap.get(ozonCardStableKey(card)))).length;
+  const ozonContentFinalCount = ozonCards.filter((card) => ozonCardDraftHasFinalContent(contentDraftMap.get(ozonCardStableKey(card)))).length;
+  const ozonLaunchChecks = [
+    {
+      key: "source",
+      label: "Источник Ozon",
+      ready: sourceConfigured,
+      value: sourceConfigured ? "задан" : "не задан",
+      note: sourceConfigured ? "MPStats может искать карточки по сохраненному ориентиру." : "Нужна ссылка продавца, Seller ID, SKU/Ozon ID или offer ID.",
+    },
+    {
+      key: "cards",
+      label: "Карточки",
+      ready: ozonCards.length > 0,
+      value: ozonCards.length ? `${formatNumber(ozonCards.length)} сохранено` : "нет карточек",
+      note: ozonCards.length ? "Ozon snapshot готов для задач и отчета." : "Сначала выполните MPStats-проверку и сохраните найденные карточки.",
+    },
+    {
+      key: "tasks",
+      label: "Задачи",
+      ready: ozonTasks.length > 0,
+      value: ozonTasks.length ? `${formatNumber(ozonTasks.length)} создано` : "нет задач",
+      note: ozonTasks.length ? "Рабочий набор уже заведен в Ozon-контуре." : "Выберите карточки ниже и нажмите Взять в работу.",
+    },
+    {
+      key: "semantic-workflow",
+      label: "СЯ workflow",
+      ready: ozonCards.length > 0,
+      value: ozonCards.length ? "готов" : "ждет карточки",
+      note: ozonCards.length ? "Процесс СЯ работает как в WB: текущие, к добавлению, к исключению и итог." : "СЯ станет доступно сразу после сохранения Ozon-карточек.",
+    },
+    {
+      key: "semantic-result",
+      label: "Итоговое СЯ",
+      ready: ozonSemanticFinalCount > 0,
+      value: ozonSemanticFinalCount ? `${formatNumber(ozonSemanticFinalCount)} карточек` : "результат не сохранен",
+      note: ozonSemanticFinalCount ? "Файл итогового СЯ можно собирать по сохраненным карточкам." : "Workflow готов; осталось открыть карточку и сохранить финальный набор.",
+    },
+    {
+      key: "content",
+      label: "Итоговый контент",
+      ready: ozonContentFinalCount > 0,
+      value: ozonContentFinalCount ? `${formatNumber(ozonContentFinalCount)} карточек` : "не принят",
+      note: ozonContentFinalCount ? "Есть принятый Ozon-контент для выгрузки." : "Во вкладке Изменения примите контент хотя бы по одной карточке.",
+    },
+    {
+      key: "report",
+      label: "Отчет XLSX",
+      ready: ozonCards.length > 0,
+      value: ozonCards.length ? "можно скачать" : "пока нечего",
+      note: ozonCards.length ? "Клиентский Ozon XLSX соберется из текущего snapshot." : "Отчет станет доступен после сохранения Ozon-карточек.",
+    },
+  ];
+  const launchReadyCount = ozonLaunchChecks.filter((item) => item.ready).length;
+  const launchNextStep = ozonLaunchChecks.find((item) => !item.ready);
 
   return (
     <section className="screen active marketplace-theme-ozon">
@@ -8760,11 +8818,11 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
           <div className="seller-main">
             <WorkspaceTabs items={sellerWorkspaceTabs} active={activeSellerTab} onChange={setSellerTab} ariaLabel="Разделы Ozon-кабинета" />
             <HelpHint enabled={helpEnabled} title="Ozon beta">
-              Этот кабинет не использует WB API. Карточки, задачи и отчетные периоды будут развиваться как отдельный Ozon-поток, а семантика может брать ключи из MPStats по WB keyword-базе.
+              Кабинет работает на Ozon snapshot и MPStats. Карточки, задачи и отчетные периоды хранятся в отдельном Ozon-контуре, а семантика честно помечает источник keyword-базы.
             </HelpHint>
 
             {canManage ? (
-              <details className="cabinet-management" open={nameEditing || undefined}>
+              <details className="cabinet-management" open={nameEditing || sourceEditing || undefined}>
                 <summary>
                   <div>
                     <Settings size={17} />
@@ -8790,7 +8848,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <button className="btn" type="button" onClick={() => setNameEditing(true)}><Pencil size={16} />Редактировать</button>
                     )}
                   </div>
-                  <details className="management-subpanel">
+                  <details className="management-subpanel" open={sourceEditing || !sourceConfigured || undefined}>
                     <summary><Store size={16} />Источник данных</summary>
                     <div className="management-subpanel-body">
                       <p>{sourceDescription}</p>
@@ -8836,15 +8894,27 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                           <Search size={16} />Проверить источник
                         </button>
                       </div>
-                      <OzonMpstatsProbeResult result={probeResult} status={probeStatus} canSave={false} saveStatus={probeSaveStatus} onSave={saveOzonProbeCards} />
+                      {!sourceConfigured ? (
+                        <div className="empty-state compact">
+                          <strong>Источник Ozon не задан</strong>
+                          <span>Укажите ссылку на продавца, Seller ID, SKU/Ozon ID или offer ID. После этого MPStats-проверка станет доступна.</span>
+                        </div>
+                      ) : null}
+                      <OzonMpstatsProbeResult
+                        result={probeResult}
+                        status={probeStatus}
+                        canSave={canManage && Array.isArray(probeResult?.cards) && probeResult.cards.length > 0}
+                        saveStatus={probeSaveStatus}
+                        onSave={saveOzonProbeCards}
+                      />
                     </div>
                   </details>
                   <details className="management-subpanel">
                     <summary><Settings size={16} />Контур Ozon</summary>
                     <div className="security-inline-list">
-                      <div><span>Ozon API</span><strong>не подключен</strong></div>
-                      <div><span>WB API</span><strong>не используется</strong></div>
-                      <div><span>MPStats</span><strong>WB ключи для СЯ</strong></div>
+                      <div><span>Ozon Seller API</span><strong>не подключен</strong></div>
+                      <div><span>Контур данных</span><strong>только Ozon snapshot</strong></div>
+                      <div><span>MPStats</span><strong>keyword-база для СЯ</strong></div>
                     </div>
                   </details>
                 </div>
@@ -8868,6 +8938,18 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                     <Metric label="На согласовании" value={formatNumber(ozonSubmittedTasks)} />
                   </div>
                 </section>
+
+                <OzonLaunchChecklist
+                  items={ozonLaunchChecks}
+                  readyCount={launchReadyCount}
+                  totalCount={ozonLaunchChecks.length}
+                  nextStep={launchNextStep}
+                  loading={probeStatus === "loading" || probeSaveStatus === "saving"}
+                  onEditSource={canManage ? () => setSourceEditing(true) : null}
+                  onRefreshCards={canManage && sourceConfigured ? () => runOzonMpstatsProbe({ autoSave: true }) : null}
+                  onOpenTasks={() => setSellerTab("tasks")}
+                  onOpenReports={() => setSellerTab("reports")}
+                />
 
                 <SellerCommandCenter
                   marketplace="Ozon"
@@ -8931,7 +9013,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   <div className="strip-head">
                     <div>
                       <h2>Маршрут Ozon</h2>
-                      <p>Форма работы похожа на WB, но карточки, задачи и отчеты будут храниться в Ozon-контуре.</p>
+                      <p>Форма работы единая с остальными кабинетами, но карточки, задачи и отчеты хранятся в Ozon-контуре.</p>
                     </div>
                     <Tag tone="blue">{sourceConfigured ? "2 из 6" : "1 из 6"}</Tag>
                   </div>
@@ -8963,8 +9045,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
                     </button>
                   </div>
-                  {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового Ozon-СЯ пока нет.</p> : null}
-                  {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого Ozon-контента пока нет.</p> : null}
+                  {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Итоговое Ozon-СЯ нечего скачать: откройте карточку, сохраните финальный набор во вкладке СЯ и повторите выгрузку.</p> : null}
+                  {cabinetExportStatus === "content-empty" ? <p className="status-note">Итоговый Ozon-контент нечего скачать: сначала примите контент хотя бы по одной карточке во вкладке Изменения.</p> : null}
                 </section>
 
                 <OzonCardsPanel
@@ -9015,7 +9097,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   );
 }
 
-function OzonPlaceholderPanel({ title, copy, tag }) {
+function OzonPlaceholderPanel({ title, copy, tag, steps = [] }) {
   return (
     <section className="workspace-strip audit-workspace">
       <div className="strip-head">
@@ -9028,6 +9110,62 @@ function OzonPlaceholderPanel({ title, copy, tag }) {
       <div className="empty-state">
         <strong>Ozon beta</strong>
         <span>{copy}</span>
+        {steps.length ? (
+          <div className="empty-state-steps">
+            {steps.map((step) => <em key={step}>{step}</em>)}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function OzonLaunchChecklist({ items, readyCount, totalCount, nextStep, loading = false, onEditSource, onRefreshCards, onOpenTasks, onOpenReports }) {
+  const complete = readyCount >= totalCount;
+  const tone = complete ? "green" : readyCount > 1 ? "blue" : "amber";
+  const nextAction = (() => {
+    if (!nextStep) return { label: "Открыть отчеты", onClick: onOpenReports, Icon: FileText };
+    if (nextStep.key === "source") return { label: "Задать источник", onClick: onEditSource, Icon: Store };
+    if (nextStep.key === "cards") return { label: "Обновить карточки", onClick: onRefreshCards, Icon: RefreshCw };
+    if (nextStep.key === "tasks") return { label: "Выбрать карточки ниже", onClick: null, Icon: ClipboardList };
+    if (nextStep.key === "semantic-workflow") return { label: "Обновить карточки", onClick: onRefreshCards, Icon: RefreshCw };
+    if (nextStep.key === "semantic-result" || nextStep.key === "content") return { label: "Открыть задачи", onClick: onOpenTasks, Icon: ClipboardList };
+    return { label: "Открыть отчеты", onClick: onOpenReports, Icon: FileText };
+  })();
+  const ActionIcon = nextAction.Icon;
+  return (
+    <section className="workspace-strip ozon-launch-checklist">
+      <div className="strip-head">
+        <div>
+          <h2>Ozon перед запуском</h2>
+          <p>{complete ? "Базовый контур готов: источник, карточки, задачи и выгрузки доступны." : `Ближайший шаг: ${nextStep?.note || "проверьте Ozon-контур."}`}</p>
+        </div>
+        <Tag tone={tone}>{formatNumber(readyCount)} из {formatNumber(totalCount)}</Tag>
+      </div>
+      <div className="ozon-launch-grid">
+        {items.map((item) => (
+          <div className={`ozon-launch-row ${item.ready ? "ready" : "pending"}`} key={item.key}>
+            <div className="ozon-launch-status">
+              {item.ready ? <CheckSquare size={16} /> : <AlertTriangle size={16} />}
+            </div>
+            <div>
+              <strong>{item.label}</strong>
+              <span>{item.note}</span>
+            </div>
+            <Tag tone={item.ready ? "green" : "amber"}>{item.value}</Tag>
+          </div>
+        ))}
+      </div>
+      <div className="ozon-launch-next">
+        <div>
+          <span>{complete ? "Статус" : "Следующее действие"}</span>
+          <strong>{complete ? "Можно проводить первый рабочий проход" : nextStep?.label || "Проверка Ozon"}</strong>
+        </div>
+        {nextAction.onClick ? (
+          <button className={loadingButtonClass("btn primary", loading && nextStep?.key === "cards")} type="button" onClick={nextAction.onClick} disabled={loading && nextStep?.key === "cards"} aria-busy={(loading && nextStep?.key === "cards") || undefined}>
+            <ActionIcon size={16} />{loading && nextStep?.key === "cards" ? "Обновляем" : nextAction.label}
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -9292,7 +9430,7 @@ function ozonSemanticDraftRows(card, seedQuery = "") {
       status: "recommended",
       frequency: "",
       position: "",
-      source: index < seedTokens.length ? "MPStats/WB keyword-база" : "Ozon snapshot",
+      source: index < seedTokens.length ? "MPStats keyword-база" : "Ozon snapshot",
     }));
   return { current, recommendations };
 }
@@ -9438,7 +9576,7 @@ function buildOzonSemanticCoreSheets(cards, drafts) {
       widths: [32, 96],
       rows: [
         ["Раздел", "Описание"],
-        ["Ozon СЯ", "Файл собран из сохраненных итоговых СЯ Ozon-карточек. WB API и WB card_drafts не используются."],
+        ["Ozon СЯ", "Файл собран из сохраненных итоговых СЯ Ozon-карточек. Таблицы и API других маркетплейсов не используются."],
         ["Итоговое СЯ", "Финальный набор ключей, сохраненный во вкладке Семантическое ядро Ozon."],
       ],
     },
@@ -9602,7 +9740,7 @@ function ozonReportCoverageItems(cards) {
     }),
     item({
       block: "Карточка",
-      label: "Артикул продавца",
+      label: "Offer ID",
       filled: count((card) => ozonReportHasValue(ozonReportOfferId(card))),
       source: "Ozon snapshot / MPStats",
       action: "Проверить, что offer ID сохранен в карточке",
@@ -9647,21 +9785,21 @@ function ozonReportCoverageItems(cards) {
       label: "Текущая цена",
       filled: count((card) => ozonReportHasValue(ozonReportPriceFromCard(card))),
       source: "Ozon snapshot; позже Ozon Seller API",
-      action: "Подключить цены и остатки Ozon API для полного обновления",
+      action: "Подключить цены и остатки Ozon Seller API для полного обновления",
     }),
     item({
       block: "Цены и остатки",
       label: "Остаток",
       filled: count((card) => ozonReportHasValue(ozonReportStockFromCard(card))),
       source: "Ozon snapshot; позже Ozon Seller API",
-      action: "Подключить складские остатки Ozon API",
+      action: "Подключить складские остатки Ozon Seller API",
     }),
     item({
       block: "Аналитика",
       label: "Заказы",
       filled: count((card) => ozonReportHasValue(ozonReportCurrentOrders(card))),
       source: "Ozon snapshot / MPStats; позже Ozon Seller API",
-      action: "Подключить аналитику товаров Ozon API",
+      action: "Подключить аналитику товаров Ozon Seller API",
       waitsApi: true,
     }),
     item({
@@ -9669,7 +9807,7 @@ function ozonReportCoverageItems(cards) {
       label: "Выручка",
       filled: count((card) => ozonReportHasValue(ozonReportRevenue(card))),
       source: "Ozon snapshot / MPStats; позже Ozon Seller API",
-      action: "Подключить аналитику заказов Ozon API",
+      action: "Подключить аналитику заказов Ozon Seller API",
       waitsApi: true,
     }),
     item({
@@ -9828,7 +9966,7 @@ function ozonReportInstructionRows() {
     [10, "Финансовая выгрузка по SKU", "OZON_ФИНАНСЫ_ЗАГРУЗКА", "Маржинальность по строке"],
     [11, "Автоматический контроль", "OZON_СВОД_ПО_SKU", "Расход, выручка, ДРР, маржа и оборачиваемость"],
     [],
-    ["ВАЖНО", "Артикул продавца - основной ключ сопоставления. Он должен совпадать с колонкой C недельного листа.", "", ""],
+    ["ВАЖНО", "Offer ID - основной ключ сопоставления. Он должен совпадать с колонкой C недельного листа.", "", ""],
     ["ВАЖНО", "В текущем beta-режиме Ozon Seller API еще не подключен, поэтому часть коммерческих колонок может быть пустой.", "", ""],
   ];
 }
@@ -9841,8 +9979,8 @@ function ozonReportMainRows(portal, cards, period) {
     reportHeaderRow([
       "Товар",
       "Цвет",
-      "Артикул",
-      "Озон ID",
+      "Offer ID",
+      "Ozon ID / SKU",
       "Категория АБС",
       "Текущая цена",
       "Рыночная цена конкурентов, руб.",
@@ -9920,7 +10058,7 @@ function ozonReportMainRows(portal, cards, period) {
 }
 
 function ozonReportSkuSummaryRows(cards) {
-  const rows = [reportHeaderRow(["Артикул", "SKU", "Рекламный расход, ₽", "Локализация заказов, %", "Выручка, ₽", "ДРР", "Продажи товара, шт.", "Маржинальность, ₽", "Остатки FBO, шт.", "Среднесуточные продажи, шт.", "Оборачиваемость, дней", "Проверка", "Комментарий"])];
+  const rows = [reportHeaderRow(["Offer ID", "SKU", "Рекламный расход, ₽", "Локализация заказов, %", "Выручка, ₽", "ДРР", "Продажи товара, шт.", "Маржинальность, ₽", "Остатки FBO, шт.", "Среднесуточные продажи, шт.", "Оборачиваемость, дней", "Проверка", "Комментарий"])];
   for (const card of Array.isArray(cards) ? cards : []) {
     const hasCommercial = Boolean(ozonReportPriceFromCard(card) || ozonReportStockFromCard(card) || ozonReportCurrentOrders(card));
     rows.push([
@@ -9949,61 +10087,61 @@ function ozonReportUploadRows(cards, kind) {
     analytics: [
       ["OZON - АНАЛИТИКА ТОВАРОВ"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Категория АБС", "Сумма заказов", "Позиция", "CTR", "Кол-во заказов", "Индекс цен", "Текущая ситуация CPC"]),
+      reportHeaderRow(["Offer ID", "Категория АБС", "Сумма заказов", "Позиция", "CTR", "Кол-во заказов", "Индекс цен", "Текущая ситуация CPC"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["abcCategory", "abc", "abc_group"]), ozonReportRevenue(card), reportNumber(ozonReportMetric(card, ["position", "searchPosition"])), ozonReportCtr(card), ozonReportCurrentOrders(card), ozonReportMetric(card, ["priceIndex", "indexPrice", "price_index"]), ozonReportMetric(card, ["currentCpcSituation", "cpcSituation"])]),
     ],
     prices: [
       ["OZON - ЦЕНЫ И ОСТАТКИ"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Остаток на складах, шт", "Текущая цена", "Озон ID", "Рыночная цена конкурентов, руб."]),
+      reportHeaderRow(["Offer ID", "Остаток на складах, шт", "Текущая цена", "Ozon ID / SKU", "Рыночная цена конкурентов, руб."]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportStockFromCard(card), ozonReportPriceFromCard(card), ozonReportSku(card), reportPrice(ozonReportMetric(card, ["marketPrice", "competitorPrice", "market_price"]))]),
     ],
     cpo: [
       ["OZON - CPO"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Текущая ситуация CPO, шт."]),
+      reportHeaderRow(["Offer ID", "Текущая ситуация CPO, шт."]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["currentCpoSituation", "cpoSituation"])]),
     ],
     turnover: [
       ["OZON - ОБОРАЧИВАЕМОСТЬ"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Дней до конца остатка", "Товаров в пути, шт.", "Среднесуточные продажи, шт"]),
+      reportHeaderRow(["Offer ID", "Дней до конца остатка", "Товаров в пути, шт.", "Среднесуточные продажи, шт"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportTurnoverDays(card), reportNumber(ozonReportMetric(card, ["inboundStock", "stockInTransit"])), ozonReportAverageSales(card)]),
     ],
     storage: [
       ["OZON - ПЛАТНОСТЬ"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Прогноз платности", "Платно, шт", "Дата первой платности"]),
+      reportHeaderRow(["Offer ID", "Прогноз платности", "Платно, шт", "Дата первой платности"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportMetric(card, ["paidStorageForecast", "storageForecast"]), reportNumber(ozonReportMetric(card, ["paidStorageCount", "paidStock"])), ozonReportMetric(card, ["paidStorageDate", "firstPaidStorageDate"])]),
     ],
     locality: [
       ["OZON - ЛОКАЛЬНОСТЬ"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "Наценка за нелокальную продажу, руб.", "Локализация заказов, %"]),
+      reportHeaderRow(["Offer ID", "Наценка за нелокальную продажу, руб.", "Локализация заказов, %"]),
       ...list.map((card) => [ozonReportOfferId(card), reportPrice(ozonReportMetric(card, ["localityMarkup", "nonLocalMarkup", "localOverpay"])), reportPercent(ozonReportMetric(card, ["localizationPercent", "localityPercent"]))]),
     ],
     orders: [
       ["OZON - ЗАКАЗЫ / РЕКЛАМА"],
       ["API/выгрузка заполняет данные с 4 строки."],
-      reportHeaderRow(["Артикул", "SKU", "Название товара", "Расход, ₽, с НДС", "Заказов", "Количество, шт.", "Заказано на сумму, ₽", "Расход, ₽, с НДС"]),
+      reportHeaderRow(["Offer ID", "SKU", "Название товара", "Расход, ₽, с НДС", "Заказов", "Количество, шт.", "Заказано на сумму, ₽", "Расход, ₽, с НДС"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), card?.title || "", reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"])), ozonReportCurrentOrders(card), ozonReportCurrentOrders(card), ozonReportRevenue(card), reportPrice(ozonReportMetric(card, ["adSpend", "advertSpend", "promoSpend"]))]),
     ],
     products: [
       ["OZON - ТОВАРЫ"],
       ["Вставьте данные с заголовками в строку 3."],
-      reportHeaderRow(["Артикул", "SKU", "Название товара", "Заказано товаров"]),
+      reportHeaderRow(["Offer ID", "SKU", "Название товара", "Заказано товаров"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), card?.title || "", ozonReportCurrentOrders(card)]),
     ],
     stock: [
       ["OZON - СТОК FBO"],
       ["Вставьте данные с заголовками в строку 3."],
-      reportHeaderRow(["Артикул", "SKU", "Доступно к продаже по схеме FBO, шт."]),
+      reportHeaderRow(["Offer ID", "SKU", "Доступно к продаже по схеме FBO, шт."]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), ozonReportStockFromCard(card)]),
     ],
     finance: [
       ["OZON - ФИНАНСЫ ПО SKU"],
       ["Вставьте исходные данные только в A:H. Колонка I в референсе рассчитывает маржинальность."],
-      reportHeaderRow(["Артикул", "SKU", "Фактическая сумма продаж", "Себестоимость товаров", "Комиссия за продажу", "Итого по весу", "Количество проданных единиц", "Количество заказанных единиц", "Маржинальность строки, ₽"]),
+      reportHeaderRow(["Offer ID", "SKU", "Фактическая сумма продаж", "Себестоимость товаров", "Комиссия за продажу", "Итого по весу", "Количество проданных единиц", "Количество заказанных единиц", "Маржинальность строки, ₽"]),
       ...list.map((card) => [ozonReportOfferId(card), ozonReportSku(card), ozonReportRevenue(card), "", "", "", "", ozonReportCurrentOrders(card), reportPrice(ozonReportMetric(card, ["margin", "profit", "marginRub"]))]),
     ],
   }[kind] || [];
@@ -10017,7 +10155,7 @@ function ozonReportSourceRows(portal, cards) {
   return [
     reportHeaderRow(["Блок", "Статус", "Источник", "Что нужно для полного автоматического отчета"]),
     ["Карточки Ozon", hasCards ? "есть" : "нет данных", "OptiCards Ozon snapshot / MPStats", "Сохранить карточки через Ozon MPStats probe или Ozon Seller API"],
-    ["Контент карточек", ozonReportCoverageBlockStatus(coverageItems, "Карточка"), "Ozon snapshot / MPStats", "Название, артикулы, категория, бренд, фото и характеристики"],
+    ["Контент карточек", ozonReportCoverageBlockStatus(coverageItems, "Карточка"), "Ozon snapshot / MPStats", "Название, offer ID, SKU, категория, бренд, фото и характеристики"],
     ["Аналитика товаров", ozonReportCoverageBlockStatus(coverageItems, "Аналитика", true), "Ozon snapshot / MPStats; позже Ozon Seller API", "Категория АБС, заказы, выручка, позиция, CTR, индекс цен, CPC"],
     ["Цены и остатки", ozonReportCoverageBlockStatus(coverageItems, "Цены и остатки"), "Ozon snapshot; позже Ozon Seller API", "Текущая цена, остаток, Ozon ID, цены конкурентов"],
     ["CPO/CPC", ozonReportCoverageBlockStatus(coverageItems, "Реклама", true), "Ozon Performance / отчеты оплаты за заказ", "Расход, CPO, CPC, ДРР и статусы рекламных решений"],
@@ -10057,6 +10195,7 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   const [reportStatus, setReportStatus] = useState("idle");
   const selectedReport = ozonReportTemplate(selectedReportId);
   const cardsList = Array.isArray(cards) ? cards : [];
+  const hasReportCards = cardsList.length > 0;
   const coverageItems = ozonReportCoverageItems(cardsList);
   const snapshotItems = coverageItems.filter((item) => !item.waitsApi);
   const snapshotFilled = snapshotItems.reduce((sum, item) => sum + item.filled, 0);
@@ -10123,6 +10262,11 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
 
   async function generateReport({ reportId = selectedReportId, reportPeriod = period } = {}) {
     if (!portal) return;
+    if (!hasReportCards) {
+      setReportStatus("empty");
+      onNotice?.("Ozon-отчет нечего скачать: сначала сохраните карточки из MPStats-проверки.");
+      return;
+    }
     if (!reportPeriod.start || !reportPeriod.end || reportPeriod.start > reportPeriod.end) {
       onNotice?.("Выберите корректный период отчета.");
       return;
@@ -10201,11 +10345,19 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
               По какое число
               <input type="date" value={period.end} onChange={(event) => setPeriod((current) => ({ ...current, end: event.target.value }))} />
             </label>
-            <button className={loadingButtonClass("btn primary", isLoading)} type="button" onClick={() => generateReport()} disabled={!portal || isLoading} aria-busy={isLoading || undefined}>
+            <button className={loadingButtonClass("btn primary", isLoading)} type="button" onClick={() => generateReport()} disabled={!portal || isLoading || !hasReportCards} aria-busy={isLoading || undefined}>
               <Download size={17} />{isLoading ? "Формируем" : "Сформировать"}
             </button>
           </div>
         </div>
+        {!hasReportCards ? (
+          <div className="empty-state compact">
+            <strong>Отчет пока нечего скачать</strong>
+            <span>Сначала сохраните Ozon-карточки через MPStats. После этого отчет соберет snapshot, покрытие данных и служебные вкладки.</span>
+          </div>
+        ) : null}
+        {reportStatus === "empty" ? <p className="status-note">Карточек Ozon в кабинете нет, файл не сформирован.</p> : null}
+        {reportStatus === "error" ? <p className="status-note">Ozon-отчет сейчас не сформировался. Проверьте период и повторите действие.</p> : null}
       </section>
 
       <div className="report-catalog">
@@ -10296,8 +10448,13 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
     return (
       <OzonPlaceholderPanel
         title="Карточки Ozon"
-        copy="Карточки появятся после проверки MPStats и явного сохранения найденного результата. WB-карточки сюда не подмешиваются."
+        copy="В кабинете пока нет сохраненных Ozon-карточек. Таблица появится только после успешной MPStats-проверки и сохранения результата."
         tag="нет данных"
+        steps={[
+          "1. Проверьте источник Ozon в настройках кабинета.",
+          "2. Нажмите Обновить карточки или Проверьте источник.",
+          "3. Если MPStats нашел карточки, сохраните найденный результат.",
+        ]}
       />
     );
   }
@@ -10452,7 +10609,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
       <div className="strip-head">
         <div>
           <h2>Карточки Ozon</h2>
-          <p>Сохраненные карточки из Ozon MPStats probe. Вид повторяет рабочий блок WB, но статусы и замечания считаются по Ozon snapshot.</p>
+          <p>Сохраненные карточки из Ozon MPStats probe. Статусы, замечания и рабочий набор считаются только по Ozon snapshot.</p>
         </div>
         <Tag tone="blue">{formatNumber(visibleCards.length)}</Tag>
       </div>
@@ -10497,7 +10654,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
           <div className="card-filters ozon-card-filters">
             <label className="search-field card-search">
               <Search size={16} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, SKU, offer, бренду" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию, SKU, offer ID, бренду" />
             </label>
             <select className="select" value={issueFilter} onChange={(event) => setIssueFilter(event.target.value)}>
               <option value="all">Все карточки</option>
@@ -10552,7 +10709,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
                     <input type="checkbox" aria-label="Выбрать видимые Ozon-карточки" checked={allVisibleSelected} onChange={toggleVisible} />
                   </th>
                   <th>Карточка</th>
-                  <th>SKU / offer</th>
+                  <th>SKU / offer ID</th>
                   <th>Заполненность</th>
                   <th>Замечания по данным</th>
                   <th>Статус работы</th>
@@ -10659,11 +10816,17 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
   }
 
   if (!tasks.length) {
+    const hasCards = Array.isArray(cards) && cards.length > 0;
     return (
       <OzonPlaceholderPanel
         title="Задачи Ozon"
-        copy="Выберите карточки во вкладке Кабинет и нажмите Взять в работу. Задачи Ozon пока хранятся отдельно от WB-пачек в beta-контуре."
+        copy={hasCards
+          ? "Ozon-задач пока нет. Выберите карточки во вкладке Кабинет и нажмите Взять в работу."
+          : "Ozon-задач пока нет, потому что в кабинете еще нет сохраненных Ozon-карточек."}
         tag="нет задач"
+        steps={hasCards
+          ? ["1. Откройте вкладку Кабинет.", "2. Отметьте нужные SKU / offer ID.", "3. Создайте Ozon-задачу кнопкой Взять в работу."]
+          : ["1. Укажите источник Ozon.", "2. Обновите карточки через MPStats.", "3. После сохранения карточек создайте первую задачу."]}
       />
     );
   }
@@ -10673,7 +10836,7 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
       <div className="strip-head">
         <div>
           <h2>Задачи Ozon</h2>
-          <p>Beta-набор задач по Ozon-карточкам. Статусы читают сохраненное итоговое СЯ и итоговый контент Ozon, не WB workflow.</p>
+          <p>Beta-набор задач по Ozon-карточкам. Статусы читают сохраненное итоговое СЯ и итоговый контент из Ozon-таблиц.</p>
         </div>
         <Tag tone={workStatus === "local-fallback" ? "amber" : "blue"}>{workStatus === "saving" ? "сохраняем" : workStatus === "local-fallback" ? "локально" : `${formatNumber(tasks.length)} задач`}</Tag>
       </div>
@@ -10805,7 +10968,7 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
                                   <Thumb url={card ? bestPhotoUrl(card) : ""} />
                                   <div>
                                     <strong>{task.title}</strong>
-                                    <span>Ozon SKU {textOrDash(task.sku)} · offer {textOrDash(task.offerId)} · {textOrDash(task.category)}</span>
+                                    <span>Ozon SKU {textOrDash(task.sku)} · offer ID {textOrDash(task.offerId)} · {textOrDash(task.category)}</span>
                                   </div>
                                 </div>
                                 <div className="task-card-row-actions">
@@ -10874,7 +11037,7 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
     return (
       <div className="ozon-probe-result">
         <strong>Проверяем MPStats</strong>
-        <span>Ищем Ozon-карточки по сохраненному источнику.</span>
+        <span>Ищем Ozon-карточки по сохраненному источнику. В кабинет ничего не записывается до успешного результата.</span>
       </div>
     );
   }
@@ -10883,6 +11046,10 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
       <div className="ozon-probe-result error">
         <strong>Проверка не прошла</strong>
         <span>{result.message || "MPStats временно недоступен для Ozon-проверки."}</span>
+        <div className="empty-state-steps">
+          <em>Проверьте, что источник относится к Ozon: ссылка продавца, Seller ID, SKU/Ozon ID или offer ID.</em>
+          <em>Если источник корректный, повторите проверку позже или обновите MPStats-ключ в настройках.</em>
+        </div>
       </div>
     );
   }
@@ -10904,23 +11071,28 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
           {cards.slice(0, 5).map((card, index) => (
             <div className="ozon-probe-card" key={`${card.id || card.offerId || card.title}-${index}`}>
               <strong>{card.title || card.id || "Ozon карточка"}</strong>
-              <span>{[card.id ? `SKU ${card.id}` : "", card.offerId ? `offer ${card.offerId}` : "", card.brand, card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
+              <span>{[card.id ? `SKU ${card.id}` : "", card.offerId ? `offer ID ${card.offerId}` : "", card.brand, card.category].filter(Boolean).join(" · ") || "данные MPStats"}</span>
               <small>{[card.price ? `цена ${formatNumber(card.price)}` : "", card.stock !== null && card.stock !== undefined ? `остаток ${formatNumber(card.stock)}` : "", card.rating ? `рейтинг ${card.rating}` : ""].filter(Boolean).join(" · ")}</small>
             </div>
           ))}
         </div>
-      ) : null}
+      ) : (
+        <div className="empty-state compact">
+          <strong>Карточки не найдены</strong>
+          <span>MPStats ответил без Ozon-карточек. Проверьте, что ссылка открывает продавца Ozon, а список содержит SKU/Ozon ID или offer ID без лишних комментариев.</span>
+        </div>
+      )}
       {cards.length && canSave ? (
         <div className="ozon-probe-save-row">
-          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={onSave} disabled={saveStatus === "saving"} aria-busy={saveStatus === "saving" || undefined}>
+          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={onSave} disabled={saveStatus === "saving" || saveStatus === "saved"} aria-busy={saveStatus === "saving" || undefined}>
             <Save size={16} />{saveStatus === "saving" ? "Сохраняем" : saveStatus === "saved" ? "Сохранено" : "Сохранить карточки"}
           </button>
           <span>
             {saveStatus === "saved"
               ? "Найденные карточки добавлены в Ozon-кабинет."
               : saveStatus === "error"
-                ? "Сохранение не прошло, попробуйте еще раз."
-                : "Сохранит найденные карточки в раздел Ozon этого клиента."}
+                ? "Карточки найдены, но не сохранились. Повторите сохранение или нажмите Обновить карточки."
+                : "Карточки найдены, но еще не сохранены в кабинете. Сохраните их, чтобы появились таблица, задачи и отчеты."}
           </span>
         </div>
       ) : null}
@@ -11005,7 +11177,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
       <header className="topbar">
         <div className="title">
           <h1>Детальная карточка Ozon</h1>
-          <p>{title} · SKU {sku} · offer {offerId} · {category}</p>
+          <p>{title} · SKU {sku} · offer ID {offerId} · {category}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel}</button>
@@ -11041,7 +11213,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
           <div className="detail-main">
             <WorkspaceTabs items={ozonCardWorkspaceTabs} active={activeTab} onChange={setActiveTab} className="detail-tabs" ariaLabel="Разделы Ozon-карточки" />
             <HelpHint enabled={helpEnabled} title="Ozon-карточка">
-              Экран повторяет рабочий контур WB-карточки, но использует сохраненный Ozon snapshot. WB API, WB-аудит и WB-экспорты здесь не запускаются.
+              Экран использует сохраненный Ozon snapshot. Аудит, черновики и экспорты Ozon здесь не запускают логику других маркетплейсов.
             </HelpHint>
 
             {activeTab === "card" ? (
@@ -11117,7 +11289,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                   <div className="strip-head">
                     <div>
                       <h2>Характеристики</h2>
-                      <p>Значения из Ozon/MPStats без подмешивания WB-справочников.</p>
+                      <p>Значения из Ozon/MPStats без подмешивания справочников других маркетплейсов.</p>
                     </div>
                     <Tag tone="blue">{valueCount(characteristics)} {pluralRu(valueCount(characteristics), "поле", "поля", "полей")}</Tag>
                   </div>
@@ -11140,7 +11312,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                     <div><span>Рейтинг</span><strong>{valueSummary(rating)}</strong></div>
                     <div><span>Отзывы</span><strong>{valueSummary(feedbacks)}</strong></div>
                     <div><span>SKU</span><strong>{sku}</strong></div>
-                    <div><span>Offer</span><strong>{offerId}</strong></div>
+                    <div><span>Offer ID</span><strong>{offerId}</strong></div>
                   </div>
                   {Array.isArray(sizes) && sizes.length ? (
                     <div className="commerce-size-scroll">
@@ -11318,7 +11490,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
       <div className="strip-head">
         <div>
           <h2>Семантическое ядро Ozon</h2>
-          <p>Рабочий черновик по карточке Ozon: текущие ключи, выбранные запросы и исключения сохраняются в кабинете.</p>
+          <p>Полный workflow СЯ как в основном кабинете: текущие ключи, запросы к добавлению, исключения и итоговый набор сохраняются в Ozon-контуре.</p>
         </div>
         <Tag tone={statusTone}>{statusLabel}</Tag>
       </div>
@@ -11338,7 +11510,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
 
       <SemanticWorkSummary
         title={selectedRows.length ? `${formatNumber(selectedRows.length)} ${pluralRu(selectedRows.length, "запрос", "запроса", "запросов")} выбрано для Ozon` : "Черновик готов к отбору запросов"}
-        copy={removalQueries.length ? `${formatNumber(removalQueries.length)} ${pluralRu(removalQueries.length, "ключ", "ключа", "ключей")} помечено к исключению.` : "Сейчас Ozon-СЯ работает без внешнего API-подбора: сохраняем структуру, чтобы пачки и согласование уже были в одном стиле с WB."}
+        copy={removalQueries.length ? `${formatNumber(removalQueries.length)} ${pluralRu(removalQueries.length, "ключ", "ключа", "ключей")} помечено к исключению.` : "Процесс такой же: разобрать текущие ключи, выбрать добавления, отметить исключения и сохранить итоговое СЯ."}
         items={[
           {
             label: "В карточке",
@@ -11606,14 +11778,14 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
         <Thumb url={photoUrl} alt={false} />
         <div className="changes-context-main">
           <strong>{currentTitle || "Ozon карточка"}</strong>
-          <span>SKU {sku} · offer {offerId} · {ozonCardCategory(card)}</span>
+          <span>SKU {sku} · offer ID {offerId} · {ozonCardCategory(card)}</span>
         </div>
         <Tag tone={saveStatus === "error" ? "red" : approvalMeta.tone}>{saveStatus === "saving" ? "сохраняем" : approvalMeta.label}</Tag>
       </div>
       <div className="strip-head">
         <div>
           <h2>Изменения Ozon</h2>
-          <p>Черновик итогового контента Ozon хранится отдельно от WB и готовится к согласованию по тем же статусам.</p>
+          <p>Черновик итогового контента хранится в Ozon-контуре и готовится к согласованию по тем же статусам.</p>
         </div>
         <Tag tone={saveStatus === "error" ? "red" : approvalMeta.tone}>{saveStatus === "saving" ? "сохраняем" : approvalMeta.label}</Tag>
       </div>
@@ -11709,7 +11881,7 @@ function OzonCompetitorAuditPanel({ card, portal, draft, status = "idle" }) {
         <div>
           <span>Что уже видно</span>
           <strong>{title}</strong>
-          <p>SKU {sku} · offer {offerId} · {category}. После подключения Ozon-конкурентов этот экран станет парой к WB-товарному аудиту.</p>
+          <p>SKU {sku} · offer ID {offerId} · {category}. После подключения Ozon-конкурентов этот экран станет полноценным товарным аудитом Ozon.</p>
         </div>
       </div>
       <div className="commerce-summary">
@@ -11721,7 +11893,7 @@ function OzonCompetitorAuditPanel({ card, portal, draft, status = "idle" }) {
         <div><span>Кабинет</span><strong>{portalDisplayName(portal)}</strong></div>
       </div>
       <div className="problem-reasons">
-        <Tag tone="blue">без WB API</Tag>
+        <Tag tone="blue">Seller API позже</Tag>
         <Tag tone="amber">ждет источник конкурентов Ozon</Tag>
       </div>
     </section>
@@ -21222,11 +21394,11 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
       return;
     }
     if (scope === "selected" && !testSkus) {
-      setError("Для выбранных карточек вставьте артикулы или SKU.");
+      setError("Для выбранных карточек вставьте SKU, Ozon ID или offer ID.");
       return;
     }
     const sourceDetails = [
-      scope === "selected" && testSkus ? `Ozon артикулы/SKU: ${testSkus}` : "",
+      scope === "selected" && testSkus ? `Ozon SKU / offer ID: ${testSkus}` : "",
       manualSource,
     ].filter(Boolean).join("\n");
     setLoading(true);
@@ -21253,7 +21425,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
         <div className="modal-head">
           <div>
             <h2>Подключить Ozon beta</h2>
-            <p>{client.name}: создаем Ozon-кабинет с источником для проверки через MPStats. WB-поток не меняется.</p>
+            <p>{client.name}: создаем Ozon-кабинет с источником для проверки через MPStats. Другие маркетплейсы не меняются.</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
@@ -21271,7 +21443,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           <div className="ozon-scope-toggle" role="group" aria-label="Охват Ozon-кабинета">
             <button className={form.scope === "selected" ? "active" : ""} type="button" onClick={() => update("scope", "selected")}>
               <strong>Выбранные карточки</strong>
-              <span>Сохраняем только указанные артикулы или SKU.</span>
+              <span>Сохраняем только указанные SKU, Ozon ID или offer ID.</span>
             </button>
             <button className={form.scope === "full" ? "active" : ""} type="button" onClick={() => update("scope", "full")}>
               <strong>Весь кабинет</strong>
@@ -21288,8 +21460,8 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           </label>
           {form.scope === "selected" ? (
             <label className="field-label">
-              Артикулы или SKU
-              <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-ART-01, 987654321. Эти позиции попадут в первую проверку MPStats." />
+              SKU, Ozon ID или offer ID
+              <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-OFFER-01, 987654321. Эти позиции попадут в первую проверку MPStats." />
             </label>
           ) : null}
           <label className="field-label">

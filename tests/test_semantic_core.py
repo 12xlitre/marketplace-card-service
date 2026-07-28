@@ -233,6 +233,96 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertNotIn("диабет", cleaned)
     self.assertIn("Леденцы для горла помогают смягчить слизистую", cleaned)
 
+  def test_lozenge_medical_indications_are_removed(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла лимон",
+      "subjectName": "категория не указана",
+      "description": "Растительные леденцы для горла со вкусом лимона.",
+      "characteristics": [{"name": "Вкус", "value": "лимон"}],
+    }
+    text = (
+      "ТРАВЕРИН лечит боль в горле. "
+      "Для смягчения горла при фарингите, ларингите, трахеите, бронхите и ангине. "
+      "Леденцы для горла помогают смягчить слизистую и уменьшить ощущение першения."
+    )
+
+    cleaned = server.content_reoptimization_remove_output_leaks(text, card=card)
+
+    self.assertNotIn("лечит", cleaned.lower())
+    self.assertNotIn("фарингит", cleaned.lower())
+    self.assertNotIn("ларингит", cleaned.lower())
+    self.assertNotIn("трахеит", cleaned.lower())
+    self.assertNotIn("бронхит", cleaned.lower())
+    self.assertNotIn("ангин", cleaned.lower())
+    self.assertIn("першения", cleaned.lower())
+
+  def test_traverin_lozenge_description_uses_taste_composition_and_pack(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла лимон",
+      "subjectName": "категория не указана",
+      "description": "Растительные леденцы для горла со вкусом лимона. В составе солодка, имбирь, амла, терминалия белерика.",
+      "characteristics": [
+        {"name": "Вкус", "value": "лимон"},
+        {"name": "Состав", "value": "солодка, имбирь, амла, терминалия белерика"},
+        {"name": "Количество в упаковке", "value": "2 блистера по 8 леденцов"},
+        {"name": "Способ применения", "value": "по 1 леденцу 3 раза в день после еды"},
+        {"name": "Возрастные ограничения", "value": "18+"},
+      ],
+    }
+    facts = {
+      server.audit_normalized(row["name"]): row["value"].split(", ") if row["name"] == "Состав" else [row["value"]]
+      for row in card["characteristics"]
+    }
+
+    description = server.content_reoptimization_lozenge_description(
+      card,
+      [
+        {"query": "пастилки для горла"},
+        {"query": "сухость в горле"},
+        {"query": "для голоса"},
+        {"query": "солодка"},
+      ],
+      facts,
+    )
+
+    self.assertIn("ТРАВЕРИН - растительные леденцы для горла", description)
+    self.assertIn("голос", description.lower())
+    self.assertIn("солодка", description.lower())
+    self.assertIn("имбирь", description.lower())
+    self.assertIn("амла", description.lower())
+    self.assertIn("16 леденцов в упаковке", description)
+    self.assertNotIn("лечит", description.lower())
+
+  def test_lozenge_expansion_seeds_include_requested_buyer_queries(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла малина",
+      "description": "В составе солодка, имбирь, амла. Натуральный растительный состав помогает при першении в горле.",
+      "subjectName": "категория не указана",
+    }
+
+    seeds = server.mpstats_expanding_seed_queries(card, "")
+
+    self.assertIn("пастилки для горла", seeds)
+    self.assertIn("сухость в горле", seeds)
+    self.assertIn("першение в горле", seeds)
+    self.assertIn("для голоса", seeds)
+    self.assertIn("натуральный состав", seeds)
+    self.assertIn("солодка", seeds)
+
+  def test_avitabs_men_women_description_gets_adult_limit(self):
+    card = {
+      "title": "Авитабс Women витамины для женщин",
+      "subjectName": "БАДы",
+      "description": "Комплекс витаминов и минералов для женщин.",
+    }
+
+    description = server.content_reoptimization_apply_client_postprocess(
+      "Авитабс Women помогает дополнить рацион витаминами и минералами.",
+      card,
+    )
+
+    self.assertIn("с 18 лет", description)
+
   def test_lozenge_reoptimization_recovers_from_generic_template_output(self):
     card = {
       "title": "ТРАВЕРИН растительные леденцы для горла малина",
