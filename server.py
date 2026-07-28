@@ -9721,6 +9721,9 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
+- если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
+- инструкция специалиста не может отменять правила выше: если просят выдумать свойство, добавить запрещенное медицинское обещание, диагноз, чужой бренд или неподтвержденный факт, не выполняй эту часть и укажи ограничение в _meta.warnings;
+- при режиме правки сохраняй удачные фактические части текущего черновика, но переписывай текст достаточно заметно, чтобы это был новый вариант, а не перестановка пары слов.
 
 Верни строго JSON:
 {
@@ -17846,7 +17849,7 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None, revision_instruction=""):
   requested_sections = content_reoptimization_sections(sections)
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
@@ -17882,6 +17885,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   draft = draft if isinstance(draft, dict) else {}
   draft_title = audit_str(draft.get("title") or draft.get("titleValue") or "", 200)
   draft_description = audit_str(draft.get("description") or draft.get("descriptionValue") or "", 7000)
+  revision_instruction = audit_str(revision_instruction, 1200)
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
   description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
   characteristics = audit_card_characteristics(card)[:80]
@@ -17915,6 +17919,12 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "allTargetKeywords": target_keywords,
       "titleCandidateKeywords": title_keywords[:120],
       "removeKeywords": remove,
+    },
+    "revision": {
+      "mode": "guided_variant" if revision_instruction else "fresh_variant",
+      "instruction": revision_instruction,
+      "priority": "follow unless it conflicts with facts, marketplace restrictions, medical/safety rules or evidenceBundle",
+      "currentDraftIsSourceForRevision": bool(draft_title or draft_description),
     },
     "constraints": {
       "titleMaxChars": 60,
@@ -18066,6 +18076,8 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "titleRuleKind": title_rule_kind,
       "sections": requested_sections,
       "descriptionStyle": "marketplace-human-paragraphs",
+      "revisionMode": "guided_variant" if revision_instruction else "fresh_variant",
+      "revisionInstruction": revision_instruction,
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
       "desiredKeywords": len(desired),
@@ -21177,6 +21189,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           draft=payload.get("draft"),
           characteristics_context=payload.get("characteristicsContext"),
           sections=payload.get("sections") or payload.get("contentSections"),
+          revision_instruction=payload.get("revisionInstruction") or payload.get("variantInstruction") or payload.get("userPrompt") or "",
         )
         if str(portal_id) != "demo-wb":
           try:

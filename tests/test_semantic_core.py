@@ -208,6 +208,49 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(optimization["desiredKeywordsUnused"], [])
     self.assertEqual(list(result["draftContent"].keys()), ["description"])
 
+  def test_reoptimization_passes_specialist_revision_instruction(self):
+    card = {
+      "title": "ТРАВЕРИН растительные леденцы для горла малина",
+      "subjectName": "Леденцы",
+      "description": "Растительные леденцы для горла со вкусом малины.",
+      "characteristics": [{"name": "Вкус", "value": "малина"}],
+    }
+    llm_body = {
+      "title": {"value": "ТРАВЕРИН леденцы для горла малина", "reason": "test"},
+      "description": {
+        "value": "ТРАВЕРИН - растительные леденцы для горла с малиновым вкусом. Формат помогает смягчить ощущение першения и сухости.",
+        "reason": "Учтена инструкция специалиста.",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+    captured = {}
+
+    def fake_llm(messages):
+      captured["messages"] = messages
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "traverin-1",
+        card,
+        selected_keywords=[{"query": "леденцы для горла"}],
+        draft={"description": "Старый черновик с повтором слова леденцы."},
+        revision_instruction="Сделай мягче и убери медицинские обещания.",
+        sections=["description"],
+      )
+
+    evidence = json.loads(captured["messages"][1]["content"])["evidenceBundle"]
+    self.assertEqual(evidence["revision"]["mode"], "guided_variant")
+    self.assertIn("Сделай мягче", evidence["revision"]["instruction"])
+    self.assertEqual(evidence["draft"]["description"], "Старый черновик с повтором слова леденцы.")
+    self.assertEqual(result["contentOptimization"]["revisionMode"], "guided_variant")
+    self.assertIn("Сделай мягче", result["contentOptimization"]["revisionInstruction"])
+
   def test_output_leaks_and_unconfirmed_claims_are_removed(self):
     card = {
       "title": "ТРАВЕРИН растительные леденцы для горла малина",

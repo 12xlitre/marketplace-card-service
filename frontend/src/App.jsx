@@ -14756,6 +14756,69 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
   );
 }
 
+function ContentVariantPromptModal({ value, loading = false, onChange, onClose, onSubmit }) {
+  const instruction = String(value?.instruction || "");
+  const sectionLabel = value?.sectionLabel || "контента";
+  const quickPrompts = [
+    "Сделай текст живее и менее похожим на инструкцию.",
+    "Добавь больше SEO в первые 200-300 символов, но без переспама.",
+    "Сделай мягче формулировки и убери медицинские обещания.",
+    "Сильнее раскрой состав, ингредиенты и пользу для покупателя.",
+    "Сделай короче и плотнее, сохрани ключевые факты.",
+  ];
+  const submit = (event) => {
+    event.preventDefault();
+    onSubmit?.();
+  };
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="modal work-package-modal" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <h2>Еще вариант {sectionLabel}</h2>
+            <p>Опишите, что поменять в текущем черновике. Базовые правила карточки и факты товара останутся выше этой инструкции.</p>
+          </div>
+          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+        </div>
+        <div className="modal-body">
+          <label className="field-label">
+            <span>Что учесть в новом варианте</span>
+            <textarea
+              value={instruction}
+              onChange={(event) => onChange?.(event.target.value)}
+              rows={6}
+              maxLength={1200}
+              placeholder="Например: сделать текст мягче, добавить акцент на состав, убрать медицинские формулировки, больше SEO в начале, не повторять слово леденцы."
+              disabled={loading}
+              autoFocus
+            />
+          </label>
+          <div className="description-keyword-legend">
+            {quickPrompts.map((prompt) => (
+              <button
+                className="description-keyword-chip selectable"
+                type="button"
+                key={prompt}
+                onClick={() => onChange?.(instruction ? `${instruction.trim()}\n${prompt}` : prompt)}
+                disabled={loading}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+          <p className="status-note">Можно оставить поле пустым: система сделает новый вариант по базовым правилам и текущему СЯ.</p>
+        </div>
+        <div className="modal-actions">
+          <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading} aria-busy={loading || undefined}>
+            <WandSparkles size={16} />{loading ? "Готовим вариант" : "Сделать вариант"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, onOpenTask, onDeleteTaskGroup, onReorderTaskGroup, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteCompletedTask, onWorkflowUpdated, taskActionStatus = "", workPeriods = [], workPeriodsStatus = "idle", helpEnabled = false }) {
   const tasks = workflow.tasks || [];
   const completedTasks = workflow.completedTasks || [];
@@ -15688,6 +15751,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticContentStatus, setSemanticContentStatus] = useState("");
   const [semanticContentAction, setSemanticContentAction] = useState("");
   const [semanticContentError, setSemanticContentError] = useState("");
+  const [contentVariantPrompt, setContentVariantPrompt] = useState(null);
   const [semanticDraftDirty, setSemanticDraftDirty] = useState(false);
   const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
@@ -17319,9 +17383,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     const sections = requestedSections.length ? requestedSections : ["title", "description", "characteristics"];
     const action = sections.length === 1 ? sections[0] : "all";
     const desiredKeywords = semanticRowsByKey(Array.isArray(options.desiredKeywords) ? options.desiredKeywords : []);
+    const revisionInstruction = String(options.revisionInstruction || "").trim();
     setSemanticContentStatus("loading");
     setSemanticContentAction(action);
     setSemanticContentError("");
+    setContentVariantPrompt(null);
     try {
       const payload = await apiRequest("/api/card-content-reoptimize", {
         method: "POST",
@@ -17333,6 +17399,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           currentKeywords: activeSemanticRowsForOptimization,
           removeKeywords: activeSemanticRemovalRows,
           desiredKeywords,
+          revisionInstruction,
           sections,
           draft: {
             title: draftTitle,
@@ -17372,6 +17439,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           descriptionDraft.reason
           || (desiredKeywords.length
             ? `Описание переписано по СЯ и с попыткой естественно учесть ${desiredKeywords.length} выбранных непокрытых ${pluralRu(desiredKeywords.length, "ключ", "ключа", "ключей")}.`
+            : revisionInstruction
+              ? "Описание переписано по СЯ и дополнительной инструкции специалиста."
             : "Описание переписано с учетом выбранного СЯ.")
         )
         : draftDescriptionReason;
@@ -17421,6 +17490,43 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setSemanticContentError(message);
       setSemanticContentStatus("error");
     }
+  }
+
+  function openContentVariantPrompt(options = {}) {
+    if (!semanticHasOptimizationKeywords || approvalReadOnly) {
+      return;
+    }
+    const requestedSections = (Array.isArray(options.sections) ? options.sections : [])
+      .map((section) => String(section || "").trim())
+      .filter((section) => ["title", "description", "characteristics"].includes(section));
+    const sections = requestedSections.length ? requestedSections : ["title", "description", "characteristics"];
+    const desiredKeywords = semanticRowsByKey(Array.isArray(options.desiredKeywords) ? options.desiredKeywords : []);
+    const sectionLabel = sections.length === 1
+      ? (sections[0] === "title" ? "заголовка" : sections[0] === "description" ? "описания" : "характеристик")
+      : "контента";
+    const defaultInstruction = String(options.defaultInstruction || "").trim()
+      || (desiredKeywords.length
+        ? `Учти выбранные непокрытые ключи: ${desiredKeywords.map((item) => item.query).filter(Boolean).slice(0, 8).join(", ")}. Впиши их естественно, без SEO-склейки.`
+        : "");
+    setContentVariantPrompt({
+      sections,
+      desiredKeywords,
+      instruction: defaultInstruction,
+      sectionLabel,
+    });
+  }
+
+  function updateContentVariantInstruction(value) {
+    setContentVariantPrompt((current) => current ? { ...current, instruction: value } : current);
+  }
+
+  async function submitContentVariantPrompt() {
+    if (!contentVariantPrompt) return;
+    await reoptimizeContentFromSemanticCore({
+      sections: contentVariantPrompt.sections,
+      desiredKeywords: contentVariantPrompt.desiredKeywords,
+      revisionInstruction: contentVariantPrompt.instruction,
+    });
   }
 
   async function runAudit(nextTab = "changes") {
@@ -19190,7 +19296,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                       <button
                         className={loadingButtonClass("btn mini", semanticContentBusyAction === "title")}
                         type="button"
-                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["title"] })}
+                        onClick={() => openContentVariantPrompt({ sections: ["title"] })}
                         disabled={!canReoptimizeContent}
                         aria-busy={semanticContentBusyAction === "title" || undefined}
                         title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант заголовка по сохраненному СЯ, не меняя описание и характеристики."}
@@ -19225,7 +19331,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                       <button
                         className={loadingButtonClass("btn mini", semanticContentBusyAction === "description")}
                         type="button"
-                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["description"] })}
+                        onClick={() => openContentVariantPrompt({ sections: ["description"] })}
                         disabled={!canReoptimizeContent}
                         aria-busy={semanticContentBusyAction === "description" || undefined}
                         title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант описания по сохраненному СЯ, не меняя заголовок и характеристики."}
@@ -19250,7 +19356,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                       description={draftDescription}
                       keywords={descriptionKeywordRows}
                       helpEnabled={helpEnabled}
-                      onReoptimizeMissing={(rows) => reoptimizeContentFromSemanticCore({ sections: ["description"], desiredKeywords: rows })}
+                      onReoptimizeMissing={(rows) => openContentVariantPrompt({ sections: ["description"], desiredKeywords: rows })}
                       reoptimizeDisabled={!canReoptimizeContent}
                       reoptimizeBusy={semanticContentBusyAction === "description"}
                       reoptimizeTitle={semanticReoptimizeUnavailableTitle || "Попросить следующий вариант описания по возможности учесть выбранные непокрытые ключи."}
@@ -19262,7 +19368,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                       <button
                         className={loadingButtonClass("btn mini", semanticContentBusyAction === "characteristics")}
                         type="button"
-                        onClick={() => reoptimizeContentFromSemanticCore({ sections: ["characteristics"] })}
+                        onClick={() => openContentVariantPrompt({ sections: ["characteristics"] })}
                         disabled={!canReoptimizeContent}
                         aria-busy={semanticContentBusyAction === "characteristics" || undefined}
                         title={semanticReoptimizeUnavailableTitle || "Подготовить только новый вариант характеристик по сохраненному СЯ, не меняя заголовок и описание."}
@@ -19426,6 +19532,15 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           </div>
         </div>
       </div>
+      {contentVariantPrompt ? (
+        <ContentVariantPromptModal
+          value={contentVariantPrompt}
+          loading={semanticContentRunning}
+          onChange={updateContentVariantInstruction}
+          onClose={() => setContentVariantPrompt(null)}
+          onSubmit={submitContentVariantPrompt}
+        />
+      ) : null}
     </section>
   );
 }
