@@ -9273,15 +9273,55 @@ function ozonCardCategory(card) {
 function ozonCardCharacteristicItems(card) {
   const rawFields = rawFieldsForCard(card);
   const source = card?.characteristics || rawFields.characteristics || [];
+  return ozonContentCharacteristicItems(source);
+}
+
+function ozonCharacteristicValues(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => ozonCharacteristicValues(item)).filter(Boolean).slice(0, 8);
+  }
+  if (value && typeof value === "object") {
+    return ozonCharacteristicValues(value.value || value.name || value.label || value.values);
+  }
+  return String(value ?? "")
+    .split(/[,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function ozonContentCharacteristicItems(source) {
   if (Array.isArray(source)) {
-    return source.filter((item) => !isEmptyValue(item));
+    return source
+      .filter((item) => !isEmptyValue(item))
+      .map((item, index) => {
+        if (item && typeof item === "object") {
+          const values = Array.isArray(item.values) && item.values.length ? item.values : ozonCharacteristicValues(item.value);
+          return {
+            ...item,
+            name: String(item.name || item.label || item.attributeName || item.attribute_name || item.charcName || `Характеристика ${index + 1}`),
+            value: item.value || values.join(", "),
+            values,
+          };
+        }
+        return { name: `Характеристика ${index + 1}`, value: String(item), values: [String(item)] };
+      });
   }
   if (source && typeof source === "object") {
     return Object.entries(source)
       .filter(([, value]) => !isEmptyValue(value))
-      .map(([name, value]) => ({ name, value }));
+      .map(([name, value]) => ({ name, value: valueSummary(value), values: ozonCharacteristicValues(value) }));
   }
   return [];
+}
+
+function ozonCharacteristicSignature(items) {
+  return JSON.stringify((Array.isArray(items) ? items : [])
+    .map((item) => ({
+      name: normalizedCharacteristicOption(item?.name || item?.label || ""),
+      value: normalizedCharacteristicOption(item?.value || (Array.isArray(item?.values) ? item.values.join(", ") : "")),
+    }))
+    .filter((item) => item.name || item.value));
 }
 
 function ozonCardPhotoCount(card) {
@@ -11956,16 +11996,21 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = String(card?.title || rawFields.title || rawFields.name || "");
   const currentDescription = String(card?.description || rawFields.description || "");
+  const currentCharacteristics = ozonCardCharacteristicItems(card);
   const savedContent = draft?.draft?.content || {};
   const savedApproval = draft?.draft?.approval || {};
+  const savedCharacteristics = ozonContentCharacteristicItems(savedContent.characteristics);
   const [titleDraft, setTitleDraft] = useState(savedContent.title || currentTitle);
   const [descriptionDraft, setDescriptionDraft] = useState(savedContent.description || currentDescription);
+  const [characteristicDraft, setCharacteristicDraft] = useState(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [generateStatus, setGenerateStatus] = useState("idle");
   const approvalMeta = ozonCardContentStatusMeta(draft);
   const contentApproval = normalizeApprovalState({ status: savedApproval.contentStatus || "draft" });
   const titleChanged = normalizedCharacteristicOption(titleDraft) !== normalizedCharacteristicOption(currentTitle);
   const descriptionChanged = normalizedCharacteristicOption(descriptionDraft) !== normalizedCharacteristicOption(currentDescription);
-  const changesCount = [titleChanged, descriptionChanged].filter(Boolean).length;
+  const characteristicsChanged = ozonCharacteristicSignature(characteristicDraft) !== ozonCharacteristicSignature(currentCharacteristics);
+  const changesCount = [titleChanged, descriptionChanged, characteristicsChanged].filter(Boolean).length;
   const readinessSummary = changesCount
     ? `${formatNumber(changesCount)} ${pluralRu(changesCount, "правка", "правки", "правок")} в Ozon-контенте`
     : "Ozon-черновик совпадает с текущим снимком";
@@ -11973,10 +12018,11 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   useEffect(() => {
     setTitleDraft(savedContent.title || currentTitle);
     setDescriptionDraft(savedContent.description || currentDescription);
+    setCharacteristicDraft(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
   }, [draft?.updatedAt, cardKey]);
 
   async function saveContent(nextStatus = savedApproval.contentStatus || "draft") {
-    if (!portal?.id || portal.isDemo || saveStatus === "saving") return;
+    if (!portal?.id || portal.isDemo || saveStatus === "saving" || generateStatus === "loading") return;
     setSaveStatus("saving");
     try {
       const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-card-draft`, {
@@ -11989,7 +12035,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           content: {
             title: titleDraft,
             description: descriptionDraft,
-            characteristics: card?.characteristics || rawFields.characteristics || [],
+            characteristics: characteristicDraft,
           },
           approval: { contentStatus: nextStatus },
           auditResult: draft?.draft?.auditResult || {},
@@ -12001,6 +12047,43 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
       setSaveStatus("saved");
     } catch {
       setSaveStatus("error");
+    }
+  }
+
+  async function generateContent() {
+    if (!portal?.id || portal.isDemo || generateStatus === "loading") return;
+    setGenerateStatus("loading");
+    setSaveStatus("idle");
+    try {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-card-content-reoptimize`, {
+        method: "POST",
+        body: JSON.stringify({
+          cardKey,
+          sku: sku === "Не указано" ? "" : sku,
+          offerId: offerId === "Не указано" ? "" : offerId,
+          title: card?.title || rawFields.title || rawFields.name || "",
+          card,
+          draft: {
+            cardKey,
+            sku: sku === "Не указано" ? "" : sku,
+            offerId: offerId === "Не указано" ? "" : offerId,
+            title: card?.title || rawFields.title || rawFields.name || "",
+            content: {
+              title: titleDraft,
+              description: descriptionDraft,
+              characteristics: characteristicDraft,
+            },
+          },
+        }),
+      });
+      const nextContent = payload?.draft?.draft?.content || payload?.draftContent || {};
+      setTitleDraft(nextContent.title || "");
+      setDescriptionDraft(nextContent.description || "");
+      setCharacteristicDraft(ozonContentCharacteristicItems(nextContent.characteristics));
+      onDraftSaved?.(payload.draft || null);
+      setGenerateStatus("done");
+    } catch {
+      setGenerateStatus("error");
     }
   }
 
@@ -12036,7 +12119,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
               <Tag tone={approvalStatusTone(contentApproval.status)}>{approvalStatusLabel(contentApproval.status)}</Tag>
             </div>
             <p>{changesReadinessStatusText({ approval: contentApproval, changesCount })}</p>
-            <span>{titleChanged ? "заголовок изменен" : "заголовок без изменений"} · {descriptionChanged ? "описание изменено" : "описание без изменений"}</span>
+            <span>{titleChanged ? "заголовок изменен" : "заголовок без изменений"} · {descriptionChanged ? "описание изменено" : "описание без изменений"} · {characteristicsChanged ? "характеристики изменены" : "характеристики без изменений"}</span>
             <div className="changes-readiness-actions">
               <button className={loadingButtonClass("btn mini", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
                 <Save size={14} />Сохранить
@@ -12049,6 +12132,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
       <div className="commerce-summary">
         <div><span>Заголовок</span><strong>{titleDraft.trim() ? `${titleDraft.length} симв.` : "пусто"}</strong></div>
         <div><span>Описание</span><strong>{descriptionDraft.trim() ? `${descriptionDraft.length} симв.` : "пусто"}</strong></div>
+        <div><span>Характеристики</span><strong>{formatNumber(characteristicDraft.length)}</strong></div>
         <div><span>Статус</span><strong>{approvalMeta.label}</strong></div>
         <div><span>Источник</span><strong>Ozon draft</strong></div>
       </div>
@@ -12062,7 +12146,22 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           <textarea value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} rows={8} />
         </label>
       </div>
+      {characteristicDraft.length ? (
+        <section className="workspace-strip compact-inner">
+          <div className="strip-head">
+            <div>
+              <h2>Итоговые характеристики</h2>
+              <p>Черновик для Ozon сохраняется вместе с заголовком и описанием.</p>
+            </div>
+            <Tag tone={characteristicsChanged ? "amber" : "blue"}>{characteristicsChanged ? "изменены" : "snapshot"}</Tag>
+          </div>
+          <CharacteristicsBlock items={characteristicDraft} />
+        </section>
+      ) : null}
       <div className="panel-actions">
+        <button className={loadingButtonClass("btn", generateStatus === "loading")} type="button" onClick={generateContent} disabled={portal?.isDemo || generateStatus === "loading" || saveStatus === "saving"} aria-busy={generateStatus === "loading" || undefined}>
+          <WandSparkles size={16} />{generateStatus === "loading" ? "Готовим" : "Подготовить по СЯ"}
+        </button>
         <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
           <Save size={16} />Сохранить черновик
         </button>
@@ -12070,6 +12169,8 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           <CheckSquare size={16} />Принять контент
         </button>
       </div>
+      {generateStatus === "done" ? <p className="status-note">Ozon-контент подготовлен по сохраненному итоговому СЯ и сохранен в черновик.</p> : null}
+      {generateStatus === "error" ? <p className="status-note">Не удалось подготовить Ozon-контент. Проверьте, что итоговое СЯ сохранено и доступен GigaChat.</p> : null}
       {saveStatus === "error" ? <p className="status-note">Не удалось сохранить Ozon-контент.</p> : null}
       {status === "loading" ? <p className="status-note">Загружаем сохраненный Ozon-черновик.</p> : null}
     </section>

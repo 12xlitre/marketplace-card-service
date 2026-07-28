@@ -3892,9 +3892,19 @@ def normalize_ozon_content_payload(payload):
     for item in characteristics[:300]:
       if isinstance(item, dict):
         name = audit_str(item.get("name") or item.get("label"), 120)
-        value = audit_str(item.get("value"), 500)
+        values = content_characteristic_values(item.get("values") if "values" in item else item.get("value"), limit=8)
+        value = audit_str(item.get("value") or ", ".join(values), 500)
         if name or value:
-          clean_characteristics.append({"name": name, "value": value})
+          clean_item = {"name": name, "value": value}
+          if values:
+            clean_item["values"] = values
+          source = audit_str(item.get("source"), 80)
+          reason = audit_str(item.get("reason"), 700)
+          if source:
+            clean_item["source"] = source
+          if reason:
+            clean_item["reason"] = reason
+          clean_characteristics.append(clean_item)
       else:
         value = audit_str(item, 500)
         if value:
@@ -3906,6 +3916,7 @@ def normalize_ozon_content_payload(payload):
   if content_status not in {"draft", "submitted", "approved", "exported"}:
     content_status = "draft"
   audit_result = payload.get("auditResult") if isinstance(payload.get("auditResult"), dict) else {}
+  content_optimization = payload.get("contentOptimization") if isinstance(payload.get("contentOptimization"), dict) else {}
   audit_status = audit_str(payload.get("auditStatus") or payload.get("audit_status") or ("done" if audit_result else "idle"), 40)
   normalized = {
     "version": 1,
@@ -3928,6 +3939,8 @@ def normalize_ozon_content_payload(payload):
       "marketplace": "Ozon",
     },
   }
+  if content_optimization:
+    normalized["contentOptimization"] = content_optimization
   return normalized if card_key else None
 
 
@@ -4138,6 +4151,312 @@ def ozon_card_value(raw_card, *keys):
     if value not in (None, "", [], {}):
       return value
   return ""
+
+
+OZON_CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT = 4000
+OZON_CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
+Ты — редактор карточек Ozon для живого покупателя. Переоптимизируй заголовок, описание и характеристики под согласованное семантическое ядро Ozon, но не превращай карточку в SEO-перечень.
+
+Правила:
+- используй только факты из evidenceBundle;
+- marketplace = Ozon: не применяй WB-лимит 60 символов к заголовку, но держи название читаемым и не длиннее evidenceBundle.constraints.titleMaxChars;
+- заголовок должен начинаться с типа товара и главного поискового признака, бренд можно добавлять ближе к концу, если он есть в карточке;
+- описание пиши как карточку товара для покупателя: понятные абзацы, разные начала предложений, конкретные преимущества из фактов, без канцелярита и служебных комментариев;
+- органично используй ключи из evidenceBundle.semanticCore.finalKeywords; removeKeywords не добавляй намеренно;
+- если ключ звучит неестественно или противоречит карточке, пропусти его и вынеси предупреждение в _meta.warnings;
+- характеристики Ozon заполняй только по существующим характеристикам карточки, Ozon/MPStats snapshot и evidenceBundle.characteristicsContext.mpstatsCharacteristics;
+- для характеристик MPStats — статистическая подсказка популярных рыночных значений, а не истина; не добавляй значение, если оно противоречит названию, описанию, фото или текущим характеристикам;
+- не дублируй одно и то же значение в разных характеристиках и не складывай SEO-ключи в одно поле;
+- для леденцов, БАДов и средств для горла используй мягкий словарь: "помогает смягчить", "способствует уменьшению першения", "помогает снизить дискомфорт"; не пиши "лечит", диагнозы и обещания быстрого медицинского эффекта;
+- для ТРАВЕРИН раскрывай вкус, состав и ценность растительных компонентов только если они есть в evidenceBundle: солодка, имбирь, амла, терминалия, упаковка 16 леденцов, медленное рассасывание, удобно взять с собой;
+- для Авитабс Men/Women укажи "для взрослых с 18 лет", если это не противоречит evidenceBundle, и объясняй компоненты простым языком только по фактам карточки;
+- не обещай рост продаж, сертификацию, лечебный эффект, безопасность или свойства без фактов.
+
+Верни строго JSON:
+{
+  "title": {"value": "...", "reason": "...", "keywords": ["..."]},
+  "description": {"value": "...", "reason": "...", "keywords": ["..."]},
+  "characteristics": [
+    {"name": "...", "values": ["..."], "reason": "...", "keywords": ["..."]}
+  ],
+  "_meta": {"warnings": ["..."]}
+}
+"""
+
+
+def ozon_card_characteristics_for_content(raw_card):
+  characteristics = ozon_card_value(raw_card, "characteristics")
+  if isinstance(characteristics, dict):
+    rows = [
+      {"name": audit_str(name, 140), "value": value}
+      for name, value in characteristics.items()
+      if audit_str(name, 140) or value not in (None, "", [], {})
+    ]
+  elif isinstance(characteristics, list):
+    rows = []
+    for index, item in enumerate(characteristics[:300]):
+      if isinstance(item, dict):
+        name = audit_str(
+          item.get("name")
+          or item.get("label")
+          or item.get("attributeName")
+          or item.get("attribute_name")
+          or item.get("charcName")
+          or item.get("id")
+          or f"Характеристика {index + 1}",
+          140,
+        )
+        rows.append({
+          **item,
+          "name": name,
+          "value": item.get("value") if "value" in item else item.get("values"),
+        })
+      else:
+        rows.append({"name": f"Характеристика {index + 1}", "value": item})
+  else:
+    rows = []
+  return audit_card_characteristics({"characteristics": rows})[:120]
+
+
+def ozon_content_title_limit(value):
+  return audit_str(value, 200)
+
+
+def ozon_content_characteristics_list(characteristic_draft, limit=40):
+  rows = []
+  if isinstance(characteristic_draft, dict):
+    source = list(characteristic_draft.values())
+  elif isinstance(characteristic_draft, list):
+    source = characteristic_draft
+  else:
+    source = []
+  for item in source[:limit]:
+    if not isinstance(item, dict):
+      continue
+    name = content_characteristic_row_label(item)
+    values = content_characteristic_values(item.get("values") if "values" in item else item.get("value"), limit=8)
+    if not name or not values:
+      continue
+    rows.append({
+      "name": name,
+      "value": ", ".join(values),
+      "values": values,
+      "source": audit_str(item.get("source") or "semantic", 80),
+      "reason": audit_str(item.get("reason") or "", 700),
+    })
+  return rows
+
+
+def load_ozon_semantic_payload_for_card(numeric_portal_id, card_key):
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT payload_json
+      FROM ozon_semantic_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+  if not row:
+    return {}
+  try:
+    return normalize_ozon_semantic_payload(json.loads(row["payload_json"] or "{}")) or {}
+  except (TypeError, json.JSONDecodeError):
+    return {}
+
+
+def load_ozon_card_draft_payload_for_card(numeric_portal_id, card_key):
+  with connect_db() as db:
+    row = db.execute(
+      """
+      SELECT payload_json
+      FROM ozon_card_drafts
+      WHERE portal_id = ? AND card_key = ?
+      """,
+      (numeric_portal_id, card_key),
+    ).fetchone()
+  if not row:
+    return {}
+  try:
+    return normalize_ozon_content_payload(json.loads(row["payload_json"] or "{}")) or {}
+  except (TypeError, json.JSONDecodeError):
+    return {}
+
+
+def build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=None, draft=None, mpstats_characteristics=None):
+  raw_card = raw_card if isinstance(raw_card, dict) else {}
+  raw_fields = raw_card.get("rawFields") if isinstance(raw_card.get("rawFields"), dict) else {}
+  semantic_payload = normalize_ozon_semantic_payload(semantic_payload) if isinstance(semantic_payload, dict) else {}
+  draft = normalize_ozon_content_payload(draft) if isinstance(draft, dict) else {}
+  draft_content = draft.get("content") if isinstance(draft.get("content"), dict) else {}
+  final_keywords = content_keywords_from_payload(semantic_payload.get("final"), limit=180)
+  remove_keywords = content_keywords_from_payload(semantic_payload.get("removal"), limit=80)
+  current_keywords = content_keywords_from_payload(semantic_payload.get("current"), limit=140)
+  selected_keywords = content_keywords_from_payload(semantic_payload.get("selected"), limit=140)
+  if not final_keywords:
+    raise ValueError("missing_ozon_semantic_keywords")
+  if not content_reoptimization_configured():
+    raise ValueError("llm_key_missing")
+
+  title = audit_str(ozon_card_value(raw_card, "title", "name"), 300)
+  description = audit_str(ozon_card_value(raw_card, "description"), 6000)
+  brand = audit_str(ozon_card_value(raw_card, "brand"), 180)
+  category = audit_str(ozon_card_value(raw_card, "subjectName", "category", "categoryName"), 180)
+  sku = audit_str(ozon_card_value(raw_card, "sku", "id", "productId"), 120)
+  offer_id = audit_str(ozon_card_value(raw_card, "offerId", "offer_id", "vendorCode"), 120)
+  characteristics = ozon_card_characteristics_for_content(raw_card)
+  mpstats_characteristics = mpstats_characteristics if isinstance(mpstats_characteristics, list) else []
+  evidence = {
+    "marketplace": "Ozon",
+    "card": {
+      "sku": sku,
+      "offerId": offer_id,
+      "brand": brand,
+      "category": category,
+      "title": title,
+      "description": description,
+      "characteristics": characteristics,
+      "rawSignals": {
+        "price": ozon_card_value(raw_card, "price", "finalPrice", "final_price"),
+        "stock": ozon_card_value(raw_card, "stock", "balance", "available_stock"),
+        "rating": ozon_card_value(raw_card, "rating"),
+        "feedbacks": ozon_card_value(raw_card, "feedbacks", "reviews", "comments"),
+      },
+    },
+    "draft": {
+      "title": audit_str(draft_content.get("title") or "", 300),
+      "description": audit_str(draft_content.get("description") or "", 6000),
+      "characteristics": draft_content.get("characteristics") if isinstance(draft_content.get("characteristics"), list) else [],
+    },
+    "semanticCore": {
+      "finalKeywords": final_keywords,
+      "currentKeywords": current_keywords,
+      "selectedKeywords": selected_keywords,
+      "removeKeywords": remove_keywords,
+    },
+    "characteristicsContext": {
+      "currentCharacteristics": characteristics,
+      "mpstatsCharacteristics": mpstats_characteristics[:80],
+    },
+    "constraints": {
+      "titleMaxChars": 200,
+      "descriptionMaxChars": OZON_CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT,
+      "descriptionTarget": "1200-2500",
+      "language": "ru",
+    },
+  }
+  messages = [
+    {"role": "system", "content": OZON_CONTENT_REOPTIMIZE_SYSTEM_PROMPT},
+    {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
+  ]
+  try:
+    payload, model, provider = audit_llm_chat_completion(messages)
+    if not payload:
+      raise ValueError("llm_key_missing")
+    content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+    parsed = parse_llm_json_content(content)
+    if not isinstance(parsed, dict):
+      raise RuntimeError("llm_ozon_content_reoptimization_invalid_json")
+  except (RuntimeError, urlerror.HTTPError, urlerror.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as exc:
+    raise RuntimeError(f"llm_ozon_content_reoptimization_failed:{type(exc).__name__}") from exc
+
+  title_block = parsed.get("title") if isinstance(parsed.get("title"), dict) else {}
+  description_block = parsed.get("description") if isinstance(parsed.get("description"), dict) else {}
+  next_title = ozon_content_title_limit(title_block.get("value") or draft_content.get("title") or title)
+  next_description = audit_str(description_block.get("value") or draft_content.get("description") or description, OZON_CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  next_description = content_reoptimization_remove_output_leaks(next_description, card={
+    "title": title,
+    "subjectName": category,
+    "description": description,
+    "brand": brand,
+    "characteristics": [
+      {"name": row.get("name"), "value": ", ".join(row.get("values") or [])}
+      for row in characteristics
+    ],
+  }) or next_description
+  next_description = content_reoptimization_apply_client_postprocess(next_description, {
+    "title": title,
+    "subjectName": category,
+    "description": description,
+    "brand": brand,
+    "characteristics": [
+      {"name": row.get("name"), "value": ", ".join(row.get("values") or [])}
+      for row in characteristics
+    ],
+  })
+  if not next_title or not next_description:
+    raise RuntimeError("llm_ozon_content_reoptimization_empty")
+
+  llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
+  fallback_characteristics = content_reoptimization_characteristic_fallback(
+    {"characteristics": [
+      {"name": row.get("name"), "value": ", ".join(row.get("values") or [])}
+      for row in characteristics
+    ]},
+    final_keywords,
+    available_characteristics=characteristics,
+    mpstats_characteristics=mpstats_characteristics,
+  )
+  characteristic_draft = content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics)
+  characteristic_rows = ozon_content_characteristics_list(characteristic_draft)
+  used_keywords = content_keyword_matches(f"{next_title} {next_description}", final_keywords, limit=120)
+  warnings = parsed.get("_meta", {}).get("warnings", []) if isinstance(parsed.get("_meta"), dict) and isinstance(parsed.get("_meta", {}).get("warnings"), list) else []
+  return {
+    "draftContent": {
+      "title": next_title,
+      "description": next_description,
+      "characteristics": characteristic_rows,
+    },
+    "contentOptimization": {
+      "id": f"ozon-semantic-content-{int(time.time() * 1000)}",
+      "createdAt": utc_now().isoformat(),
+      "engine": "opticards-ozon-semantic-content-v1",
+      "provider": provider,
+      "model": model,
+      "marketplace": "Ozon",
+      "finalKeywordCount": len(final_keywords),
+      "usedKeywords": used_keywords,
+      "warnings": warnings[:20],
+      "mpstatsCharacteristics": len(mpstats_characteristics),
+    },
+  }
+
+
+def build_ozon_card_content_reoptimization(portal_id, payload, user):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  payload = payload if isinstance(payload, dict) else {}
+  raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else payload
+  card_key = audit_str(payload.get("cardKey") or raw_card.get("cardKey"), 160)
+  sku = audit_str(payload.get("sku") or ozon_card_value(raw_card, "sku", "id", "productId"), 120)
+  offer_id = audit_str(payload.get("offerId") or ozon_card_value(raw_card, "offerId", "offer_id", "vendorCode"), 120)
+  title = audit_str(payload.get("title") or ozon_card_value(raw_card, "title", "name"), 300)
+  if not card_key:
+    card_key = draft_card_key(sku or offer_id or title)
+  if not card_key:
+    raise ValueError("invalid_ozon_card_content_reoptimization")
+  semantic_payload = normalize_ozon_semantic_payload(payload.get("semanticDraft")) if isinstance(payload.get("semanticDraft"), dict) else {}
+  if not semantic_payload:
+    semantic_payload = load_ozon_semantic_payload_for_card(numeric_portal_id, card_key)
+  draft_payload = normalize_ozon_content_payload(payload.get("draft")) if isinstance(payload.get("draft"), dict) else {}
+  if not draft_payload:
+    draft_payload = load_ozon_card_draft_payload_for_card(numeric_portal_id, card_key)
+  mpstats_characteristics = payload.get("mpstatsCharacteristics") if isinstance(payload.get("mpstatsCharacteristics"), list) else []
+  result = build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=semantic_payload, draft=draft_payload, mpstats_characteristics=mpstats_characteristics)
+  previous_audit = draft_payload.get("auditResult") if isinstance(draft_payload.get("auditResult"), dict) else {}
+  saved = save_ozon_card_draft(numeric_portal_id, {
+    "cardKey": card_key,
+    "sku": sku,
+    "offerId": offer_id,
+    "title": title or result["draftContent"]["title"],
+    "content": result["draftContent"],
+    "approval": {"contentStatus": "draft"},
+    "auditStatus": "done",
+    "auditResult": previous_audit,
+    "source": "ozon-semantic-content",
+    "contentOptimization": result["contentOptimization"],
+  }, user)
+  result["draft"] = saved.get("draft")
+  return result
 
 
 def build_ozon_card_audit(portal_id, payload, user):
@@ -9719,6 +10038,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - ключи и свойства "без сахара", "для диабетиков", "натуральные подсластители", конкретные экстракты, "безопасно для полости рта" используй только если эти факты прямо есть в evidenceBundle.card.characteristics/title/description;
 - для медицинских и околомедицинских товаров не пиши "лечит", "устраняет боль", "быстрое облегчение", "эффективное средство", "вылечит ангину/ОРВИ/бронхит"; замени на "помогает смягчить", "способствует уменьшению першения", "помогает снизить дискомфорт", "может использоваться как вспомогательное средство";
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
+- для характеристик сначала смотри evidenceBundle.characteristicsContext.mpstatsCharacteristics как статистику популярных рыночных значений, затем WB-справочник availableCharacteristics как рамку допустимых полей, затем текущие факты карточки; не добавляй значение, если оно противоречит карточке;
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
@@ -10126,11 +10446,14 @@ def semantic_keyword_text(rows):
   return " ".join(item.get("query") or "" for item in rows if isinstance(item, dict))
 
 
-def content_characteristic_name_from_context(preferred, characteristics, available):
+def content_characteristic_name_from_context(preferred, characteristics, available, mpstats_characteristics=None):
   candidates = []
   for row in characteristics if isinstance(characteristics, list) else []:
     candidates.append((row.get("name") or "", row.get("charcId") or row.get("charcID") or "", row))
   for row in available if isinstance(available, list) else []:
+    if isinstance(row, dict):
+      candidates.append((row.get("name") or row.get("label") or "", row.get("charcID") or row.get("charcId") or "", row))
+  for row in mpstats_characteristics if isinstance(mpstats_characteristics, list) else []:
     if isinstance(row, dict):
       candidates.append((row.get("name") or row.get("label") or "", row.get("charcID") or row.get("charcId") or "", row))
   preferred_tokens = set(audit_tokens(preferred))
@@ -10147,9 +10470,22 @@ def content_characteristic_name_from_context(preferred, characteristics, availab
   return best if best_score else (preferred, "", {})
 
 
-def content_reoptimization_characteristic_fallback(card, keyword_rows, available_characteristics=None, limit=16):
+def content_characteristic_value_matches_keywords(value, keyword_tokens):
+  value_tokens = semantic_content_tokens(value)
+  for value_token in value_tokens:
+    for keyword_token in keyword_tokens:
+      if value_token == keyword_token:
+        return True
+      prefix_length = min(len(value_token), len(keyword_token), 5)
+      if prefix_length >= 5 and value_token[:prefix_length] == keyword_token[:prefix_length]:
+        return True
+  return False
+
+
+def content_reoptimization_characteristic_fallback(card, keyword_rows, available_characteristics=None, mpstats_characteristics=None, limit=16):
   card_rows = audit_card_characteristics(card)
   available_characteristics = available_characteristics if isinstance(available_characteristics, list) else []
+  mpstats_characteristics = mpstats_characteristics if isinstance(mpstats_characteristics, list) else []
   output = {}
   keyword_text = semantic_keyword_text(keyword_rows)
   keyword_tokens = set(semantic_content_tokens(keyword_text))
@@ -10185,6 +10521,50 @@ def content_reoptimization_characteristic_fallback(card, keyword_rows, available
     if len(output) >= limit:
       return output
 
+  for meta in available_characteristics:
+    if not isinstance(meta, dict):
+      continue
+    name = audit_str(meta.get("name") or meta.get("label") or "")
+    if not name:
+      continue
+    stats = audit_mpstats_value_stats(name, mpstats_characteristics)
+    if not stats:
+      continue
+    matches = audit_mpstats_matches(name, mpstats_characteristics)
+    values_text = " ".join(item.get("value") or "" for item in stats[:5])
+    market_tokens = set(semantic_content_tokens(f"{name} {values_text}"))
+    if not (market_tokens & keyword_tokens) and not audit_promotion_relevant(meta, matches):
+      continue
+    charc_id = meta.get("charcID") or meta.get("charcId") or ""
+    key = content_characteristic_draft_key(name, charc_id)
+    if not key or key in output:
+      continue
+    value_limit = audit_characteristic_limit(meta) or 3
+    keyword_matched_values = [
+      item["value"]
+      for item in stats
+      if item.get("value") and content_characteristic_value_matches_keywords(item.get("value"), keyword_tokens)
+    ]
+    values = audit_unique(
+      keyword_matched_values or [item["value"] for item in stats[:value_limit] if item.get("value")],
+      limit=value_limit,
+    )
+    if not values:
+      continue
+    output[key] = {
+      "charcID": charc_id,
+      "label": name,
+      "value": ", ".join(values),
+      "values": values,
+      "source": "semantic",
+      "reason": f"MPStats показывает популярные значения для этой характеристики: {', '.join(values[:3])}. Проверьте релевантность перед публикацией.",
+      "unitName": meta.get("unitName") or "",
+      "maxCount": meta.get("maxCount"),
+      "charcType": meta.get("charcType"),
+    }
+    if len(output) >= limit:
+      return output
+
   hints = []
   normalized_keywords = audit_normalized(keyword_text)
   if "женск" in normalized_keywords:
@@ -10199,7 +10579,17 @@ def content_reoptimization_characteristic_fallback(card, keyword_rows, available
     hints.append(("Форма оправы", ["овальная"], "Ключи содержат форму оправы; заполните, если форма подтверждена фото и WB-справочником."))
 
   for name, values, reason in hints:
-    target_name, charc_id, source = content_characteristic_name_from_context(name, card_rows, available_characteristics)
+    target_name, charc_id, source = content_characteristic_name_from_context(name, card_rows, available_characteristics, mpstats_characteristics)
+    stats = audit_mpstats_value_stats(target_name, mpstats_characteristics)
+    desired_keys = {audit_normalized(value) for value in values}
+    mpstats_values = [
+      item["value"]
+      for item in stats
+      if audit_normalized(item.get("value")) in desired_keys
+    ]
+    if mpstats_values:
+      values = audit_unique(mpstats_values, limit=len(values))
+      reason = f"{reason} Значение сверено с MPStats по нише."
     key = content_characteristic_draft_key(target_name, charc_id)
     if not key or key in output:
       continue
@@ -18041,7 +18431,12 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "Часть выбранных ключей не добавлена прямым вхождением, потому что это могло ухудшить читаемость или противоречить фактам карточки.",
     ]
   llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
-  fallback_characteristics = content_reoptimization_characteristic_fallback(card, target_keywords, available_characteristics=available_characteristics)
+  fallback_characteristics = content_reoptimization_characteristic_fallback(
+    card,
+    target_keywords,
+    available_characteristics=available_characteristics,
+    mpstats_characteristics=mpstats_characteristics,
+  )
   characteristic_draft = content_reoptimization_merge_characteristic_drafts(fallback_characteristics, llm_characteristics)
   draft_content = {
     "title": {
@@ -22038,6 +22433,28 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         error_text = str(exc) or "invalid_ozon_card_draft"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-card-content-reoptimize"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-card-content-reoptimize")].strip("/")
+      payload = self.read_json() or {}
+      try:
+        result = build_ozon_card_content_reoptimization(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except ValueError as exc:
+        message = str(exc) or "invalid_ozon_card_content_reoptimization"
+        status = HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": message})
+        return
+      except RuntimeError as exc:
+        self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc) or "llm_ozon_content_reoptimization_failed"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

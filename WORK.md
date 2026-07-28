@@ -89,6 +89,35 @@ npm run frontend:check
 
 Основной discovery-документ: `docs/discovery.md`.
 
+## Статус на 2026-07-28 — Ozon генерация контента по СЯ
+
+Сделано:
+- Добавлен отдельный backend route `POST /api/portals/<portal_id>/ozon-card-content-reoptimize`: берет сохраненное итоговое СЯ из `ozon_semantic_drafts`, Ozon snapshot карточки, текущий Ozon draft и MPStats-характеристики, генерирует title/description/characteristics через Ozon-specific GigaChat prompt и сохраняет результат в `ozon_card_drafts`.
+- Ozon prompt не использует WB-лимит 60 символов, но сохраняет клиентские ограничения по ТРАВЕРИН/Авитабс, мягкий БАД-словарь и правило `MPStats -> snapshot/факты карточки` для характеристик.
+- Во вкладке `Изменения Ozon` добавлена кнопка `Подготовить по СЯ`; результат сразу подставляет заголовок, описание и итоговые характеристики, а ручное сохранение больше не затирает сгенерированные характеристики snapshot-значениями.
+- README и `docs/memory/product_marketplace_architecture.md` обновлены через doc-update.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core` -> `19 tests OK`.
+- `python3 -m unittest discover -s tests` -> `27 tests OK`.
+- `python3 -m py_compile server.py`.
+- `npm run frontend:check`.
+- `git diff --check -- server.py frontend/src/App.jsx tests/test_semantic_core.py WORK.md`.
+
+## Статус на 2026-07-28 — правило MPStats для характеристик
+
+Сделано:
+- Зафиксировано рабочее правило: характеристики в черновиках контента должны опираться на связку `MPStats -> WB-справочник -> факты карточки`. MPStats дает популярные рыночные значения, WB-справочник ограничивает допустимые поля, факты карточки запрещают неподтвержденные свойства.
+- `CONTENT_REOPTIMIZE_SYSTEM_PROMPT` явно инструктирует GigaChat сначала смотреть `evidenceBundle.characteristicsContext.mpstatsCharacteristics` для статистики популярных значений.
+- Backend fallback для `/api/card-content-reoptimize` теперь тоже принимает `mpstatsCharacteristics` и поднимает MPStats-значения для характеристик WB, если они совпадают с семантикой или поле промо-значимое.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_characteristic_fallback_uses_mpstats_market_values` -> OK.
+- `python3 -m unittest tests.test_semantic_core` -> `18 tests OK`.
+- `python3 -m unittest discover -s tests` -> `26 tests OK`.
+- `python3 -m py_compile server.py tests/test_semantic_core.py`.
+- `git diff --check -- server.py tests/test_semantic_core.py WORK.md`.
+
 ## Статус на 2026-07-28 — клиентские правила ТРАВЕРИН/Авитабс
 
 Сделано:

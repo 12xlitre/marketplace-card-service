@@ -164,6 +164,28 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     self.assertFalse(server.content_contains_exact_keyword(result, query))
 
+  def test_characteristic_fallback_uses_mpstats_market_values(self):
+    card = {
+      "title": "Солнцезащитные очки женские",
+      "subjectName": "Солнцезащитные очки",
+      "characteristics": [],
+    }
+
+    draft = server.content_reoptimization_characteristic_fallback(
+      card,
+      [{"query": "очки женские"}],
+      available_characteristics=[
+        {"name": "Пол", "charcID": 123, "hasFilter": True, "maxCount": 1, "charcType": 1},
+      ],
+      mpstats_characteristics=[
+        {"name": "Пол", "values": [{"value": "мужской", "score": 100}, {"value": "женский", "score": 72}]},
+      ],
+    )
+
+    self.assertIn("charc:123", draft)
+    self.assertEqual(draft["charc:123"]["values"], ["женский"])
+    self.assertIn("MPStats", draft["charc:123"]["reason"])
+
   def test_reoptimization_result_reports_desired_direct_entry_usage(self):
     card = {
       "title": "Солнцезащитные очки Polaroid мужские",
@@ -250,6 +272,58 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(evidence["draft"]["description"], "Старый черновик с повтором слова леденцы.")
     self.assertEqual(result["contentOptimization"]["revisionMode"], "guided_variant")
     self.assertIn("Сделай мягче", result["contentOptimization"]["revisionInstruction"])
+
+  def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
+    card = {
+      "sku": "oz-100",
+      "offerId": "offer-100",
+      "title": "Солнцезащитные очки",
+      "category": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Очки для яркого дня.",
+      "characteristics": [{"name": "Пол", "value": "женский"}],
+    }
+    semantic = {
+      "cardKey": "oz-100",
+      "sku": "oz-100",
+      "title": "Солнцезащитные очки",
+      "final": [{"query": "очки женские солнцезащитные", "ozonCount": 1200}],
+      "removal": [{"query": "детские очки"}],
+    }
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки женские Polaroid", "reason": "test"},
+      "description": {
+        "value": "Солнцезащитные очки женские Polaroid подходят для города и поездок.",
+        "reason": "test",
+      },
+      "characteristics": [{"name": "Пол", "values": ["женский"], "reason": "MPStats и карточка совпали."}],
+      "_meta": {"warnings": []},
+    }
+    captured = {}
+
+    def fake_llm(messages):
+      captured["evidence"] = json.loads(messages[1]["content"])["evidenceBundle"]
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_ozon_card_content_reoptimization_result(
+        card,
+        semantic_payload=semantic,
+        mpstats_characteristics=[
+          {"name": "Пол", "values": [{"value": "женский", "score": 80}]},
+        ],
+      )
+
+    evidence = captured["evidence"]
+    self.assertEqual(evidence["marketplace"], "Ozon")
+    self.assertEqual(evidence["semanticCore"]["finalKeywords"][0]["query"], "очки женские солнцезащитные")
+    self.assertEqual(evidence["characteristicsContext"]["mpstatsCharacteristics"][0]["name"], "Пол")
+    self.assertEqual(result["draftContent"]["title"], "Солнцезащитные очки женские Polaroid")
+    self.assertEqual(result["draftContent"]["characteristics"][0]["name"], "Пол")
+    self.assertEqual(result["contentOptimization"]["marketplace"], "Ozon")
 
   def test_output_leaks_and_unconfirmed_claims_are_removed(self):
     card = {
