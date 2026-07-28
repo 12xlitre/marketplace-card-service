@@ -184,6 +184,43 @@ class MarketplaceGuardTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "ozon_portal_required"):
       server.import_ozon_semantic_core_agreement(self.wb_portal_id, payload, self.manager)
 
+  def test_withdrawn_approval_from_submitted_is_logged(self):
+    previous_payload = server.normalize_card_draft_payload({
+      "meta": {
+        "approvalSections": {
+          "content": {
+            "status": "submitted",
+            "submittedBy": "anastasia.tech",
+            "submittedAt": "2026-07-28T10:00:00+00:00",
+          },
+        },
+      },
+    })
+    payload = server.normalize_card_draft_payload({
+      "meta": {
+        "approvalSections": {
+          "content": {
+            "status": "draft",
+            "submittedBy": "",
+            "submittedAt": "",
+            "history": [{
+              "action": "withdrawn",
+              "reason": "Специалист забрал блок с согласования для доработки.",
+              "createdAt": "2026-07-28T10:30:00+00:00",
+              "userLogin": "anastasia.tech",
+            }],
+          },
+        },
+      },
+    })
+
+    events = server.approval_events_from_payload_change(payload, previous_payload, self.anastasia, "123", "ART-1")
+
+    self.assertEqual(len(events), 1)
+    self.assertEqual(events[0]["status"], "draft")
+    self.assertEqual(events[0]["action"], "withdrawn")
+    self.assertIn("Контент", events[0]["reason"])
+
 
 if __name__ == "__main__":
   unittest.main()

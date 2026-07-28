@@ -7099,7 +7099,10 @@ def approval_events_from_payload_change(payload, previous_payload, user, nm_id="
     for key, approval in sections.items():
       status = approval_status_from_approval(approval)
       previous_status = approval_status_from_approval(previous_sections.get(key, {}))
-      if status != "draft" and status != previous_status:
+      history = approval.get("history") if isinstance(approval.get("history"), list) else []
+      latest = history[0] if history and isinstance(history[0], dict) else {}
+      is_withdrawn = status == "draft" and previous_status == "submitted" and latest.get("action") == "withdrawn"
+      if (status != "draft" and status != previous_status) or is_withdrawn:
         events.append(approval_event_from_approval(
           approval,
           user,
@@ -7110,6 +7113,11 @@ def approval_events_from_payload_change(payload, previous_payload, user, nm_id="
     return events
   approval_status = approval_status_from_payload(payload)
   previous_status = approval_status_from_payload(previous_payload or {})
+  approval = approval_from_payload(payload)
+  history = approval.get("history") if isinstance(approval.get("history"), list) else []
+  latest = history[0] if history and isinstance(history[0], dict) else {}
+  if approval_status == "draft" and previous_status == "submitted" and latest.get("action") == "withdrawn":
+    return [approval_event_from_payload(payload, user, nm_id, vendor_code)]
   if approval_status != "draft" and approval_status != previous_status:
     return [approval_event_from_payload(payload, user, nm_id, vendor_code)]
   return []
@@ -11232,6 +11240,52 @@ def content_reoptimization_sunglasses_title(card, keyword_rows, facts, max_chars
     title_parts = [part for part in title_parts if part != "поляризационные"]
     output = " ".join(title_parts)
   return content_title_limit(output, max_chars)
+
+
+CONTENT_REOPTIMIZATION_AUDIENCE_MARKERS = {
+  "женская": ("женск", "женщ", "девуш"),
+  "мужская": ("мужск", "мужчин", "парн"),
+  "детская": ("детск", "ребен", "ребён", "девоч", "мальч", "подрост"),
+}
+
+
+def content_reoptimization_audiences_in_text(text):
+  normalized = audit_normalized(text)
+  return {
+    audience
+    for audience, markers in CONTENT_REOPTIMIZATION_AUDIENCE_MARKERS.items()
+    if any(marker in normalized for marker in markers)
+  }
+
+
+def content_reoptimization_revision_target_audience(revision_instruction):
+  normalized = audit_normalized(revision_instruction)
+  if not normalized:
+    return ""
+  target_match = re.search(r"\b(?:на|в)\s+([а-яa-z0-9-]{3,})", normalized)
+  if target_match:
+    token = target_match.group(1)
+    for audience, markers in CONTENT_REOPTIMIZATION_AUDIENCE_MARKERS.items():
+      if any(marker in token for marker in markers):
+        return audience
+  action_markers = ("замен", "помен", "исправ", "вместо", "сдел", "напиш")
+  if not any(marker in normalized for marker in action_markers):
+    return ""
+  matched = [
+    audience
+    for audience, markers in CONTENT_REOPTIMIZATION_AUDIENCE_MARKERS.items()
+    if any(marker in normalized for marker in markers)
+  ]
+  return matched[0] if len(matched) == 1 else ""
+
+
+def content_reoptimization_preserve_guided_title(next_title, rule_title, revision_instruction):
+  target_audience = content_reoptimization_revision_target_audience(revision_instruction)
+  if not target_audience:
+    return False
+  next_audiences = content_reoptimization_audiences_in_text(next_title)
+  rule_audiences = content_reoptimization_audiences_in_text(rule_title)
+  return target_audience in next_audiences and target_audience not in rule_audiences
 
 
 def content_reoptimization_card_has_marker(card, markers):
@@ -18395,8 +18449,9 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
   rule_title = sunglasses_rule_title or frame_rule_title
   title_rule_kind = "sunglasses" if sunglasses_rule_title else ("frame" if frame_rule_title else "")
-  title_rule_applied = bool(rule_title and audit_normalized(rule_title) != audit_normalized(next_title))
-  if rule_title:
+  preserve_guided_title = content_reoptimization_preserve_guided_title(next_title, rule_title, revision_instruction)
+  title_rule_applied = bool(rule_title and not preserve_guided_title and audit_normalized(rule_title) != audit_normalized(next_title))
+  if rule_title and not preserve_guided_title:
     next_title = rule_title
   if not next_title or not next_description:
     raise RuntimeError("llm_content_reoptimization_empty")

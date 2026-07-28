@@ -89,6 +89,32 @@ npm run frontend:check
 
 Основной discovery-документ: `docs/discovery.md`.
 
+## Статус на 2026-07-28 — guided title fix для карточки 367374601
+
+Сделано:
+- Исправлен кейс `Оптимист`, карточка `367374601`: при `Еще вариант` с инструкцией вроде `замени женские на детские` backend больше не перетирает LLM-заголовок rule-title формулой солнцезащитных очков, если новая аудитория явно есть в ответе и была запрошена специалистом.
+- Добавлен регрессионный тест `test_guided_title_revision_is_not_overwritten_by_sunglasses_rule`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_title_revision_is_not_overwritten_by_sunglasses_rule` -> OK.
+- `python3 -m unittest discover -s tests` -> `29 tests OK`.
+- `npm run frontend:build`.
+- `git diff --check`.
+
+## Статус на 2026-07-28 — отзыв карточек с согласования
+
+Сделано:
+- В WB `ApprovalPanel` добавлена кнопка `Забрать с согласования` для специалиста, когда активный блок находится в статусе `submitted`; блок возвращается в `draft`, очищает `submittedBy/submittedAt` и снова доступен для доработки.
+- Backend логирует отзыв как событие `withdrawn` в `card_approval_events`, даже если итоговый статус снова `draft`; review-права по-прежнему требуются только для `approved` и `changes_requested`.
+- В Ozon `Изменения` добавлены отдельные действия `На согласование` и `Забрать с согласования` для `contentStatus=submitted`, чтобы beta-контур повторял логику WB.
+- README обновлен через doc-update.
+
+Проверки:
+- `python3 -m unittest tests.test_marketplace_guards` -> `9 tests OK`.
+- `python3 -m py_compile server.py tests/test_marketplace_guards.py`.
+- `npm run frontend:check`.
+- `git diff --check -- server.py frontend/src/App.jsx tests/test_marketplace_guards.py WORK.md`.
+
 ## Статус на 2026-07-28 — Ozon генерация контента по СЯ
 
 Сделано:

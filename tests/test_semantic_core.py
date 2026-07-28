@@ -273,6 +273,46 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(result["contentOptimization"]["revisionMode"], "guided_variant")
     self.assertIn("Сделай мягче", result["contentOptimization"]["revisionInstruction"])
 
+  def test_guided_title_revision_is_not_overwritten_by_sunglasses_rule(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid с поляризационными линзами.",
+      "characteristics": [{"name": "Поляризация", "value": "да"}],
+    }
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки детские Polaroid", "reason": "Учтена просьба специалиста."},
+      "description": {
+        "value": "Солнцезащитные очки Polaroid подходят для яркого дня и поездок.",
+        "reason": "test",
+      },
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "367374601",
+        card,
+        selected_keywords=[{"query": "солнцезащитные очки женские", "wbCount": 1000}],
+        draft={"title": "Солнцезащитные очки женские поляризационные Polaroid"},
+        revision_instruction="замени женские на детские",
+        sections=["title"],
+      )
+
+    title = result["draftContent"]["title"]["value"]
+    self.assertIn("детские", title.lower())
+    self.assertNotIn("женские", title.lower())
+    self.assertFalse(result["contentOptimization"]["titleRuleApplied"])
+
   def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
     card = {
       "sku": "oz-100",

@@ -12011,6 +12011,8 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const descriptionChanged = normalizedCharacteristicOption(descriptionDraft) !== normalizedCharacteristicOption(currentDescription);
   const characteristicsChanged = ozonCharacteristicSignature(characteristicDraft) !== ozonCharacteristicSignature(currentCharacteristics);
   const changesCount = [titleChanged, descriptionChanged, characteristicsChanged].filter(Boolean).length;
+  const ozonCanSubmitContent = ["draft", "changes_requested"].includes(contentApproval.status);
+  const ozonCanWithdrawContent = contentApproval.status === "submitted";
   const readinessSummary = changesCount
     ? `${formatNumber(changesCount)} ${pluralRu(changesCount, "правка", "правки", "правок")} в Ozon-контенте`
     : "Ozon-черновик совпадает с текущим снимком";
@@ -12165,6 +12167,16 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
         <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
           <Save size={16} />Сохранить черновик
         </button>
+        {ozonCanSubmitContent ? (
+          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("submitted")} disabled={saveStatus === "saving" || !titleDraft.trim()}>
+            <Upload size={16} />На согласование
+          </button>
+        ) : null}
+        {ozonCanWithdrawContent ? (
+          <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
+            <RotateCcw size={16} />Забрать с согласования
+          </button>
+        ) : null}
         <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("approved")} disabled={saveStatus === "saving" || !titleDraft.trim()}>
           <CheckSquare size={16} />Принять контент
         </button>
@@ -15989,6 +16001,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
+  const canWithdrawApproval = !isProjectLead && activeApproval.status === "submitted" && !isApprovalReviewer;
   const canDownloadFinalContent = contentApprovalStatusExportable(normalizeApprovalState(approvalSections.content).status);
   const latestAuditEntry = auditHistory.find((item) => item?.summary || item?.competitorSelection) || {};
   const latestAuditSummary = latestAuditEntry.summary || {};
@@ -18314,6 +18327,25 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     return applyApprovalChange(nextApproval, "approval-submitted", targetSection);
   }
 
+  async function withdrawApproval(sectionKey = activeApprovalSection) {
+    const targetSection = normalizeApprovalSectionKey(sectionKey, activeApprovalSection);
+    const sectionApproval = normalizeApprovalState(approvalSections[targetSection]);
+    if (sectionApproval.status !== "submitted") {
+      return false;
+    }
+    const nextApproval = normalizeApprovalState({
+      ...sectionApproval,
+      status: "draft",
+      submittedBy: "",
+      submittedAt: "",
+      reviewedBy: "",
+      reviewedAt: "",
+      returnReason: "",
+      history: [approvalHistoryItem("withdrawn", "Специалист забрал блок с согласования для доработки.", targetSection), ...(sectionApproval.history || [])],
+    });
+    return applyApprovalChange(nextApproval, "approval-withdrawn", targetSection);
+  }
+
   async function approveChanges() {
     const now = new Date().toISOString();
     const nextApproval = normalizeApprovalState({
@@ -19596,12 +19628,14 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   team={portalTeam}
                   canSubmit={canSubmitApproval}
                   canReview={canReviewApproval}
+                  canWithdraw={canWithdrawApproval}
                   readOnly={approvalReadOnly}
                   comment={approvalComment}
                   onComment={setApprovalComment}
                   onSubmit={submitForApproval}
                   onApprove={approveChanges}
                   onReturn={requestChanges}
+                  onWithdraw={withdrawApproval}
                   status={draftSaveStatus}
                   saveError={draftSaveError}
                 />
@@ -19617,6 +19651,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     {draftSaveStatus === "reset" ? <p>Черновик сброшен. В черновике снова текущие данные WB.</p> : null}
                     {draftSaveStatus === "reset-error" ? <p>Не удалось сбросить черновик на backend. Попробуйте еще раз.</p> : null}
                     {draftSaveStatus === "approval-submitted" ? <p>Задача отправлена аккаунт-менеджеру на согласование.</p> : null}
+                    {draftSaveStatus === "approval-withdrawn" ? <p>Задача снята с согласования и снова доступна для доработки.</p> : null}
                     {draftSaveStatus === "approval-approved" ? <p>Правки приняты. Можно выгружать таблицы WB.</p> : null}
                       {draftSaveStatus === "approval-returned" ? <p>Правки возвращены на доработку с комментарием.</p> : null}
                       {draftSaveStatus === "approval-reason-required" ? <p>Укажите причину, чтобы вернуть правки на доработку.</p> : null}
@@ -20401,12 +20436,14 @@ function ApprovalPanel({
   team,
   canSubmit,
   canReview,
+  canWithdraw,
   readOnly,
   comment,
   onComment,
   onSubmit,
   onApprove,
   onReturn,
+  onWithdraw,
   status,
   saveError = "",
 }) {
@@ -20465,10 +20502,23 @@ function ApprovalPanel({
             </button>
         </div>
       ) : null}
+      {canWithdraw ? (
+        <div className="approval-buttons">
+            <button className={loadingButtonClass("btn", busy)} type="button" onClick={() => onWithdraw?.()} disabled={busy} aria-busy={busy || undefined}>
+              <RotateCcw size={17} />Забрать с согласования
+            </button>
+        </div>
+      ) : null}
       {status === "approval-submitted" ? (
         <div className="approval-note">
           <span>Статус сохранен</span>
           <p>Блок отправлен аккаунт-менеджеру на согласование.</p>
+        </div>
+      ) : null}
+      {status === "approval-withdrawn" ? (
+        <div className="approval-note">
+          <span>Статус сохранен</span>
+          <p>Блок снят с согласования и снова доступен для доработки.</p>
         </div>
       ) : null}
       {status === "approval-save-error" ? (
@@ -20489,6 +20539,7 @@ function ApprovalPanel({
 function approvalEventLabel(action) {
   return {
     submitted: "отправлено на согласование",
+    withdrawn: "забрано с согласования",
     approved: "принято",
     changes_requested: "возвращено на доработку",
     opened: "открыта в конвейере",
