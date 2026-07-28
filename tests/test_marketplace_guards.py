@@ -17,7 +17,8 @@ class MarketplaceGuardTest(unittest.TestCase):
         INSERT INTO users (login, password_hash, full_name, role, user_role, access_level)
         VALUES
           ('owner.manager', 'x', 'Owner Manager', 'Manager', 'manager', 'overview'),
-          ('readonly.tech', 'x', 'Read Only Tech', 'Tech', 'tech', 'readonly_wb')
+          ('readonly.tech', 'x', 'Read Only Tech', 'Tech', 'tech', 'readonly_wb'),
+          ('anastasia.tech', 'x', 'Анастасия Руднева', 'Технический специалист', 'tech', 'readonly_wb')
         """
       )
     self.manager = {
@@ -32,12 +33,19 @@ class MarketplaceGuardTest(unittest.TestCase):
       "user_role": "tech",
       "access_level": "readonly_wb",
     }
+    self.anastasia = {
+      "login": "anastasia.tech",
+      "full_name": "Анастасия Руднева",
+      "role": "Технический специалист",
+      "user_role": "tech",
+      "access_level": "readonly_wb",
+    }
     self.ozon_portal_id = server.create_portal(
       "Ozon Beta",
       "Ozon",
       "selected",
       "owner.manager",
-      {"lead": "owner.manager", "tech": "readonly.tech", "manager": ""},
+      {"lead": "owner.manager", "tech": "readonly.tech", "manager": "anastasia.tech"},
       store_url="https://www.ozon.ru/seller/test",
     )
     self.wb_portal_id = server.create_portal(
@@ -45,7 +53,7 @@ class MarketplaceGuardTest(unittest.TestCase):
       "Wildberries",
       "full",
       "owner.manager",
-      {"lead": "owner.manager", "tech": "readonly.tech", "manager": ""},
+      {"lead": "owner.manager", "tech": "readonly.tech", "manager": "anastasia.tech"},
     )
 
   def tearDown(self):
@@ -62,6 +70,18 @@ class MarketplaceGuardTest(unittest.TestCase):
         {"tasks": [{"cardKey": "sku-1", "sku": "123456789", "title": "Ozon card"}]},
         self.readonly,
       )
+
+  def test_anastasia_can_manage_ozon_beta_but_not_wildberries(self):
+    self.assertTrue(server.user_can_edit_portal(self.anastasia, self.ozon_portal_id))
+    self.assertFalse(server.user_can_edit_portal(self.anastasia, self.wb_portal_id))
+
+    result = server.save_ozon_tasks(
+      self.ozon_portal_id,
+      {"tasks": [{"cardKey": "sku-1", "sku": "123456789", "title": "Ozon card"}]},
+      self.anastasia,
+    )
+
+    self.assertEqual(len(result["tasks"]), 1)
 
   def test_ozon_writes_reject_wildberries_portal(self):
     with self.assertRaisesRegex(ValueError, "ozon_portal_required"):

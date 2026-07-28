@@ -107,6 +107,24 @@ npm run frontend:check
 - Коммит и деплой не выполнялись.
 - Перед деплоем стоит прогнать реальную генерацию 5 вкусов ТРАВЕРИН и 2-3 карточек Авитабс через LLM, чтобы оценить не только guard/fallback, но и живой модельный текст.
 
+## Статус на 2026-07-28 — Ozon beta доступ для Насти
+
+Сделано:
+- Ozon beta во frontend открыт для `anastasia.tech` / `Анастасия Руднева`: она видит раздел Ozon внутри клиента и получает управление Ozon beta-кабинетом.
+- Backend edit-доступ расширен точечно: beta tester должен иметь обычный доступ к порталу через создателя/команду, и дополнительное edit-право срабатывает только если `portals.marketplace = Ozon`.
+- WB/admin-права Насти не расширялись: `user_can_edit_portal(anastasia, wb_portal)` остается `False`.
+- README и `docs/memory/product_marketplace_architecture.md` обновлены: Ozon beta теперь для Дмитрия и Насти.
+
+Проверки:
+- `python3 -m unittest discover -s tests` -> `21 tests OK`.
+- `npm run frontend:check`.
+- `npm run frontend:build`.
+- `python3 -m py_compile server.py tests/test_marketplace_guards.py tests/test_semantic_core.py`.
+- `git diff --check`.
+
+Осталось:
+- После деплоя Насте нужно перелогиниться/обновить страницу, открыть клиента, перейти в Ozon beta и создать тестовый Ozon-кабинет по ссылке/Seller ID/SKU.
+
 ## Статус на 2026-07-27 — Ozon beta перед запуском
 
 Сделано:

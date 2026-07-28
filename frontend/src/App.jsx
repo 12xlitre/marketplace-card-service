@@ -850,7 +850,17 @@ function clientTaskCount(client, marketplaceKey = "") {
 
 function userCanSeeOzonBeta(user) {
   const marker = `${user?.login || ""} ${user?.full_name || ""}`.toLowerCase();
-  return marker.includes("dmitriy") || marker.includes("dmitry") || marker.includes("дмитрий") || marker.includes("сафиуллин");
+  return marker.includes("dmitriy")
+    || marker.includes("dmitry")
+    || marker.includes("дмитрий")
+    || marker.includes("сафиуллин")
+    || marker.includes("anastasia.tech")
+    || marker.includes("анастасия")
+    || marker.includes("руднева");
+}
+
+function userCanManageOzonBeta(user) {
+  return userCanSeeOzonBeta(user);
 }
 
 function uniqueLogins(logins) {
@@ -5964,6 +5974,7 @@ export default function App() {
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
+  const canManageOzonBeta = currentUser ? userCanManageOzonBeta(currentUser) : false;
   const canManageUsers = currentUser ? userCanManageUsers(currentUser) : false;
   const allPortals = userPortals.map(mergePortalWorkSummary);
   const activePortals = allPortals.filter((portal) => portal.isActive !== false);
@@ -7167,6 +7178,7 @@ export default function App() {
             currentUser={currentUser}
             displayUsers={displayUsers}
             canManage={canManagePortals}
+            canManageOzonBeta={canManageOzonBeta}
             findUser={findUser}
             onBack={() => setScreen("cabinets")}
             onOpenPortal={showSeller}
@@ -7194,7 +7206,7 @@ export default function App() {
             portal={currentPortal}
             displayUsers={displayUsers}
             findUser={findUser}
-            canManage={canManagePortals}
+            canManage={canManagePortals || canManageOzonBeta}
             onBack={() => setScreen("client")}
             sellerTab={sellerTab}
             onSellerTabChange={setSellerTab}
@@ -7636,7 +7648,7 @@ function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenT
   );
 }
 
-function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", currentUser, displayUsers, canManage, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
+function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", currentUser, displayUsers, canManage, canManageOzonBeta = false, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
   const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
   const [marketplaceTab, setMarketplaceTab] = useState(initialMarketplaceTab || "overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
@@ -7998,7 +8010,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
             client={client}
             marketplaceKey="ozon"
             portals={ozonPortals}
-            canManage={canManage}
+            canManage={canManage || canManageOzonBeta}
             findUser={findUser}
             onOpenPortal={onOpenPortal}
             onArchive={onArchive}

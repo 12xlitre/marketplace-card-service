@@ -1092,6 +1092,15 @@ def user_can_manage_portals(row):
   return any(part in marker for part in ("admin", "manager", "all", "полный", "админ", "руковод", "менедж"))
 
 
+def user_is_ozon_beta_tester(row):
+  if not row:
+    return False
+  login = user_login_value(row)
+  full_name = row["full_name"] if isinstance(row, sqlite3.Row) and "full_name" in row.keys() else (row.get("full_name") if isinstance(row, dict) else "")
+  marker = f"{login} {full_name}".lower()
+  return any(part in marker for part in ("dmitriy", "dmitry", "дмитрий", "сафиуллин", "anastasia.tech", "анастасия", "руднева"))
+
+
 def user_can_manage_users(row):
   if not row:
     return False
@@ -1157,7 +1166,20 @@ def user_can_access_portal(user, portal_id):
 
 
 def user_can_edit_portal(user, portal_id):
-  return user_can_manage_portals(user) and user_can_access_portal(user, portal_id)
+  if user_can_manage_portals(user) and user_can_access_portal(user, portal_id):
+    return True
+  if not user_is_ozon_beta_tester(user) or not user_can_access_portal(user, portal_id):
+    return False
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError):
+    return False
+  with connect_db() as db:
+    row = db.execute(
+      "SELECT marketplace FROM portals WHERE id = ? AND is_active = 1",
+      (numeric_portal_id,),
+    ).fetchone()
+  return bool(row and audit_normalized(row["marketplace"]) == "ozon")
 
 
 def portal_conflict_payload(existing_portal, user):
