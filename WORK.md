@@ -17,6 +17,9 @@
 - `npm run frontend:build`
 - `git diff --check`
 
+Деплой:
+- Коммит `2d516ee` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная -> `200`, HTML содержит `Мой вариант` и payload `revisionMode`, `/api/portals` без сессии -> `401`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `2d516ee`, контейнер `opticards-web-1 Up`.
+
 ## Статус на 2026-07-29 — guided prompt для добавления абзаца в описание
 
 Сделано:
