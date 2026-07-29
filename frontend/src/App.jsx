@@ -416,8 +416,12 @@ function sheetXml(sheet) {
     const width = sheet.widths?.[index] || 18;
     return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`;
   }).join("");
+  const sheetViewAttrs = sheet.showGridLines === false ? ' showGridLines="0"' : "";
   const freezePane = sheet.freezeRows
-    ? `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${sheet.freezeRows}" topLeftCell="A${sheet.freezeRows + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`
+    ? `<pane ySplit="${sheet.freezeRows}" topLeftCell="A${sheet.freezeRows + 1}" activePane="bottomLeft" state="frozen"/>`
+    : "";
+  const sheetViews = sheet.freezeRows || sheet.showGridLines === false
+    ? `<sheetViews><sheetView workbookViewId="0"${sheetViewAttrs}>${freezePane}</sheetView></sheetViews>`
     : "";
   const sheetRows = rows.map((row, rowIndex) => {
     const rowNumber = rowIndex + 1;
@@ -443,7 +447,7 @@ function sheetXml(sheet) {
     : "";
   const sheetProtection = sheet.protected ? '<sheetProtection sheet="1" objects="1" scenarios="1" insertRows="0"/>' : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${freezePane}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${sheetProtection}${autoFilter}${dataValidations}</worksheet>`;
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${sheetViews}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${sheetProtection}${autoFilter}${dataValidations}</worksheet>`;
 }
 
 function xlsxFiles(sheets) {
@@ -479,7 +483,7 @@ function xlsxFiles(sheets) {
     {
       name: "xl/styles.xml",
       data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
     },
     ...worksheetFiles,
   ];
@@ -3338,6 +3342,55 @@ function characteristicExportText(value) {
   return String(value ?? "").trim();
 }
 
+function finalContentHeaderRow(values) {
+  return values.map((value) => ({ value, style: 3 }));
+}
+
+function finalContentTextCell(value) {
+  return { value: value || "", style: 4 };
+}
+
+function finalContentAgreementCell(value = "Нет") {
+  return { value, style: 5 };
+}
+
+function finalContentAgreementValidation(columnIndex, rowCount) {
+  if (rowCount <= 1) {
+    return [];
+  }
+  const column = columnName(columnIndex);
+  return [{
+    type: "list",
+    range: `${column}2:${column}${rowCount}`,
+    formula1: '"Нет,Да"',
+    allowBlank: true,
+  }];
+}
+
+function finalContentSheetDefaults(sheet, agreementColumnIndex) {
+  return {
+    ...sheet,
+    autoFilter: false,
+    protected: true,
+    showGridLines: false,
+    dataValidations: finalContentAgreementValidation(agreementColumnIndex, sheet.rows.length),
+  };
+}
+
+function currentCharacteristicValueLookup(card) {
+  const lookup = new Map();
+  characteristicRows(currentCardCharacteristicItems(card)).forEach((row) => {
+    const value = characteristicExportText(row.value);
+    const keys = [row.charcID ? `charc:${row.charcID}` : "", characteristicKeyFromName(row.label)];
+    keys.filter(Boolean).forEach((key) => {
+      if (!lookup.has(key)) {
+        lookup.set(key, value);
+      }
+    });
+  });
+  return lookup;
+}
+
 function buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics) {
   const characteristics = draftCharacteristicsList(draftCharacteristics);
   const characteristicHeaders = characteristics.map((item) => item.name);
@@ -3687,40 +3740,61 @@ function SemanticCoreImportPanel({ status = "", error = "", preview = null, onPi
 
 function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCharacteristics) {
   const characteristics = draftCharacteristicsList(draftCharacteristics);
+  const rawFields = rawFieldsForCard(card);
+  const characteristicCurrentValues = currentCharacteristicValueLookup(card);
   return [
-    {
+    finalContentSheetDefaults({
       name: "Заголовок",
       freezeRows: 1,
-      widths: [24, 18, 64],
+      widths: [24, 18, 52, 52, 18],
       rows: [
-        ["Артикул продавца", "Номенклатура WB", "Итоговый заголовок"],
-        [card?.vendorCode || "", card?.nmID || "", draftTitle || ""],
-      ],
-    },
-    {
-      name: "Описание",
-      freezeRows: 1,
-      widths: [24, 18, 96],
-      rows: [
-        ["Артикул продавца", "Номенклатура WB", "Итоговое описание"],
-        [card?.vendorCode || "", card?.nmID || "", draftDescription || ""],
-      ],
-    },
-    {
-      name: "Характеристики",
-      freezeRows: 1,
-      widths: [24, 18, 34, 14, 56],
-      rows: [
-        ["Артикул продавца", "Номенклатура WB", "Характеристика", "charcID", "Значение"],
-        ...characteristics.map((item) => [
+        finalContentHeaderRow(["Артикул продавца", "Номенклатура WB", "Было", "Итоговый заголовок", "Согласовано"]),
+        [
           card?.vendorCode || "",
           card?.nmID || "",
-          item.name,
-          item.charcID,
-          characteristicExportText(item.value),
-        ]),
+          finalContentTextCell(card?.title || rawFields.title || ""),
+          finalContentTextCell(draftTitle || ""),
+          finalContentAgreementCell(),
+        ],
       ],
-    },
+    }, 4),
+    finalContentSheetDefaults({
+      name: "Описание",
+      freezeRows: 1,
+      widths: [24, 18, 72, 72, 18],
+      rows: [
+        finalContentHeaderRow(["Артикул продавца", "Номенклатура WB", "Было", "Итоговое описание", "Согласовано"]),
+        [
+          card?.vendorCode || "",
+          card?.nmID || "",
+          finalContentTextCell(card?.description || rawFields.description || ""),
+          finalContentTextCell(draftDescription || ""),
+          finalContentAgreementCell(),
+        ],
+      ],
+    }, 4),
+    finalContentSheetDefaults({
+      name: "Характеристики",
+      freezeRows: 1,
+      widths: [24, 18, 34, 14, 48, 48, 18],
+      rows: [
+        finalContentHeaderRow(["Артикул продавца", "Номенклатура WB", "Характеристика", "charcID", "Было", "Значение", "Согласовано"]),
+        ...characteristics.map((item) => {
+          const currentValue = characteristicCurrentValues.get(item.charcID ? `charc:${item.charcID}` : "")
+            || characteristicCurrentValues.get(characteristicKeyFromName(item.name))
+            || "";
+          return [
+            card?.vendorCode || "",
+            card?.nmID || "",
+            item.name,
+            item.charcID,
+            finalContentTextCell(currentValue),
+            finalContentTextCell(characteristicExportText(item.value)),
+            finalContentAgreementCell(),
+          ];
+        }),
+      ],
+    }, 6),
   ];
 }
 
