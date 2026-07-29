@@ -14,6 +14,9 @@
 - `python3 -m py_compile server.py tests/test_semantic_core.py`
 - `git diff --check`
 
+Деплой:
+- Коммит `400f7c6` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная -> `200`, `/api/portals` без сессии -> `401`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `400f7c6`, контейнер `opticards-web-1 Up`.
+
 ## Статус на 2026-07-29 — итоговый контент с Да по умолчанию
 
 Сделано:
