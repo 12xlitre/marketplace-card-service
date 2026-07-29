@@ -5312,6 +5312,46 @@ tr:last-child td {
   gap: 6px;
 }
 
+.content-variant-mode {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.content-variant-mode button {
+  min-height: 54px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.content-variant-mode button:hover:not(:disabled),
+.content-variant-mode button.active {
+  background: #edf5ff;
+  border-color: #b9cbed;
+}
+
+.content-variant-mode strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.content-variant-mode span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .description-keyword-empty {
   border: 1px dashed var(--line);
   background: var(--surface);

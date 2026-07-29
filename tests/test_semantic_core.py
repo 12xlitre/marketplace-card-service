@@ -495,6 +495,104 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertTrue(result["contentOptimization"]["revisionAdditionApplied"])
     self.assertLessEqual(len(description), server.CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
+  def test_explicit_addition_mode_does_not_require_command_words(self):
+    card = {
+      "title": "Солнцезащитные очки мужские Polaroid",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Материал линзы", "value": "триацетат целлюлозы"},
+        {"name": "Материал оправы", "value": "поликарбонат"},
+      ],
+    }
+    bare_addition = (
+      "Polaroid мужские очки имеют линзы из триацетата целлюлозы и прочную оправу из поликарбоната. "
+      "Материалы подходят для регулярного использования."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки мужские Polaroid", "reason": "test"},
+      "description": {"value": "Солнцезащитные очки Polaroid подходят для города.", "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "243430592",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные мужские", "wbCount": 1000}],
+        draft={"description": "Солнцезащитные очки Polaroid подходят для города."},
+        revision_instruction="",
+        revision_mode="addition",
+        revision_text=bare_addition,
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertIn("Polaroid мужские очки имеют линзы из триацетата целлюлозы", description)
+    self.assertEqual(result["contentOptimization"]["revisionInstructionMode"], "addition")
+    self.assertTrue(result["contentOptimization"]["revisionAdditionApplied"])
+
+  def test_reference_mode_uses_user_text_when_llm_ignores_it(self):
+    card = {
+      "title": "Солнцезащитные очки мужские Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Поляризация", "value": "да"},
+        {"name": "Материал линзы", "value": "триацетат целлюлозы"},
+        {"name": "Материал оправы", "value": "поликарбонат"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+        {"name": "Цвет", "value": "черный"},
+        {"name": "Цвет линз", "value": "серый"},
+      ],
+    }
+    reference = (
+      "Солнцезащитные очки мужские Polaroid PLD 4137 S 807 M9 подходят для ярких солнечных дней и поездок за рулем. "
+      "Прямоугольная форма оправы выглядит сдержанно и современно. "
+      "Polaroid мужские очки имеют линзы из триацетата целлюлозы и прочную оправу из поликарбоната. "
+      "Серые линзы и черная оправа легко сочетаются с повседневной одеждой."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки мужские Polaroid", "reason": "test"},
+      "description": {"value": "Солнцезащитные очки Polaroid подходят для города.", "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "243430592",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные мужские", "wbCount": 1000}],
+        revision_mode="reference",
+        revision_text=reference,
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertIn("Солнцезащитные очки мужские Polaroid PLD 4137 S 807 M9", description)
+    self.assertIn("Polaroid мужские очки имеют линзы из триацетата целлюлозы", description)
+    self.assertEqual(result["contentOptimization"]["revisionInstructionMode"], "reference")
+    self.assertTrue(result["contentOptimization"]["revisionAdditionApplied"])
+    self.assertLessEqual(len(description), server.CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
   def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
     card = {
       "sku": "oz-100",

@@ -1,5 +1,22 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-29 — явные режимы prompt для варианта описания
+
+Сделано:
+- в модалке `Еще вариант описания` добавлен переключатель: `Пожелание`, `Добавить фрагмент`, `Мой вариант`;
+- frontend отправляет в `/api/card-content-reoptimize` отдельные поля `revisionMode` и `revisionText`, а поле для эталонного текста увеличено до 5000 символов;
+- backend явно обрабатывает `addition`: добавляет безопасный фрагмент даже без слов-команд в тексте, и `reference`: берет пользовательский вариант как основу, если LLM его проигнорировал;
+- system prompt GigaChat дополнен правилами для `instructionMode=addition/reference`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_explicit_addition_mode_does_not_require_command_words tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_uses_user_text_when_llm_ignores_it tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_description_addition_is_applied_when_llm_ignores_instruction`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `npm run frontend:check`
+- `npm run frontend:build`
+- `git diff --check`
+
 ## Статус на 2026-07-29 — guided prompt для добавления абзаца в описание
 
 Сделано:

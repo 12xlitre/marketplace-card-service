@@ -15025,7 +15025,24 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
 
 function ContentVariantPromptModal({ value, loading = false, onChange, onClose, onSubmit }) {
   const instruction = String(value?.instruction || "");
+  const mode = ["addition", "reference"].includes(value?.mode) ? value.mode : "instruction";
   const sectionLabel = value?.sectionLabel || "контента";
+  const modeOptions = [
+    { key: "instruction", title: "Пожелание", copy: "Тон, акценты, сокращение" },
+    { key: "addition", title: "Добавить фрагмент", copy: "Вставить текст в черновик" },
+    { key: "reference", title: "Мой вариант", copy: "Взять текст за основу" },
+  ];
+  const fieldLabel = mode === "addition"
+    ? "Фрагмент для добавления"
+    : mode === "reference"
+      ? "Мой вариант текста"
+      : "Что учесть в новом варианте";
+  const placeholder = mode === "addition"
+    ? "Вставьте абзац или несколько предложений, которые нужно добавить в описание."
+    : mode === "reference"
+      ? "Вставьте свой вариант описания. GigaChat должен сохранить его основу и поправить только то, что требуется по фактам, лимиту и правилам WB."
+      : "Например: сделать текст мягче, добавить акцент на состав, убрать медицинские формулировки, больше SEO в начале, не повторять слово леденцы.";
+  const maxLength = mode === "reference" ? 5000 : mode === "addition" ? 2600 : 1800;
   const quickPrompts = [
     "Сделай текст живее и менее похожим на инструкцию.",
     "Добавь больше SEO в первые 200-300 символов, но без переспама.",
@@ -15048,32 +15065,54 @@ function ContentVariantPromptModal({ value, loading = false, onChange, onClose, 
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
+          <div className="content-variant-mode" role="tablist" aria-label="Режим правки">
+            {modeOptions.map((option) => (
+              <button
+                type="button"
+                key={option.key}
+                className={option.key === mode ? "active" : ""}
+                onClick={() => onChange?.({ mode: option.key })}
+                disabled={loading}
+              >
+                <strong>{option.title}</strong>
+                <span>{option.copy}</span>
+              </button>
+            ))}
+          </div>
           <label className="field-label">
-            <span>Что учесть в новом варианте</span>
+            <span>{fieldLabel}</span>
             <textarea
               value={instruction}
-              onChange={(event) => onChange?.(event.target.value)}
-              rows={6}
-              maxLength={1200}
-              placeholder="Например: сделать текст мягче, добавить акцент на состав, убрать медицинские формулировки, больше SEO в начале, не повторять слово леденцы."
+              onChange={(event) => onChange?.({ instruction: event.target.value })}
+              rows={mode === "reference" ? 10 : 7}
+              maxLength={maxLength}
+              placeholder={placeholder}
               disabled={loading}
               autoFocus
             />
           </label>
-          <div className="description-keyword-legend">
-            {quickPrompts.map((prompt) => (
-              <button
-                className="description-keyword-chip selectable"
-                type="button"
-                key={prompt}
-                onClick={() => onChange?.(instruction ? `${instruction.trim()}\n${prompt}` : prompt)}
-                disabled={loading}
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-          <p className="status-note">Можно оставить поле пустым: система сделает новый вариант по базовым правилам и текущему СЯ.</p>
+          {mode === "instruction" ? (
+            <div className="description-keyword-legend">
+              {quickPrompts.map((prompt) => (
+                <button
+                  className="description-keyword-chip selectable"
+                  type="button"
+                  key={prompt}
+                  onClick={() => onChange?.({ instruction: instruction ? `${instruction.trim()}\n${prompt}` : prompt })}
+                  disabled={loading}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <p className="status-note">
+            {mode === "reference"
+              ? `${instruction.length}/${maxLength} символов`
+              : mode === "addition"
+                ? `${instruction.length}/${maxLength} символов`
+                : "Можно оставить поле пустым: система сделает новый вариант по базовым правилам и текущему СЯ."}
+          </p>
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
@@ -17652,6 +17691,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     const action = sections.length === 1 ? sections[0] : "all";
     const desiredKeywords = semanticRowsByKey(Array.isArray(options.desiredKeywords) ? options.desiredKeywords : []);
     const revisionInstruction = String(options.revisionInstruction || "").trim();
+    const revisionMode = ["addition", "reference"].includes(options.revisionMode) ? options.revisionMode : "instruction";
+    const revisionText = String(options.revisionText || "").trim();
     setSemanticContentStatus("loading");
     setSemanticContentAction(action);
     setSemanticContentError("");
@@ -17668,6 +17709,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           removeKeywords: activeSemanticRemovalRows,
           desiredKeywords,
           revisionInstruction,
+          revisionMode,
+          revisionText,
           sections,
           draft: {
             title: draftTitle,
@@ -17780,20 +17823,43 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       sections,
       desiredKeywords,
       instruction: defaultInstruction,
+      mode: "instruction",
       sectionLabel,
     });
   }
 
-  function updateContentVariantInstruction(value) {
-    setContentVariantPrompt((current) => current ? { ...current, instruction: value } : current);
+  function updateContentVariantPrompt(patch) {
+    setContentVariantPrompt((current) => {
+      if (!current) return current;
+      if (typeof patch === "string") {
+        return { ...current, instruction: patch };
+      }
+      if (!patch || typeof patch !== "object") {
+        return current;
+      }
+      const next = { ...current, ...patch };
+      if (patch.mode && patch.mode !== current.mode) {
+        next.instruction = "";
+      }
+      return next;
+    });
   }
 
   async function submitContentVariantPrompt() {
     if (!contentVariantPrompt) return;
+    const revisionMode = ["addition", "reference"].includes(contentVariantPrompt.mode) ? contentVariantPrompt.mode : "instruction";
+    const revisionText = String(contentVariantPrompt.instruction || "").trim();
+    const revisionInstruction = revisionMode === "addition"
+      ? `Добавь в описание этот фрагмент, слегка вычитав при необходимости:\n${revisionText}`
+      : revisionMode === "reference"
+        ? `Возьми этот текст как мой вариант описания и минимально скорректируй только при необходимости:\n${revisionText}`
+        : revisionText;
     await reoptimizeContentFromSemanticCore({
       sections: contentVariantPrompt.sections,
       desiredKeywords: contentVariantPrompt.desiredKeywords,
-      revisionInstruction: contentVariantPrompt.instruction,
+      revisionInstruction,
+      revisionMode,
+      revisionText,
     });
   }
 
@@ -19826,7 +19892,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
         <ContentVariantPromptModal
           value={contentVariantPrompt}
           loading={semanticContentRunning}
-          onChange={updateContentVariantInstruction}
+          onChange={updateContentVariantPrompt}
           onClose={() => setContentVariantPrompt(null)}
           onSubmit={submitContentVariantPrompt}
         />

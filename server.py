@@ -10050,6 +10050,8 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
+- если evidenceBundle.revision.instructionMode = "addition", обязательно включи безопасный смысл из evidenceBundle.revision.additionText в description.value; можно слегка вычитать русский язык, но не игнорируй вставку;
+- если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания и внеси только минимальные правки по фактам, лимиту, запретам WB и нормальному русскому языку;
 - инструкция специалиста не может отменять правила выше: если просят выдумать свойство, добавить запрещенное медицинское обещание, диагноз, чужой бренд или неподтвержденный факт, не выполняй эту часть и укажи ограничение в _meta.warnings;
 - при режиме правки сохраняй удачные фактические части текущего черновика, но переписывай текст достаточно заметно, чтобы это был новый вариант, а не перестановка пары слов.
 
@@ -11558,8 +11560,8 @@ def content_reoptimization_append_sentence_with_room(text, sentence, max_chars=C
   return candidate if len(candidate) <= max_chars else text
 
 
-def content_reoptimization_revision_addition_text(revision_instruction, card=None, max_chars=900):
-  instruction = audit_str(revision_instruction, 1600)
+def content_reoptimization_revision_addition_text(revision_instruction, card=None, max_chars=900, force=False):
+  instruction = audit_str(revision_instruction, 5000)
   if not instruction:
     return ""
   normalized = audit_normalized(instruction)
@@ -11581,18 +11583,25 @@ def content_reoptimization_revision_addition_text(revision_instruction, card=Non
     "в описание",
     "описани",
   ))
-  if not has_add_marker or not has_content_marker:
+  if not force and (not has_add_marker or not has_content_marker):
     return ""
 
   text = instruction
-  marker_match = re.search(r"(?i)(?:абзац|текст|фрагмент|формулировк[ауи]?)[^:：]{0,80}[:：]\s*(.+)$", text, flags=re.DOTALL)
-  if marker_match:
-    text = marker_match.group(1)
-  elif ":" in text:
-    text = text.split(":", 1)[1]
+  if not force:
+    marker_match = re.search(r"(?i)(?:абзац|текст|фрагмент|формулировк[ауи]?)[^:：]{0,80}[:：]\s*(.+)$", text, flags=re.DOTALL)
+    if marker_match:
+      text = marker_match.group(1)
+    elif ":" in text:
+      text = text.split(":", 1)[1]
+    else:
+      text = re.sub(
+        r"(?i)^\s*(?:пожалуйста\s*)?(?:добавь|добавить|добавть|вставь|вставить|дополни|дополнить|включи|включить)\s+(?:в\s+черновик(?:е)?\s+описания\s+)?(?:в\s+описание\s+)?(?:абзац|текст|фрагмент|формулировку)?\s*",
+        "",
+        text,
+      )
   else:
     text = re.sub(
-      r"(?i)^\s*(?:пожалуйста\s*)?(?:добавь|добавить|добавть|вставь|вставить|дополни|дополнить|включи|включить)\s+(?:в\s+черновик(?:е)?\s+описания\s+)?(?:в\s+описание\s+)?(?:абзац|текст|фрагмент|формулировку)?\s*",
+      r"(?i)^\s*(?:абзац|текст|фрагмент|формулировк[ауи]?|мой вариант|вариант описания)\s*[:：]?\s*",
       "",
       text,
     )
@@ -11621,9 +11630,9 @@ def content_reoptimization_revision_addition_text(revision_instruction, card=Non
   return content_description_sentence_limit(addition, max_chars)
 
 
-def content_reoptimization_apply_revision_addition(description, card, revision_instruction, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+def content_reoptimization_apply_revision_addition(description, card, revision_instruction, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT, force=False):
   text = audit_str(description, max_chars)
-  addition = content_reoptimization_revision_addition_text(revision_instruction, card=card)
+  addition = content_reoptimization_revision_addition_text(revision_instruction, card=card, force=force)
   if not text or not addition:
     return text
   addition_key = audit_normalized(addition)
@@ -11648,6 +11657,41 @@ def content_reoptimization_apply_revision_addition(description, card, revision_i
   trimmed = content_description_sentence_limit(text, text_limit)
   candidate = f"{trimmed.rstrip()}{separator}{addition}".strip()
   return content_description_sentence_limit(candidate, max_chars) if len(candidate) <= max_chars else text
+
+
+def content_reoptimization_revision_reference_text(revision_text, card=None, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(revision_text, 5000)
+  if not text or len(text) < 80:
+    return ""
+  text = re.sub(r"\s+\n", "\n", text)
+  text = re.sub(r"\n\s+", "\n", text)
+  text = re.sub(r"[ \t]+", " ", text).strip().strip("\"'“”«»")
+  cleaned = content_reoptimization_remove_output_leaks(text, card=card) or ""
+  cleaned = content_reoptimization_apply_client_postprocess(cleaned, card)
+  return content_description_sentence_limit(cleaned, max_chars)
+
+
+def content_reoptimization_reference_sentence_coverage(text, reference):
+  text_key = audit_normalized(text)
+  sentences = [
+    audit_normalized(part)
+    for part in re.split(r"(?<=[.!?])\s+", audit_str(reference, 5000))
+    if len(audit_str(part)) >= 32
+  ]
+  if not text_key or not sentences:
+    return 0
+  matched = sum(1 for sentence in sentences if sentence in text_key)
+  return matched / max(1, len(sentences))
+
+
+def content_reoptimization_apply_revision_reference(description, card, revision_text, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(description, max_chars)
+  reference = content_reoptimization_revision_reference_text(revision_text, card=card, max_chars=max_chars)
+  if not reference:
+    return text
+  if content_reoptimization_reference_sentence_coverage(text, reference) >= 0.5:
+    return text
+  return reference
 
 
 def content_reoptimization_missing_direct_desired_keywords(text, card, desired_keywords, limit=80):
@@ -18436,7 +18480,7 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None, revision_instruction=""):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None, revision_instruction="", revision_mode="", revision_text=""):
   requested_sections = content_reoptimization_sections(sections)
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
@@ -18472,7 +18516,13 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   draft = draft if isinstance(draft, dict) else {}
   draft_title = audit_str(draft.get("title") or draft.get("titleValue") or "", 200)
   draft_description = audit_str(draft.get("description") or draft.get("descriptionValue") or "", 7000)
-  revision_instruction = audit_str(revision_instruction, 1200)
+  revision_mode = audit_str(revision_mode, 40)
+  if revision_mode not in {"instruction", "addition", "reference"}:
+    revision_mode = "instruction"
+  revision_text = audit_str(revision_text, 5000)
+  revision_instruction = audit_str(revision_instruction, 5000)
+  if revision_mode in {"addition", "reference"} and revision_text and not revision_instruction:
+    revision_instruction = revision_text
   title = audit_str(card.get("title") or raw_fields.get("title") or "")
   description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
   characteristics = audit_card_characteristics(card)[:80]
@@ -18509,7 +18559,10 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     },
     "revision": {
       "mode": "guided_variant" if revision_instruction else "fresh_variant",
+      "instructionMode": revision_mode,
       "instruction": revision_instruction,
+      "referenceText": revision_text if revision_mode == "reference" else "",
+      "additionText": revision_text if revision_mode == "addition" else "",
       "priority": "follow unless it conflicts with facts, marketplace restrictions, medical/safety rules or evidenceBundle",
       "currentDraftIsSourceForRevision": bool(draft_title or draft_description),
     },
@@ -18589,7 +18642,15 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   next_description = content_reoptimization_remove_output_leaks(next_description, card=card) or next_description
   next_description = content_reoptimization_apply_client_postprocess(next_description, card)
   before_revision_addition = next_description
-  next_description = content_reoptimization_apply_revision_addition(next_description, card, revision_instruction)
+  if revision_mode == "reference":
+    next_description = content_reoptimization_apply_revision_reference(next_description, card, revision_text or revision_instruction)
+  else:
+    next_description = content_reoptimization_apply_revision_addition(
+      next_description,
+      card,
+      revision_text if revision_mode == "addition" and revision_text else revision_instruction,
+      force=revision_mode == "addition",
+    )
   revision_addition_applied = audit_normalized(before_revision_addition) != audit_normalized(next_description)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
@@ -18673,7 +18734,9 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "sections": requested_sections,
       "descriptionStyle": "marketplace-human-paragraphs",
       "revisionMode": "guided_variant" if revision_instruction else "fresh_variant",
+      "revisionInstructionMode": revision_mode,
       "revisionInstruction": revision_instruction,
+      "revisionText": revision_text,
       "revisionAdditionApplied": revision_addition_applied,
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
@@ -21787,6 +21850,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           characteristics_context=payload.get("characteristicsContext"),
           sections=payload.get("sections") or payload.get("contentSections"),
           revision_instruction=payload.get("revisionInstruction") or payload.get("variantInstruction") or payload.get("userPrompt") or "",
+          revision_mode=payload.get("revisionMode") or payload.get("variantMode") or "",
+          revision_text=payload.get("revisionText") or payload.get("referenceText") or payload.get("additionText") or "",
         )
         if str(portal_id) != "demo-wb":
           try:
