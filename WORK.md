@@ -1,5 +1,19 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-29 — guided prompt для добавления абзаца в описание
+
+Сделано:
+- исправлен кейс карточки `243430592`: если специалист в `Еще вариант описания` просит добавить конкретный абзац/фрагмент, backend теперь извлекает этот фрагмент из инструкции и добавляет его в черновик, если LLM вернул прежний текст без учета просьбы;
+- добавка проходит через существующие guard-проверки на редакторские утечки, неподтвержденные claims и лимит описания 2000 символов; в `contentOptimization` появился флаг `revisionAdditionApplied`;
+- добавлен регрессионный тест на Polaroid: LLM намеренно игнорирует инструкцию, но итоговый draft содержит абзац про триацетат целлюлозы, поликарбонат и `очки солнцезащитные мужские брендовые`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_description_addition_is_applied_when_llm_ignores_instruction`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `git diff --check`
+
 ## Статус на 2026-07-29 — итоговый контент с Да по умолчанию
 
 Сделано:

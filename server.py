@@ -11558,6 +11558,98 @@ def content_reoptimization_append_sentence_with_room(text, sentence, max_chars=C
   return candidate if len(candidate) <= max_chars else text
 
 
+def content_reoptimization_revision_addition_text(revision_instruction, card=None, max_chars=900):
+  instruction = audit_str(revision_instruction, 1600)
+  if not instruction:
+    return ""
+  normalized = audit_normalized(instruction)
+  has_add_marker = any(marker in normalized for marker in (
+    "добав",
+    "добавт",
+    "встав",
+    "дополни",
+    "дополнить",
+    "включи",
+    "включить",
+  ))
+  has_content_marker = any(marker in normalized for marker in (
+    "абзац",
+    "текст",
+    "предложен",
+    "фрагмент",
+    "формулиров",
+    "в описание",
+    "описани",
+  ))
+  if not has_add_marker or not has_content_marker:
+    return ""
+
+  text = instruction
+  marker_match = re.search(r"(?i)(?:абзац|текст|фрагмент|формулировк[ауи]?)[^:：]{0,80}[:：]\s*(.+)$", text, flags=re.DOTALL)
+  if marker_match:
+    text = marker_match.group(1)
+  elif ":" in text:
+    text = text.split(":", 1)[1]
+  else:
+    text = re.sub(
+      r"(?i)^\s*(?:пожалуйста\s*)?(?:добавь|добавить|добавть|вставь|вставить|дополни|дополнить|включи|включить)\s+(?:в\s+черновик(?:е)?\s+описания\s+)?(?:в\s+описание\s+)?(?:абзац|текст|фрагмент|формулировку)?\s*",
+      "",
+      text,
+    )
+  text = text.strip().strip("\"'“”«»")
+  text = re.sub(r"\s+\n", "\n", text)
+  text = re.sub(r"\n\s+", "\n", text)
+  text = re.sub(r"[ \t]+", " ", text)
+  if len(text) < 40 or not re.search(r"[.!?]", text):
+    return ""
+
+  parts = [
+    part.strip()
+    for part in re.split(r"(?<=[.!?])\s+", text)
+    if part.strip()
+  ]
+  safe_parts = [
+    part
+    for part in parts
+    if len(part) >= 24
+    and not content_reoptimization_sentence_has_output_leak(part)
+    and not (card is not None and content_reoptimization_sentence_has_unconfirmed_claim(part, card))
+  ]
+  if not safe_parts:
+    return ""
+  addition = " ".join(safe_parts)
+  return content_description_sentence_limit(addition, max_chars)
+
+
+def content_reoptimization_apply_revision_addition(description, card, revision_instruction, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(description, max_chars)
+  addition = content_reoptimization_revision_addition_text(revision_instruction, card=card)
+  if not text or not addition:
+    return text
+  addition_key = audit_normalized(addition)
+  text_key = audit_normalized(text)
+  if addition_key in text_key:
+    return text
+  addition_sentences = [
+    audit_normalized(part)
+    for part in re.split(r"(?<=[.!?])\s+", addition)
+    if len(audit_str(part)) >= 24
+  ]
+  if addition_sentences and all(sentence in text_key for sentence in addition_sentences):
+    return text
+  separator = "\n\n" if "\n\n" in text or len(text) > 500 else " "
+  candidate = f"{text.rstrip()}{separator}{addition}".strip()
+  if len(candidate) <= max_chars:
+    return content_description_sentence_limit(candidate, max_chars)
+  reserved_chars = len(addition) + len(separator)
+  text_limit = max_chars - reserved_chars
+  if text_limit < 700:
+    return text
+  trimmed = content_description_sentence_limit(text, text_limit)
+  candidate = f"{trimmed.rstrip()}{separator}{addition}".strip()
+  return content_description_sentence_limit(candidate, max_chars) if len(candidate) <= max_chars else text
+
+
 def content_reoptimization_missing_direct_desired_keywords(text, card, desired_keywords, limit=80):
   output = []
   for item in desired_keywords if isinstance(desired_keywords, list) else []:
@@ -18496,6 +18588,9 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   next_description = content_reoptimization_apply_direct_desired_keywords(next_description, card, desired)
   next_description = content_reoptimization_remove_output_leaks(next_description, card=card) or next_description
   next_description = content_reoptimization_apply_client_postprocess(next_description, card)
+  before_revision_addition = next_description
+  next_description = content_reoptimization_apply_revision_addition(next_description, card, revision_instruction)
+  revision_addition_applied = audit_normalized(before_revision_addition) != audit_normalized(next_description)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
   rule_title = sunglasses_rule_title or frame_rule_title
@@ -18579,6 +18674,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "descriptionStyle": "marketplace-human-paragraphs",
       "revisionMode": "guided_variant" if revision_instruction else "fresh_variant",
       "revisionInstruction": revision_instruction,
+      "revisionAdditionApplied": revision_addition_applied,
       "selectedKeywords": len(selected),
       "currentKeywords": len(current),
       "desiredKeywords": len(desired),
