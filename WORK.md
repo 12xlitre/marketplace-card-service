@@ -12,6 +12,9 @@
 - `npm run frontend:build`
 - `git diff --check`
 
+Деплой:
+- Коммит `7dea50c` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная -> `200`, `/api/portals` без сессии -> `401`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `7dea50c`, контейнер `opticards-web-1 Up`.
+
 ## Статус на 2026-07-28 — guided shape fix для карточки 391030226
 
 Сделано:
