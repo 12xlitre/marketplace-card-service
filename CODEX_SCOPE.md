@@ -52,6 +52,7 @@ rg "term" -g '!node_modules' -g '!var' -g '!.git' -g '!docs/memory'
 Keep this section compact. Add only stable locations that help avoid future searches.
 
 - Frontend app: `frontend/src/`
+- Final content XLSX builders: `frontend/src/App.jsx` (`buildFinalContentCardSheets`, `buildPortalContentSheets`)
 - Tests: `tests/`
 - Project docs/memory: `docs/`, `docs/memory/`
 - Generated/local runtime data: `var/`

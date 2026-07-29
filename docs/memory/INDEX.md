@@ -9,7 +9,7 @@
 - `backend_wb_readonly.md` — read-only WB API подключение через backend, токены только env/demo или encrypted per portal, без write-операций.
 - `ops_production_deployment.md` — OptiCards развернут на `opticards.weboptai.ru`, прод-обвязка живет на сервере.
 - `product_wb_characteristic_values.md` — правила по значениям характеристик WB: где есть официальный справочник, где только подсказки из карточек, и почему нужен MPStats.
-- `product_approval_workflow.md` — роли согласования, хранение задач/событий и правило soft reset анализа при обновлении WB.
+- `product_approval_workflow.md` — роли согласования, хранение задач/событий, правило soft reset анализа при обновлении WB и кабинетная XLSX-выгрузка итогового контента.
 - `product_mass_workflow.md` — гибридный сценарий массовой обработки: конвейер техспециалиста, пакетная проверка аккаунта, без write-запросов в WB.
 - `product_marketplace_architecture.md` — верхний уровень `Клиент`, разделы Wildberries/Ozon и правило скрытой Ozon beta без поломки WB-потока.
 - `product_semantic_core.md` — правила СЯ: стабильные ранжирующиеся запросы, полный `allKeywords`, multi-seed MPStats, частотные корзины и согласование ключей к удалению.

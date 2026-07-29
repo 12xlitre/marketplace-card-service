@@ -3350,7 +3350,7 @@ function finalContentTextCell(value) {
   return { value: value || "", style: 4 };
 }
 
-function finalContentAgreementCell(value = "Нет") {
+function finalContentAgreementCell(value = "Да") {
   return { value, style: 5 };
 }
 
@@ -3363,7 +3363,7 @@ function finalContentAgreementValidations(columnIndexes, rowCount) {
     return {
       type: "list",
       range: `${column}2:${column}${rowCount}`,
-      formula1: '"Нет,Да"',
+      formula1: '"Да,Нет"',
       allowBlank: true,
     };
   });
@@ -3405,7 +3405,7 @@ function buildFinalContentInstructionSheet(card) {
       [finalContentTextCell("Карточка"), finalContentTextCell(`Проверьте правки по карточке ${card?.vendorCode || card?.nmID || ""}. Рабочие листы идут дальше: Заголовок, Описание, Характеристики.`)],
       [finalContentTextCell("Было"), finalContentTextCell("Текущее значение из WB на момент выгрузки. Это поле нужно только для сравнения.")],
       [finalContentTextCell("Итоговый вариант"), finalContentTextCell("Предложение ВебОптимайз для согласования. Текст переносится по словам, чтобы его было удобно читать в таблице.")],
-      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Нет. Если правка принята, выберите Да в выпадающем списке.")],
+      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Да. Если правка не принята, выберите Нет в выпадающем списке.")],
       [finalContentTextCell("Важно"), finalContentTextCell("Не меняйте структуру рабочих листов и служебные колонки. Для согласования достаточно менять только значение в колонке Согласовано.")],
     ],
   };
@@ -3423,7 +3423,7 @@ function buildPortalContentInstructionSheet() {
       [finalContentTextCell("Файл"), finalContentTextCell("Файл собран из карточек WB, отправленных на согласование по контенту. Каждый следующий лист - отдельная карточка.")],
       [finalContentTextCell("Было"), finalContentTextCell("Текущее значение из WB на момент выгрузки. Это поле нужно только для сравнения.")],
       [finalContentTextCell("Итоговый вариант"), finalContentTextCell("Предложение ВебОптимайз для согласования. Текст переносится по словам, чтобы его было удобно читать в таблице.")],
-      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Нет. Если правка принята, выберите Да в выпадающем списке.")],
+      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Да. Если правка не принята, выберите Нет в выпадающем списке.")],
       [finalContentTextCell("Важно"), finalContentTextCell("Не меняйте структуру рабочих листов и служебные колонки. Для согласования достаточно менять только значения в колонках Согласовано.")],
     ],
   };
