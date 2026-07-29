@@ -11,6 +11,9 @@
 - `npm run frontend:build`
 - `git diff --check`
 
+Деплой:
+- Коммит `65d965f` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная -> `200`, HTML содержит строки `По умолчанию стоит Да` и XLSX helper `Да/Нет`, `/api/portals` без сессии -> `401`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `65d965f`, контейнер `opticards-web-1 Up`.
+
 ## Статус на 2026-07-29 — кабинетная XLSX-выгрузка итогового контента
 
 Сделано:
