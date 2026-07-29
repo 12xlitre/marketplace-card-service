@@ -3354,17 +3354,19 @@ function finalContentAgreementCell(value = "Нет") {
   return { value, style: 5 };
 }
 
-function finalContentAgreementValidation(columnIndex, rowCount) {
+function finalContentAgreementValidations(columnIndexes, rowCount) {
   if (rowCount <= 1) {
     return [];
   }
-  const column = columnName(columnIndex);
-  return [{
-    type: "list",
-    range: `${column}2:${column}${rowCount}`,
-    formula1: '"Нет,Да"',
-    allowBlank: true,
-  }];
+  return (Array.isArray(columnIndexes) ? columnIndexes : [columnIndexes]).map((columnIndex) => {
+    const column = columnName(columnIndex);
+    return {
+      type: "list",
+      range: `${column}2:${column}${rowCount}`,
+      formula1: '"Нет,Да"',
+      allowBlank: true,
+    };
+  });
 }
 
 function finalContentSheetDefaults(sheet, agreementColumnIndex) {
@@ -3373,7 +3375,7 @@ function finalContentSheetDefaults(sheet, agreementColumnIndex) {
     autoFilter: false,
     protected: true,
     showGridLines: false,
-    dataValidations: finalContentAgreementValidation(agreementColumnIndex, sheet.rows.length),
+    dataValidations: finalContentAgreementValidations(agreementColumnIndex, sheet.rows.length),
   };
 }
 
@@ -3405,6 +3407,24 @@ function buildFinalContentInstructionSheet(card) {
       [finalContentTextCell("Итоговый вариант"), finalContentTextCell("Предложение ВебОптимайз для согласования. Текст переносится по словам, чтобы его было удобно читать в таблице.")],
       [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Нет. Если правка принята, выберите Да в выпадающем списке.")],
       [finalContentTextCell("Важно"), finalContentTextCell("Не меняйте структуру рабочих листов и служебные колонки. Для согласования достаточно менять только значение в колонке Согласовано.")],
+    ],
+  };
+}
+
+function buildPortalContentInstructionSheet() {
+  return {
+    name: "Инструкция",
+    freezeRows: 1,
+    autoFilter: false,
+    showGridLines: false,
+    widths: [30, 92],
+    rows: [
+      finalContentHeaderRow(["Раздел", "Что делать"]),
+      [finalContentTextCell("Файл"), finalContentTextCell("Файл собран из карточек WB, отправленных на согласование по контенту. Каждый следующий лист - отдельная карточка.")],
+      [finalContentTextCell("Было"), finalContentTextCell("Текущее значение из WB на момент выгрузки. Это поле нужно только для сравнения.")],
+      [finalContentTextCell("Итоговый вариант"), finalContentTextCell("Предложение ВебОптимайз для согласования. Текст переносится по словам, чтобы его было удобно читать в таблице.")],
+      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Нет. Если правка принята, выберите Да в выпадающем списке.")],
+      [finalContentTextCell("Важно"), finalContentTextCell("Не меняйте структуру рабочих листов и служебные колонки. Для согласования достаточно менять только значения в колонках Согласовано.")],
     ],
   };
 }
@@ -3828,25 +3848,65 @@ function buildPortalContentSheet(card, draft, usedNames) {
     return null;
   }
   const characteristics = draftCharacteristicsList(normalized.characteristics);
-  const characteristicHeaders = characteristics.map((item) => item.name);
-  const characteristicValues = characteristics.map((item) => characteristicExportText(item.value));
-  return {
+  const rawFields = rawFieldsForCard(card);
+  const characteristicCurrentValues = currentCharacteristicValueLookup(card);
+  const characteristicHeaders = characteristics.flatMap((item) => [`Было: ${item.name}`, item.name, `Согласовано: ${item.name}`]);
+  const characteristicValues = characteristics.flatMap((item) => {
+    const currentValue = characteristicCurrentValues.get(item.charcID ? `charc:${item.charcID}` : "")
+      || characteristicCurrentValues.get(characteristicKeyFromName(item.name))
+      || "";
+    return [
+      finalContentTextCell(currentValue),
+      finalContentTextCell(characteristicExportText(item.value)),
+      finalContentAgreementCell(),
+    ];
+  });
+  const agreementColumns = [6, 9, ...characteristics.map((_, index) => 12 + index * 3)];
+  return finalContentSheetDefaults({
     name: cardExportSheetName(card, draft, usedNames),
     freezeRows: 1,
-    widths: [24, 18, 28, 22, 64, 96, ...characteristicHeaders.map(() => 28)],
+    widths: [
+      24,
+      18,
+      28,
+      22,
+      52,
+      52,
+      18,
+      72,
+      72,
+      18,
+      ...characteristics.flatMap(() => [34, 34, 18]),
+    ],
     rows: [
-      ["Артикул продавца", "Номенклатура WB", "Предмет", "Статус", "Заголовок", "Описание", ...characteristicHeaders],
+      finalContentHeaderRow([
+        "Артикул продавца",
+        "Номенклатура WB",
+        "Предмет",
+        "Статус",
+        "Было: заголовок",
+        "Заголовок",
+        "Согласовано: заголовок",
+        "Было: описание",
+        "Описание",
+        "Согласовано: описание",
+        ...characteristicHeaders,
+      ]),
       [
         card?.vendorCode || draft?.vendorCode || "",
         card?.nmID || draft?.nmID || "",
         card?.subjectName || "",
         approvalStatusLabel(contentApproval.status),
-        normalized.title || "",
-        normalized.description || "",
+        finalContentTextCell(card?.title || rawFields.title || ""),
+        finalContentTextCell(normalized.title || ""),
+        finalContentAgreementCell(),
+        finalContentTextCell(card?.description || rawFields.description || ""),
+        finalContentTextCell(normalized.description || ""),
+        finalContentAgreementCell(),
         ...characteristicValues,
       ],
     ],
-  };
+  }, agreementColumns);
 }
 
 function buildPortalContentSheets(cards, drafts) {
@@ -3854,12 +3914,13 @@ function buildPortalContentSheets(cards, drafts) {
   const cardsByNm = new Map(cards.map((card) => [String(card?.nmID || ""), card]).filter(([key]) => key));
   const cardsByVendor = new Map(cards.map((card) => [String(card?.vendorCode || ""), card]).filter(([key]) => key));
   const usedNames = new Set();
-  return (Array.isArray(drafts) ? drafts : [])
+  const sheets = (Array.isArray(drafts) ? drafts : [])
     .map((draft) => {
       const card = cardsByKey.get(draft.cardKey) || cardsByNm.get(String(draft.nmID || "")) || cardsByVendor.get(String(draft.vendorCode || "")) || {};
       return buildPortalContentSheet(card, draft, usedNames);
     })
     .filter(Boolean);
+  return sheets.length ? [buildPortalContentInstructionSheet(), ...sheets] : [];
 }
 
 function normalizeDraftKeyValue(value) {
