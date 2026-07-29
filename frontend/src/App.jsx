@@ -3391,6 +3391,24 @@ function currentCharacteristicValueLookup(card) {
   return lookup;
 }
 
+function buildFinalContentInstructionSheet(card) {
+  return {
+    name: "Инструкция",
+    freezeRows: 1,
+    autoFilter: false,
+    showGridLines: false,
+    widths: [30, 86],
+    rows: [
+      finalContentHeaderRow(["Раздел", "Что делать"]),
+      [finalContentTextCell("Карточка"), finalContentTextCell(`Проверьте правки по карточке ${card?.vendorCode || card?.nmID || ""}. Рабочие листы идут дальше: Заголовок, Описание, Характеристики.`)],
+      [finalContentTextCell("Было"), finalContentTextCell("Текущее значение из WB на момент выгрузки. Это поле нужно только для сравнения.")],
+      [finalContentTextCell("Итоговый вариант"), finalContentTextCell("Предложение ВебОптимайз для согласования. Текст переносится по словам, чтобы его было удобно читать в таблице.")],
+      [finalContentTextCell("Согласовано"), finalContentTextCell("По умолчанию стоит Нет. Если правка принята, выберите Да в выпадающем списке.")],
+      [finalContentTextCell("Важно"), finalContentTextCell("Не меняйте структуру рабочих листов и служебные колонки. Для согласования достаточно менять только значение в колонке Согласовано.")],
+    ],
+  };
+}
+
 function buildContentExportSheets(card, draftTitle, draftDescription, draftCharacteristics) {
   const characteristics = draftCharacteristicsList(draftCharacteristics);
   const characteristicHeaders = characteristics.map((item) => item.name);
@@ -3743,6 +3761,7 @@ function buildFinalContentCardSheets(card, draftTitle, draftDescription, draftCh
   const rawFields = rawFieldsForCard(card);
   const characteristicCurrentValues = currentCharacteristicValueLookup(card);
   return [
+    buildFinalContentInstructionSheet(card),
     finalContentSheetDefaults({
       name: "Заголовок",
       freezeRows: 1,
