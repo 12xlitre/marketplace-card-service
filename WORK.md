@@ -11,6 +11,9 @@
 - `npm run frontend:build`
 - `git diff --check`
 
+Деплой:
+- Коммит `d7f9d2c` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная -> `200`, `/api/portals` без сессии -> `401`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, HTML содержит строки инструкции `Рабочие листы идут дальше`, `Итоговый вариант`, `Согласовано`, серверная рабочая копия `d7f9d2c`, контейнер `opticards-web-1 Up`.
+
 ## Статус на 2026-07-29 — XLSX согласование итогового контента
 
 Сделано:
