@@ -1,5 +1,23 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-30 — характеристики текущей карточки при переписывании описания
+
+Сделано:
+- для `Еще вариант описания` (`Мой вариант`, `Пожелание`, `Добавить фрагмент`) backend теперь после LLM/fallback сверяет текст с характеристиками текущей карточки;
+- если в пользовательском варианте остались признаки другой карточки, сервер удаляет предложения с чужой формой/цветом/материалом и добавляет подтвержденные факты текущей карточки: форму оправы, цвет оправы, цвет линз, материалы, поляризацию, комплектацию и размеры;
+- system prompt уточнен: reference-текст должен сверяться не только с моделью и ключами, но и с `evidenceBundle.card.characteristics`;
+- добавлен регрессионный тест на карточку `262693847`: чужие `круглая форма`, `коричневая оправа`, `зеленые линзы`, `металлическая оправа`, `стеклянные линзы` убираются, а текущие характеристики добавляются.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_aligns_description_audience_to_target_keywords tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_aligns_description_to_current_characteristics tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_description_instruction_aligns_audience_when_llm_ignores_it`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `git diff --check`
+
+Деплой:
+- Не выполнялся на момент записи.
+
 ## Статус на 2026-07-30 — аудитория описания в "Мой вариант" и guided-пожелании
 
 Сделано:

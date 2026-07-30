@@ -10051,8 +10051,9 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
 - если evidenceBundle.revision.instructionMode = "addition", обязательно включи безопасный смысл из evidenceBundle.revision.additionText в description.value; можно слегка вычитать русский язык, но не игнорируй вставку;
-- если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания, но все равно сверь его с evidenceBundle.semanticCore.allTargetKeywords; если ключи задают другую аудиторию товара, исправь аудиторию в тексте под ключи и факты текущей карточки;
+- если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания, но все равно сверь его с evidenceBundle.card.characteristics и evidenceBundle.semanticCore.allTargetKeywords; если ключи задают другую аудиторию товара, исправь аудиторию в тексте под ключи и факты текущей карточки;
 - если evidenceBundle.card.model заполнена, модель/артикул модели в title и description должен соответствовать именно evidenceBundle.card.model; если referenceText содержит модель другой карточки, замени ее на модель текущей карточки или убери чужую модель;
+- форма, цвет, цвет линз, материал, поляризация, комплектация и размеры в description.value должны соответствовать evidenceBundle.card.characteristics текущей карточки; если referenceText описывает характеристики другой карточки, замени их на текущие или убери неподтвержденные;
 - если специалист просит заменить мужское позиционирование на женское или наоборот, эта просьба должна менять не только title, но и description.value; не возвращай базовый вариант без такой замены;
 - инструкция специалиста не может отменять правила выше: если просят выдумать свойство, добавить запрещенное медицинское обещание, диагноз, чужой бренд или неподтвержденный факт, не выполняй эту часть и укажи ограничение в _meta.warnings;
 - при режиме правки сохраняй удачные фактические части текущего черновика, но переписывай текст достаточно заметно, чтобы это был новый вариант, а не перестановка пары слов.
@@ -12008,6 +12009,188 @@ def content_reoptimization_align_audience_in_text(text, target_audience):
   for pattern, replacement in replacements:
     output = re.sub(pattern, replacement, output)
   return content_description_sentence_limit(output, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
+
+def content_reoptimization_card_fact_values(card, names, limit=6):
+  facts = {
+    audit_normalized(row.get("name")): row.get("values") or []
+    for row in audit_card_characteristics(card)
+  }
+  for name in names:
+    values = facts.get(audit_normalized(name))
+    if values:
+      return content_reoptimization_clean_values(values, limit=limit)
+  return []
+
+
+def content_reoptimization_current_shape(card):
+  for value in content_reoptimization_card_fact_values(card, ["Форма оправы", "Форма"], limit=3):
+    shape = content_reoptimization_shape_from_value(value)
+    if shape:
+      return shape
+  return ""
+
+
+def content_reoptimization_remove_conflicting_shape_sentences(text, current_shape):
+  output = audit_str(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  current_shape = audit_str(current_shape, 40)
+  if not output or not current_shape:
+    return output
+  current_markers = tuple(markers for label, markers in CONTENT_FRAME_TITLE_SHAPES if label == current_shape)
+  current_markers = current_markers[0] if current_markers else ()
+  parts = re.split(r"(?<=[.!?])\s+", output)
+  kept = []
+  for part in parts:
+    normalized = audit_normalized(part)
+    conflicting = False
+    for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+      if label == current_shape:
+        continue
+      if any(marker in normalized for marker in markers) and not any(marker in normalized for marker in current_markers):
+        conflicting = True
+        break
+    if not conflicting:
+      kept.append(part.strip())
+  return content_description_sentence_limit(" ".join(part for part in kept if part), CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
+
+CONTENT_REOPTIMIZATION_COLOR_MARKERS = (
+  "черн",
+  "бел",
+  "корич",
+  "сер",
+  "зелен",
+  "син",
+  "голуб",
+  "красн",
+  "роз",
+  "беж",
+  "золот",
+  "сереб",
+  "прозрач",
+  "фиолет",
+  "желт",
+  "оранж",
+)
+
+CONTENT_REOPTIMIZATION_MATERIAL_MARKERS = (
+  "металл",
+  "пластик",
+  "поликарбон",
+  "ацетат",
+  "триацетат",
+  "нейлон",
+  "сталь",
+  "алюмин",
+  "титан",
+  "резин",
+  "стекл",
+)
+
+
+def content_reoptimization_sentence_has_current_value(normalized, values):
+  for value in content_reoptimization_clean_values(values, limit=8):
+    value_text = audit_normalized(value)
+    if value_text and value_text in normalized:
+      return True
+    if any(token in normalized for token in audit_tokens(value_text)):
+      return True
+  return False
+
+
+def content_reoptimization_sentence_conflicts_with_markers(normalized, current_values, markers):
+  current_text = audit_normalized(" ".join(content_reoptimization_clean_values(current_values, limit=8)))
+  if not current_text:
+    return False
+  return (
+    any(marker in normalized and marker not in current_text for marker in markers)
+    and not content_reoptimization_sentence_has_current_value(normalized, current_values)
+  )
+
+
+def content_reoptimization_remove_conflicting_characteristic_sentences(text, card):
+  output = audit_str(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  if not output:
+    return output
+  current_shape = content_reoptimization_current_shape(card)
+  color_values = content_reoptimization_card_fact_values(card, ["Цвет"], limit=4)
+  lens_color_values = content_reoptimization_card_fact_values(card, ["Цвет линз"], limit=3)
+  frame_material_values = content_reoptimization_card_fact_values(card, ["Материал оправы", "Материал"], limit=3)
+  lens_material_values = content_reoptimization_card_fact_values(card, ["Материал линзы", "Материал линз"], limit=3)
+  parts = re.split(r"(?<=[.!?])\s+", output)
+  kept = []
+  for part in parts:
+    normalized = audit_normalized(part)
+    conflicting = False
+    if current_shape:
+      current_markers = tuple(markers for label, markers in CONTENT_FRAME_TITLE_SHAPES if label == current_shape)
+      current_markers = current_markers[0] if current_markers else ()
+      for label, markers in CONTENT_FRAME_TITLE_SHAPES:
+        if label != current_shape and any(marker in normalized for marker in markers) and not any(marker in normalized for marker in current_markers):
+          conflicting = True
+          break
+    if not conflicting and ("цвет" in normalized or "оправ" in normalized) and content_reoptimization_sentence_conflicts_with_markers(normalized, color_values, CONTENT_REOPTIMIZATION_COLOR_MARKERS):
+      conflicting = True
+    if not conflicting and "линз" in normalized and content_reoptimization_sentence_conflicts_with_markers(normalized, lens_color_values, CONTENT_REOPTIMIZATION_COLOR_MARKERS):
+      conflicting = True
+    if not conflicting and ("материал" in normalized or "оправ" in normalized) and content_reoptimization_sentence_conflicts_with_markers(normalized, frame_material_values, CONTENT_REOPTIMIZATION_MATERIAL_MARKERS):
+      conflicting = True
+    if not conflicting and "линз" in normalized and content_reoptimization_sentence_conflicts_with_markers(normalized, lens_material_values, CONTENT_REOPTIMIZATION_MATERIAL_MARKERS):
+      conflicting = True
+    if not conflicting:
+      kept.append(part.strip())
+  return content_description_sentence_limit(" ".join(part for part in kept if part), CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
+
+def content_reoptimization_characteristics_fact_sentence(card, text=""):
+  normalized_text = audit_normalized(text)
+  parts = []
+
+  def add_part(label, values, presence_markers=None):
+    values = content_reoptimization_clean_values(values, limit=4)
+    if not values:
+      return
+    value_text = content_reoptimization_join_ru(values, limit=4)
+    normalized_value = audit_normalized(value_text)
+    if normalized_value and normalized_value in normalized_text:
+      return
+    if presence_markers and any(marker in normalized_text for marker in presence_markers):
+      return
+    parts.append(f"{label} - {value_text}")
+
+  shape = content_reoptimization_current_shape(card)
+  if shape and audit_normalized(shape) not in normalized_text:
+    parts.append(f"форма оправы - {shape}")
+  add_part("цвет оправы", content_reoptimization_card_fact_values(card, ["Цвет"], limit=4), presence_markers=("цвет оправ", "оправа цвет"))
+  add_part("цвет линз", content_reoptimization_card_fact_values(card, ["Цвет линз"], limit=3), presence_markers=("цвет линз", "линзы цвет"))
+  add_part("материал линз", content_reoptimization_card_fact_values(card, ["Материал линзы", "Материал линз"], limit=3), presence_markers=("материал линз",))
+  add_part("материал оправы", content_reoptimization_card_fact_values(card, ["Материал оправы", "Материал"], limit=3), presence_markers=("материал оправ",))
+  polarization = " ".join(content_reoptimization_card_fact_values(card, ["Поляризация", "Поляризационные линзы", "Поляризованные линзы"], limit=2))
+  normalized_polarization = audit_normalized(polarization)
+  if normalized_polarization and "поляр" not in normalized_text and not any(marker in normalized_polarization for marker in ("нет", "отсутств", "без", "false", "0")):
+    parts.append("линзы с поляризацией")
+  add_part("комплектация", content_reoptimization_card_fact_values(card, ["Комплектация"], limit=5), presence_markers=("комплект", "в комплект"))
+  dimensions = []
+  for name in ("Высота линзы", "Ширина линзы", "Ширина оправы", "Ширина носового моста", "Длина дужки"):
+    value = content_reoptimization_join_ru(content_reoptimization_card_fact_values(card, [name], limit=2), limit=2)
+    if value and audit_normalized(value) not in normalized_text:
+      dimensions.append(f"{name.lower()} {value}")
+  if dimensions and not any(marker in normalized_text for marker in ("размер", "ширина", "высота", "длина дуж")):
+    parts.append(f"размеры - {', '.join(dimensions[:5])}")
+  if not parts:
+    return ""
+  return f"Факты модели: {'; '.join(parts[:8])}."
+
+
+def content_reoptimization_apply_current_characteristics(description, card, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+  text = audit_str(description, max_chars)
+  if not text:
+    return text
+  text = content_reoptimization_remove_conflicting_characteristic_sentences(text, card)
+  fact_sentence = content_reoptimization_characteristics_fact_sentence(card, text)
+  if fact_sentence:
+    text = content_reoptimization_append_sentence_with_room(text, fact_sentence, max_chars=max_chars)
+  return content_description_sentence_limit(text, max_chars)
 
 
 def content_reoptimization_kit_sentence(values, product_kind="frame"):
@@ -18780,6 +18963,8 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       force=revision_mode == "addition",
     )
   next_description = content_reoptimization_align_audience_in_text(next_description, revision_target_audience)
+  if revision_instruction:
+    next_description = content_reoptimization_apply_current_characteristics(next_description, card)
   revision_addition_applied = audit_normalized(before_revision_addition) != audit_normalized(next_description)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
