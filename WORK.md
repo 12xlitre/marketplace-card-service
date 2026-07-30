@@ -1,5 +1,23 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-30 — аудитория описания в "Мой вариант" и guided-пожелании
+
+Сделано:
+- исправлен кейс карточки `262693847`: если в `Мой вариант` вставлен текст с мужским позиционированием, а согласованные ключи указывают на женские очки, backend выравнивает аудиторию описания под `allTargetKeywords`;
+- если специалист в `Еще вариант описания -> Пожелание` пишет `заменить мужские на женские`, серверный fallback меняет аудиторию в `description.value`, даже если GigaChat вернул старый или базовый текст;
+- system prompt уточнен: reference-текст остается основой, но не может отменять согласованные ключи и аудиторию текущей карточки;
+- добавлены регрессионные тесты для `Мой вариант` и `Пожелание` на карточке `262693847`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_aligns_description_audience_to_target_keywords tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_description_instruction_aligns_audience_when_llm_ignores_it`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `git diff --check`
+
+Деплой:
+- Не выполнялся на момент записи.
+
 ## Статус на 2026-07-30 — модель текущей карточки в режиме "Мой вариант"
 
 Сделано:

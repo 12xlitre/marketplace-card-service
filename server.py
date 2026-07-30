@@ -10051,8 +10051,9 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
 - если evidenceBundle.revision.instructionMode = "addition", обязательно включи безопасный смысл из evidenceBundle.revision.additionText в description.value; можно слегка вычитать русский язык, но не игнорируй вставку;
-- если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания и внеси только минимальные правки по фактам, лимиту, запретам WB и нормальному русскому языку;
+- если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания, но все равно сверь его с evidenceBundle.semanticCore.allTargetKeywords; если ключи задают другую аудиторию товара, исправь аудиторию в тексте под ключи и факты текущей карточки;
 - если evidenceBundle.card.model заполнена, модель/артикул модели в title и description должен соответствовать именно evidenceBundle.card.model; если referenceText содержит модель другой карточки, замени ее на модель текущей карточки или убери чужую модель;
+- если специалист просит заменить мужское позиционирование на женское или наоборот, эта просьба должна менять не только title, но и description.value; не возвращай базовый вариант без такой замены;
 - инструкция специалиста не может отменять правила выше: если просят выдумать свойство, добавить запрещенное медицинское обещание, диагноз, чужой бренд или неподтвержденный факт, не выполняй эту часть и укажи ограничение в _meta.warnings;
 - при режиме правки сохраняй удачные фактические части текущего черновика, но переписывай текст достаточно заметно, чтобы это был новый вариант, а не перестановка пары слов.
 
@@ -11948,6 +11949,64 @@ def content_reoptimization_align_card_model_in_text(text, card):
     r"(\b[Мм]одель\s+)([A-Z0-9А-ЯЁ][A-Z0-9А-ЯЁ/\- ]{2,80})(?=\s+(?:подход|име|выгляд|с|для|и|в|на|это|эта|выбира|относ)|[.!?,;:]|$)"
   )
   output = model_pattern.sub(replace_model, output)
+  return content_description_sentence_limit(output, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+
+
+def content_reoptimization_target_audience_for_revision(revision_instruction, keyword_rows, facts):
+  target = content_reoptimization_revision_target_audience(revision_instruction)
+  if target:
+    return target
+  return content_reoptimization_gender_for_title(keyword_rows, facts)
+
+
+def content_reoptimization_align_audience_in_text(text, target_audience):
+  output = audit_str(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  target_audience = audit_str(target_audience, 40)
+  if not output or target_audience not in {"женская", "мужская"}:
+    return output
+  replacements = (
+    (
+      (r"\bМужские\b", "Женские"),
+      (r"\bмужские\b", "женские"),
+      (r"\bМужская\b", "Женская"),
+      (r"\bмужская\b", "женская"),
+      (r"\bМужской\b", "Женский"),
+      (r"\bмужской\b", "женский"),
+      (r"\bМужского\b", "Женского"),
+      (r"\bмужского\b", "женского"),
+      (r"\bМужскому\b", "Женскому"),
+      (r"\bмужскому\b", "женскому"),
+      (r"\bМужским\b", "Женским"),
+      (r"\bмужским\b", "женским"),
+      (r"\bМужских\b", "Женских"),
+      (r"\bмужских\b", "женских"),
+      (r"\bдля\s+мужчин\b", "для женщин"),
+      (r"\bМужчинам\b", "Женщинам"),
+      (r"\bмужчинам\b", "женщинам"),
+    )
+    if target_audience == "женская" else
+    (
+      (r"\bЖенские\b", "Мужские"),
+      (r"\bженские\b", "мужские"),
+      (r"\bЖенская\b", "Мужская"),
+      (r"\bженская\b", "мужская"),
+      (r"\bЖенский\b", "Мужской"),
+      (r"\bженский\b", "мужской"),
+      (r"\bЖенского\b", "Мужского"),
+      (r"\bженского\b", "мужского"),
+      (r"\bЖенскому\b", "Мужскому"),
+      (r"\bженскому\b", "мужскому"),
+      (r"\bЖенским\b", "Мужским"),
+      (r"\bженским\b", "мужским"),
+      (r"\bЖенских\b", "Мужских"),
+      (r"\bженских\b", "мужских"),
+      (r"\bдля\s+женщин\b", "для мужчин"),
+      (r"\bЖенщинам\b", "Мужчинам"),
+      (r"\bженщинам\b", "мужчинам"),
+    )
+  )
+  for pattern, replacement in replacements:
+    output = re.sub(pattern, replacement, output)
   return content_description_sentence_limit(output, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
 
@@ -18591,6 +18650,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   characteristics = audit_card_characteristics(card)[:80]
   fact_map = {audit_normalized(row.get("name")): row.get("values") or [] for row in characteristics}
   card_model = content_reoptimization_card_model_name(card, title_keywords)
+  revision_target_audience = content_reoptimization_target_audience_for_revision(revision_instruction, target_keywords, fact_map)
   characteristics_context = characteristics_context if isinstance(characteristics_context, dict) else {}
   available_characteristics = characteristics_context.get("availableCharacteristics") if isinstance(characteristics_context.get("availableCharacteristics"), list) else []
   mpstats_characteristics = characteristics_context.get("mpstatsCharacteristics") if isinstance(characteristics_context.get("mpstatsCharacteristics"), list) else []
@@ -18629,6 +18689,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "referenceText": revision_text if revision_mode == "reference" else "",
       "additionText": revision_text if revision_mode == "addition" else "",
       "currentCardModel": card_model,
+      "targetAudience": revision_target_audience,
       "priority": "follow unless it conflicts with facts, marketplace restrictions, medical/safety rules or evidenceBundle",
       "currentDraftIsSourceForRevision": bool(draft_title or draft_description),
     },
@@ -18718,6 +18779,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       revision_text if revision_mode == "addition" and revision_text else revision_instruction,
       force=revision_mode == "addition",
     )
+  next_description = content_reoptimization_align_audience_in_text(next_description, revision_target_audience)
   revision_addition_applied = audit_normalized(before_revision_addition) != audit_normalized(next_description)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)

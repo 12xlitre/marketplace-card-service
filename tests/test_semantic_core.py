@@ -645,6 +645,116 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertIn("Polaroid PLD 4137 S 807 M9", description)
     self.assertNotIn("PLD 6012 N 807 M9", description)
 
+  def test_reference_mode_aligns_description_audience_to_target_keywords(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Поляризация", "value": "да"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+      ],
+    }
+    reference = (
+      "Очки солнцезащитные мужские Polaroid PLD 4137 S 807 M9 подходят для ярких дней и поездок за рулем. "
+      "Мужские очки легко сочетать с повседневной одеждой. "
+      "Эта мужская модель имеет прямоугольную форму и спокойный дизайн. "
+      "Такие очки удобно брать в отпуск и носить в городе."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки Polaroid", "reason": "test"},
+      "description": {"value": "Солнцезащитные очки Polaroid подходят для города.", "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "262693847",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные женские", "wbCount": 1000}],
+        revision_mode="reference",
+        revision_text=reference,
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertIn("Очки солнцезащитные женские", description)
+    self.assertIn("Женские очки", description)
+    self.assertIn("женская модель", description)
+    self.assertNotIn("мужские", description.lower())
+    self.assertNotIn("мужская", description.lower())
+    self.assertEqual(result["contentOptimization"]["revisionInstructionMode"], "reference")
+
+  def test_guided_description_instruction_aligns_audience_when_llm_ignores_it(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Поляризация", "value": "да"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+      ],
+    }
+    ignored_description = (
+      "Очки солнцезащитные мужские Polaroid PLD 4137 S 807 M9 подходят для ярких дней. "
+      "Мужские очки легко сочетать с повседневной одеждой. "
+      "Эта мужская модель имеет прямоугольную форму и спокойный дизайн. "
+      "Посадку удобно оценивать по фото, форме оправы и расстоянию между линзами перед заказом. "
+      "Для города важны нейтральный цвет, комфорт на переносице и понятный силуэт без лишнего визуального шума. "
+      "В дороге такая модель помогает спокойнее воспринимать яркий дневной свет и сохранять привычный ритм. "
+      "Прямоугольная форма выглядит сдержанно, поэтому аксессуар легко вписывается в деловую и повседневную одежду. "
+      "Перед покупкой стоит сверить размеры, оттенок линз и комплект, чтобы ожидания совпали с карточкой. "
+      "Polaroid PLD 4137 S 807 M9 можно носить на прогулке, в отпуске и за рулем, когда солнце быстро утомляет глаза. "
+      "Форма оправы визуально вытягивает линию лица и остается аккуратной без спортивного или слишком яркого акцента. "
+      "Линзы и оправа описаны только по фактам карточки, без обещаний свойств, которых нет в характеристиках. "
+      "Для ежедневного выбора важны удобная посадка, спокойный стиль и понятное сочетание с базовым гардеробом. "
+      "Этот вариант описания сохраняет структуру покупательского текста и не превращает карточку в список ключей. "
+      "Финальный абзац помогает покупателю еще раз проверить назначение, внешний вид и параметры модели перед заказом."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки Polaroid", "reason": "test"},
+      "description": {"value": ignored_description, "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "262693847",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные", "wbCount": 1000}],
+        draft={"description": ignored_description},
+        revision_instruction="заменить мужские на женские",
+        sections=["description"],
+      )
+
+    description = result["draftContent"]["description"]["value"]
+    self.assertIn("Очки солнцезащитные женские", description)
+    self.assertIn("Женские очки", description)
+    self.assertIn("женская модель", description)
+    self.assertNotIn("мужские", description.lower())
+    self.assertNotIn("мужская", description.lower())
+    self.assertEqual(result["contentOptimization"]["revisionInstructionMode"], "instruction")
+
   def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
     card = {
       "sku": "oz-100",
