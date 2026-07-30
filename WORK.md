@@ -1,5 +1,23 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-30 — жесткое добавление характеристик в описание
+
+Сделано:
+- исправлена ошибка предыдущей страховки: backend больше не считает общие слова `цвет`, `форма`, `материал` достаточным учетом характеристик;
+- итоговый `description.value` теперь всегда получает компактную фразу `По характеристикам текущей карточки: ...` с фактическими значениями текущей карточки, при необходимости старый текст подрезается под лимит 2000 символов;
+- правило применяется не только к `Мой вариант`/guided-пожеланиям, но и к обычной переоптимизации описания;
+- добавлены регрессионные тесты: generic-текст с общими словами обязан получить реальные значения, fresh-переоптимизация без инструкции тоже обязана включить характеристики.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_aligns_description_to_current_characteristics tests.test_semantic_core.SemanticCoreFilteringTest.test_guided_description_adds_characteristic_values_even_when_generic_words_exist tests.test_semantic_core.SemanticCoreFilteringTest.test_fresh_description_reoptimization_includes_current_characteristics`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `git diff --check`
+
+Деплой:
+- Не выполнялся на момент записи.
+
 ## Статус на 2026-07-30 — характеристики текущей карточки при переписывании описания
 
 Сделано:

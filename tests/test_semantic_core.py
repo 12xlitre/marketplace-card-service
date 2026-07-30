@@ -750,13 +750,108 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertIn("цвет линз - серый", normalized)
     self.assertIn("материал линз - триацетат целлюлозы", normalized)
     self.assertIn("материал оправы - поликарбонат", normalized)
-    self.assertIn("линзы с поляризацией", normalized)
+    self.assertIn("поляризация - да", normalized)
     self.assertIn("комплектация - футляр и салфетка", normalized)
     self.assertNotIn("круглая форма", normalized)
     self.assertNotIn("коричневая оправа", normalized)
     self.assertNotIn("зеленые линзы", normalized)
     self.assertNotIn("металлическая оправа", normalized)
     self.assertNotIn("стеклянные линзы", normalized)
+
+  def test_guided_description_adds_characteristic_values_even_when_generic_words_exist(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Материал линзы", "value": "триацетат целлюлозы"},
+        {"name": "Материал оправы", "value": "поликарбонат"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+        {"name": "Цвет", "value": "черный"},
+        {"name": "Цвет линз", "value": "серый"},
+      ],
+    }
+    generic_description = (
+      "Солнцезащитные очки Polaroid подходят для города и отдыха. "
+      "Форма, цвет оправы, цвет линз и материалы помогают оценить внешний вид модели перед заказом."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки Polaroid", "reason": "test"},
+      "description": {"value": generic_description, "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "262693847",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные", "wbCount": 1000}],
+        revision_instruction="Сделай еще вариант описания.",
+        sections=["description"],
+      )
+
+    normalized = result["draftContent"]["description"]["value"].lower()
+    self.assertIn("по характеристикам текущей карточки", normalized)
+    self.assertIn("форма оправы - прямоугольная", normalized)
+    self.assertIn("цвет оправы - черный", normalized)
+    self.assertIn("цвет линз - серый", normalized)
+    self.assertIn("материал линз - триацетат целлюлозы", normalized)
+    self.assertIn("материал оправы - поликарбонат", normalized)
+
+  def test_fresh_description_reoptimization_includes_current_characteristics(self):
+    card = {
+      "title": "Солнцезащитные очки Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Материал линзы", "value": "триацетат целлюлозы"},
+        {"name": "Материал оправы", "value": "поликарбонат"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+        {"name": "Цвет", "value": "черный"},
+        {"name": "Цвет линз", "value": "серый"},
+      ],
+    }
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки Polaroid", "reason": "test"},
+      "description": {"value": "Солнцезащитные очки Polaroid подходят для яркого дня, прогулок и дороги.", "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "262693847",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные", "wbCount": 1000}],
+        sections=["description"],
+      )
+
+    normalized = result["draftContent"]["description"]["value"].lower()
+    self.assertIn("по характеристикам текущей карточки", normalized)
+    self.assertIn("форма оправы - прямоугольная", normalized)
+    self.assertIn("цвет оправы - черный", normalized)
+    self.assertIn("цвет линз - серый", normalized)
+    self.assertIn("материал линз - триацетат целлюлозы", normalized)
+    self.assertIn("материал оправы - поликарбонат", normalized)
 
   def test_guided_description_instruction_aligns_audience_when_llm_ignores_it(self):
     card = {

@@ -11546,9 +11546,9 @@ def content_reoptimization_direct_keyword_sentence(query, card, product_kind="",
   return f"Если нужен {clean_query}, сверяйте его с фактическими характеристиками, фото и привычным сценарием использования."
 
 
-def content_reoptimization_append_sentence_with_room(text, sentence, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
+def content_reoptimization_append_sentence_with_room(text, sentence, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT, sentence_max_chars=420):
   text = audit_str(text, max_chars)
-  sentence = audit_str(sentence, 420)
+  sentence = audit_str(sentence, sentence_max_chars)
   if not sentence:
     return text
   candidate = f"{text.rstrip()} {sentence}".strip()
@@ -12143,53 +12143,69 @@ def content_reoptimization_remove_conflicting_characteristic_sentences(text, car
 
 
 def content_reoptimization_characteristics_fact_sentence(card, text=""):
-  normalized_text = audit_normalized(text)
+  card = card if isinstance(card, dict) else {}
   parts = []
+  used_keys = set()
 
-  def add_part(label, values, presence_markers=None):
+  def add_part(key, label, values):
     values = content_reoptimization_clean_values(values, limit=4)
-    if not values:
+    if not values or key in used_keys:
       return
     value_text = content_reoptimization_join_ru(values, limit=4)
-    normalized_value = audit_normalized(value_text)
-    if normalized_value and normalized_value in normalized_text:
-      return
-    if presence_markers and any(marker in normalized_text for marker in presence_markers):
-      return
     parts.append(f"{label} - {value_text}")
+    used_keys.add(key)
 
   shape = content_reoptimization_current_shape(card)
-  if shape and audit_normalized(shape) not in normalized_text:
+  if shape:
     parts.append(f"форма оправы - {shape}")
-  add_part("цвет оправы", content_reoptimization_card_fact_values(card, ["Цвет"], limit=4), presence_markers=("цвет оправ", "оправа цвет"))
-  add_part("цвет линз", content_reoptimization_card_fact_values(card, ["Цвет линз"], limit=3), presence_markers=("цвет линз", "линзы цвет"))
-  add_part("материал линз", content_reoptimization_card_fact_values(card, ["Материал линзы", "Материал линз"], limit=3), presence_markers=("материал линз",))
-  add_part("материал оправы", content_reoptimization_card_fact_values(card, ["Материал оправы", "Материал"], limit=3), presence_markers=("материал оправ",))
-  polarization = " ".join(content_reoptimization_card_fact_values(card, ["Поляризация", "Поляризационные линзы", "Поляризованные линзы"], limit=2))
-  normalized_polarization = audit_normalized(polarization)
-  if normalized_polarization and "поляр" not in normalized_text and not any(marker in normalized_polarization for marker in ("нет", "отсутств", "без", "false", "0")):
-    parts.append("линзы с поляризацией")
-  add_part("комплектация", content_reoptimization_card_fact_values(card, ["Комплектация"], limit=5), presence_markers=("комплект", "в комплект"))
+    used_keys.add("shape")
+  add_part("color", "цвет оправы", content_reoptimization_card_fact_values(card, ["Цвет"], limit=4))
+  add_part("lens_color", "цвет линз", content_reoptimization_card_fact_values(card, ["Цвет линз"], limit=3))
+  add_part("lens_material", "материал линз", content_reoptimization_card_fact_values(card, ["Материал линзы", "Материал линз"], limit=3))
+  add_part("frame_material", "материал оправы", content_reoptimization_card_fact_values(card, ["Материал оправы", "Материал"], limit=3))
+  polarization_values = content_reoptimization_card_fact_values(card, ["Поляризация", "Поляризационные линзы", "Поляризованные линзы"], limit=2)
+  if polarization_values:
+    add_part("polarization", "поляризация", polarization_values)
+  add_part("kit", "комплектация", content_reoptimization_card_fact_values(card, ["Комплектация"], limit=5))
   dimensions = []
   for name in ("Высота линзы", "Ширина линзы", "Ширина оправы", "Ширина носового моста", "Длина дужки"):
     value = content_reoptimization_join_ru(content_reoptimization_card_fact_values(card, [name], limit=2), limit=2)
-    if value and audit_normalized(value) not in normalized_text:
+    if value:
       dimensions.append(f"{name.lower()} {value}")
-  if dimensions and not any(marker in normalized_text for marker in ("размер", "ширина", "высота", "длина дуж")):
+  if dimensions:
     parts.append(f"размеры - {', '.join(dimensions[:5])}")
+    used_keys.add("dimensions")
+  known_names = {
+    "форма оправы", "форма", "цвет", "цвет линз", "материал линзы", "материал линз",
+    "материал оправы", "материал", "поляризация", "поляризационные линзы",
+    "поляризованные линзы", "комплектация", "высота линзы", "ширина линзы",
+    "ширина оправы", "ширина носового моста", "длина дужки",
+  }
+  for row in audit_card_characteristics(card):
+    name = audit_str(row.get("name") or "", 80)
+    normalized_name = audit_normalized(name)
+    if not name or normalized_name in known_names or semantic_subject_is_missing(name):
+      continue
+    values = content_reoptimization_clean_values(row.get("values") or [], limit=3)
+    if not values:
+      continue
+    parts.append(f"{name.lower()} - {content_reoptimization_join_ru(values, limit=3)}")
+    if len(parts) >= 10:
+      break
   if not parts:
     return ""
-  return f"Факты модели: {'; '.join(parts[:8])}."
+  return f"По характеристикам текущей карточки: {'; '.join(parts[:10])}."
 
 
 def content_reoptimization_apply_current_characteristics(description, card, max_chars=CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT):
   text = audit_str(description, max_chars)
   if not text:
     return text
+  text = re.sub(r"\s*(?:Факты модели|По характеристикам текущей карточки):\s*[^.!?]*(?:[.!?]|$)", " ", text).strip()
   text = content_reoptimization_remove_conflicting_characteristic_sentences(text, card)
   fact_sentence = content_reoptimization_characteristics_fact_sentence(card, text)
   if fact_sentence:
-    text = content_reoptimization_append_sentence_with_room(text, fact_sentence, max_chars=max_chars)
+    text = content_reoptimization_append_sentence_with_room(text, fact_sentence, max_chars=max_chars, sentence_max_chars=700)
   return content_description_sentence_limit(text, max_chars)
 
 
@@ -18963,8 +18979,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       force=revision_mode == "addition",
     )
   next_description = content_reoptimization_align_audience_in_text(next_description, revision_target_audience)
-  if revision_instruction:
-    next_description = content_reoptimization_apply_current_characteristics(next_description, card)
+  next_description = content_reoptimization_apply_current_characteristics(next_description, card)
   revision_addition_applied = audit_normalized(before_revision_addition) != audit_normalized(next_description)
   sunglasses_rule_title = content_reoptimization_sunglasses_title(card, title_keywords, fact_map)
   frame_rule_title = "" if sunglasses_rule_title else content_reoptimization_frame_title(card, title_keywords, fact_map)
