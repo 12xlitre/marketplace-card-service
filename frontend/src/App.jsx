@@ -22088,7 +22088,11 @@ function DraftCharacteristicEditor({ draft, row, meta, valueOptions, mpstatsValu
             {!readOnly ? <X size={14} /> : null}
           </button>
         ))}
-        {!values.length ? <span className="raw-field-value field-empty">Пусто в черновике</span> : null}
+        {!values.length ? (
+          <span className="raw-field-value field-empty">
+            {!row.draftOnly && !isEmptyValue(row.value) ? "Останется текущее значение" : "Пусто в черновике"}
+          </span>
+        ) : null}
         {row.draftOnly && !readOnly ? (
           <button className="icon-btn" type="button" onClick={onRemove} aria-label="Убрать характеристику" title="Убрать характеристику">
             <X size={15} />
