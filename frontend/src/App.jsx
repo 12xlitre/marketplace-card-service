@@ -2737,6 +2737,13 @@ function characteristicAuditReason(row, mpstatsStats = [], nextValues = [], curr
   return "Значение уже заполнено в WB; аудит перенес его в черновик как базу для ручной правки.";
 }
 
+function characteristicIdFromItem(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  return item.charcID || item.charcId || item.id || null;
+}
+
 function characteristicRows(items) {
   if (!Array.isArray(items)) {
     return [];
@@ -2751,9 +2758,9 @@ function characteristicRows(items) {
         charcID: null,
       };
     }
-    const label = item.name || item.charcName || item.id || item.charcID || `Характеристика ${index + 1}`;
+    const label = item.name || item.charcName || item.label || item.id || item.charcID || item.charcId || `Характеристика ${index + 1}`;
     const value = Object.prototype.hasOwnProperty.call(item, "value") ? item.value : (item.values ?? item);
-    const charcID = item.charcID || item.id || null;
+    const charcID = characteristicIdFromItem(item);
     const baseKey = charcID ? `charc:${charcID}` : characteristicKeyFromName(label);
     const keyCount = (seenKeys.get(baseKey) || 0) + 1;
     seenKeys.set(baseKey, keyCount);
@@ -2834,8 +2841,9 @@ function characteristicKeyFromName(name) {
 
 function characteristicKeyFromDraft(key, draft) {
   const draftObject = draft && typeof draft === "object" ? draft : {};
-  if (draftObject.charcID) {
-    return `charc:${draftObject.charcID}`;
+  const charcID = characteristicIdFromItem(draftObject);
+  if (charcID) {
+    return `charc:${charcID}`;
   }
   const labelKey = characteristicKeyFromName(draftObject.label || draftObject.name || "");
   if (labelKey) {
@@ -2933,13 +2941,55 @@ function normalizeDraftCharacteristics(drafts) {
   }, {});
 }
 
+function canonicalizeDraftCharacteristics(drafts, rows = [], availableCharacteristics = []) {
+  const normalized = normalizeDraftCharacteristics(drafts);
+  const metaByKey = characteristicMetaLookup(availableCharacteristics);
+  const rowByKey = new Map();
+  const rowById = new Map();
+  const rowByName = new Map();
+  rows.forEach((row) => {
+    if (!row) return;
+    if (row.key && !rowByKey.has(row.key)) rowByKey.set(row.key, row);
+    if (row.charcID && !rowById.has(String(row.charcID))) rowById.set(String(row.charcID), row);
+    const nameKey = normalizedCharacteristicName(row.label);
+    if (nameKey && !rowByName.has(nameKey)) rowByName.set(nameKey, row);
+  });
+
+  return Object.entries(normalized).reduce((output, [key, draft]) => {
+    const charcID = characteristicIdFromItem(draft);
+    const nameKey = normalizedCharacteristicName(draft?.label || draft?.name || "");
+    const meta = metaByKey[key]
+      || (charcID ? metaByKey[`charc:${charcID}`] : null)
+      || (nameKey ? metaByKey[`charc-name:${nameKey}`] : null);
+    const row = rowByKey.get(key)
+      || (charcID ? rowById.get(String(charcID)) : null)
+      || (nameKey ? rowByName.get(nameKey) : null);
+    const metaCharcID = characteristicIdFromItem(meta);
+    const nextCharcID = charcID || row?.charcID || metaCharcID || null;
+    const nextLabel = row?.label || meta?.name || meta?.label || draft?.label || draft?.name || "";
+    const nextKey = row?.key || (nextCharcID ? `charc:${nextCharcID}` : characteristicKeyFromName(nextLabel)) || key;
+    const nextDraft = {
+      ...draft,
+      charcID: nextCharcID,
+      label: nextLabel,
+      unitName: draft?.unitName || row?.unitName || meta?.unitName || "",
+      maxCount: draft?.maxCount || meta?.maxCount,
+      charcType: draft?.charcType || meta?.charcType,
+    };
+    output[nextKey] = output[nextKey] ? mergeDraftCharacteristic(output[nextKey], nextDraft) : nextDraft;
+    return output;
+  }, {});
+}
+
 function characteristicKeyFromMeta(item) {
-  return item?.charcID ? `charc:${item.charcID}` : characteristicKeyFromName(item?.name || item?.label || "");
+  const charcID = characteristicIdFromItem(item);
+  return charcID ? `charc:${charcID}` : characteristicKeyFromName(item?.name || item?.label || "");
 }
 
 function normalizeCharacteristicMeta(item) {
+  const charcID = characteristicIdFromItem(item);
   return {
-    charcID: item?.charcID || null,
+    charcID,
     label: item?.name || "Характеристика",
     value: "",
     values: [],
@@ -2978,7 +3028,7 @@ function draftCharacteristicsList(drafts) {
   return Object.values(drafts || {})
     .filter((item) => item?.label)
     .map((item) => ({
-      charcID: item.charcID || "",
+      charcID: characteristicIdFromItem(item) || "",
       name: item.label,
       value: draftCharacteristicValues(item).join(", "),
       unitName: item.unitName || "",
@@ -4245,6 +4295,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
       ? meta.semanticCoreSelected
       : semanticCoreReports.flatMap((report) => report.selected || [])
   );
+  const currentRows = characteristicRows(currentCardCharacteristicItems(card));
   return {
     auditStatus: payload.auditStatus || storedDraft?.auditStatus || "idle",
     title: typeof title === "object" ? title.value || "" : payload.title || "",
@@ -4253,7 +4304,7 @@ function contentFromStoredDraft(storedDraft, card = {}) {
     descriptionSource: typeof description === "object" ? description.source || "" : payload.descriptionSource || "",
     titleReason: typeof title === "object" ? title.reason || "" : payload.titleReason || "",
     descriptionReason: typeof description === "object" ? description.reason || "" : payload.descriptionReason || "",
-    characteristics: normalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}),
+    characteristics: canonicalizeDraftCharacteristics(content.characteristics || payload.characteristics || {}, currentRows),
     prices: normalizeDraftPrices(payload.prices, card),
     stocks: normalizeDraftStocks(payload.stocks, card),
     semanticCoreSelected,
@@ -4271,8 +4322,9 @@ function contentFromStoredDraft(storedDraft, card = {}) {
 
 function countChangedDraftCharacteristics(drafts, rows) {
   return Object.entries(drafts || {}).filter(([key, draft]) => {
+    const draftCharcID = characteristicIdFromItem(draft);
     const currentRow = rows.find((row) => row.key === key)
-      || rows.find((row) => row.charcID && draft?.charcID && String(row.charcID) === String(draft.charcID))
+      || rows.find((row) => row.charcID && draftCharcID && String(row.charcID) === String(draftCharcID))
       || rows.find((row) => normalizedCharacteristicName(row.label) === normalizedCharacteristicName(draft?.label || draft?.name || ""));
     if (!currentRow) {
       return true;
@@ -17865,9 +17917,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       const shouldApplyDescription = sections.includes("description");
       const shouldApplyCharacteristics = sections.includes("characteristics");
       const semanticCharacteristicDrafts = shouldApplyCharacteristics
-        ? normalizeDraftCharacteristics(payload.draftContent?.characteristics || savedDraftContent.characteristics || {})
+        ? canonicalizeDraftCharacteristics(payload.draftContent?.characteristics || savedDraftContent.characteristics || {}, characteristicItems, subjectCharacteristics)
         : {};
-      const nextDraftCharacteristics = { ...normalizeDraftCharacteristics(draftCharacteristics) };
+      const nextDraftCharacteristics = { ...canonicalizeDraftCharacteristics(draftCharacteristics, characteristicItems, subjectCharacteristics) };
       if (shouldApplyCharacteristics) {
         Object.entries(semanticCharacteristicDrafts).forEach(([key, draft]) => {
           nextDraftCharacteristics[key] = nextDraftCharacteristics[key]
@@ -18029,8 +18081,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       const nextDescription = descriptionDraft.value || description;
       const nextTitleReason = titleDraft.reason || payload.auditResult?.title?.reason || "";
       const nextDescriptionReason = descriptionDraft.reason || payload.auditResult?.description?.reason || "";
-      const nextDraftCharacteristics = normalizeDraftCharacteristics(
-        draftContent.characteristics || characteristicDraftsFromRows(characteristicItems, "audit", returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics, subjectCharacteristics)
+      const nextDraftCharacteristics = canonicalizeDraftCharacteristics(
+        draftContent.characteristics || characteristicDraftsFromRows(characteristicItems, "audit", returnedMpstats.length ? returnedMpstats : mpstatsCharacteristics, subjectCharacteristics),
+        characteristicItems,
+        subjectCharacteristics
       );
       const fallbackEntry = {
         id: `audit-${Date.now()}`,

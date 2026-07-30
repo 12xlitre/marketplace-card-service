@@ -10806,7 +10806,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - ключи и свойства "без сахара", "для диабетиков", "натуральные подсластители", конкретные экстракты, "безопасно для полости рта" используй только если эти факты прямо есть в evidenceBundle.card.characteristics/title/description;
 - для медицинских и околомедицинских товаров не пиши "лечит", "устраняет боль", "быстрое облегчение", "эффективное средство", "вылечит ангину/ОРВИ/бронхит"; замени на "помогает смягчить", "способствует уменьшению першения", "помогает снизить дискомфорт", "может использоваться как вспомогательное средство";
 - характеристики верни в JSON: укажи поля, которые уже подходят под ключи, и поля/значения, которые стоит заполнить или проверить под средне- и низкочастотные ключи;
-- для характеристик сначала смотри evidenceBundle.characteristicsContext.mpstatsCharacteristics как статистику популярных рыночных значений, затем WB-справочник availableCharacteristics как рамку допустимых полей, затем текущие факты карточки; не добавляй значение, если оно противоречит карточке;
+- для характеристик сначала смотри evidenceBundle.characteristicsContext.mpstatsCharacteristics как статистику популярных рыночных значений, затем WB-справочник availableCharacteristics как рамку допустимых полей, затем текущие факты карточки; если поле уже есть в текущей карточке или справочнике WB, возвращай его charcID без изменений; не добавляй значение, если оно противоречит карточке;
 - в характеристиках не дублируй одно и то же значение в разных полях, не пиши SEO-список в одно поле, выбирай фактические значения и варианты из evidenceBundle.characteristicsContext, если они есть;
 - не обещай рост продаж, медицинский эффект, сертификацию или преимущества без фактов.
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
@@ -11083,6 +11083,25 @@ def content_characteristic_best_match(name, rows, charc_id="", min_score=CONTENT
   return best if best is not None and best_score >= min_score else {}
 
 
+def content_characteristic_context_rows(*groups):
+  output = []
+  seen = set()
+  for rows in groups:
+    for row in rows if isinstance(rows, list) else []:
+      if not isinstance(row, dict):
+        continue
+      name = content_characteristic_row_label(row)
+      charc_id = content_characteristic_row_charc_id(row)
+      key = content_characteristic_draft_key(name, charc_id)
+      if not key:
+        continue
+      if key in seen:
+        continue
+      seen.add(key)
+      output.append(row)
+  return output
+
+
 def content_characteristic_existing_match(output, name, charc_id="", min_score=CONTENT_CHARACTERISTIC_DEDUPE_SCORE):
   if not isinstance(output, dict):
     return "", {}
@@ -11173,7 +11192,7 @@ def content_reoptimization_merge_characteristic_drafts(fallback_characteristics,
   return output
 
 
-def normalize_content_reoptimization_characteristics(value, fallback_rows=None, limit=24):
+def normalize_content_reoptimization_characteristics(value, fallback_rows=None, limit=24, strict_fallback=False):
   rows = []
   if isinstance(value, dict):
     for key, item in value.items():
@@ -11183,12 +11202,28 @@ def normalize_content_reoptimization_characteristics(value, fallback_rows=None, 
     rows = [item for item in value if isinstance(item, dict)]
   output = {}
   fallback_rows = fallback_rows if isinstance(fallback_rows, list) else []
-  fallback_by_name = {audit_normalized(row.get("name")): row for row in fallback_rows if isinstance(row, dict)}
+  fallback_by_id = {
+    content_characteristic_row_charc_id(row): row
+    for row in fallback_rows
+    if isinstance(row, dict) and content_characteristic_row_charc_id(row)
+  }
+  fallback_by_name = {
+    audit_normalized(content_characteristic_row_label(row)): row
+    for row in fallback_rows
+    if isinstance(row, dict) and content_characteristic_row_label(row)
+  }
   for item in rows[:limit]:
     name = audit_str(item.get("name") or item.get("label") or "")
-    fallback = fallback_by_name.get(audit_normalized(name)) or content_characteristic_best_match(name, fallback_rows)
-    charc_id = item.get("charcID") or item.get("charcId") or fallback.get("charcId") or fallback.get("charcID") or ""
-    name = audit_str(fallback.get("name") or fallback.get("label") or name)
+    incoming_charc_id = content_characteristic_row_charc_id(item)
+    fallback = (
+      fallback_by_id.get(incoming_charc_id)
+      or fallback_by_name.get(audit_normalized(name))
+      or content_characteristic_best_match(name, fallback_rows, incoming_charc_id)
+    )
+    if strict_fallback and not incoming_charc_id and not fallback:
+      continue
+    charc_id = incoming_charc_id or fallback.get("charcId") or fallback.get("charcID") or fallback.get("id") or ""
+    name = audit_str(content_characteristic_row_label(fallback) or name)
     values = content_characteristic_values(item.get("values") if "values" in item else item.get("value"), limit=8)
     if not name or not values:
       continue
@@ -16405,9 +16440,19 @@ def audit_card_values_from_characteristic(item):
   return audit_unique(re.split(r"[,;]+", str(value or "")))
 
 
+def audit_card_characteristic_items(card):
+  raw_fields = card.get("rawFields") if isinstance(card, dict) and isinstance(card.get("rawFields"), dict) else {}
+  items = card.get("characteristics") if isinstance(card, dict) else []
+  if isinstance(items, list) and items:
+    return items
+  if isinstance(raw_fields.get("characteristics"), list):
+    return raw_fields.get("characteristics")
+  return items if isinstance(items, list) else []
+
+
 def audit_card_characteristics(card):
   rows = []
-  items = card.get("characteristics") if isinstance(card, dict) else []
+  items = audit_card_characteristic_items(card)
   if not isinstance(items, list):
     return rows
   for index, item in enumerate(items):
@@ -19557,7 +19602,24 @@ def content_card_for_portal(portal_id, card_key, raw_card):
       row = db.execute("SELECT cards_snapshot_json FROM portals WHERE id = ?", (int(portal_id),)).fetchone()
     snapshot_card = snapshot_card_lookup(row["cards_snapshot_json"] if row else "").get(card_key)
     if snapshot_card:
-      card = snapshot_card
+      raw_characteristics_count = len(audit_card_characteristics(card))
+      snapshot_characteristics_count = len(audit_card_characteristics(snapshot_card))
+      merged_raw_fields = {}
+      if isinstance(card.get("rawFields"), dict):
+        merged_raw_fields.update(card.get("rawFields"))
+      if isinstance(snapshot_card.get("rawFields"), dict):
+        merged_raw_fields.update(snapshot_card.get("rawFields"))
+      if raw_characteristics_count > snapshot_characteristics_count:
+        card_characteristics = audit_card_characteristic_items(card)
+      else:
+        card_characteristics = audit_card_characteristic_items(snapshot_card)
+      card = {
+        **card,
+        **snapshot_card,
+        "rawFields": merged_raw_fields or snapshot_card.get("rawFields") or card.get("rawFields") or {},
+        "description": audit_str(snapshot_card.get("description") or card.get("description") or "", 7000),
+        "characteristics": card_characteristics if isinstance(card_characteristics, list) else [],
+      }
   return card
 
 
@@ -19781,7 +19843,12 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       *warnings,
       "Часть выбранных ключей не добавлена прямым вхождением, потому что это могло ухудшить читаемость или противоречить фактам карточки.",
     ]
-  llm_characteristics = normalize_content_reoptimization_characteristics(parsed.get("characteristics"), fallback_rows=characteristics)
+  characteristic_context_rows = content_characteristic_context_rows(characteristics, available_characteristics)
+  llm_characteristics = normalize_content_reoptimization_characteristics(
+    parsed.get("characteristics"),
+    fallback_rows=characteristic_context_rows,
+    strict_fallback=True,
+  )
   fallback_characteristics = content_reoptimization_characteristic_fallback(
     card,
     target_keywords,

@@ -229,6 +229,93 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(draft["charc:123"]["values"], ["женский"])
     self.assertIn("MPStats", draft["charc:123"]["reason"])
 
+  def test_characteristic_normalization_preserves_current_wb_ids(self):
+    fallback_rows = server.audit_card_characteristics({
+      "characteristics": [
+        {"charcId": 101, "name": "Вкус", "value": ["имбирь", "мёд"]},
+        {"charcId": 102, "name": "Форма выпуска", "value": "леденцы"},
+        {"charcId": 103, "name": "Количество капсул/таблеток", "value": "16"},
+      ],
+    })
+
+    draft = server.normalize_content_reoptimization_characteristics(
+      [
+        {"name": "Вкус", "values": ["имбирь", "мёд"], "reason": "test"},
+        {"name": "Форма выпуска", "values": ["Леденцы"], "reason": "test"},
+        {"name": "Количество", "values": ["16 шт."], "reason": "test"},
+      ],
+      fallback_rows=fallback_rows,
+      strict_fallback=True,
+    )
+
+    self.assertIn("charc:101", draft)
+    self.assertIn("charc:102", draft)
+    self.assertEqual(draft["charc:101"]["label"], "Вкус")
+    self.assertEqual(draft["charc:101"]["values"], ["имбирь", "мёд"])
+    self.assertEqual(draft["charc:102"]["values"], ["Леденцы"])
+    self.assertNotIn("charc-name:количество", draft)
+    self.assertNotIn("charc:103", draft)
+
+  def test_card_characteristics_fallback_reads_raw_fields(self):
+    rows = server.audit_card_characteristics({
+      "characteristics": [],
+      "rawFields": {
+        "characteristics": [
+          {"charcId": 301, "name": "Вкус", "value": "имбирь"},
+        ],
+      },
+    })
+
+    self.assertEqual(rows[0]["key"], "charc:301")
+    self.assertEqual(rows[0]["values"], ["имбирь"])
+
+  def test_wb_content_reoptimization_keeps_approval_card_characteristics(self):
+    raw_card = {
+      "nmID": 262693847,
+      "title": "ТРАВЕРИН растительные леденцы для горла имбирь мед",
+      "subjectName": "БАД",
+      "description": "Растительные леденцы для горла.",
+      "characteristics": [
+        {"charcId": 201, "name": "Вкус", "value": ["имбирь", "мёд"]},
+        {"charcId": 202, "name": "Форма выпуска", "value": "леденцы"},
+        {"charcId": 203, "name": "Состав", "value": ["экстракт корневищ имбиря лекарственного", "экстракт корней солодки голой"]},
+      ],
+    }
+    llm_body = {
+      "title": {"value": "ТРАВЕРИН леденцы для горла имбирь мед", "reason": "test"},
+      "description": {"value": "ТРАВЕРИН помогает смягчить горло.", "reason": "test"},
+      "characteristics": [
+        {"name": "Вкус", "values": ["имбирь", "мёд"], "reason": "test"},
+        {"name": "Количество", "values": ["16 шт."], "reason": "test"},
+      ],
+      "_meta": {"warnings": []},
+    }
+
+    def fake_llm(_messages):
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "262693847",
+        raw_card,
+        selected_keywords=[{"query": "леденцы от боли", "wbCount": 1000}],
+        sections=["description", "characteristics"],
+      )
+
+    description = result["draftContent"]["description"]["value"].lower()
+    characteristics = result["draftContent"]["characteristics"]
+    self.assertIn("по характеристикам текущей карточки", description)
+    self.assertIn("вкус - имбирь и мёд", description)
+    self.assertIn("форма выпуска - леденцы", description)
+    self.assertIn("состав - экстракт корневищ имбиря лекарственного", description)
+    self.assertIn("charc:201", characteristics)
+    self.assertNotIn("charc-name:количество", characteristics)
+
   def test_reoptimization_result_reports_desired_direct_entry_usage(self):
     card = {
       "title": "Солнцезащитные очки Polaroid мужские",
