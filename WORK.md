@@ -15,7 +15,7 @@
 - `git diff --check`
 
 Деплой:
-- Не выполнялся в этой сессии.
+- Коммит `1908ecb` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная `GET /` -> `200`, `/api/session` без сессии -> `200 {"user": null}`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `1908ecb`, контейнер `opticards-web-1 Up`.
 
 ## Статус на 2026-07-29 — явные режимы prompt для варианта описания
 
