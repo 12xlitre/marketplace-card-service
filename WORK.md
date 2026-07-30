@@ -1,5 +1,22 @@
 # Marketplace Card Service
 
+## Статус на 2026-07-30 — модель текущей карточки в режиме "Мой вариант"
+
+Сделано:
+- для `Еще вариант описания -> Мой вариант` backend теперь передает GigaChat явное поле `evidenceBundle.card.model` и правило сверять модель/артикул модели с текущей карточкой;
+- если специалист вставил описание с моделью другой карточки, серверный fallback в reference-режиме заменяет чужую модель рядом с брендом на модель текущей карточки перед выдачей черновика;
+- добавлен регрессионный тест на Polaroid: в пользовательском reference-тексте модель `PLD 6012 N 807 M9` заменяется на текущую `PLD 4137 S 807 M9`.
+
+Проверки:
+- `python3 -m unittest tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_uses_user_text_when_llm_ignores_it tests.test_semantic_core.SemanticCoreFilteringTest.test_reference_mode_substitutes_current_card_model`
+- `python3 -m unittest tests.test_semantic_core`
+- `python3 -m unittest discover -s tests`
+- `python3 -m py_compile server.py tests/test_semantic_core.py`
+- `git diff --check`
+
+Деплой:
+- Не выполнялся в этой сессии.
+
 ## Статус на 2026-07-29 — явные режимы prompt для варианта описания
 
 Сделано:

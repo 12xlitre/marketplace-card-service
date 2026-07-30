@@ -593,6 +593,58 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertTrue(result["contentOptimization"]["revisionAdditionApplied"])
     self.assertLessEqual(len(description), server.CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
+  def test_reference_mode_substitutes_current_card_model(self):
+    card = {
+      "title": "Солнцезащитные очки мужские Polaroid PLD 4137 S 807 M9",
+      "subjectName": "Солнцезащитные очки",
+      "brand": "Polaroid",
+      "description": "Солнцезащитные очки Polaroid подходят для города.",
+      "characteristics": [
+        {"name": "Поляризация", "value": "да"},
+        {"name": "Форма оправы", "value": "прямоугольная"},
+        {"name": "Цвет", "value": "черный"},
+      ],
+    }
+    reference = (
+      "Солнцезащитные очки мужские Polaroid PLD 6012 N 807 M9 подходят для ярких солнечных дней и поездок за рулем. "
+      "Прямоугольная форма оправы выглядит сдержанно и современно. "
+      "Polaroid PLD 6012 N 807 M9 имеет поляризационные линзы и черную оправу. "
+      "Эта модель помогает собрать понятное описание для покупателя."
+    )
+    llm_body = {
+      "title": {"value": "Солнцезащитные очки мужские Polaroid", "reason": "test"},
+      "description": {"value": "Солнцезащитные очки Polaroid подходят для города.", "reason": "test"},
+      "characteristics": [],
+      "_meta": {"warnings": []},
+    }
+    captured = {}
+
+    def fake_llm(messages):
+      captured["messages"] = messages
+      return {
+        "choices": [{"message": {"content": json.dumps(llm_body, ensure_ascii=False)}}],
+      }, "test-model", "test-provider"
+
+    with patch.object(server, "content_reoptimization_configured", return_value=True), \
+      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      result = server.build_card_content_reoptimization(
+        "demo-wb",
+        "243430592",
+        card,
+        selected_keywords=[{"query": "очки солнцезащитные мужские", "wbCount": 1000}],
+        revision_mode="reference",
+        revision_text=reference,
+        sections=["description"],
+      )
+
+    evidence = json.loads(captured["messages"][1]["content"])["evidenceBundle"]
+    description = result["draftContent"]["description"]["value"]
+    self.assertEqual(evidence["card"]["model"], "PLD 4137 S 807 M9")
+    self.assertEqual(evidence["revision"]["currentCardModel"], "PLD 4137 S 807 M9")
+    self.assertIn("evidenceBundle.card.model", captured["messages"][0]["content"])
+    self.assertIn("Polaroid PLD 4137 S 807 M9", description)
+    self.assertNotIn("PLD 6012 N 807 M9", description)
+
   def test_ozon_content_reoptimization_uses_final_semantic_and_mpstats_characteristics(self):
     card = {
       "sku": "oz-100",

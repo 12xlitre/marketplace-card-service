@@ -10052,6 +10052,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - если evidenceBundle.revision.instruction заполнена, подготовь следующий вариант как редакторскую правку текущего черновика из evidenceBundle.draft: учти просьбу специалиста по тону, акцентам, сокращению, добавлению или удалению смыслов;
 - если evidenceBundle.revision.instructionMode = "addition", обязательно включи безопасный смысл из evidenceBundle.revision.additionText в description.value; можно слегка вычитать русский язык, но не игнорируй вставку;
 - если evidenceBundle.revision.instructionMode = "reference", возьми evidenceBundle.revision.referenceText как основной авторский вариант описания и внеси только минимальные правки по фактам, лимиту, запретам WB и нормальному русскому языку;
+- если evidenceBundle.card.model заполнена, модель/артикул модели в title и description должен соответствовать именно evidenceBundle.card.model; если referenceText содержит модель другой карточки, замени ее на модель текущей карточки или убери чужую модель;
 - инструкция специалиста не может отменять правила выше: если просят выдумать свойство, добавить запрещенное медицинское обещание, диагноз, чужой бренд или неподтвержденный факт, не выполняй эту часть и укажи ограничение в _meta.warnings;
 - при режиме правки сохраняй удачные фактические части текущего черновика, но переписывай текст достаточно заметно, чтобы это был новый вариант, а не перестановка пары слов.
 
@@ -11668,6 +11669,7 @@ def content_reoptimization_revision_reference_text(revision_text, card=None, max
   text = re.sub(r"[ \t]+", " ", text).strip().strip("\"'“”«»")
   cleaned = content_reoptimization_remove_output_leaks(text, card=card) or ""
   cleaned = content_reoptimization_apply_client_postprocess(cleaned, card)
+  cleaned = content_reoptimization_align_card_model_in_text(cleaned, card)
   return content_description_sentence_limit(cleaned, max_chars)
 
 
@@ -11886,6 +11888,67 @@ def content_reoptimization_model_name(title):
   title = audit_str(title, 120)
   cleaned = re.sub(r"(?i)^оправа\s+", "", title).strip()
   return cleaned or title
+
+
+def content_reoptimization_card_model_name(card, keyword_rows=None):
+  card = card if isinstance(card, dict) else {}
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  facts = audit_card_characteristics(card)
+  for row in facts:
+    name = audit_normalized(row.get("name"))
+    if "модель" not in name and "model" not in name:
+      continue
+    values = content_reoptimization_clean_values(row.get("values") or [], limit=1)
+    if values:
+      return audit_str(values[0], 80)
+  for key in ("model", "modelName", "productModel", "vendorModel"):
+    value = audit_str(card.get(key) or raw_fields.get(key), 80)
+    if value:
+      return value
+  title = audit_str(card.get("title") or raw_fields.get("title") or "", 160)
+  brand = content_reoptimization_brand_label(card.get("brand") or raw_fields.get("brand") or "")
+  if content_reoptimization_is_sunglasses(card, keyword_rows):
+    return content_reoptimization_sunglasses_model_name(title, brand)
+  if brand:
+    match = re.search(rf"\b{re.escape(brand)}\s+([A-Z0-9][A-Z0-9/\- ]{{2,80}})", title)
+    if match:
+      model = re.sub(r"\s+", " ", match.group(1)).strip(" -")
+      if re.search(r"\d", model):
+        return audit_str(model, 80)
+  return ""
+
+
+def content_reoptimization_align_card_model_in_text(text, card):
+  card = card if isinstance(card, dict) else {}
+  output = audit_str(text, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
+  model = content_reoptimization_card_model_name(card)
+  if not output or not model:
+    return output
+  normalized_output = audit_normalized(output)
+  normalized_model = audit_normalized(model)
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  brand = content_reoptimization_brand_label(card.get("brand") or raw_fields.get("brand") or "")
+
+  def replace_model(match):
+    prefix = match.group(1)
+    candidate = re.sub(r"\s+", " ", match.group(2)).strip(" -")
+    if not candidate or audit_normalized(candidate) == normalized_model:
+      return match.group(0)
+    return f"{prefix}{model}"
+
+  if brand:
+    brand_pattern = re.compile(
+      rf"(\b{re.escape(brand)}\s+)([A-Z0-9][A-Z0-9/\- ]{{2,80}})(?=\s+(?:подход|име|выгляд|с|для|и|в|на|это|эта|выбира|относ)|[.!?,;:]|$)"
+    )
+    output = brand_pattern.sub(replace_model, output)
+    normalized_output = audit_normalized(output)
+    if normalized_model not in normalized_output and re.search(re.escape(brand), output):
+      output = re.sub(re.escape(brand), f"{brand} {model}", output, count=1)
+  model_pattern = re.compile(
+    r"(\b[Мм]одель\s+)([A-Z0-9А-ЯЁ][A-Z0-9А-ЯЁ/\- ]{2,80})(?=\s+(?:подход|име|выгляд|с|для|и|в|на|это|эта|выбира|относ)|[.!?,;:]|$)"
+  )
+  output = model_pattern.sub(replace_model, output)
+  return content_description_sentence_limit(output, CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT)
 
 
 def content_reoptimization_kit_sentence(values, product_kind="frame"):
@@ -18527,6 +18590,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   description = audit_str(card.get("description") or raw_fields.get("description") or "", 7000)
   characteristics = audit_card_characteristics(card)[:80]
   fact_map = {audit_normalized(row.get("name")): row.get("values") or [] for row in characteristics}
+  card_model = content_reoptimization_card_model_name(card, title_keywords)
   characteristics_context = characteristics_context if isinstance(characteristics_context, dict) else {}
   available_characteristics = characteristics_context.get("availableCharacteristics") if isinstance(characteristics_context.get("availableCharacteristics"), list) else []
   mpstats_characteristics = characteristics_context.get("mpstatsCharacteristics") if isinstance(characteristics_context.get("mpstatsCharacteristics"), list) else []
@@ -18535,6 +18599,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "nmId": audit_str(card.get("nmID") or card.get("nmId") or raw_fields.get("nmID") or ""),
       "vendorCode": audit_str(card.get("vendorCode") or raw_fields.get("vendorCode") or ""),
       "brand": audit_str(card.get("brand") or raw_fields.get("brand") or ""),
+      "model": card_model,
       "subject": audit_str(card.get("subjectName") or raw_fields.get("subjectName") or ""),
       "title": title,
       "description": description,
@@ -18563,6 +18628,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       "instruction": revision_instruction,
       "referenceText": revision_text if revision_mode == "reference" else "",
       "additionText": revision_text if revision_mode == "addition" else "",
+      "currentCardModel": card_model,
       "priority": "follow unless it conflicts with facts, marketplace restrictions, medical/safety rules or evidenceBundle",
       "currentDraftIsSourceForRevision": bool(draft_title or draft_description),
     },
@@ -18644,6 +18710,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   before_revision_addition = next_description
   if revision_mode == "reference":
     next_description = content_reoptimization_apply_revision_reference(next_description, card, revision_text or revision_instruction)
+    next_description = content_reoptimization_align_card_model_in_text(next_description, card)
   else:
     next_description = content_reoptimization_apply_revision_addition(
       next_description,
