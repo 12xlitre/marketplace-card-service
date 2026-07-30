@@ -221,6 +221,129 @@ class MarketplaceGuardTest(unittest.TestCase):
     self.assertEqual(events[0]["action"], "withdrawn")
     self.assertIn("Контент", events[0]["reason"])
 
+  def test_wb_content_publication_prepares_only_approved_content_for_tech(self):
+    raw_card = {
+      "nmID": 262693847,
+      "vendorCode": "WB-ART-1",
+      "brand": "Optic",
+      "title": "Старый заголовок",
+      "description": "Старое описание",
+      "subjectID": 123,
+      "subjectName": "Оправы",
+      "characteristics": [
+        {"id": 14177449, "name": "Цвет", "value": "черный"},
+        {"id": 12, "name": "Форма оправы", "value": ["квадратная"]},
+        {"id": 999, "name": "Ширина линзы", "value": 52},
+      ],
+      "sizes": [{"chrtID": 1001, "techSize": "0", "wbSize": "", "skus": ["2000000000011"]}],
+    }
+    with server.connect_db() as db:
+      db.execute(
+        "UPDATE portals SET cards_snapshot_json = ? WHERE id = ?",
+        (json.dumps([server.normalize_wb_card(raw_card)], ensure_ascii=False), self.wb_portal_id),
+      )
+
+    approved_payload = {
+      "content": {
+        "title": {"value": "Оправа для очков женская Optic"},
+        "description": {"value": "Новое согласованное описание с характеристиками текущей карточки."},
+        "characteristics": {
+          "charc:14177449": {"label": "Цвет", "charcID": 14177449, "values": ["красный"]},
+          "shape": {"label": "Форма оправы", "values": ["круглая"]},
+        },
+      },
+      "meta": {
+        "approvalSections": {
+          "content": {
+            "status": "approved",
+            "reviewedBy": "anastasia.tech",
+            "reviewedAt": "2026-07-30T10:00:00+00:00",
+          },
+        },
+      },
+    }
+    server.save_card_draft(
+      self.wb_portal_id,
+      "262693847",
+      "262693847",
+      "WB-ART-1",
+      approved_payload,
+      self.anastasia,
+    )
+
+    preview = server.prepare_wb_content_publication(self.wb_portal_id, self.readonly)
+    self.assertEqual(preview["summary"]["readyCount"], 1)
+    self.assertEqual(preview["summary"]["apiReadyCount"], 1)
+    card = preview["cards"][0]
+
+    self.assertEqual(card["updatePayload"]["title"], "Оправа для очков женская Optic")
+    self.assertEqual(card["updatePayload"]["description"], "Новое согласованное описание с характеристиками текущей карточки.")
+    characteristics = {str(item["id"]): item["value"] for item in card["updatePayload"]["characteristics"]}
+    self.assertEqual(characteristics["14177449"], "красный")
+    self.assertEqual(characteristics["12"], ["круглая"])
+    self.assertEqual(characteristics["999"], 52)
+
+    with self.assertRaises(PermissionError):
+      server.prepare_wb_content_publication(self.wb_portal_id, self.anastasia)
+
+  def test_wb_content_publication_table_marks_content_exported(self):
+    raw_card = {
+      "nmID": 262693847,
+      "vendorCode": "WB-ART-1",
+      "brand": "Optic",
+      "title": "Старый заголовок",
+      "description": "Старое описание",
+      "subjectID": 123,
+      "subjectName": "Оправы",
+      "characteristics": [{"id": 14177449, "name": "Цвет", "value": "черный"}],
+      "sizes": [{"chrtID": 1001, "techSize": "0", "wbSize": "", "skus": ["2000000000011"]}],
+    }
+    with server.connect_db() as db:
+      db.execute(
+        "UPDATE portals SET cards_snapshot_json = ? WHERE id = ?",
+        (json.dumps([server.normalize_wb_card(raw_card)], ensure_ascii=False), self.wb_portal_id),
+      )
+    server.save_card_draft(
+      self.wb_portal_id,
+      "262693847",
+      "262693847",
+      "WB-ART-1",
+      {
+        "content": {
+          "title": {"value": "Оправа для очков женская Optic"},
+          "description": {"value": "Новое согласованное описание."},
+          "characteristics": {},
+        },
+        "meta": {"approvalSections": {"content": {"status": "approved"}}},
+      },
+      self.anastasia,
+    )
+
+    result = server.publish_wb_content_publication(
+      self.wb_portal_id,
+      {"mode": "table", "cardKeys": ["262693847"]},
+      self.readonly,
+    )
+
+    self.assertEqual(result["summary"]["publishedCount"], 1)
+    draft = server.get_card_draft(self.wb_portal_id, "262693847", self.readonly)
+    status = draft["draft"]["meta"]["approvalSections"]["content"]["status"]
+    self.assertEqual(status, "exported")
+    with server.connect_db() as db:
+      row = db.execute(
+        "SELECT action FROM card_approval_events WHERE portal_id = ? AND card_key = ? ORDER BY id DESC LIMIT 1",
+        (self.wb_portal_id, "262693847"),
+      ).fetchone()
+    self.assertEqual(row["action"], "content_export_table")
+
+  def test_wb_content_publication_api_requires_encrypted_portal_token(self):
+    with self.assertRaisesRegex(ValueError, "wb_token_missing"):
+      server.publish_wb_content_publication(
+        self.wb_portal_id,
+        {"mode": "api"},
+        self.readonly,
+      )
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -68,7 +68,7 @@ npm run wb-sync -- --portal-id 1 --limit 20
 
 WB API ключ не хранится в `index.html` и не пишется в браузерное хранилище.
 
-Read-only маршруты backend:
+Основные маршруты backend:
 
 ```text
 POST /api/portals
@@ -91,6 +91,7 @@ GET /api/card-workset?portal_id=1
 GET /api/portal-card-drafts?portal_id=1
 GET /api/semantic-core-collections?portal_id=1
 GET /api/portal-work-periods?portal_id=1
+POST /api/portals/<portal_id>/wb-content-publication
 POST /api/card-audit
 POST /api/card-content-reoptimize
 POST /api/card-competitors/suggest
@@ -115,7 +116,7 @@ DELETE /api/portal-work-periods?portal_id=1&period_id=1
 
 `POST /api/portals/<portal_id>/ozon-mpstats-cards` доступен только для Ozon-порталов с edit/manage правами пользователя и сохраняет явно выбранный результат Ozon MPStats probe в `cards_snapshot_json`. Карточки нормализуются как `marketplace=ozon`, мержатся по SKU/offer/id с уже сохраненным Ozon snapshot и обновляют `card_count/problem_count/last_sync_at`; WB API и WB bootstrap не запускаются.
 
-Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. До отдельного решения write-операции WB не реализуются.
+Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. WB write-операции ограничены ручной публикацией принятого контента; цены, остатки, медиа и автоматическая публикация при принятии не реализуются.
 
 `GET /api/wb/cards` возвращает нормализованные карточки и sanitised `rawFields` для детального просмотра. Поля с признаками секретов (`token`, `secret`, `password`, `authorization`, `api_key`, `apikey`, `cookie`, `session`, `credential`) вырезаются на backend.
 
@@ -142,6 +143,8 @@ SEO expansion MPStats отправляется не только с пользо
 `POST /api/semantic-core-import` загружает согласованное СЯ обратно в WB `card_drafts` без write-операций в Wildberries. Маршрут принимает JSON с `portalId`, `scope` (`card` или `portal`), `mode` (`preview` или `apply`), `fileName`, `fileData` base64 и опциональным `cardKey` для карточечного режима. Backend читает XLSX/CSV/TXT, ищет колонки ключей, `Да/Нет`, частоту WB и частоту Ozon, сопоставляет карточки по `cardKey`/WB `nmID`/артикулу/имени листа, а для категорийных файлов вроде `Шапки`, `Косынки`, `Панамки`, `Бейсболки` может сопоставлять карточки по предмету/названию. В `preview` возвращаются matched/unmatched строки; в `apply` обновляется только `meta.semanticCoreFinal`, `semanticCoreSelected` и `semanticCoreRemoval`, чтобы последующая переоптимизация контента работала по согласованному СЯ.
 
 `GET /api/portal-card-drafts` отдает сохраненные черновики карточек по одному кабинету после проверки доступа. Frontend использует его для кабинетных XLSX-выгрузок: итоговое СЯ по карточкам с сохраненным СЯ и итоговый контент по карточкам, где секция `Контент` отправлена на согласование или уже принята (`submitted/approved/exported`).
+
+`POST /api/portals/<portal_id>/wb-content-publication` публикует только принятую секцию `Контент` и доступен техспециалисту проекта или админу. Режим `preview` собирает состав карточек перед подтверждением, `api` требует encrypted WB token конкретного портала и отправляет payload в `POST /content/v2/cards/update`, а `table` готовит XLSX для ручной загрузки в WB при отсутствии API. Payload строится из текущего WB snapshot/fresh read: сохраняются `nmID`, `vendorCode`, `brand`, `dimensions`, `sizes` и характеристики текущей карточки, поверх применяются принятые title/description/characteristics из `card_drafts`. После успешного API-ответа или подготовки таблицы секция `Контент` получает статус `exported`.
 
 `GET/POST /api/card-workset` хранит рабочий набор карточек кабинета в backend, а `POST /api/card-workset/create-tasks` создает внутренние задачи по выбранным типам работ (`СЯ`, `Контент`, `Цены`, `Остатки`). При создании пачку можно сразу связать с пунктом отчетного периода через `workPeriodId` + `workPeriodTaskKey`: backend добавляет `batchId`/тип задачи в `linkedBatchIds`/`linkedTaskIds` пункта и переводит пункт из `planned` в `in_progress`. Задачей считается только draft с явным `meta.batch.workTypes`; обычное сохранение СЯ/черновика карточки без batch не должно появляться как задача `Контент`. Во вкладке `Задачи` активная пачка открывается как рабочий конвейер в детальной карточке: прогресс `N из M`, текущая карточка и переходы `Предыдущая`/`Следующая` без возврата к списку. `POST /api/card-workset/reorder-tasks` сохраняет ручной порядок карточек внутри batch в `card_drafts.meta.batch.position`; маршрут фильтрует задачи по `portal_id` и `batch.id`, а frontend меняет порядок drag-and-drop локально до явного `Сохранить порядок`. `POST /api/card-workset/log-event` пишет журнал действий по карточке пачки (`opened`, `skipped`, `deferred`, `quick_completed`, `audit_completed`, `audit_failed`) в `card_approval_events` после проверки доступа к кабинету и существования `card_draft`. `POST /api/card-workset/audit-task` запускает аудит одной карточки пачки, сохраняет audit/content draft в `card_drafts`, не отправляет блоки на согласование и возвращает обновленный workflow; frontend вызывает этот маршрут последовательно для пакетного аудита видимых карточек. Задачи workflow содержат `hasAuditDraft`, поэтому после частичного пакетного аудита frontend может продолжить только карточки без сохраненного аудита или повторить только локально упавшие карточки. `POST /api/card-workset/delete-tasks` удаляет рабочую задачу/тип работ из batch, очищает matching-связи `linkedTaskIds`/`linkedBatchIds` в активных отчетных периодах, но сохраняет результаты карточки в `card_drafts`; для СЯ задача считается закрытой после сохранения карточки в итоговое СЯ кабинета.
 

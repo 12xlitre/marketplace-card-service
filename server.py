@@ -116,6 +116,10 @@ OPTICARDS_LLM_PROVIDER = os.environ.get("OPTICARDS_LLM_PROVIDER", "gigachat" if 
 WB_MAX_CARDS_PER_SYNC = 1000
 WB_CHARCS_CACHE_TTL_SECONDS = int(os.environ.get("WB_CHARCS_CACHE_TTL_SECONDS", "21600"))
 WB_TOKEN_LIFETIME_DAYS = 180
+WB_CONTENT_UPDATE_PATH = "/content/v2/cards/update"
+WB_CONTENT_PUBLICATION_MAX_CARDS = int(os.environ.get("WB_CONTENT_PUBLICATION_MAX_CARDS", "100"))
+WB_CONTENT_PUBLICATION_RATE_LIMIT_SECONDS = float(os.environ.get("WB_CONTENT_PUBLICATION_RATE_LIMIT_SECONDS", "10"))
+WB_CONTENT_PUBLICATION_RATE_LIMIT = {}
 WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
 AUDIT_MARKET_CACHE = {}
@@ -5721,6 +5725,762 @@ def list_portal_card_drafts(portal_id, user):
     "portalId": str(numeric_portal_id),
     "drafts": [public_card_draft(row) for row in rows],
   }
+
+
+def user_can_publish_wb_content(user, portal_id):
+  if not user_can_access_portal(user, portal_id):
+    return False
+  if user_is_admin(user):
+    return True
+  return portal_team_roles(portal_id).get("tech") == user_login_value(user)
+
+
+def check_wb_content_publication_rate_limit(user, portal_id, mode):
+  if mode == "preview" or WB_CONTENT_PUBLICATION_RATE_LIMIT_SECONDS <= 0:
+    return
+  now = time.monotonic()
+  cutoff = now - max(WB_CONTENT_PUBLICATION_RATE_LIMIT_SECONDS * 4, 60)
+  stale_keys = [key for key, timestamp in WB_CONTENT_PUBLICATION_RATE_LIMIT.items() if timestamp < cutoff]
+  for key in stale_keys:
+    WB_CONTENT_PUBLICATION_RATE_LIMIT.pop(key, None)
+  rate_key = (user_login_value(user), str(portal_id), mode)
+  previous = WB_CONTENT_PUBLICATION_RATE_LIMIT.get(rate_key)
+  if previous and now - previous < WB_CONTENT_PUBLICATION_RATE_LIMIT_SECONDS:
+    raise ValueError("wb_publication_rate_limited")
+  WB_CONTENT_PUBLICATION_RATE_LIMIT[rate_key] = now
+
+
+def wb_content_publication_card_keys(value):
+  if isinstance(value, str):
+    raw_items = re.split(r"[\s,;]+", value)
+  elif isinstance(value, (list, tuple, set)):
+    raw_items = list(value)
+  else:
+    raw_items = []
+  output = []
+  seen = set()
+  for item in raw_items:
+    key = draft_card_key(item)
+    if key and key not in seen:
+      seen.add(key)
+      output.append(key)
+  return output
+
+
+def wb_content_publication_lookup_key(value):
+  return draft_card_key(value)
+
+
+def wb_content_publication_card_identifiers(card):
+  if not isinstance(card, dict):
+    return []
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  values = [
+    card_key_from_snapshot_card(card),
+    raw_storefront_card_key(card),
+    card.get("nmID"),
+    card.get("nmId"),
+    card.get("nm_id"),
+    raw_fields.get("nmID"),
+    raw_fields.get("nmId"),
+    raw_fields.get("nm_id"),
+    card.get("vendorCode"),
+    card.get("vendor_code"),
+    card.get("supplierArticle"),
+    raw_fields.get("vendorCode"),
+    raw_fields.get("vendor_code"),
+    raw_fields.get("supplierArticle"),
+    card.get("nmUUID"),
+    card.get("nmUuid"),
+    raw_fields.get("nmUUID"),
+    raw_fields.get("nmUuid"),
+  ]
+  output = []
+  seen = set()
+  for value in values:
+    key = wb_content_publication_lookup_key(value)
+    if key and key not in seen:
+      seen.add(key)
+      output.append(key)
+  return output
+
+
+def wb_content_publication_card_lookup(cards):
+  lookup = {}
+  for card in cards if isinstance(cards, list) else []:
+    if not isinstance(card, dict):
+      continue
+    for key in wb_content_publication_card_identifiers(card):
+      lookup.setdefault(key, card)
+  return lookup
+
+
+def wb_content_publication_draft_rows(portal_id, card_keys=None):
+  card_keys = wb_content_publication_card_keys(card_keys)
+  params = [portal_id]
+  key_filter = ""
+  if card_keys:
+    placeholders = ",".join("?" for _ in card_keys)
+    key_filter = f"AND card_key IN ({placeholders})"
+    params.extend(card_keys)
+  with connect_db() as db:
+    return db.execute(
+      f"""
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ?
+      {key_filter}
+      ORDER BY updated_at DESC, card_key
+      LIMIT ?
+      """,
+      [*params, WB_CONTENT_PUBLICATION_MAX_CARDS],
+    ).fetchall()
+
+
+def wb_content_publication_content_status(draft_payload):
+  sections = approval_sections_from_payload(draft_payload)
+  content = sections.get("content") if isinstance(sections.get("content"), dict) else {}
+  if content:
+    return approval_status_from_approval(content)
+  return approval_status_from_payload(draft_payload)
+
+
+def wb_content_publication_approved(draft_payload):
+  return wb_content_publication_content_status(draft_payload) in {"approved", "exported"}
+
+
+def wb_content_publication_meta_card(draft_payload):
+  meta = draft_payload.get("meta") if isinstance(draft_payload.get("meta"), dict) else {}
+  card = meta.get("card") if isinstance(meta.get("card"), dict) else {}
+  return card
+
+
+def wb_content_publication_find_card(row, lookup, fallback_cards=None):
+  fallback_cards = fallback_cards if isinstance(fallback_cards, list) else []
+  candidate_keys = [
+    row["card_key"],
+    row["nm_id"],
+    row["vendor_code"],
+  ]
+  draft_payload = normalize_card_draft_payload(safe_json_object(row["payload_json"]))
+  meta_card = wb_content_publication_meta_card(draft_payload)
+  candidate_keys.extend([
+    meta_card.get("nmID"),
+    meta_card.get("nmId"),
+    meta_card.get("vendorCode"),
+    meta_card.get("vendor_code"),
+  ])
+  for key in candidate_keys:
+    card = lookup.get(wb_content_publication_lookup_key(key))
+    if card:
+      return card
+  normalized_nm = wb_content_publication_lookup_key(row["nm_id"])
+  normalized_vendor = wb_content_publication_lookup_key(row["vendor_code"])
+  for card in fallback_cards:
+    if not isinstance(card, dict):
+      continue
+    identifiers = set(wb_content_publication_card_identifiers(card))
+    if normalized_nm and normalized_nm in identifiers:
+      return card
+    if normalized_vendor and normalized_vendor in identifiers:
+      return card
+  return {}
+
+
+def wb_content_publication_raw_card(card):
+  if not isinstance(card, dict):
+    return {}
+  raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  return raw_fields if raw_fields else card
+
+
+def wb_publication_clean_text(value, limit=4000):
+  return re.sub(r"\s+", " ", str(value or "").strip())[:limit].strip()
+
+
+def wb_publication_characteristic_values(item, limit=20):
+  if isinstance(item, dict):
+    raw_values = item.get("values") if isinstance(item.get("values"), list) else item.get("value")
+  else:
+    raw_values = item
+  values = []
+  source = raw_values if isinstance(raw_values, list) else [raw_values]
+  for raw in source:
+    if isinstance(raw, dict):
+      raw = raw.get("value") or raw.get("name")
+    for part in re.split(r"[,;]+", str(raw or "")):
+      value = wb_publication_clean_text(part, 240)
+      if value:
+        values.append(value)
+      if len(values) >= limit:
+        break
+    if len(values) >= limit:
+      break
+  return audit_unique(values, limit=limit)
+
+
+def wb_publication_characteristic_id(item):
+  if not isinstance(item, dict):
+    return ""
+  value = item.get("id") or item.get("charcID") or item.get("charcId")
+  text = str(value).strip() if value not in (None, "") else ""
+  if not text:
+    return ""
+  match = re.search(r"\d+", text)
+  return match.group(0) if match else text
+
+
+def wb_publication_characteristic_name(item, fallback=""):
+  if not isinstance(item, dict):
+    return fallback
+  return audit_str(item.get("name") or item.get("label") or item.get("charcName") or fallback, 160)
+
+
+def wb_publication_characteristic_api_value(values, current_value=None):
+  values = wb_publication_characteristic_values(values)
+  if isinstance(current_value, list):
+    return values
+  if isinstance(current_value, bool) and len(values) == 1:
+    normalized = audit_normalized(values[0])
+    if normalized in {"true", "1", "да", "yes"}:
+      return True
+    if normalized in {"false", "0", "нет", "no"}:
+      return False
+  if isinstance(current_value, int) and not isinstance(current_value, bool) and len(values) == 1:
+    try:
+      return int(values[0])
+    except (TypeError, ValueError):
+      pass
+  if isinstance(current_value, float) and len(values) == 1:
+    try:
+      return float(str(values[0]).replace(",", "."))
+    except (TypeError, ValueError):
+      pass
+  if len(values) == 1:
+    return values[0]
+  return values
+
+
+def wb_publication_current_characteristic_api_value(item):
+  if not isinstance(item, dict):
+    return ""
+  raw_value = item.get("value")
+  if isinstance(raw_value, list):
+    output = []
+    for entry in raw_value:
+      if isinstance(entry, dict):
+        value = entry.get("value") or entry.get("name")
+      else:
+        value = entry
+      if value not in (None, ""):
+        output.append(public_wb_value(value))
+    if output:
+      return output
+  if raw_value not in (None, "", []):
+    return public_wb_value(raw_value)
+  values = wb_publication_characteristic_values(item)
+  return wb_publication_characteristic_api_value(values, raw_value)
+
+
+def wb_publication_characteristic_display_value(values):
+  values = wb_publication_characteristic_values(values, limit=40)
+  return ", ".join(values)
+
+
+def wb_publication_normalized_characteristic_name(value):
+  return audit_normalized_characteristic_name(value) or audit_normalized(value)
+
+
+def wb_publication_merge_characteristics(current_characteristics, draft_characteristics):
+  current_characteristics = current_characteristics if isinstance(current_characteristics, list) else []
+  draft_characteristics = draft_characteristics if isinstance(draft_characteristics, dict) else {}
+  api_items = []
+  display_items = []
+  by_id = {}
+  by_name = {}
+  warnings = []
+
+  for item in current_characteristics:
+    if not isinstance(item, dict):
+      continue
+    charc_id = wb_publication_characteristic_id(item)
+    name = wb_publication_characteristic_name(item, charc_id)
+    values = wb_publication_characteristic_values(item)
+    api_item = {
+      "id": int(charc_id) if charc_id.isdigit() else charc_id,
+      "value": wb_publication_current_characteristic_api_value(item),
+    } if charc_id else None
+    display_item = {
+      "id": charc_id,
+      "name": name,
+      "value": wb_publication_characteristic_display_value(values),
+    }
+    index = len(display_items)
+    display_items.append(display_item)
+    if api_item:
+      api_items.append(api_item)
+      by_id[charc_id] = len(api_items) - 1
+    normalized_name = wb_publication_normalized_characteristic_name(name)
+    if normalized_name:
+      by_name.setdefault(normalized_name, index)
+
+  for raw_key, draft in draft_characteristics.items():
+    draft = draft if isinstance(draft, dict) else {"value": draft}
+    values = wb_publication_characteristic_values(draft)
+    if not values:
+      continue
+    charc_id = wb_publication_characteristic_id(draft) or wb_publication_characteristic_id({"id": raw_key})
+    name = wb_publication_characteristic_name(draft, str(raw_key or ""))
+    normalized_name = wb_publication_normalized_characteristic_name(name)
+    api_index = by_id.get(charc_id) if charc_id else None
+    display_index = by_name.get(normalized_name) if normalized_name else None
+    if api_index is None and display_index is not None:
+      existing_id = display_items[display_index].get("id") or ""
+      api_index = by_id.get(existing_id) if existing_id else None
+      charc_id = existing_id or charc_id
+    if api_index is not None:
+      current_value = api_items[api_index].get("value")
+      api_items[api_index]["value"] = wb_publication_characteristic_api_value(values, current_value)
+      display_target = display_index
+      if display_target is None:
+        existing_id = str(api_items[api_index].get("id") or "")
+        display_target = next((idx for idx, item in enumerate(display_items) if item.get("id") == existing_id), None)
+      if display_target is not None:
+        display_items[display_target]["value"] = wb_publication_characteristic_display_value(values)
+        if name and not display_items[display_target].get("name"):
+          display_items[display_target]["name"] = name
+      continue
+    if charc_id:
+      api_items.append({
+        "id": int(charc_id) if str(charc_id).isdigit() else charc_id,
+        "value": wb_publication_characteristic_api_value(values),
+      })
+      by_id[str(charc_id)] = len(api_items) - 1
+      display_items.append({
+        "id": str(charc_id),
+        "name": name or str(charc_id),
+        "value": wb_publication_characteristic_display_value(values),
+      })
+      if normalized_name:
+        by_name[normalized_name] = len(display_items) - 1
+      continue
+    warnings.append(f"Характеристика `{name or raw_key}` не попала в API-payload: нет charcID.")
+
+  return api_items, display_items, warnings
+
+
+def wb_publication_size_for_update(size):
+  if not isinstance(size, dict):
+    return None
+  output = {}
+  for key in ("chrtID", "techSize", "wbSize", "skus"):
+    value = size.get(key)
+    if value not in (None, "", []):
+      output[key] = public_wb_value(value)
+  if not output.get("chrtID"):
+    chrt_id = size.get("chrtId") or size.get("sizeID")
+    if chrt_id not in (None, ""):
+      output["chrtID"] = chrt_id
+  return output if output else None
+
+
+def wb_publication_card_update_payload(card, draft_payload):
+  raw_card = wb_content_publication_raw_card(card)
+  content = draft_payload.get("content") if isinstance(draft_payload.get("content"), dict) else {}
+  title = content.get("title") if isinstance(content.get("title"), dict) else {}
+  description = content.get("description") if isinstance(content.get("description"), dict) else {}
+  draft_title = wb_publication_clean_text(title.get("value"), 120)
+  draft_description = wb_publication_clean_text(description.get("value"), 5000)
+  current_title = wb_publication_clean_text(raw_card.get("title") or card.get("title"), 120)
+  current_description = wb_publication_clean_text(raw_card.get("description") or card.get("description"), 5000)
+  next_title = draft_title or current_title
+  next_description = draft_description or current_description
+  current_characteristics = raw_card.get("characteristics")
+  if not isinstance(current_characteristics, list):
+    current_characteristics = card.get("characteristics") if isinstance(card.get("characteristics"), list) else []
+  draft_characteristics = content.get("characteristics") if isinstance(content.get("characteristics"), dict) else {}
+  api_characteristics, display_characteristics, warnings = wb_publication_merge_characteristics(current_characteristics, draft_characteristics)
+  sizes = raw_card.get("sizes") if isinstance(raw_card.get("sizes"), list) else card.get("sizes")
+  update_sizes = [
+    item
+    for item in (wb_publication_size_for_update(size) for size in (sizes if isinstance(sizes, list) else []))
+    if item
+  ]
+  nm_id = raw_card.get("nmID") or raw_card.get("nmId") or card.get("nmID") or card.get("nmId")
+  vendor_code = raw_card.get("vendorCode") or raw_card.get("vendor_code") or raw_card.get("supplierArticle") or card.get("vendorCode")
+  brand = raw_card.get("brand") or raw_card.get("brandName") or card.get("brand") or ""
+  payload = {
+    "nmID": nm_id,
+    "vendorCode": vendor_code,
+    "brand": brand,
+    "title": next_title,
+    "description": next_description,
+    "characteristics": api_characteristics,
+  }
+  dimensions = raw_card.get("dimensions") if isinstance(raw_card.get("dimensions"), dict) else card.get("dimensions")
+  if isinstance(dimensions, dict) and dimensions:
+    payload["dimensions"] = public_wb_value(dimensions)
+  if update_sizes:
+    payload["sizes"] = update_sizes
+  return payload, display_characteristics, warnings
+
+
+def wb_publication_table_columns(cards):
+  static_columns = [
+    {"key": "vendorCode", "label": "Артикул продавца"},
+    {"key": "nmID", "label": "Артикул WB"},
+    {"key": "brand", "label": "Бренд"},
+    {"key": "subjectName", "label": "Предмет"},
+    {"key": "title", "label": "Наименование"},
+    {"key": "description", "label": "Описание"},
+  ]
+  characteristic_columns = []
+  seen = set()
+  for card in cards:
+    for item in card.get("characteristics") or []:
+      name = audit_str(item.get("name") or item.get("id") or "", 160)
+      key = f"char:{wb_publication_normalized_characteristic_name(name)}:{item.get('id') or ''}"
+      if not name or key in seen:
+        continue
+      seen.add(key)
+      characteristic_columns.append({"key": key, "label": name})
+  return [*static_columns, *characteristic_columns]
+
+
+def wb_publication_table_row(card, columns):
+  update_payload = card.get("updatePayload") if isinstance(card.get("updatePayload"), dict) else {}
+  row = {
+    "vendorCode": update_payload.get("vendorCode") or "",
+    "nmID": update_payload.get("nmID") or "",
+    "brand": update_payload.get("brand") or "",
+    "subjectName": card.get("subjectName") or "",
+    "title": update_payload.get("title") or "",
+    "description": update_payload.get("description") or "",
+  }
+  values_by_column = {}
+  for item in card.get("characteristics") or []:
+    name = audit_str(item.get("name") or item.get("id") or "", 160)
+    key = f"char:{wb_publication_normalized_characteristic_name(name)}:{item.get('id') or ''}"
+    if key:
+      values_by_column[key] = item.get("value") or ""
+  for column in columns:
+    if column["key"].startswith("char:"):
+      row[column["key"]] = values_by_column.get(column["key"], "")
+  return row
+
+
+def wb_content_publication_summary(mode, api_connected, cards, skipped, warnings):
+  ready_count = len(cards)
+  api_ready_count = sum(1 for card in cards if card.get("apiReady"))
+  return {
+    "mode": mode,
+    "apiConnected": bool(api_connected),
+    "readyCount": ready_count,
+    "apiReadyCount": api_ready_count,
+    "skippedCount": len(skipped),
+    "publishedCount": 0,
+    "warningsCount": len(warnings),
+  }
+
+
+def prepare_wb_content_publication(portal_id, user, card_keys=None, fresh_cards=None, mode="preview"):
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  ensure_wildberries_content_portal(numeric_portal_id)
+  if not user_can_publish_wb_content(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  portal_row = get_portal_row(numeric_portal_id, user)
+  if not portal_row:
+    raise ValueError("portal_not_found")
+  snapshot_cards = wb_snapshot_cards_from_row(portal_row)
+  snapshot_lookup = wb_content_publication_card_lookup(snapshot_cards)
+  fresh_lookup = wb_content_publication_card_lookup(fresh_cards if isinstance(fresh_cards, list) else [])
+  lookup = {**snapshot_lookup, **fresh_lookup}
+  rows = wb_content_publication_draft_rows(numeric_portal_id, card_keys=card_keys)
+  prepared_cards = []
+  skipped = []
+  warnings = []
+  for row in rows:
+    draft_payload = normalize_card_draft_payload(safe_json_object(row["payload_json"]))
+    if not wb_content_publication_approved(draft_payload):
+      skipped.append({
+        "cardKey": row["card_key"],
+        "nmID": row["nm_id"] or "",
+        "vendorCode": row["vendor_code"] or "",
+        "reason": "content_not_approved",
+      })
+      continue
+    card = wb_content_publication_find_card(row, lookup, fallback_cards=snapshot_cards)
+    if not card:
+      skipped.append({
+        "cardKey": row["card_key"],
+        "nmID": row["nm_id"] or "",
+        "vendorCode": row["vendor_code"] or "",
+        "reason": "card_snapshot_missing",
+      })
+      continue
+    update_payload, display_characteristics, card_warnings = wb_publication_card_update_payload(card, draft_payload)
+    reasons = []
+    if not update_payload.get("nmID"):
+      reasons.append("nm_id_missing")
+    if not update_payload.get("vendorCode"):
+      reasons.append("vendor_code_missing")
+    if not update_payload.get("title"):
+      reasons.append("title_missing")
+    if not update_payload.get("description"):
+      reasons.append("description_missing")
+    api_ready = not reasons and bool(update_payload.get("sizes"))
+    if not update_payload.get("sizes"):
+      card_warnings.append("Для API-payload не найдены размеры WB; таблицу можно подготовить, API-публикация этой строки заблокирована.")
+    if reasons:
+      skipped.append({
+        "cardKey": row["card_key"],
+        "nmID": row["nm_id"] or update_payload.get("nmID") or "",
+        "vendorCode": row["vendor_code"] or update_payload.get("vendorCode") or "",
+        "reason": ",".join(reasons),
+      })
+      continue
+    raw_card = wb_content_publication_raw_card(card)
+    prepared_cards.append({
+      "cardKey": row["card_key"],
+      "nmID": str(update_payload.get("nmID") or row["nm_id"] or ""),
+      "vendorCode": str(update_payload.get("vendorCode") or row["vendor_code"] or ""),
+      "title": update_payload.get("title") or "",
+      "description": update_payload.get("description") or "",
+      "brand": update_payload.get("brand") or "",
+      "subjectName": raw_card.get("subjectName") or card.get("subjectName") or "",
+      "status": wb_content_publication_content_status(draft_payload),
+      "apiReady": api_ready,
+      "updatePayload": public_wb_value(update_payload),
+      "characteristics": display_characteristics,
+      "warnings": audit_public_warnings(card_warnings),
+    })
+    warnings.extend(card_warnings)
+  table_columns = wb_publication_table_columns(prepared_cards)
+  table_rows = [wb_publication_table_row(card, table_columns) for card in prepared_cards]
+  try:
+    token, token_source = get_wb_token_for_portal(numeric_portal_id)
+  except RuntimeError:
+    token, token_source = "", "missing"
+  api_connected = bool(token and token_source == "encrypted")
+  summary = wb_content_publication_summary(mode, api_connected, prepared_cards, skipped, warnings)
+  return {
+    "portalId": str(numeric_portal_id),
+    "mode": mode,
+    "cards": prepared_cards,
+    "skipped": skipped,
+    "warnings": audit_public_warnings(warnings),
+    "summary": summary,
+    "table": {
+      "columns": table_columns,
+      "rows": table_rows,
+    },
+    "availableModes": {
+      "api": api_connected,
+      "table": True,
+    },
+  }
+
+
+def fetch_wb_content_cards_for_publication(token, max_cards=WB_MAX_CARDS_PER_SYNC):
+  max_cards = max(1, min(int(max_cards or WB_MAX_CARDS_PER_SYNC), WB_MAX_CARDS_PER_SYNC))
+  cards = []
+  cursor = {"limit": min(100, max_cards)}
+  while len(cards) < max_cards:
+    cursor["limit"] = min(100, max_cards - len(cards))
+    payload = {
+      "settings": {
+        "sort": {"ascending": True},
+        "cursor": cursor,
+        "filter": {"withPhoto": -1},
+      },
+    }
+    response = wb_request_json(token, "/content/v2/get/cards/list", payload, attempts=2)
+    batch = response.get("cards") or []
+    cards.extend([card for card in batch if isinstance(card, dict)])
+    response_cursor = response.get("cursor") or {}
+    total = int(response_cursor.get("total") or len(batch))
+    updated_at = response_cursor.get("updatedAt")
+    nm_id = response_cursor.get("nmID")
+    if not batch or total < cursor["limit"] or not updated_at or not nm_id:
+      break
+    cursor = {
+      "limit": min(100, max_cards - len(cards)),
+      "updatedAt": updated_at,
+      "nmID": nm_id,
+    }
+  return [normalize_wb_card(card) for card in cards[:max_cards]]
+
+
+def mark_wb_content_publication_exported(portal_id, cards, method, user, response_payload=None):
+  cards = cards if isinstance(cards, list) else []
+  if not cards:
+    return []
+  now = utc_now().isoformat()
+  updated_drafts = []
+  card_keys = [card.get("cardKey") for card in cards if card.get("cardKey")]
+  with connect_db() as db:
+    placeholders = ",".join("?" for _ in card_keys)
+    rows = db.execute(
+      f"""
+      SELECT *
+      FROM card_drafts
+      WHERE portal_id = ? AND card_key IN ({placeholders})
+      """,
+      [portal_id, *card_keys],
+    ).fetchall() if card_keys else []
+    by_key = {row["card_key"]: row for row in rows}
+    for card in cards:
+      row = by_key.get(card.get("cardKey"))
+      if not row:
+        continue
+      payload = normalize_card_draft_payload(safe_json_object(row["payload_json"]))
+      meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+      sections = approval_sections_from_payload(payload)
+      content_approval = sections.get("content") if isinstance(sections.get("content"), dict) else {}
+      history = content_approval.get("history") if isinstance(content_approval.get("history"), list) else []
+      action = "content_published_wb" if method == "api" else "content_export_table"
+      reason = "Контент опубликован в WB по API." if method == "api" else "Подготовлена таблица контента для загрузки в WB."
+      next_content_approval = {
+        **content_approval,
+        "status": "exported",
+        "exportedBy": user_login_value(user),
+        "exportedAt": now,
+        "history": [{
+          "id": f"publication-{int(time.time() * 1000)}-{secrets.token_hex(4)}",
+          "action": action,
+          "section": "content",
+          "sectionLabel": "Контент",
+          "reason": reason,
+          "userLogin": user_login_value(user),
+          "createdAt": now,
+        }, *history][:20],
+      }
+      next_sections = {**sections, "content": next_content_approval}
+      publication = {
+        "method": method,
+        "status": "published" if method == "api" else "table_prepared",
+        "publishedAt": now,
+        "publishedBy": user_login_value(user),
+        "cardKey": card.get("cardKey") or "",
+        "nmID": card.get("nmID") or "",
+        "vendorCode": card.get("vendorCode") or "",
+      }
+      publication_history = meta.get("contentPublicationHistory") if isinstance(meta.get("contentPublicationHistory"), list) else []
+      next_meta = {
+        **meta,
+        "approvalSections": next_sections,
+        "approval": derive_overall_approval_from_sections(next_sections),
+        "contentPublication": publication,
+        "contentPublicationHistory": [publication, *publication_history][:20],
+      }
+      payload["meta"] = next_meta
+      db.execute(
+        """
+        UPDATE card_drafts
+        SET payload_json = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+          json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+          user_login_value(user),
+          row["id"],
+        ),
+      )
+      insert_card_approval_event(db, portal_id, row["card_key"], {
+        "status": "exported",
+        "action": action,
+        "actorLogin": user_login_value(user),
+        "assigneeLogin": "",
+        "reason": reason,
+        "eventAt": now,
+        "nmID": str(card.get("nmID") or row["nm_id"] or "")[:80],
+        "vendorCode": str(card.get("vendorCode") or row["vendor_code"] or "")[:120],
+      })
+      updated_drafts.append(public_card_draft(db.execute("SELECT * FROM card_drafts WHERE id = ?", (row["id"],)).fetchone()))
+  record_admin_event(user, "wb_content_published" if method == "api" else "wb_content_table_prepared", "portal", portal_id, portal_id=portal_id, details={
+    "method": method,
+    "cards": len(updated_drafts),
+    "nmIDs": [card.get("nmID") or "" for card in cards[:12]],
+    "wbStatus": response_payload.get("error") if isinstance(response_payload, dict) else "",
+  })
+  return updated_drafts
+
+
+def derive_overall_approval_from_sections(sections):
+  if not isinstance(sections, dict) or not sections:
+    return {"status": "draft"}
+  statuses = [approval_status_from_approval(value) for value in sections.values() if isinstance(value, dict)]
+  if statuses and all(status == "exported" for status in statuses):
+    latest = next((value for value in sections.values() if isinstance(value, dict) and value.get("exportedAt")), {})
+    return {**latest, "status": "exported"}
+  if statuses and all(status in {"approved", "exported"} for status in statuses):
+    latest = next((value for value in sections.values() if isinstance(value, dict) and approval_status_from_approval(value) in {"approved", "exported"}), {})
+    return {**latest, "status": "approved"}
+  if "submitted" in statuses:
+    latest = next((value for value in sections.values() if isinstance(value, dict) and approval_status_from_approval(value) == "submitted"), {})
+    return {**latest, "status": "submitted"}
+  if "changes_requested" in statuses:
+    latest = next((value for value in sections.values() if isinstance(value, dict) and approval_status_from_approval(value) == "changes_requested"), {})
+    return {**latest, "status": "changes_requested"}
+  return {"status": "draft"}
+
+
+def publish_wb_content_publication(portal_id, payload, user):
+  payload = payload if isinstance(payload, dict) else {}
+  mode = audit_str(payload.get("mode") or "preview", 20)
+  if mode not in {"preview", "table", "api"}:
+    raise ValueError("invalid_publication_mode")
+  try:
+    numeric_portal_id = int(portal_id)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("invalid_portal_id") from exc
+  card_keys = wb_content_publication_card_keys(payload.get("cardKeys") or payload.get("card_keys") or payload.get("cardKey") or payload.get("card_key"))
+  if not user_can_access_portal(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  ensure_wildberries_content_portal(numeric_portal_id)
+  if not user_can_publish_wb_content(user, numeric_portal_id):
+    raise PermissionError("forbidden")
+  check_wb_content_publication_rate_limit(user, numeric_portal_id, mode)
+  fresh_cards = None
+  token = ""
+  if mode == "api":
+    token, token_source = get_wb_token_for_portal(numeric_portal_id)
+    if not token or token_source != "encrypted":
+      raise ValueError("wb_token_missing")
+    fresh_cards = fetch_wb_content_cards_for_publication(token)
+  result = prepare_wb_content_publication(numeric_portal_id, user, card_keys=card_keys, fresh_cards=fresh_cards, mode=mode)
+  if mode == "preview":
+    return result
+  cards = result.get("cards") or []
+  publishable_cards = cards if mode == "table" else [card for card in cards if card.get("apiReady")]
+  if mode == "api":
+    if not publishable_cards:
+      raise ValueError("wb_publication_no_api_ready_cards")
+    update_payload = [card.get("updatePayload") for card in publishable_cards if isinstance(card.get("updatePayload"), dict)]
+    wb_response = wb_request_json(token, WB_CONTENT_UPDATE_PATH, update_payload, attempts=2)
+    drafts = mark_wb_content_publication_exported(numeric_portal_id, publishable_cards, "api", user, response_payload=wb_response if isinstance(wb_response, dict) else {})
+    result["wbResponse"] = public_wb_value(wb_response)
+    result["drafts"] = drafts
+    result["summary"] = {
+      **result["summary"],
+      "publishedCount": len(drafts),
+      "apiReadyCount": len(publishable_cards),
+    }
+    result["workflow"] = approval_workflow(numeric_portal_id, user)
+    return result
+  drafts = mark_wb_content_publication_exported(numeric_portal_id, publishable_cards, "table", user)
+  result["drafts"] = drafts
+  result["summary"] = {
+    **result["summary"],
+    "publishedCount": len(drafts),
+  }
+  result["workflow"] = approval_workflow(numeric_portal_id, user)
+  return result
 
 
 def delete_card_draft(portal_id, card_key, user):
@@ -22037,6 +22797,45 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(status, {"error": error_text})
         return
       self.send_json(HTTPStatus.CREATED, {"item": item})
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/wb-content-publication"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/wb-content-publication")].strip("/")
+      payload = self.read_json(MAX_DRAFT_JSON_BYTES) or {}
+      try:
+        result = publish_wb_content_publication(portal_id_text, payload, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      except WbApiError as exc:
+        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
+        if status < 400 or status >= 600:
+          status = HTTPStatus.BAD_GATEWAY
+        self.send_json(
+          status,
+          {
+            "error": "wb_api_error",
+            "status": exc.status,
+            "message": exc.message,
+            "retryable": exc.retryable,
+          },
+        )
+        return
+      except ValueError as exc:
+        error_text = str(exc) or "invalid_wb_content_publication"
+        status = HTTPStatus.CONFLICT if error_text in {
+          "wb_token_missing",
+          "wb_publication_no_api_ready_cards",
+        } else HTTPStatus.TOO_MANY_REQUESTS if error_text == "wb_publication_rate_limited" else HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
       return
 
     if path == "/api/users":

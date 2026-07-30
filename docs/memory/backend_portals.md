@@ -1,6 +1,6 @@
 # Backend Portals
 
-Дата: 2026-07-08.
+Дата: 2026-07-30.
 
 Решение:
 - список кабинетов является backend-состоянием в SQLite `portals`;
@@ -23,6 +23,7 @@
 - ручной порядок задач внутри пачки сохраняется через `POST /api/card-workset/reorder-tasks` в `card_drafts.meta.batch.position`; маршрут обязан фильтровать задачи по `portal_id` и `meta.batch.id`;
 - журнал действий пачки пишется через `POST /api/card-workset/log-event`, а пакетный аудит через `POST /api/card-workset/audit-task`; оба маршрута требуют доступ к `portal_id`, работают только с существующим `card_draft` и не выполняют write-запросы в WB;
 - обратная загрузка согласованного WB-СЯ идет через `POST /api/semantic-core-import`: сначала `mode=preview`, затем `mode=apply`; маршрут читает XLSX/CSV/TXT, сопоставляет карточки по `cardKey`/`nmID`/артикулу/листу или категорийным файлам и обновляет только `card_drafts.meta.semanticCoreFinal`, `semanticCoreSelected`, `semanticCoreRemoval` без write-запросов в WB;
+- публикация принятого WB-контента идет через `POST /api/portals/<portal_id>/wb-content-publication`: маршрут требует техспециалиста проекта или админа, проверяет `marketplace=Wildberries`, берет только approved/exported секцию `Контент`, в `mode=api` отправляет WB `POST /content/v2/cards/update`, а в `mode=table` возвращает данные для XLSX и помечает контент как `exported`;
 - `approval_workflow` отдает по задачам `auditStatus` и `hasAuditDraft`; frontend пакетного аудита использует это, чтобы после частичного запуска продолжать только карточки без сохраненного audit draft, а локальные ошибки повторять отдельным failed-списком;
 - для ошибок пакетного аудита `card_approval_events.action` может быть `audit_failed`, а backend возвращает безопасный код `audit_task_failed` + тип исключения без stack trace и без секретов;
 - `localStorage` в frontend остается только временным fallback, когда backend еще недоступен на контуре.

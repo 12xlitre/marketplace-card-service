@@ -3923,6 +3923,60 @@ function buildPortalContentSheets(cards, drafts) {
   return sheets.length ? [buildPortalContentInstructionSheet(), ...sheets] : [];
 }
 
+function wbContentPublicationErrorText(errorObject) {
+  const code = errorObject?.message || errorObject?.error || "";
+  if (code === "forbidden") return "Публикация доступна только техническому специалисту кабинета или админу.";
+  if (code === "wb_token_missing") return "WB API не подключен к этому кабинету: выберите таблицу WB.";
+  if (code === "wb_publication_no_api_ready_cards") return "Нет карточек, готовых к API-публикации: проверьте размеры, WB ID и принятый контент.";
+  if (code === "wb_publication_rate_limited") return "Повторная публикация слишком быстро: подождите несколько секунд и повторите.";
+  if (code === "unsupported_marketplace") return "Эта публикация доступна только для Wildberries.";
+  if (code === "wb_api_error") return errorObject?.payload?.message || "WB API не принял обновление карточек.";
+  return "Не удалось подготовить публикацию контента.";
+}
+
+function wbContentPublicationInstructionRows(publication) {
+  const summary = publication?.summary || {};
+  return [
+    ["ПУБЛИКАЦИЯ ПРИНЯТОГО КОНТЕНТА WB"],
+    ["Файл собран из карточек, у которых секция Контент принята аккаунт-менеджером в OptiCards."],
+    ["Лист WB_загрузка_контента содержит одну строку на карточку: WB ID, артикул продавца, название, описание и характеристики текущей карточки с принятыми правками."],
+    ["Перед загрузкой в кабинет WB проверьте, что заголовки колонок совпадают с актуальным шаблоном WB для предмета. Если WB попросит свой шаблон, перенесите значения из этого листа без изменения текста."],
+    [],
+    reportHeaderRow(["Показатель", "Значение"]),
+    ["Готово строк", summary.readyCount || 0],
+    ["Пропущено", summary.skippedCount || 0],
+    ["API подключен", summary.apiConnected ? "да" : "нет"],
+  ];
+}
+
+function buildWbContentPublicationSheets(publication) {
+  const columns = Array.isArray(publication?.table?.columns) ? publication.table.columns : [];
+  const rows = Array.isArray(publication?.table?.rows) ? publication.table.rows : [];
+  if (!columns.length || !rows.length) {
+    return [];
+  }
+  const headers = columns.map((column) => column.label || column.key);
+  const dataRows = rows.map((row) => columns.map((column) => row?.[column.key] ?? ""));
+  const skipped = Array.isArray(publication?.skipped) ? publication.skipped : [];
+  const warnings = Array.isArray(publication?.warnings) ? publication.warnings : [];
+  return [
+    { name: "Инструкция", freezeRows: 6, widths: [32, 72], rows: wbContentPublicationInstructionRows(publication) },
+    { name: "WB_загрузка_контента", freezeRows: 1, widths: columns.map((column) => column.key === "description" ? 78 : 24), rows: [reportHeaderRow(headers), ...dataRows] },
+    { name: "Проверка_OptiCards", freezeRows: 1, widths: [18, 24, 60], rows: skipped.length ? [reportHeaderRow(["Артикул WB", "Артикул продавца", "Причина"]), ...skipped.map((item) => [item.nmID || "", item.vendorCode || "", item.reason || ""])] : [reportHeaderRow(["Статус"]), ["Пропущенных карточек нет"]] },
+    { name: "Предупреждения", freezeRows: 1, widths: [100], rows: warnings.length ? [reportHeaderRow(["Предупреждение"]), ...warnings.map((warning) => [warning])] : [reportHeaderRow(["Статус"]), ["Предупреждений нет"]] },
+  ];
+}
+
+function wbPublicationSummaryText(publication, mode) {
+  const summary = publication?.summary || {};
+  if (mode === "api") {
+    const count = Number(summary.publishedCount || 0);
+    return `WB API обновил ${formatNumber(count)} ${pluralRu(count, "карточку", "карточки", "карточек")}.`;
+  }
+  const count = Number(summary.publishedCount || summary.readyCount || 0);
+  return `Таблица WB готова: ${formatNumber(count)} ${pluralRu(count, "строка", "строки", "строк")}.`;
+}
+
 function normalizeDraftKeyValue(value) {
   const text = String(value ?? "").trim();
   return text && text !== "undefined" && text !== "null" ? text : "";
@@ -7380,6 +7434,7 @@ export default function App() {
             cards={currentPortalCards}
             cardsLoading={Boolean(loadingPortalCards[currentPortalKey])}
             mpstatsIntegration={mpstatsIntegration}
+            currentUser={currentUser}
             displayUsers={displayUsers}
             findUser={findUser}
             canManage={canManagePortals}
@@ -12399,7 +12454,7 @@ function OzonCompetitorAuditPanel({ card, portal, draft, status = "idle" }) {
   );
 }
 
-function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, displayUsers, findUser, canManage = false, onBack, onOpenCard, sellerTab = "cabinet", onSellerTabChange, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
+function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, currentUser, displayUsers, findUser, canManage = false, onBack, onOpenCard, sellerTab = "cabinet", onSellerTabChange, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
@@ -12426,6 +12481,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [taskActionStatus, setTaskActionStatus] = useState("");
   const [importJob, setImportJob] = useState(null);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
+  const [contentPublicationStatus, setContentPublicationStatus] = useState("");
+  const [contentPublicationPreview, setContentPublicationPreview] = useState(null);
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
   const [semanticImportError, setSemanticImportError] = useState("");
   const [semanticImportPreview, setSemanticImportPreview] = useState(null);
@@ -12475,6 +12532,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     setSemanticImportError("");
     setSemanticImportPreview(null);
     setSemanticImportFile(null);
+    setContentPublicationStatus("");
+    setContentPublicationPreview(null);
   }, [portal.id]);
 
   useEffect(() => {
@@ -12940,6 +12999,57 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     }
   }
 
+  async function publishPortalContent(mode) {
+    if (!portal?.id || portal.isDemo || ["api-loading", "table-loading"].includes(contentPublicationStatus)) {
+      return;
+    }
+    const statusKey = `${mode}-loading`;
+    setContentPublicationStatus(statusKey);
+    try {
+      if (mode === "api") {
+        const preview = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-content-publication`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "preview" }),
+        });
+        setContentPublicationPreview(preview);
+        const apiReady = Number(preview.summary?.apiReadyCount || 0);
+        if (!apiReady) {
+          setContentPublicationStatus("empty");
+          onNotice?.("Нет принятых карточек, готовых к API-публикации.");
+          return;
+        }
+        const skipped = Number(preview.summary?.skippedCount || 0);
+        const confirmed = window.confirm(`Обновить ${formatNumber(apiReady)} ${pluralRu(apiReady, "карточку", "карточки", "карточек")} в WB по API?${skipped ? ` Пропущено: ${formatNumber(skipped)}.` : ""}`);
+        if (!confirmed) {
+          setContentPublicationStatus("");
+          return;
+        }
+      }
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-content-publication`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      });
+      setContentPublicationPreview(result);
+      if (mode === "table") {
+        const sheets = buildWbContentPublicationSheets(result);
+        if (!sheets.length) {
+          setContentPublicationStatus("empty");
+          onNotice?.("Нет принятого контента для таблицы WB.");
+          return;
+        }
+        downloadXlsx(`wb загрузка контента - ${safeFilePart(displayName)} - ${exportDatePart()}.xlsx`, sheets);
+      }
+      if (result.workflow) {
+        replaceApprovalWorkflow(result.workflow);
+      }
+      setContentPublicationStatus(`${mode}-done`);
+      onNotice?.(wbPublicationSummaryText(result, mode));
+    } catch (error) {
+      setContentPublicationStatus("error");
+      onNotice?.(wbContentPublicationErrorText(error));
+    }
+  }
+
   const importRunning = ["queued", "running"].includes(importJob?.status);
   const importLoaded = Number(importJob?.loadedCount || 0);
   const importTotal = Number(importJob?.totalEstimate || 0);
@@ -12955,6 +13065,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     ? approvalWorkflow.tasks.length
     : portalActiveTaskCount(portal);
   const sellerSubmittedTaskCount = Number(approvalWorkflow.analytics?.pendingCount || portal.draftSummary?.approvalPendingCount || 0);
+  const contentPublicationLoading = ["api-loading", "table-loading"].includes(contentPublicationStatus);
+  const wbApiPublicationAvailable = Boolean(portal.apiConnected || portal.mode === "api" || portal.syncStatus === "stored-token" || portal.syncStatus === "loaded");
+  const contentPublicationSummary = contentPublicationPreview?.summary || null;
+  const canPublishWbContent = Boolean(currentUser?.login && (currentUser.login === team.tech || getUserRoleType(currentUser) === "admin"));
 
   return (
     <section className="screen active marketplace-theme-wildberries">
@@ -13185,6 +13299,16 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                 <button className={loadingButtonClass("btn", cabinetExportStatus === "content-loading")} type="button" onClick={downloadPortalFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"} aria-busy={cabinetExportStatus === "content-loading" || undefined}>
                   <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
                 </button>
+                {canPublishWbContent ? (
+                  <>
+                    <button className={loadingButtonClass("btn primary", contentPublicationStatus === "api-loading")} type="button" onClick={() => publishPortalContent("api")} disabled={portal.isDemo || !wbApiPublicationAvailable || contentPublicationLoading} aria-busy={contentPublicationStatus === "api-loading" || undefined} title={wbApiPublicationAvailable ? "Обновить принятый контент карточек через подключенный WB API." : "WB API не подключен: подготовьте таблицу для кабинета WB."}>
+                      <Upload size={16} />{contentPublicationStatus === "api-loading" ? "Публикуем в WB" : "Опубликовать в WB по API"}
+                    </button>
+                    <button className={loadingButtonClass("btn", contentPublicationStatus === "table-loading")} type="button" onClick={() => publishPortalContent("table")} disabled={portal.isDemo || contentPublicationLoading} aria-busy={contentPublicationStatus === "table-loading" || undefined}>
+                      <Download size={16} />{contentPublicationStatus === "table-loading" ? "Готовим WB-таблицу" : "Скачать таблицу WB"}
+                    </button>
+                  </>
+                ) : null}
               </div>
               <SemanticCoreImportPanel
                 status={semanticImportStatus}
@@ -13198,6 +13322,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               />
               {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового СЯ по карточкам пока нет.</p> : null}
               {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого контента по карточкам пока нет.</p> : null}
+              {contentPublicationStatus === "api-done" ? <p className="status-note">Контент опубликован в WB: {formatNumber(contentPublicationSummary?.publishedCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || 0, "карточка", "карточки", "карточек")}.</p> : null}
+              {contentPublicationStatus === "table-done" ? <p className="status-note">WB-таблица подготовлена: {formatNumber(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0, "строка", "строки", "строк")}.</p> : null}
+              {contentPublicationStatus === "empty" ? <p className="status-note">Нет принятого контента, готового к публикации.</p> : null}
+              {contentPublicationStatus === "error" ? <p className="status-note">Публикация контента не выполнена. Проверьте принятые карточки, права и подключение WB API.</p> : null}
             </section>
 
             <section className="workspace-strip">
@@ -16096,6 +16224,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [competitorInput, setCompetitorInput] = useState("");
   const [competitorStatus, setCompetitorStatus] = useState("idle");
   const [auditCompetitorInput, setAuditCompetitorInput] = useState("");
+  const [contentPublicationStatus, setContentPublicationStatus] = useState("");
   const [cardDescriptionOpen, setCardDescriptionOpen] = useState(false);
   const [cardCharacteristicsOpen, setCardCharacteristicsOpen] = useState(false);
   const [taskRunActionStatus, setTaskRunActionStatus] = useState("");
@@ -16188,6 +16317,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const portalTeam = getPortalTeam(portal || {});
   const userRoleType = getUserRoleType(currentUser);
   const isApprovalReviewer = Boolean(currentUser?.login && (currentUser.login === portalTeam.manager || userRoleType === "admin"));
+  const canPublishWbContent = Boolean(currentUser?.login && (currentUser.login === portalTeam.tech || userRoleType === "admin"));
   const isProjectLead = Boolean(currentUser?.login && currentUser.login === portalTeam.lead && !isApprovalReviewer);
   const activeApprovalSection = APPROVAL_SECTION_KEYS.includes(changesTab) ? changesTab : "content";
   const activeApproval = normalizeApprovalState(approvalSections[activeApprovalSection]);
@@ -16196,6 +16326,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
   const canWithdrawApproval = !isProjectLead && activeApproval.status === "submitted" && !isApprovalReviewer;
   const canDownloadFinalContent = contentApprovalStatusExportable(normalizeApprovalState(approvalSections.content).status);
+  const contentApprovedForPublication = ["approved", "exported"].includes(normalizeApprovalState(approvalSections.content).status);
+  const contentPublicationLoading = ["api-loading", "table-loading"].includes(contentPublicationStatus);
+  const wbApiPublicationAvailable = Boolean(portal?.apiConnected || portal?.mode === "api" || portal?.syncStatus === "stored-token" || portal?.syncStatus === "loaded");
+  const canPublishCurrentContent = Boolean(backendDraftEnabled && canPublishWbContent && contentApprovedForPublication && !contentPublicationLoading);
   const latestAuditEntry = auditHistory.find((item) => item?.summary || item?.competitorSelection) || {};
   const latestAuditSummary = latestAuditEntry.summary || {};
   const latestMainProblems = Array.isArray(latestAuditSummary.mainProblems) ? latestAuditSummary.mainProblems : [];
@@ -16514,6 +16648,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setCardDescriptionOpen(false);
     setCardCharacteristicsOpen(false);
     setTaskRunActionStatus("");
+    setContentPublicationStatus("");
   }, [card?.nmID, card?.vendorCode, card?.title, card?.subjectName]);
 
   useEffect(() => {
@@ -18665,6 +18800,66 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     downloadXlsx(`${exportFileBase}-stocks-wb.xlsx`, buildStocksExportSheets(card, draftStocks));
   }
 
+  async function publishCardContent(mode) {
+    if (!canPublishCurrentContent || !draftCardKey) {
+      return;
+    }
+    setContentPublicationStatus(`${mode}-loading`);
+    try {
+      if (mode === "api") {
+        const preview = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-content-publication`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "preview", cardKeys: [draftCardKey] }),
+        });
+        const apiReady = Number(preview.summary?.apiReadyCount || 0);
+        if (!apiReady) {
+          setContentPublicationStatus("empty");
+          return;
+        }
+        const confirmed = window.confirm(`Обновить текущую карточку WB ${card?.nmID || ""} по API?`);
+        if (!confirmed) {
+          setContentPublicationStatus("");
+          return;
+        }
+      }
+      const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/wb-content-publication`, {
+        method: "POST",
+        body: JSON.stringify({ mode, cardKeys: [draftCardKey] }),
+      });
+      if (mode === "table") {
+        const sheets = buildWbContentPublicationSheets(result);
+        if (!sheets.length) {
+          setContentPublicationStatus("empty");
+          return;
+        }
+        downloadXlsx(`wb загрузка контента - ${safeFilePart(cardExportArticle(card))} - ${exportDatePart()}.xlsx`, sheets);
+      }
+      if (Number(result.summary?.publishedCount || 0) > 0) {
+        const nextContentApproval = normalizeApprovalState({
+          ...approvalSections.content,
+          status: "exported",
+          exportedAt: new Date().toISOString(),
+          exportedBy: currentUser?.login || "",
+        });
+        const nextSections = normalizeApprovalSections({ ...approvalSections, content: nextContentApproval });
+        setApprovalSections(nextSections);
+        setApproval(deriveOverallApproval(nextSections));
+        if (Array.isArray(result.drafts) && result.drafts[0]) {
+          try {
+            localStorage.setItem(draftStorageKey, JSON.stringify(result.drafts[0]));
+          } catch {
+            // Backend remains the source of truth; local cache sync is best effort.
+          }
+          await onDraftSaved?.(result.drafts[0]);
+        }
+      }
+      setContentPublicationStatus(`${mode}-done`);
+    } catch (error) {
+      setContentPublicationStatus("error");
+      setDraftSaveError(wbContentPublicationErrorText(error));
+    }
+  }
+
   function downloadSemanticCoreSelection({ selectedRows = semanticCoreSelected, removalRows = semanticCoreRemoval, core = activeSemanticCore } = {}) {
     const sheet = buildSemanticCoreExportSheet("СЯ в работу", core, selectedRows, removalRows);
     if (!sheet) return;
@@ -19751,7 +19946,21 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   <button className="btn" type="button" onClick={() => downloadDraftTable("content")} disabled={!canDownloadFinalContent} title={canDownloadFinalContent ? "Скачать контент карточки для согласования" : "Сначала отправьте секцию Контент на согласование"}>
                     <Download size={17} />Скачать итоговый контент
                   </button>
+                  {canPublishWbContent ? (
+                    <>
+                      <button className={loadingButtonClass("btn primary", contentPublicationStatus === "api-loading")} type="button" onClick={() => publishCardContent("api")} disabled={!canPublishCurrentContent || !wbApiPublicationAvailable} aria-busy={contentPublicationStatus === "api-loading" || undefined} title={wbApiPublicationAvailable ? "Обновить эту принятую карточку через WB API." : "WB API не подключен: скачайте таблицу WB."}>
+                        <Upload size={17} />{contentPublicationStatus === "api-loading" ? "Публикуем" : "Опубликовать в WB"}
+                      </button>
+                      <button className={loadingButtonClass("btn", contentPublicationStatus === "table-loading")} type="button" onClick={() => publishCardContent("table")} disabled={!canPublishCurrentContent} aria-busy={contentPublicationStatus === "table-loading" || undefined}>
+                        <Download size={17} />{contentPublicationStatus === "table-loading" ? "Готовим таблицу" : "Таблица WB"}
+                      </button>
+                    </>
+                  ) : null}
                 </div>
+                {contentPublicationStatus === "api-done" ? <p className="status-note">Карточка обновлена в WB по API.</p> : null}
+                {contentPublicationStatus === "table-done" ? <p className="status-note">WB-таблица по карточке подготовлена.</p> : null}
+                {contentPublicationStatus === "empty" ? <p className="status-note">Для публикации нет принятого контента или карточка не готова к API.</p> : null}
+                {contentPublicationStatus === "error" ? <p className="status-note">{draftSaveError || "Публикация не выполнена."}</p> : null}
                 </>
                 ) : null}
                   {changesTab === "prices" ? (
