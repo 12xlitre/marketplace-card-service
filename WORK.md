@@ -16,7 +16,7 @@
 - `git diff --check`
 
 Деплой:
-- Не выполнялся на момент записи.
+- Коммит `b188b8c` задеплоен на prod: `https://opticards.weboptai.ru/healthz` -> `200 ok`, главная `GET /` -> `200`, `/api/session` без сессии -> `200 {"user": null}`, `/WORK.md`, `/.git/config`, `/docs/deployment.md` снаружи -> `404`, серверная рабочая копия `b188b8c`, контейнер `opticards-web-1 Up`.
 
 ## Статус на 2026-07-30 — аудитория описания в "Мой вариант" и guided-пожелании
 
