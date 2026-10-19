@@ -9066,8 +9066,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     { title: "Отчеты Ozon", status: "клиентский XLSX", className: "active" },
   ];
   const sourceDescription = sourceConfigured
-    ? "Кабинет заведен без Ozon Seller API, а карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Ozon Seller API можно подключить позже."
-    : "Кабинет заведен без Ozon Seller API. Здесь фиксируем ссылку на магазин, Seller ID, список SKU или исходные данные клиента; карточки можно загрузить через MPStats или позже подключить Ozon Seller API.";
+    ? "Карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Client-Id и API-ключ Ozon настраиваются в отдельном блоке ниже; проверка доступа не меняет источник карточек."
+    : "Укажите ссылку на магазин, Seller ID, список SKU или исходные данные клиента для загрузки карточек через MPStats. Client-Id и API-ключ Ozon можно добавить в отдельном блоке ниже.";
   const ozonTasks = Array.isArray(ozonWorkState.tasks) ? ozonWorkState.tasks : [];
   const ozonActiveTasks = ozonTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status)).length;
   const ozonSubmittedTasks = ozonTasks.filter((task) => task.status === "submitted").length;
