@@ -47,6 +47,64 @@ class OzonConnectionTest(unittest.TestCase):
     def connect(self, portal=None):
         return server.update_ozon_connection(portal or self.portal, self.credentials, self.owner)
 
+    def create_connected(self, team=None, scope="full", manual_source=""):
+        return server.create_connected_ozon_portal("Honeybear Ozon", scope, self.owner, team if team is not None else {"lead": "owner"}, self.credentials, manual_source=manual_source, client_name="Honeybear")
+
+    def portal_count(self):
+        with server.connect_db() as db:
+            return db.execute("SELECT COUNT(*) FROM portals").fetchone()[0]
+
+    def test_creation_saves_cabinet_team_and_encrypted_access_together(self):
+        portal_id, result = self.create_connected()
+        row = server.get_portal_row(portal_id, self.owner)
+        self.assertEqual(row["marketplace"], "Ozon")
+        self.assertEqual(row["client_name"], "Honeybear")
+        self.assertEqual(row["api_connected"], 0)
+        self.assertEqual(row["card_count"], 0)
+        self.assertEqual(result["productCount"], 12)
+        connection = server.ozon_connection_row(portal_id)
+        self.assertEqual(connection["status"], "verified")
+        self.assertEqual(json.loads(server.decrypt_secret(connection["token_nonce"], connection["token_ciphertext"], server.integration_aad(portal_id, "ozon"))), self.credentials)
+
+    def test_failed_auth_does_not_create_empty_cabinet(self):
+        before = self.portal_count()
+        self.check.side_effect = server.OzonSellerError("ozon_auth_error", 409)
+        with self.assertRaises(server.OzonSellerError):
+            self.create_connected()
+        self.assertEqual(self.portal_count(), before)
+
+    def test_creation_encryption_failure_rolls_back_cabinet(self):
+        before = self.portal_count()
+        with patch.object(server, "encrypt_secret", side_effect=RuntimeError("secret_storage_unavailable")):
+            with self.assertRaises(RuntimeError):
+                self.create_connected()
+        self.assertEqual(self.portal_count(), before)
+
+    def test_creation_invalid_team_rolls_back_cabinet(self):
+        before = self.portal_count()
+        with self.assertRaises(server.sqlite3.IntegrityError):
+            self.create_connected(team={"lead": "nonexistent-user"})
+        self.assertEqual(self.portal_count(), before)
+
+    def test_duplicate_creation_does_not_create_empty_cabinet(self):
+        self.connect()
+        before = self.portal_count()
+        with self.assertRaisesRegex(ValueError, "ozon_account_already_connected"):
+            self.create_connected()
+        self.assertEqual(self.portal_count(), before)
+
+    def test_readonly_cannot_create_api_cabinet(self):
+        before = self.portal_count()
+        with self.assertRaises(PermissionError):
+            server.create_connected_ozon_portal("Ozon", "full", self.reader, {}, self.credentials)
+        self.assertEqual(self.portal_count(), before)
+        self.check.assert_not_called()
+
+    def test_selected_creation_requires_card_source(self):
+        with self.assertRaisesRegex(ValueError, "ozon_selected_cards_required"):
+            self.create_connected(scope="selected")
+        self.check.assert_not_called()
+
     def test_encrypted_per_portal_and_public_metadata_contains_no_secrets(self):
         before = dict(server.get_portal_row(self.portal))
         result = self.connect()
@@ -154,6 +212,18 @@ class OzonConnectionTest(unittest.TestCase):
             self.assertEqual(json.loads(body)["connection"]["status"], "verified")
             self.assertNotIn(self.credentials["apiKey"], body)
             client.close()
+            creation = {"mode": "api", "marketplace": "Ozon", "scope": "full", "name": "Created Ozon", "clientName": "Honeybear", "teamRoles": {"lead": "owner"}, **self.credentials, "clientId": "55555"}
+            with patch.object(server, "fetch_wb_cards", side_effect=AssertionError("WB must not run")), patch.object(server, "refresh_manual_portal_from_mpstats", side_effect=AssertionError("MPStats bootstrap must not run")):
+                client = http.client.HTTPConnection(*httpd.server_address, timeout=5)
+                client.request("POST", "/api/portals", json.dumps(creation), headers={"Content-Type": "application/json", "Cookie": f"{server.SESSION_COOKIE}={session}"})
+                response = client.getresponse()
+                body = response.read().decode()
+                self.assertEqual(response.status, 201, body)
+                self.assertNotIn(self.credentials["apiKey"], body)
+                created = json.loads(body)["portal"]
+                self.assertEqual(created["marketplace"], "Ozon")
+                self.assertEqual(server.ozon_connection_row(created["id"])["status"], "verified")
+                client.close()
         finally:
             httpd.shutdown()
             httpd.server_close()

@@ -3710,6 +3710,13 @@ def public_ozon_connection(portal_id, user):
   }}
 
 
+def ozon_credentials_from_payload(payload):
+  credentials = {"clientId": str(payload.get("clientId") or "").strip(), "apiKey": str(payload.get("apiKey") or "").strip()}
+  if not re.fullmatch(r"[0-9]{1,20}", credentials["clientId"]) or not re.fullmatch(r"[\x21-\x7e]{20,4096}", credentials["apiKey"]):
+    raise ValueError("ozon_credentials_required")
+  return credentials
+
+
 def update_ozon_connection(portal_id, payload, user):
   numeric_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   action = payload.get("action", "connect")
@@ -3726,7 +3733,7 @@ def update_ozon_connection(portal_id, payload, user):
     if not isinstance(credentials, dict):
       raise RuntimeError("secret_storage_unavailable")
   else:
-    credentials = {"clientId": str(payload.get("clientId") or "").strip(), "apiKey": str(payload.get("apiKey") or "").strip()}
+    credentials = ozon_credentials_from_payload(payload)
   client_id, api_key = credentials.get("clientId", ""), credentials.get("apiKey", "")
   if not re.fullmatch(r"[0-9]{1,20}", client_id) or not re.fullmatch(r"[\x21-\x7e]{20,4096}", api_key):
     raise ValueError("ozon_credentials_required")
@@ -3775,6 +3782,49 @@ def update_ozon_connection(portal_id, payload, user):
   finally:
     with OZON_CONNECTION_LOCK:
       OZON_CONNECTION_INFLIGHT.discard(numeric_id)
+
+
+def create_connected_ozon_portal(name, scope, user, team, payload, store_url="", manual_source="", client_name=""):
+  if not (user_can_manage_portals(user) or user_is_ozon_beta_tester(user)):
+    raise PermissionError("forbidden")
+  init_db()
+  credentials = ozon_credentials_from_payload(payload)
+  if scope == "selected" and not manual_source:
+    raise ValueError("ozon_selected_cards_required")
+  load_secret_key()
+  account_digest = secret_digest("ozon-client:" + credentials["clientId"])
+  limiter_key = ("create", user_login_value(user))
+  with OZON_CONNECTION_LOCK:
+    if limiter_key in OZON_CONNECTION_INFLIGHT or time.monotonic() < OZON_CONNECTION_NEXT_CHECK.get(limiter_key, 0):
+      raise OzonSellerError("ozon_check_rate_limited", 429)
+    OZON_CONNECTION_INFLIGHT.add(limiter_key)
+    OZON_CONNECTION_NEXT_CHECK[limiter_key] = time.monotonic() + 10
+  try:
+    result = check_ozon_credentials(credentials["clientId"], credentials["apiKey"])
+    with connect_db() as db:
+      # A failed key, duplicate account or encryption failure leaves no empty cabinet.
+      db.execute("BEGIN IMMEDIATE")
+      if db.execute("SELECT 1 FROM portal_integrations WHERE provider = 'ozon' AND external_key = ?", (account_digest,)).fetchone():
+        raise ValueError("ozon_account_already_connected")
+      cursor = db.execute("""
+        INSERT INTO portals (name, marketplace, scope, status, store_url, manual_source, client_name, created_by)
+        VALUES (?, 'Ozon', ?, 'Ozon Seller API: доступ проверен', ?, ?, ?, ?)
+      """, (name, scope, store_url, manual_source, client_name, user_login_value(user)))
+      portal_id = cursor.lastrowid
+      for project_role, user_login in team.items():
+        if user_login:
+          db.execute("INSERT INTO portal_members (portal_id, user_login, project_role) VALUES (?, ?, ?)", (portal_id, user_login, project_role))
+      nonce, ciphertext = encrypt_secret(json.dumps(credentials), integration_aad(portal_id, "ozon"))
+      db.execute("""
+        INSERT INTO portal_integrations (portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at)
+        VALUES (?, 'ozon', 'verified', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      """, (portal_id, nonce, ciphertext, secret_digest(json.dumps(credentials)), account_digest))
+    record_admin_event(user, "portal_created", "portal", portal_id, portal_id=portal_id,
+                       details={"portalName": name, "marketplace": "Ozon", "mode": "api", "productCount": result["productCount"]})
+    return portal_id, result
+  finally:
+    with OZON_CONNECTION_LOCK:
+      OZON_CONNECTION_INFLIGHT.discard(limiter_key)
 
 
 def normalize_ozon_task(raw_task):
@@ -22908,6 +22958,22 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         client_name = clean_portal_manual_text(payload.get("clientName") or payload.get("client_name"), 120, "client_name_too_long")
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "manual_portal_field_too_long"})
+        return
+
+      if mode == "api" and marketplace == "Ozon":
+        try:
+          portal_id, result = create_connected_ozon_portal(name, scope, user, team, payload, store_url, manual_source, client_name)
+          self.send_json(HTTPStatus.CREATED, {"portal": public_portal_from_row(get_portal_row(portal_id, user)), **result})
+        except PermissionError:
+          self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        except OzonSellerError as exc:
+          self.send_json(exc.status, {"error": exc.code})
+        except ValueError as exc:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except RuntimeError:
+          self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        except sqlite3.IntegrityError:
+          self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
 
       if mode == "api":

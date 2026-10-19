@@ -7481,20 +7481,24 @@ tr:last-child td {
   gap: 8px;
 }
 
-.ozon-connect-mode div {
+.ozon-connect-mode button {
   min-height: 68px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
   padding: 10px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
 }
 
-.ozon-connect-mode div.active {
+.ozon-connect-mode button.active {
   border-color: #b9cbed;
   background: #edf5ff;
 }
 
-.ozon-connect-mode div.disabled {
+.ozon-connect-mode button:disabled {
   opacity: .68;
 }
 

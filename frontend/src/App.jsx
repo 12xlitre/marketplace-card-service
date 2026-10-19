@@ -7107,17 +7107,18 @@ export default function App() {
     const manualSource = String(source.manualSource || "").trim();
     const cabinetName = String(source.name || "").trim();
     const scope = source.scope === "full" ? "full" : "selected";
-    if (!storeUrl && !manualSource) {
+    const useApi = source.mode === "api";
+    if (!useApi && !storeUrl && !manualSource) {
       setNotice("Для Ozon-кабинета укажите ссылку, Seller ID или SKU.");
       return false;
     }
     const leadPortal = (client.portals || [])[0] || null;
-    const teamRoles = leadPortal ? getPortalTeam(leadPortal) : defaultTeamFromUsers(displayUsers);
+    const teamRoles = leadPortal ? { ...(leadPortal.teamRoles || {}) } : defaultTeamFromUsers(displayUsers);
     try {
       const response = await apiRequest("/api/portals", {
         method: "POST",
         body: JSON.stringify({
-          mode: "manual",
+          mode: useApi ? "api" : "manual",
           marketplace: "Ozon",
           scope,
           name: cabinetName || `${client.name} Ozon`,
@@ -7125,6 +7126,7 @@ export default function App() {
           teamRoles,
           storeUrl,
           manualSource,
+          ...(useApi ? { clientId: source.clientId, apiKey: source.apiKey } : {}),
         }),
       });
       const portal = normalizePortal(response.portal);
@@ -7134,9 +7136,10 @@ export default function App() {
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
-      setNotice("Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
+      setNotice(useApi ? "Ozon-кабинет создан, доступ Seller API проверен и сохранён. Загрузка карточек выполняется отдельно." : "Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
+      if (useApi) throw error;
       if (error.message === "client_name_too_long") {
         setNotice("Название клиента слишком длинное для Ozon-кабинета.");
       } else if (error.message === "store_url_too_long") {
@@ -8326,7 +8329,7 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
           <article className="workspace-card add-card">
             <div className={`seller-logo ${isOzon ? "ozon-logo" : ""}`}>{isOzon ? "OZ" : "+"}</div>
             <h2>Добавить {label} кабинет</h2>
-            <p>{isOzon ? "Добавить Ozon beta-кабинет со ссылкой, Seller ID или SKU для проверки MPStats." : "Подключить WB через API или завести ручной кабинет."}</p>
+            <p>{isOzon ? "Подключить Ozon через Seller API или указать источник для MPStats." : "Подключить WB через API или завести ручной кабинет."}</p>
             <button className="btn primary" type="button" onClick={() => (isOzon ? onAddOzon?.() : onOpenModal?.("api"))}>
               <Plus size={17} />
               {isOzon ? "Подключить Ozon" : `Добавить ${label}`}
@@ -8352,12 +8355,12 @@ function OzonEmptyCard({ client, onAddOzon }) {
         <Tag tone="amber">beta</Tag>
       </div>
       <div className="ozon-empty-list">
-        <span>Сначала укажите ссылку на кабинет, Seller ID или SKU.</span>
-        <span>После создания можно проверить источник через MPStats.</span>
+        <span>Выберите Seller API с Client-Id и ключом или источник для MPStats.</span>
+        <span>Для Seller API проверим доступ при создании кабинета.</span>
         <span>Карточки, задачи и периоды будут отдельными от других маркетплейсов.</span>
       </div>
       <div className="card-actions">
-        <Tag tone="amber">MPStats beta</Tag>
+        <Tag tone="amber">Ozon beta</Tag>
         <button className="btn primary" type="button" onClick={() => onAddOzon?.()}>
           <Plus size={17} />
           Подключить Ozon
@@ -8373,7 +8376,7 @@ function EmptyMarketplaceState({ marketplaceTab }) {
       <Tags size={20} />
       <div>
         <strong>{marketplaceTitle(marketplaceTab)}: кабинетов пока нет</strong>
-        <p>{marketplaceTab === "ozon" ? "Раздел включен как beta-каркас без API и без влияния на другие маркетплейсы." : "Добавьте WB-кабинет, чтобы начать работу по клиенту."}</p>
+        <p>{marketplaceTab === "ozon" ? "Подключите кабинет через Seller API или укажите источник для MPStats." : "Добавьте WB-кабинет, чтобы начать работу по клиенту."}</p>
       </div>
     </div>
   );
@@ -22424,6 +22427,9 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
 
 function OzonPortalModal({ client, onClose, onSubmit }) {
   const [form, setForm] = useState({
+    mode: "manual",
+    clientId: "",
+    apiKey: "",
     name: `${client.name} Ozon`,
     scope: "selected",
     storeUrl: "",
@@ -22438,6 +22444,14 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
   }
 
   function errorText(errorObject) {
+    if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
+    if (errorObject.message === "invalid_portal_team") return "Проверьте назначенных сотрудников в команде клиента. Кабинет не создан.";
+    if (errorObject.message === "ozon_credentials_required") return "Введите числовой Client-Id и API-ключ из настроек Seller API.";
+    if (errorObject.message === "ozon_account_already_connected") return "Этот Ozon-аккаунт уже подключён к другому кабинету приложения.";
+    if (["ozon_check_rate_limited", "ozon_rate_limited"].includes(errorObject.message)) return "Проверка временно ограничена. Повторите позже; новый кабинет пока не создан.";
+    if (["ozon_unavailable", "ozon_invalid_response"].includes(errorObject.message)) return "Не удалось проверить доступ к Ozon. Повторите позже; кабинет не создан.";
+    if (errorObject.message === "secret_storage_unavailable") return "Хранилище ключей недоступно. Повторите позднее; кабинет не создан.";
+    if (errorObject.status === 403) return "Недостаточно прав для создания Ozon-кабинета.";
     if (errorObject.message === "store_url_too_long") return "Ссылка или Seller ID слишком длинные.";
     if (errorObject.message === "manual_source_too_long") return "Комментарий по источнику слишком длинный.";
     if (errorObject.message === "client_name_too_long") return "Название клиента слишком длинное.";
@@ -22452,7 +22466,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     const testSkus = form.testSkus.trim();
     const manualSource = form.manualSource.trim();
     const scope = form.scope === "full" ? "full" : "selected";
-    if (scope === "full" && !storeUrl && !manualSource) {
+    if (form.mode !== "api" && scope === "full" && !storeUrl && !manualSource) {
       setError("Для всего кабинета укажите ссылку на Ozon-кабинет или Seller ID.");
       return;
     }
@@ -22467,6 +22481,8 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     setLoading(true);
     try {
       const saved = await onSubmit({
+        mode: form.mode,
+        ...(form.mode === "api" ? { clientId: form.clientId.trim(), apiKey: form.apiKey.trim() } : {}),
         name: form.name.trim(),
         scope,
         storeUrl,
@@ -22488,20 +22504,20 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
         <div className="modal-head">
           <div>
             <h2>Подключить Ozon beta</h2>
-            <p>{client.name}: создаем Ozon-кабинет с источником для проверки через MPStats. Другие маркетплейсы не меняются.</p>
+            <p>{client.name}: выберите подключение через Seller API или источник для MPStats.</p>
           </div>
-          <IconButton icon={X} label="Закрыть" onClick={onClose} />
+          <IconButton icon={X} label="Закрыть" onClick={onClose} disabled={loading} />
         </div>
         <div className="modal-body">
-          <div className="ozon-connect-mode">
-            <div className="active">
+          <div className="ozon-connect-mode" role="group" aria-label="Способ подключения Ozon">
+            <button type="button" className={form.mode === "manual" ? "active" : ""} aria-pressed={form.mode === "manual"} disabled={loading} onClick={() => { setForm((current) => ({ ...current, mode: "manual", scope: "selected" })); setError(""); }}>
               <strong>MPStats по ссылке</strong>
-              <span>Сейчас: ссылка на кабинет, Seller ID или список SKU.</span>
-            </div>
-            <div className="disabled">
+              <span>Ссылка на кабинет, Seller ID или список SKU.</span>
+            </button>
+            <button type="button" className={form.mode === "api" ? "active" : ""} aria-pressed={form.mode === "api"} disabled={loading} onClick={() => { setForm((current) => ({ ...current, mode: "api", scope: "full" })); setError(""); }}>
               <strong>Ozon Seller API</strong>
-              <span>Client-Id и API-ключ можно добавить в настройках созданного кабинета.</span>
-            </div>
+              <span>Client-Id и API-ключ: проверим и сохраним при создании.</span>
+            </button>
           </div>
           <div className="ozon-scope-toggle" role="group" aria-label="Охват Ozon-кабинета">
             <button className={form.scope === "selected" ? "active" : ""} type="button" onClick={() => update("scope", "selected")}>
@@ -22510,16 +22526,25 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             </button>
             <button className={form.scope === "full" ? "active" : ""} type="button" onClick={() => update("scope", "full")}>
               <strong>Весь кабинет</strong>
-              <span>Стартуем от ссылки на продавца или Seller ID.</span>
+              <span>{form.mode === "api" ? "Список SKU при подключении не требуется." : "Стартуем от ссылки на продавца или Seller ID."}</span>
             </button>
           </div>
           <label className="field-label">
             Название Ozon-кабинета
             <input value={form.name} onChange={(event) => update("name", event.target.value)} maxLength={120} />
           </label>
+          {form.mode === "api" ? <>
+            <label className="field-label">Client-Id
+              <input value={form.clientId} onChange={(event) => update("clientId", event.target.value)} inputMode="numeric" pattern="[0-9]+" maxLength={20} autoComplete="off" autoFocus disabled={loading} required placeholder="Client-Id из настроек Seller API" />
+            </label>
+            <label className="field-label">API-ключ Ozon
+              <input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} autoComplete="off" maxLength={4096} disabled={loading} required placeholder="API-ключ этого магазина" />
+            </label>
+            <p className="status-note">Проверим чтение списка товаров и сохраним доступ зашифрованно. Карточки загрузим отдельно. При ошибке новый кабинет не создаётся.</p>
+          </> : null}
           <label className="field-label">
-            Ссылка на Ozon-кабинет, Seller ID или карточку
-            <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.ozon.ru/seller/... или Seller ID" autoFocus />
+            Ссылка на Ozon-кабинет, Seller ID или карточку{form.mode === "api" ? " (необязательно)" : ""}
+            <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.ozon.ru/seller/... или Seller ID" autoFocus={form.mode !== "api"} />
           </label>
           {form.scope === "selected" ? (
             <label className="field-label">
@@ -22532,16 +22557,16 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder={form.scope === "selected" ? "Например: комментарий по списку карточек, файл клиента или что проверить в первую очередь." : "Например: Seller ID, ссылка на продавца, файл клиента или комментарий по кабинету."} />
           </label>
           <div className="source-flow">
-            <div className="list-row source-flow-row"><span>Создание</span><strong>Ozon beta</strong></div>
+            <div className="list-row source-flow-row"><span>Подключение</span><strong>{form.mode === "api" ? "Ozon Seller API" : "MPStats по ссылке"}</strong></div>
             <div className="list-row source-flow-row"><span>Охват</span><strong>{form.scope === "selected" ? "выбранные карточки" : "весь кабинет"}</strong></div>
-            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>после проверки MPStats</strong></div>
+            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>{form.mode === "api" ? "отдельным действием" : "после проверки MPStats"}</strong></div>
           </div>
           {error ? <div className="form-error">{error}</div> : null}
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (form.scope === "selected" ? !form.testSkus.trim() : (!form.storeUrl.trim() && !form.manualSource.trim()))} aria-busy={loading || undefined}>
-            <Plus size={16} />{loading ? "Создаем Ozon" : "Создать и открыть"}
+          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || (form.scope === "selected" && !form.testSkus.trim()) || (form.mode === "api" ? (!form.clientId.trim() || !form.apiKey.trim()) : (form.scope === "full" && !form.storeUrl.trim() && !form.manualSource.trim()))} aria-busy={loading || undefined}>
+            <Plus size={16} />{loading ? "Создаем Ozon" : form.mode === "api" ? "Проверить и создать" : "Создать и открыть"}
           </button>
         </div>
       </form>
