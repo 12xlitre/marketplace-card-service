@@ -1770,8 +1770,9 @@ def public_portal_from_row(row, task_summary=None):
   team = parse_portal_members(row["members"])
   integrations = row["integrations"] or ""
   has_wb_integration = "wb:" in integrations
+  ozon_connected = audit_normalized(row["marketplace"]) == "ozon" and "ozon:" in integrations
   api_connected = bool(row["api_connected"])
-  mode = "api" if api_connected or has_wb_integration else "manual"
+  mode = "api" if api_connected or has_wb_integration or ozon_connected else "manual"
   status = row["status"] or ""
   if mode == "manual" and status in ("", "draft"):
     status = "Ручной режим"
@@ -1790,6 +1791,7 @@ def public_portal_from_row(row, task_summary=None):
     "workCount": row["work_count"],
     "problemCount": row["problem_count"],
     "apiConnected": api_connected,
+    "ozonApiConnected": ozon_connected,
     "storeUrl": row["store_url"] or "",
     "manualSource": row["manual_source"] or "",
     "clientContact": client_contact_from_json(row["client_contact_json"] or "{}"),
@@ -1799,7 +1801,7 @@ def public_portal_from_row(row, task_summary=None):
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
     "realCards": wb_snapshot_cards_from_row(row),
-    "syncStatus": "loaded" if api_connected else ("stored-token" if has_wb_integration else manual_sync_status),
+    "syncStatus": ("loaded" if row["last_sync_at"] else "stored-token") if ozon_connected else ("loaded" if api_connected else ("stored-token" if has_wb_integration else manual_sync_status)),
     "lastSyncAt": row["last_sync_at"] or "",
     "tokenMeta": wb_token_meta_for_portal_row(row),
     "draftSummary": {
@@ -3637,42 +3639,70 @@ class OzonSellerError(Exception):
         self.status = status
 
 
-def check_ozon_credentials(client_id, api_key):
-    """Check product-list access only; no marketplace write endpoints or redirects."""
-    body = json.dumps({"filter": {"visibility": "ALL"}, "limit": 1})
+OZON_READ_PATHS = {"/v3/product/list", "/v3/product/info/list", "/v4/product/info/attributes",
+                   "/v1/description-category/attribute", "/v1/description-category/tree"}
+OZON_MAX_SYNC_CARDS = 2000
+OZON_SYNC_SECONDS = 45
+
+
+def ozon_request_json(client_id, api_key, path, payload, deadline=None, max_bytes=8 * 1024 * 1024, context=None):
+    """Fixed-host, bounded read API transport. Never log bodies or credentials."""
+    if path not in OZON_READ_PATHS:
+        raise ValueError("invalid_ozon_read_path")
+    deadline = deadline or (time.monotonic() + OZON_SYNC_SECONDS)
+    body = json.dumps(payload)
     for attempt in range(3):
-        connection = http.client.HTTPSConnection("api-seller.ozon.ru", timeout=5)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise OzonSellerError("ozon_sync_timeout", 504)
+        connection = http.client.HTTPSConnection("api-seller.ozon.ru", timeout=min(5, remaining))
         retry_after = None
+        status = 0
+        started = time.monotonic()
         try:
             connection.connect()
-            connection.sock.settimeout(15)
-            connection.request("POST", "/v3/product/list", body=body, headers={
+            connection.sock.settimeout(max(0.001, min(15, deadline - time.monotonic())))
+            connection.request("POST", path, body=body, headers={
                 "Client-Id": client_id, "Api-Key": api_key,
                 "Content-Type": "application/json", "User-Agent": "OptiCards/0.1",
             })
             response = connection.getresponse()
             status = response.status
             retry_after = response.getheader("Retry-After")
-            raw = response.read(512 * 1024 + 1)
             if status in (401, 403):
                 raise OzonSellerError("ozon_auth_error", 409)
             if status not in (429, 500, 502, 503, 504):
-                if status != 200 or len(raw) > 512 * 1024:
+                if status != 200:
                     raise OzonSellerError("ozon_invalid_response")
+                parts, size = [], 0
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise OzonSellerError("ozon_sync_timeout", 504)
+                    connection.sock.settimeout(min(15, remaining))
+                    chunk = response.read1(min(65536, max_bytes + 1 - size))
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise OzonSellerError("ozon_response_too_large")
                 try:
-                    data = json.loads(raw)
-                    result = data["result"]
-                    total = result["total"]
-                    if not isinstance(result["items"], list) or isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                    data = json.loads(b"".join(parts))
+                    if not isinstance(data, dict):
                         raise ValueError
-                except (ValueError, KeyError, TypeError, UnicodeError):
+                except (ValueError, TypeError, UnicodeError):
                     raise OzonSellerError("ozon_invalid_response") from None
-                return {"productCount": total}
+                return data
             failure = OzonSellerError("ozon_rate_limited" if status == 429 else "ozon_unavailable", 429 if status == 429 else 502)
         except (OSError, http.client.HTTPException):
             failure = OzonSellerError("ozon_unavailable")
         finally:
             connection.close()
+            if context:
+                record_admin_event(context.get("user"), "ozon_api_request", "portal", context.get("portalId", ""),
+                                   portal_id=context.get("portalId"), details={"path": path, "status": status,
+                                   "attempt": attempt + 1, "durationMs": round((time.monotonic() - started) * 1000)})
         if attempt == 2:
             raise failure
         delay = 0.5 * (2 ** attempt)
@@ -3684,10 +3714,23 @@ def check_ozon_credentials(client_id, api_key):
                     delay = max(delay, (parsedate_to_datetime(retry_after) - dt.datetime.now(dt.timezone.utc)).total_seconds())
                 except (TypeError, ValueError, OverflowError):
                     pass
-            # Do not retry before a long Retry-After; return control to the user.
             if delay > 5:
                 raise failure
+        if time.monotonic() + delay >= deadline:
+            raise OzonSellerError("ozon_sync_timeout", 504)
         time.sleep(delay)
+
+
+def check_ozon_credentials(client_id, api_key):
+    data = ozon_request_json(client_id, api_key, "/v3/product/list", {"filter": {"visibility": "ALL"}, "limit": 1}, max_bytes=512 * 1024)
+    try:
+        result = data["result"]
+        total = result["total"]
+        if not isinstance(result["items"], list) or isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise OzonSellerError("ozon_invalid_response") from None
+    return {"productCount": total}
 
 
 OZON_CONNECTION_LOCK = threading.Lock()
@@ -3800,7 +3843,8 @@ def create_connected_ozon_portal(name, scope, user, team, payload, store_url="",
     OZON_CONNECTION_INFLIGHT.add(limiter_key)
     OZON_CONNECTION_NEXT_CHECK[limiter_key] = time.monotonic() + 10
   try:
-    result = check_ozon_credentials(credentials["clientId"], credentials["apiKey"])
+    snapshot = fetch_ozon_seller_cards(credentials, scope, manual_source, context={"user": user})
+    result = {"productCount": snapshot["productCount"]}
     with connect_db() as db:
       # A failed key, duplicate account or encryption failure leaves no empty cabinet.
       db.execute("BEGIN IMMEDIATE")
@@ -3819,12 +3863,246 @@ def create_connected_ozon_portal(name, scope, user, team, payload, store_url="",
         INSERT INTO portal_integrations (portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at)
         VALUES (?, 'ozon', 'verified', ?, ?, ?, ?, CURRENT_TIMESTAMP)
       """, (portal_id, nonce, ciphertext, secret_digest(json.dumps(credentials)), account_digest))
+      saved = save_ozon_seller_snapshot(db, portal_id, snapshot)
+    result["saved"] = saved
     record_admin_event(user, "portal_created", "portal", portal_id, portal_id=portal_id,
                        details={"portalName": name, "marketplace": "Ozon", "mode": "api", "productCount": result["productCount"]})
     return portal_id, result
   finally:
     with OZON_CONNECTION_LOCK:
       OZON_CONNECTION_INFLIGHT.discard(limiter_key)
+
+
+def ozon_selected_identifiers(manual_source):
+  text = str(manual_source or "").strip()
+  match = re.search(r"(?:Ozon SKU / offer ID|SKU|offer ID|Ozon ID)\s*:\s*([^\n]+)", text, re.I)
+  text = match.group(1) if match else text
+  identifiers = set(filter(None, (part.strip() for part in re.split(r"[,;\s]+", text))))
+  if not identifiers:
+    raise ValueError("ozon_selected_cards_required")
+  return identifiers
+
+
+def ozon_seller_snapshot_card(info, attributes, definitions, listed):
+  product_id = str(info["id"])
+  sku = str(info.get("sku") or listed.get("sku") or "")
+  if not sku:
+    sku = str(next((source.get("sku") for source in info.get("sources", []) if source.get("sku")), ""))
+  offer_id = str(info.get("offer_id") or listed.get("offer_id") or "")
+  definition_map = {str(item["id"]): item for item in definitions if isinstance(item, dict) and item.get("id")}
+  characteristic_rows, values_by_id = [], {}
+  if not isinstance(attributes.get("attributes"), list) or not isinstance(attributes.get("complex_attributes", []), list):
+    raise OzonSellerError("ozon_invalid_response")
+  all_attributes = list(attributes["attributes"])
+  for group in attributes.get("complex_attributes") or []:
+    if not isinstance(group, dict):
+      raise OzonSellerError("ozon_invalid_response")
+    if "attributes" in group and isinstance(group["attributes"], list):
+      all_attributes.extend(group["attributes"])
+    elif "id" in group and isinstance(group.get("values"), list):
+      all_attributes.append(group)
+    else:
+      raise OzonSellerError("ozon_invalid_response")
+  for attribute in all_attributes:
+    if not isinstance(attribute, dict) or not attribute.get("id"):
+      raise OzonSellerError("ozon_invalid_response")
+    if not isinstance(attribute.get("values"), list):
+      raise OzonSellerError("ozon_invalid_response")
+    values = [str(item.get("value", "")) for item in attribute["values"] if isinstance(item, dict)]
+    attribute_id = str(attribute["id"])
+    values_by_id.setdefault(attribute_id, []).extend(values)
+    definition = definition_map.get(attribute_id, {})
+    characteristic_rows.append({"id": attribute["id"], "complexId": attribute.get("complex_id", 0),
+                                "name": definition.get("name") or f"Ozon #{attribute_id}", "value": values,
+                                "dictionaryValues": attribute.get("values", [])})
+  description = "\n\n".join(values_by_id.get("4191", []))
+  category = ", ".join(values_by_id.get("8229", []))
+  # Type IDs stay explicit even when the category has no textual type attribute.
+  if not category:
+    category = f"Ozon: {info.get('description_category_id') or attributes.get('description_category_id') or '—'} / {info.get('type_id') or attributes.get('type_id') or '—'}"
+  primary = info.get("primary_image") or attributes.get("primary_image") or []
+  photo_urls = ([primary] if isinstance(primary, str) else primary) + (info.get("images") or attributes.get("images") or [])
+  photos = [{"big": url, "c516x688": url, "c246x328": url} for url in dict.fromkeys(photo_urls) if isinstance(url, str) and url.startswith("https://")]
+  stock_rows = (info.get("stocks") or {}).get("stocks")
+  stock = sum(audit_int(item.get("present"), 0) for item in stock_rows) if isinstance(stock_rows, list) else None
+  price = audit_number(info.get("price"), None)
+  issues = [label for missing, label in [(not photos, "Нет фото"), (not description, "Нет описания"), (not characteristic_rows, "Нет характеристик")] if missing]
+  return {
+    "marketplace": "ozon", "source": "ozon-seller-api", "cardKey": draft_card_key(sku or product_id),
+    "id": sku or product_id, "sku": sku, "productId": product_id, "offerId": offer_id, "vendorCode": offer_id,
+    "title": info.get("name") or attributes.get("name") or f"Ozon {product_id}", "description": description,
+    "brand": ", ".join(values_by_id.get("85", [])), "subjectName": category, "category": category,
+    "descriptionCategoryId": info.get("description_category_id") or attributes.get("description_category_id"),
+    "typeId": info.get("type_id") or attributes.get("type_id"), "photos": photos,
+    "photoUrl": photos[0]["big"] if photos else "", "characteristics": characteristic_rows,
+    "price": price, "stock": stock, "sizes": [{"techSize": "единый", "price": price, "stock": stock, "skus": [sku] if sku else []}],
+    "status": "Ozon Seller API", "statusClass": "blue", "quality": "Требует проверки" if issues else "Данные получены",
+    "qualityClass": "amber" if issues else "green", "issue": issues[0] if issues else "Нет критичных", "issueCount": len(issues),
+    "url": f"https://www.ozon.ru/product/{sku}/" if sku else "", "updatedAt": info.get("updated_at") or utc_now().isoformat(),
+    "rawFields": {**info, "productId": product_id, "source": "ozon-seller-api", "attributes": attributes,
+                  "attributeDefinitions": definitions, "description": description, "characteristics": characteristic_rows},
+  }
+
+
+def fetch_ozon_seller_cards(credentials, scope="full", manual_source="", context=None):
+  deadline = time.monotonic() + OZON_SYNC_SECONDS
+  selected = ozon_selected_identifiers(manual_source) if scope == "selected" else None
+  def call(path, payload):
+    return ozon_request_json(credentials["clientId"], credentials["apiKey"], path, payload, deadline=deadline, context=context)
+  listed, cursor, cursors = {}, "", set()
+  while True:
+    data = call("/v3/product/list", {"filter": {"visibility": "ALL"}, "last_id": cursor, "limit": 1000})
+    result = data.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+      raise OzonSellerError("ozon_invalid_response")
+    total = result.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+      raise OzonSellerError("ozon_invalid_response")
+    if total > OZON_MAX_SYNC_CARDS:
+      raise OzonSellerError("ozon_sync_limit", 409)
+    for item in result["items"]:
+      if not isinstance(item, dict) or isinstance(item.get("product_id"), bool) or not re.fullmatch(r"[1-9][0-9]{0,19}", str(item.get("product_id", ""))):
+        raise OzonSellerError("ozon_invalid_response")
+      key = str(item["product_id"])
+      if key in listed:
+        raise OzonSellerError("ozon_incomplete_response")
+      listed[key] = item
+    if len(listed) > OZON_MAX_SYNC_CARDS:
+      raise OzonSellerError("ozon_sync_limit", 409)
+    if len(listed) == total:
+      break
+    cursor = result.get("last_id")
+    if not result["items"] or not isinstance(cursor, str) or not cursor or cursor in cursors or len(listed) > total:
+      raise OzonSellerError("ozon_incomplete_response")
+    cursors.add(cursor)
+  info_by_id, attrs_by_id = {}, {}
+  ids = list(listed)
+  for offset in range(0, len(ids), 100):
+    batch = ids[offset:offset + 100]
+    info = call("/v3/product/info/list", {"product_id": [int(key) for key in batch]})
+    attrs = call("/v4/product/info/attributes", {"filter": {"product_id": [int(key) for key in batch], "visibility": "ALL"}, "limit": 1000})
+    for response, field, output in [(info, "items", info_by_id), (attrs, "result", attrs_by_id)]:
+      rows = response.get(field)
+      if not isinstance(rows, list):
+        raise OzonSellerError("ozon_invalid_response")
+      seen = set()
+      for item in rows:
+        if not isinstance(item, dict) or str(item.get("id")) not in batch or str(item.get("id")) in seen:
+          raise OzonSellerError("ozon_incomplete_response")
+        seen.add(str(item["id"]))
+        output[str(item["id"])] = item
+      if seen != set(batch):
+        raise OzonSellerError("ozon_incomplete_response")
+  if selected is not None:
+    matched = set()
+    filtered = []
+    for key in ids:
+      item = info_by_id[key]
+      identifiers = {key, str(item.get("sku") or listed[key].get("sku") or ""), str(item.get("offer_id") or "")}
+      identifiers.update(str(source.get("sku")) for source in item.get("sources", []) if isinstance(source, dict))
+      overlap = selected & identifiers
+      if overlap:
+        filtered.append(key)
+        matched.update(overlap)
+    if matched != selected:
+      raise OzonSellerError("ozon_selected_cards_not_found", 409)
+    ids = filtered
+  definitions = {}
+  cards = []
+  for key in ids:
+    info, attrs = info_by_id[key], attrs_by_id[key]
+    category_key = (info.get("description_category_id") or attrs.get("description_category_id"), info.get("type_id") or attrs.get("type_id"))
+    if all(category_key) and category_key not in definitions:
+      result = call("/v1/description-category/attribute", {"description_category_id": category_key[0], "type_id": category_key[1], "language": "RU"})
+      if not isinstance(result.get("result"), list):
+        raise OzonSellerError("ozon_invalid_response")
+      definitions[category_key] = result["result"]
+    try:
+      cards.append(ozon_seller_snapshot_card(info, attrs, definitions.get(category_key, []), listed[key]))
+    except (TypeError, KeyError, ValueError, AttributeError):
+      raise OzonSellerError("ozon_invalid_response") from None
+  if time.monotonic() >= deadline:
+    raise OzonSellerError("ozon_sync_timeout", 504)
+  return {"cards": cards, "productCount": total, "loadedAt": utc_now().isoformat()}
+
+
+def ozon_card_identity_tokens(card):
+  raw = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
+  tokens = {f"product:{card.get('productId') or raw.get('productId') or raw.get('product_id') or ''}",
+            f"sku:{card.get('sku') or card.get('id') or ''}", f"offer:{card.get('offerId') or card.get('vendorCode') or ''}"}
+  return {token for token in tokens if token.split(":", 1)[1]}
+
+
+def save_ozon_seller_snapshot(db, portal_id, snapshot):
+  portal = db.execute("SELECT cards_snapshot_json FROM portals WHERE id = ? AND marketplace = 'Ozon'", (portal_id,)).fetchone()
+  if not portal:
+    raise ValueError("ozon_portal_required")
+  merged = wb_snapshot_cards_from_row(portal)
+  identity_index = {}
+  for index, card in enumerate(merged):
+    for token in ozon_card_identity_tokens(card):
+      identity_index.setdefault(token, set()).add(index)
+  added = updated = 0
+  for card in snapshot["cards"]:
+    matches = set().union(*(identity_index.get(token, set()) for token in ozon_card_identity_tokens(card)))
+    if len(matches) > 1:
+      raise ValueError("ozon_card_identity_conflict")
+    if matches:
+      index = matches.pop()
+      previous = merged[index]
+      merged[index] = {**previous, **card, "id": previous.get("id") or card["id"],
+                       "cardKey": previous.get("cardKey") or card_key_from_snapshot_card(previous) or card["cardKey"]}
+      updated += 1
+    else:
+      index = len(merged)
+      merged.append(card)
+      added += 1
+    for token in ozon_card_identity_tokens(card):
+      identity_index.setdefault(token, set()).add(index)
+  serialized = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+  if len(serialized.encode()) > 32 * 1024 * 1024:
+    raise OzonSellerError("ozon_response_too_large")
+  db.execute("""UPDATE portals SET cards_snapshot_json = ?, card_count = ?, problem_count = ?,
+                status = 'Ozon Seller API карточки', last_sync_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND marketplace = 'Ozon'""",
+             (serialized, len(merged), sum(1 for card in merged if card.get("issueCount", 0) > 0), snapshot["loadedAt"], portal_id))
+  return {"added": added, "updated": updated, "total": len(merged), "loadedAt": snapshot["loadedAt"]}
+
+
+def refresh_ozon_seller_cards(portal_id, user):
+  numeric_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  previous = ozon_connection_row(numeric_id)
+  if not previous:
+    raise ValueError("ozon_connection_required")
+  try:
+    credentials = ozon_credentials_from_payload(json.loads(decrypt_secret(previous["token_nonce"], previous["token_ciphertext"], integration_aad(numeric_id, "ozon"))))
+  except (InvalidTag, ValueError, KeyError, TypeError):
+    raise RuntimeError("secret_storage_unavailable") from None
+  limiter_key = ("cards", numeric_id)
+  with OZON_CONNECTION_LOCK:
+    if numeric_id in OZON_CONNECTION_INFLIGHT or time.monotonic() < OZON_CONNECTION_NEXT_CHECK.get(limiter_key, 0):
+      raise OzonSellerError("ozon_check_rate_limited", 429)
+    OZON_CONNECTION_INFLIGHT.add(numeric_id)
+    OZON_CONNECTION_NEXT_CHECK[limiter_key] = time.monotonic() + 10
+  try:
+    row = get_portal_row(numeric_id, user)
+    snapshot = fetch_ozon_seller_cards(credentials, row["scope"], row["manual_source"], context={"user": user, "portalId": numeric_id})
+    ensure_ozon_portal_access(numeric_id, user, edit=True)
+    with connect_db() as db:
+      db.execute("BEGIN IMMEDIATE")
+      current = db.execute("SELECT token_digest FROM portal_integrations WHERE portal_id = ? AND provider = 'ozon'", (numeric_id,)).fetchone()
+      source = db.execute("SELECT scope, manual_source FROM portals WHERE id = ?", (numeric_id,)).fetchone()
+      if not current or current["token_digest"] != previous["token_digest"] or (source["scope"], source["manual_source"]) != (row["scope"], row["manual_source"]):
+        raise ValueError("ozon_connection_changed")
+      saved = save_ozon_seller_snapshot(db, numeric_id, snapshot)
+      db.execute("UPDATE portal_integrations SET status = 'verified', last_checked_at = CURRENT_TIMESTAMP WHERE portal_id = ? AND provider = 'ozon'", (numeric_id,))
+    record_admin_event(user, "ozon_cards_synced", "portal", numeric_id, portal_id=numeric_id, details={**saved, "productCount": snapshot["productCount"]})
+    return {"portal": public_portal_from_row(get_portal_row(numeric_id, user)), "saved": saved, "productCount": snapshot["productCount"]}
+  except OzonSellerError as exc:
+    record_admin_event(user, "ozon_cards_sync_failed", "portal", numeric_id, portal_id=numeric_id, details={"code": exc.code})
+    raise
+  finally:
+    with OZON_CONNECTION_LOCK:
+      OZON_CONNECTION_INFLIGHT.discard(numeric_id)
 
 
 def normalize_ozon_task(raw_task):
@@ -24064,6 +24342,28 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         error_text = str(exc) or "invalid_ozon_mpstats_probe"
         status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": error_text})
+        return
+      self.send_json(HTTPStatus.OK, result)
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-seller-cards"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id_text = path[len("/api/portals/"):-len("/ozon-seller-cards")].strip("/")
+      try:
+        result = refresh_ozon_seller_cards(portal_id_text, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      except OzonSellerError as exc:
+        self.send_json(exc.status, {"error": exc.code})
+        return
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         return
       self.send_json(HTTPStatus.OK, result)
       return

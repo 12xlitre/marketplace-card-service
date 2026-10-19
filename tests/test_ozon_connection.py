@@ -35,8 +35,11 @@ class OzonConnectionTest(unittest.TestCase):
         server.OZON_CONNECTION_INFLIGHT.clear()
         self.transport = patch.object(server, "check_ozon_credentials", return_value={"productCount": 12})
         self.check = self.transport.start()
+        self.cards_transport = patch.object(server, "fetch_ozon_seller_cards", return_value={"cards": [{"id": "123", "sku": "123", "productId": "456", "offerId": "demo", "title": "Demo", "marketplace": "ozon", "issueCount": 0}], "productCount": 12, "loadedAt": "2026-10-19T14:00:00+00:00"})
+        self.fetch_cards = self.cards_transport.start()
 
     def tearDown(self):
+        self.cards_transport.stop()
         self.transport.stop()
         self.env.stop()
         server.DB_PATH = self.old_db
@@ -60,7 +63,8 @@ class OzonConnectionTest(unittest.TestCase):
         self.assertEqual(row["marketplace"], "Ozon")
         self.assertEqual(row["client_name"], "Honeybear")
         self.assertEqual(row["api_connected"], 0)
-        self.assertEqual(row["card_count"], 0)
+        self.assertEqual(row["card_count"], 1)
+        self.assertTrue(server.public_portal_from_row(row)["ozonApiConnected"])
         self.assertEqual(result["productCount"], 12)
         connection = server.ozon_connection_row(portal_id)
         self.assertEqual(connection["status"], "verified")
@@ -68,7 +72,7 @@ class OzonConnectionTest(unittest.TestCase):
 
     def test_failed_auth_does_not_create_empty_cabinet(self):
         before = self.portal_count()
-        self.check.side_effect = server.OzonSellerError("ozon_auth_error", 409)
+        self.fetch_cards.side_effect = server.OzonSellerError("ozon_auth_error", 409)
         with self.assertRaises(server.OzonSellerError):
             self.create_connected()
         self.assertEqual(self.portal_count(), before)
@@ -234,6 +238,7 @@ class OzonTransportTest(unittest.TestCase):
     def response(self, status, body=b'{"result":{"items":[],"total":0}}', retry=None):
         response = Mock(status=status)
         response.read.return_value = body
+        response.read1.side_effect = [body, b""]
         response.getheader.return_value = retry
         connection = Mock()
         connection.getresponse.return_value = response

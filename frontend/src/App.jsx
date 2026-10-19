@@ -923,7 +923,7 @@ function normalizePortal(portal) {
     clientName: String(portal.clientName || portal.client_name || "").trim(),
     clientContact: normalizeClientContact(portal.clientContact || portal.client_contact),
     isActive: portal.isActive !== false,
-    status: portal.mode === "api" && !portal.apiConnected ? "API ожидает подключения" : portal.status,
+    status: portal.mode === "api" && !portal.apiConnected && !portal.ozonApiConnected ? "API ожидает подключения" : portal.status,
     ownerLogin: teamRoles.lead || portal.ownerLogin,
     teamRoles,
     memberLogins: uniqueLogins(portal.memberLogins?.length
@@ -7136,7 +7136,7 @@ export default function App() {
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
-      setNotice(useApi ? "Ozon-кабинет создан, доступ Seller API проверен и сохранён. Загрузка карточек выполняется отдельно." : "Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
+      setNotice(useApi ? `Ozon-кабинет создан. Через Seller API загружено ${formatNumber(response.saved?.total || 0)} карточек.` : "Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
       if (useApi) throw error;
@@ -8396,7 +8396,7 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
             <p>{portal.marketplace} · {owner?.full_name || "ответственный не указан"}</p>
           </div>
         </div>
-        <Tag tone={inactive ? "amber" : (portal.apiConnected ? "blue" : "amber")}>{inactive ? "Неактивен" : portal.status}</Tag>
+        <Tag tone={inactive ? "amber" : ((portal.apiConnected || portal.ozonApiConnected) ? "blue" : "amber")}>{inactive ? "Неактивен" : portal.status}</Tag>
       </div>
       <div className="scope-row">
         <span>Охват</span>
@@ -8413,8 +8413,8 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
       </div>
       <TeamSummary portal={portal} findUser={findUser} fallbackOwner={owner} />
       <div className="card-actions">
-        <Tag tone={inactive ? "amber" : (portal.apiConnected ? "blue" : "amber")}>
-          {inactive ? "В архиве" : (portal.apiConnected ? "API подключен" : "Ручной режим")}
+        <Tag tone={inactive ? "amber" : ((portal.apiConnected || portal.ozonApiConnected) ? "blue" : "amber")}>
+          {inactive ? "В архиве" : ((portal.apiConnected || portal.ozonApiConnected) ? "API подключен" : "Ручной режим")}
         </Tag>
         <div className="portal-actions">
           {inactive ? (
@@ -8446,13 +8446,37 @@ function PortalCard({ portal, owner, findUser, canManage, onOpen, onArchive, onR
   );
 }
 
+function ozonSellerErrorText(error) {
+  const messages = {
+    ozon_auth_error: "Ozon отклонил доступ. Проверьте API-ключ и права на чтение товаров и характеристик.",
+    ozon_connection_required: "Сначала сохраните Client-Id и API-ключ Ozon.",
+    ozon_check_rate_limited: "Загрузка или проверка уже выполняется. Повторите через 10 секунд.",
+    ozon_rate_limited: "Ozon ограничил частоту запросов. Повторите загрузку позднее.",
+    ozon_sync_timeout: "Ozon не успел вернуть все данные. Повторите загрузку; сохранённые карточки остались прежними.",
+    ozon_sync_limit: "В магазине больше 2 000 товаров — для него потребуется фоновая загрузка. Карточки не изменены.",
+    ozon_response_too_large: "Объём данных превышает лимит загрузки. Сохранённые карточки не изменены.",
+    ozon_selected_cards_required: "Укажите список SKU, Ozon ID или offer ID для выбранных карточек.",
+    ozon_selected_cards_not_found: "Не все выбранные SKU или offer ID найдены в этом API-кабинете. Проверьте список.",
+    ozon_incomplete_response: "Ozon вернул неполные данные. Повторите загрузку; сохранённые карточки не изменены.",
+    ozon_card_identity_conflict: "Обнаружены неоднозначные идентификаторы карточек. Сохранённые данные не изменены.",
+    ozon_connection_changed: "Источник или подключение изменились во время загрузки. Обновите страницу и повторите.",
+    forbidden: "Недостаточно прав для обновления карточек этого кабинета.",
+    secret_storage_unavailable: "Хранилище ключей временно недоступно. Повторите позднее.",
+  };
+  return messages[error.message] || "Не удалось загрузить карточки через Ozon Seller API. Сохранённые данные не изменены.";
+}
+
 function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onPortalUpdated, onOpenCard, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
   const sourceStoreUrl = String(portal.storeUrl || "").trim();
   const sourceManualText = String(portal.manualSource || "").trim();
-  const sourceConfigured = Boolean(sourceStoreUrl || sourceManualText);
+  const [sellerConnection, setSellerConnection] = useState(null);
+  const hasSellerApi = Boolean(portal.ozonApiConnected || sellerConnection?.hasCredentials);
+  const sourceConfigured = hasSellerApi || Boolean(sourceStoreUrl || sourceManualText);
+  const [sellerApiLoading, setSellerApiLoading] = useState(false);
+  const [sellerApiError, setSellerApiError] = useState("");
   const sourceSafeUrl = safeHttpsUrl(sourceStoreUrl);
   const scopeLabel = portal.scope === "selected" ? "выбранные карточки" : "полный кабинет";
   const team = getPortalTeam(portal);
@@ -8645,6 +8669,30 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     } finally {
       setSourceSaving(false);
     }
+  }
+
+  async function refreshOzonSellerCards() {
+    if (!canManage || portal.isDemo || sellerApiLoading) return;
+    setSellerApiLoading(true);
+    setSellerApiError("");
+    try {
+      const response = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-seller-cards`, {
+        method: "POST", body: JSON.stringify({}),
+      });
+      if (response.portal) onPortalUpdated?.(response.portal);
+      onNotice?.(`Ozon Seller API: загружено ${formatNumber(response.saved?.total || 0)} карточек, новых ${formatNumber(response.saved?.added || 0)}, обновлено ${formatNumber(response.saved?.updated || 0)}.`);
+    } catch (error) {
+      const message = ozonSellerErrorText(error);
+      setSellerApiError(message);
+      onNotice?.(message);
+    } finally {
+      setSellerApiLoading(false);
+    }
+  }
+
+  function refreshOzonCards() {
+    if (hasSellerApi) return refreshOzonSellerCards();
+    return runOzonMpstatsProbe({ autoSave: true });
   }
 
   async function saveOzonCards(cards, { silent = false } = {}) {
@@ -9063,13 +9111,15 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const ozonRouteRows = [
     { title: "Кабинет Ozon", status: "создан", className: "active" },
     { title: "Источник Ozon", status: sourceConfigured ? "задан" : "не задан", className: sourceConfigured ? "active" : "paused" },
-    { title: "Карточки Ozon", status: sourceConfigured ? "следующий шаг" : "после источника", className: "pending" },
+    { title: "Карточки Ozon", status: portal.realCards?.length ? "загружены" : sourceConfigured ? "следующий шаг" : "после источника", className: portal.realCards?.length ? "active" : "pending" },
     { title: "СЯ через MPStats", status: "keyword-база", className: "pending" },
     { title: "Задачи Ozon", status: "после карточек", className: "pending" },
     { title: "Отчеты Ozon", status: "клиентский XLSX", className: "active" },
   ];
-  const sourceDescription = sourceConfigured
-    ? "Карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Client-Id и API-ключ Ozon настраиваются в отдельном блоке ниже; проверка доступа не меняет источник карточек."
+  const sourceDescription = hasSellerApi
+    ? "Карточки загружаются напрямую через Ozon Seller API: названия, описания, фото, характеристики, цены и остатки. MPStats используется отдельно для семантики."
+    : sourceConfigured
+    ? "Карточки загружаются через MPStats по ссылке на магазин, бренд, продавца, Seller ID или SKU. Для загрузки напрямую из Ozon сохраните Client-Id и API-ключ в блоке ниже."
     : "Укажите ссылку на магазин, Seller ID, список SKU или исходные данные клиента для загрузки карточек через MPStats. Client-Id и API-ключ Ozon можно добавить в отдельном блоке ниже.";
   const ozonTasks = Array.isArray(ozonWorkState.tasks) ? ozonWorkState.tasks : [];
   const ozonActiveTasks = ozonTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status)).length;
@@ -9084,15 +9134,15 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       key: "source",
       label: "Источник Ozon",
       ready: sourceConfigured,
-      value: sourceConfigured ? "задан" : "не задан",
-      note: sourceConfigured ? "MPStats может искать карточки по сохраненному ориентиру." : "Нужна ссылка продавца, Seller ID, SKU/Ozon ID или offer ID.",
+      value: hasSellerApi ? "Seller API" : sourceConfigured ? "MPStats" : "не задан",
+      note: hasSellerApi ? "Данные карточек получаем напрямую из Ozon по сохранённому ключу." : sourceConfigured ? "MPStats может искать карточки по сохраненному ориентиру." : "Нужна ссылка продавца, Seller ID, SKU/Ozon ID или offer ID.",
     },
     {
       key: "cards",
       label: "Карточки",
       ready: ozonCards.length > 0,
       value: ozonCards.length ? `${formatNumber(ozonCards.length)} сохранено` : "нет карточек",
-      note: ozonCards.length ? "Ozon snapshot готов для задач и отчета." : "Сначала выполните MPStats-проверку и сохраните найденные карточки.",
+      note: ozonCards.length ? "Ozon snapshot готов для задач и отчета." : hasSellerApi ? "Нажмите «Обновить карточки» для загрузки через Seller API." : "Сначала выполните MPStats-проверку и сохраните найденные карточки.",
     },
     {
       key: "tasks",
@@ -9145,16 +9195,18 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
+          {canManage && hasSellerApi ? <button className={loadingButtonClass("btn", sellerApiLoading)} type="button" onClick={refreshOzonSellerCards} disabled={sellerApiLoading || portal.isDemo} aria-busy={sellerApiLoading || undefined}><RefreshCw size={17} />{sellerApiLoading ? "Загружаем из Ozon" : "Обновить карточки"}</button> : null}
           <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
         </div>
       </header>
 
       <div className="content">
+        {sellerApiError ? <div className="form-error" role="alert">{sellerApiError}</div> : null}
         <div className="seller-layout">
           <div className="seller-main">
             <WorkspaceTabs items={sellerWorkspaceTabs} active={activeSellerTab} onChange={setSellerTab} ariaLabel="Разделы Ozon-кабинета" />
             <HelpHint enabled={helpEnabled} title="Ozon beta">
-              Кабинет работает на Ozon snapshot и MPStats. Карточки, задачи и отчетные периоды хранятся в отдельном Ozon-контуре, а семантика честно помечает источник keyword-базы.
+              Кабинет работает на данных Ozon Seller API или MPStats. Карточки, задачи и отчетные периоды хранятся в отдельном Ozon-контуре, а семантика честно помечает источник keyword-базы.
             </HelpHint>
 
             {canManage ? (
@@ -9223,12 +9275,12 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                         </div>
                       )}
                       <div className="panel-actions ozon-source-actions">
-                        <button className={loadingButtonClass("btn primary", probeStatus === "loading" || probeSaveStatus === "saving")} type="button" onClick={() => runOzonMpstatsProbe({ autoSave: true })} disabled={!canManage || !sourceConfigured || probeStatus === "loading" || probeSaveStatus === "saving"} aria-busy={probeStatus === "loading" || probeSaveStatus === "saving" || undefined}>
-                          <RefreshCw size={16} />{probeStatus === "loading" ? "Ищем данные" : probeSaveStatus === "saving" ? "Сохраняем" : "Обновить карточки"}
+                        <button className={loadingButtonClass("btn primary", sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving")} type="button" onClick={refreshOzonCards} disabled={!canManage || !sourceConfigured || sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving"} aria-busy={sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving" || undefined}>
+                          <RefreshCw size={16} />{sellerApiLoading ? "Загружаем из Ozon" : probeStatus === "loading" ? "Ищем данные" : probeSaveStatus === "saving" ? "Сохраняем" : "Обновить карточки"}
                         </button>
-                        <button className="btn" type="button" onClick={() => runOzonMpstatsProbe({ autoSave: false })} disabled={!canManage || !sourceConfigured || probeStatus === "loading" || probeSaveStatus === "saving"}>
+                        {!hasSellerApi ? <button className="btn" type="button" onClick={() => runOzonMpstatsProbe({ autoSave: false })} disabled={!canManage || !sourceConfigured || sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving"}>
                           <Search size={16} />Проверить источник
-                        </button>
+                        </button> : null}
                       </div>
                       {!sourceConfigured ? (
                         <div className="empty-state compact">
@@ -9236,16 +9288,16 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                           <span>Укажите ссылку на продавца, Seller ID, SKU/Ozon ID или offer ID. После этого MPStats-проверка станет доступна.</span>
                         </div>
                       ) : null}
-                      <OzonMpstatsProbeResult
+                      {!hasSellerApi ? <OzonMpstatsProbeResult
                         result={probeResult}
                         status={probeStatus}
                         canSave={canManage && Array.isArray(probeResult?.cards) && probeResult.cards.length > 0}
                         saveStatus={probeSaveStatus}
                         onSave={saveOzonProbeCards}
-                      />
+                      /> : null}
                     </div>
                   </details>
-                  <OzonConnectionPanel key={portal.id} portalId={portal.id} isDemo={portal.isDemo} />
+                  <OzonConnectionPanel key={portal.id} portalId={portal.id} isDemo={portal.isDemo} onConnectionChange={setSellerConnection} onConnected={refreshOzonSellerCards} />
                   <details className="management-subpanel">
                     <summary><Settings size={16} />Контур Ozon</summary>
                     <div className="security-inline-list">
@@ -9281,9 +9333,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   readyCount={launchReadyCount}
                   totalCount={ozonLaunchChecks.length}
                   nextStep={launchNextStep}
-                  loading={probeStatus === "loading" || probeSaveStatus === "saving"}
+                  loading={sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving"}
                   onEditSource={canManage ? () => setSourceEditing(true) : null}
-                  onRefreshCards={canManage && sourceConfigured ? () => runOzonMpstatsProbe({ autoSave: true }) : null}
+                  onRefreshCards={canManage && sourceConfigured ? refreshOzonCards : null}
                   onOpenTasks={() => setSellerTab("tasks")}
                   onOpenReports={() => setSellerTab("reports")}
                 />
@@ -9294,7 +9346,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   issueCount={portal.problemCount}
                   activeTaskCount={ozonActiveTasks}
                   submittedCount={ozonSubmittedTasks}
-                  sourceStatus={sourceConfigured ? "MPStats" : "не задан"}
+                  sourceStatus={hasSellerApi ? "Ozon Seller API" : sourceConfigured ? "MPStats" : "не задан"}
                   onOpenTasks={() => setSellerTab("tasks")}
                   onOpenReports={() => setSellerTab("reports")}
                   onOpenWorkPeriods={() => setSellerTab("work-periods")}
@@ -9352,7 +9404,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <h2>Маршрут Ozon</h2>
                       <p>Форма работы единая с остальными кабинетами, но карточки, задачи и отчеты хранятся в Ozon-контуре.</p>
                     </div>
-                    <Tag tone="blue">{sourceConfigured ? "2 из 6" : "1 из 6"}</Tag>
+                    <Tag tone="blue">{ozonRouteRows.filter((step) => step.className === "active").length} из {ozonRouteRows.length}</Tag>
                   </div>
                   <div className="pipeline">
                     {ozonRouteRows.map((step) => (
@@ -9397,6 +9449,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 </section>
 
                 <OzonCardsPanel
+                  hasSellerApi={hasSellerApi}
                   cards={portal.realCards || []}
                   portalId={portal.id}
                   workState={ozonWorkState}
@@ -9450,7 +9503,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   );
 }
 
-function OzonConnectionPanel({ portalId, isDemo = false }) {
+function OzonConnectionPanel({ portalId, isDemo = false, onConnectionChange, onConnected }) {
   const [connection, setConnection] = useState(null);
   const [clientId, setClientId] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -9461,7 +9514,7 @@ function OzonConnectionPanel({ portalId, isDemo = false }) {
     let active = true;
     if (isDemo) { setBusy(false); return () => { active = false; }; }
     apiRequest(path).then((result) => {
-      if (active) setConnection(result.connection);
+      if (active) { setConnection(result.connection); onConnectionChange?.(result.connection); }
     }).catch(() => {
       if (active) setMessage("Не удалось загрузить состояние подключения.");
     }).finally(() => { if (active) setBusy(false); });
@@ -9478,8 +9531,10 @@ function OzonConnectionPanel({ portalId, isDemo = false }) {
         body: JSON.stringify(action === "check" ? { action } : { action, clientId, apiKey }),
       });
       setConnection(result.connection);
+      onConnectionChange?.(result.connection);
       if (action === "connect") { setClientId(""); setApiKey(""); }
       setMessage(`Доступ к списку товаров проверен: ${formatNumber(result.productCount)} товаров. ${action === "connect" ? "Ключ сохранён." : ""}`);
+      if (action === "connect") await onConnected?.();
     } catch (error) {
       const messages = {
         ozon_auth_error: "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров.",
@@ -9504,7 +9559,7 @@ function OzonConnectionPanel({ portalId, isDemo = false }) {
     <details className="management-subpanel">
       <summary><KeyRound size={16} />Подключение Ozon Seller API <Tag tone={connection?.status === "verified" ? "green" : "amber"}>{connection?.status === "verified" ? "Проверен" : connection?.hasCredentials ? "Требует проверки" : "Не подключён"}</Tag></summary>
       <div className="management-subpanel-body">
-        <p>Укажите доступ к этому Ozon-кабинету. Проверка читает список товаров; загрузка карточек и SEO-подготовка выполняются отдельно.</p>
+        <p>Укажите доступ к этому Ozon-кабинету. После сохранения доступа загрузим карточки через Seller API. В дальнейшем используйте «Обновить карточки».</p>
         <form className="integration-form flat" onSubmit={(event) => { event.preventDefault(); submit("connect"); }}>
           <label className="field-label">Client-Id
             <input value={clientId} onChange={(event) => setClientId(event.target.value)} inputMode="numeric" autoComplete="off" maxLength={20} disabled={busy || isDemo} placeholder="Client-Id из настроек Seller API" />
@@ -9782,6 +9837,7 @@ function ozonCardSearchText(card) {
 }
 
 function ozonCardStableKey(card) {
+  if (card?.cardKey) return normalizeDraftKeyValue(card.cardKey);
   const { sku, offerId } = ozonCardIdentity(card);
   return normalizeDraftKeyValue(sku !== "Не указано" ? sku : offerId) || cardDraftKey(card);
 }
@@ -10935,7 +10991,7 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   );
 }
 
-function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks }) {
+function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks }) {
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
@@ -10950,12 +11006,11 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
     return (
       <OzonPlaceholderPanel
         title="Карточки Ozon"
-        copy="В кабинете пока нет сохраненных Ozon-карточек. Таблица появится только после успешной MPStats-проверки и сохранения результата."
+        copy={hasSellerApi ? "Нажмите «Обновить карточки»: получим товары напрямую через Ozon Seller API." : "В кабинете пока нет сохранённых Ozon-карточек. Укажите источник для MPStats или подключите Seller API в настройках."}
         tag="нет данных"
-        steps={[
+        steps={hasSellerApi ? ["1. Нажмите «Обновить карточки».", "2. После загрузки выберите карточки для работы."] : [
           "1. Проверьте источник Ozon в настройках кабинета.",
-          "2. Нажмите Обновить карточки или Проверьте источник.",
-          "3. Если MPStats нашел карточки, сохраните найденный результат.",
+          "2. Нажмите «Обновить карточки» или подключите Seller API.",
         ]}
       />
     );
@@ -11111,7 +11166,7 @@ function OzonCardsPanel({ cards, portalId, workState, workStatus = "idle", seman
       <div className="strip-head">
         <div>
           <h2>Карточки Ozon</h2>
-          <p>Сохраненные карточки из Ozon MPStats probe. Статусы, замечания и рабочий набор считаются только по Ozon snapshot.</p>
+          <p>{hasSellerApi ? "Карточки из Ozon Seller API. Статусы, замечания и рабочий набор считаются по сохранённым данным." : "Сохраненные карточки из Ozon MPStats probe. Статусы, замечания и рабочий набор считаются только по Ozon snapshot."}</p>
         </div>
         <Tag tone="blue">{formatNumber(visibleCards.length)}</Tag>
       </div>
@@ -11645,7 +11700,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
   const feedbacks = firstDefined(card?.feedbacks, rawFields.feedbacks, rawFields.reviews, rawFields.comments);
   const status = card?.status || "MPStats";
   const externalUrl = safeHttpsUrl(card?.url || rawFields.url || rawFields.productUrl || rawFields.link);
-  const sourceLabel = mpstats.source || rawFields.source || "Ozon MPStats";
+  const sourceLabel = card?.source === "ozon-seller-api" ? "Ozon Seller API" : mpstats.source || rawFields.source || "Ozon MPStats";
   const portalName = portalDisplayName(portal);
   const issueReasons = ozonCardProblemReasons(card);
   const dataSignals = ozonCardDataSignals(card);
@@ -11813,9 +11868,9 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                   <div className="strip-head">
                     <div>
                       <h2>Цены, остатки и метрики</h2>
-                      <p>Доступные коммерческие данные из Ozon MPStats snapshot.</p>
+                      <p>{card?.source === "ozon-seller-api" ? "Цены и остатки из Ozon Seller API. Продажи и рыночные метрики собираются отдельно." : "Доступные коммерческие данные из Ozon MPStats snapshot."}</p>
                     </div>
-                    <Tag tone="blue">MPStats</Tag>
+                    <Tag tone="blue">{card?.source === "ozon-seller-api" ? "Ozon Seller API" : "MPStats"}</Tag>
                   </div>
                   <div className="commerce-summary">
                     <div><span>Цена</span><strong>{valueSummary(price)}</strong></div>
@@ -11837,7 +11892,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
                           <div className="commerce-size-row" key={`${size?.techSize || index}-${size?.stock || ""}`}>
                             <strong>{size?.techSize || size?.ozonSize || `Размер ${index + 1}`}</strong>
                             <strong>{valueSummary(size?.price || size?.discountedPrice)}</strong>
-                            <strong>{valueSummary(size?.stock || size?.sellerStock || size?.wbStock)}</strong>
+                            <strong>{valueSummary(firstDefined(size?.stock, size?.sellerStock, size?.wbStock))}</strong>
                             <strong>{Array.isArray(size?.skus) && size.skus.length ? size.skus.join(", ") : sku}</strong>
                           </div>
                         ))}
@@ -22444,6 +22499,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
   }
 
   function errorText(errorObject) {
+    if (["ozon_sync_timeout", "ozon_sync_limit", "ozon_response_too_large", "ozon_selected_cards_required", "ozon_selected_cards_not_found", "ozon_incomplete_response"].includes(errorObject.message)) return `${ozonSellerErrorText(errorObject)} Кабинет не создан.`;
     if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
     if (errorObject.message === "invalid_portal_team") return "Проверьте назначенных сотрудников в команде клиента. Кабинет не создан.";
     if (errorObject.message === "ozon_credentials_required") return "Введите числовой Client-Id и API-ключ из настроек Seller API.";
@@ -22540,7 +22596,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             <label className="field-label">API-ключ Ozon
               <input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} autoComplete="off" maxLength={4096} disabled={loading} required placeholder="API-ключ этого магазина" />
             </label>
-            <p className="status-note">Проверим чтение списка товаров и сохраним доступ зашифрованно. Карточки загрузим отдельно. При ошибке новый кабинет не создаётся.</p>
+            <p className="status-note">Проверим доступ, загрузим карточки и сохраним ключ зашифрованно. При ошибке новый кабинет не создаётся.</p>
           </> : null}
           <label className="field-label">
             Ссылка на Ozon-кабинет, Seller ID или карточку{form.mode === "api" ? " (необязательно)" : ""}
@@ -22549,7 +22605,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           {form.scope === "selected" ? (
             <label className="field-label">
               SKU, Ozon ID или offer ID
-              <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-OFFER-01, 987654321. Эти позиции попадут в первую проверку MPStats." />
+              <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} placeholder="Например: 123456789, OZON-OFFER-01, 987654321. Загрузим только выбранные позиции." />
             </label>
           ) : null}
           <label className="field-label">
@@ -22559,7 +22615,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           <div className="source-flow">
             <div className="list-row source-flow-row"><span>Подключение</span><strong>{form.mode === "api" ? "Ozon Seller API" : "MPStats по ссылке"}</strong></div>
             <div className="list-row source-flow-row"><span>Охват</span><strong>{form.scope === "selected" ? "выбранные карточки" : "весь кабинет"}</strong></div>
-            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>{form.mode === "api" ? "отдельным действием" : "после проверки MPStats"}</strong></div>
+            <div className="list-row source-flow-row"><span>Сохранение карточек</span><strong>{form.mode === "api" ? "при создании через Seller API" : "после проверки MPStats"}</strong></div>
           </div>
           {error ? <div className="form-error">{error}</div> : null}
         </div>

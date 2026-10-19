@@ -79,6 +79,7 @@ POST /api/portals/<portal_id>/client-contact
 POST /api/portals/<portal_id>/manual-source
 POST /api/portals/<portal_id>/ozon-mpstats-probe
 POST /api/portals/<portal_id>/ozon-mpstats-cards
+POST /api/portals/<portal_id>/ozon-seller-cards
 GET /api/portals/<portal_id>/ozon-connection
 POST /api/portals/<portal_id>/ozon-connection
 POST /api/portals/<portal_id>/archive
@@ -118,9 +119,11 @@ DELETE /api/portal-work-periods?portal_id=1&period_id=1
 
 `POST /api/portals/<portal_id>/ozon-mpstats-cards` доступен только для Ozon-порталов с edit/manage правами пользователя и сохраняет явно выбранный результат Ozon MPStats probe в `cards_snapshot_json`. Карточки нормализуются как `marketplace=ozon`, мержатся по SKU/offer/id с уже сохраненным Ozon snapshot и обновляют `card_count/problem_count/last_sync_at`; WB API и WB bootstrap не запускаются.
 
-`POST /api/portals` также поддерживает `mode=api`, `marketplace=Ozon`: в клиенте выберите `Ozon → Подключить Ozon → Ozon Seller API`, введите Client-Id/API-ключ и нажмите `Проверить и создать`. Для полного охвата ссылка и SKU не нужны. Доступ проверяется до создания; кабинет и encrypted-подключение сохраняются одной транзакцией. Ошибки не оставляют пустой кабинет. Импорт карточек и WB/MPStats bootstrap не запускаются.
+`POST /api/portals` также поддерживает `mode=api`, `marketplace=Ozon`: в клиенте выберите `Ozon → Подключить Ozon → Ozon Seller API`, введите Client-Id/API-ключ и нажмите `Проверить и создать`. Для полного охвата ссылка и SKU не нужны. Доступ проверяется до создания; кабинет и encrypted-подключение сохраняются одной транзакцией. Ошибки не оставляют пустой кабинет. Карточки загружаются через Seller API до создания и сохраняются вместе с кабинетом и ключом; WB/MPStats bootstrap не запускается.
 
-`GET/POST /api/portals/<portal_id>/ozon-connection` обслуживает форму `Настройки кабинета → Подключение Ozon Seller API`. GET возвращает только статус, наличие доступа и время проверки. POST с `action=connect`, `clientId`, `apiKey` проверяет чтение списка товаров, затем шифрует оба значения в существующей `portal_integrations` с provider `ozon`; `action=check` использует сохранённую пару. Нужен доступ к Ozon-кабинету, для POST — право редактирования. Неудачная замена сохраняет прежний ключ; повторная привязка одного аккаунта и смена Client-Id у существующей связи запрещены. Карточки, задачи, WB API и `api_connected` не меняются. Полный контракт и ревизия: [Ozon Seller connection](docs/ozon-seller-connection.md).
+`POST /api/portals/<portal_id>/ozon-seller-cards` обновляет карточки из сохранённого доступа Ozon Seller API, без MPStats и без обязательной ссылки на продавца. Нужны сессия и edit-доступ к Ozon-кабинету. Список, info, attributes и названия характеристик получаются до записи; неполный ответ сохраняет прежние данные. Задачи и черновики не меняются. API-кабинет определяется полем `ozonApiConnected`; legacy `apiConnected` оставлен WB. Ограничения и ревизия: [Карточки Ozon Seller API](docs/ozon-seller-cards.md).
+
+`GET/POST /api/portals/<portal_id>/ozon-connection` обслуживает форму `Настройки кабинета → Подключение Ozon Seller API`. GET возвращает только статус, наличие доступа и время проверки. POST с `action=connect`, `clientId`, `apiKey` проверяет чтение списка товаров, затем шифрует оба значения в существующей `portal_integrations` с provider `ozon`; `action=check` использует сохранённую пару. Нужен доступ к Ozon-кабинету, для POST — право редактирования. Неудачная замена сохраняет прежний ключ; повторная привязка одного аккаунта и смена Client-Id у существующей связи запрещены. Сама проверка не меняет карточки и задачи. После сохранения ключа форма запускает отдельный импорт Seller API; WB API и legacy `api_connected` не меняются. Полный контракт и ревизия: [Ozon Seller connection](docs/ozon-seller-connection.md).
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. WB write-операции ограничены ручной публикацией принятого контента; цены, остатки, медиа и автоматическая публикация при принятии не реализуются.
 
