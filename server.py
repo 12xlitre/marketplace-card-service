@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import hmac
 import io
+import http.client
 import json
 import mimetypes
 import os
@@ -3627,6 +3628,153 @@ def ensure_ozon_portal_access(portal_id, user, edit=False):
   if audit_normalized(portal["marketplace"]) != "ozon":
     raise ValueError("ozon_portal_required")
   return numeric_portal_id
+
+
+class OzonSellerError(Exception):
+    def __init__(self, code, status=502):
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+def check_ozon_credentials(client_id, api_key):
+    """Check product-list access only; no marketplace write endpoints or redirects."""
+    body = json.dumps({"filter": {"visibility": "ALL"}, "limit": 1})
+    for attempt in range(3):
+        connection = http.client.HTTPSConnection("api-seller.ozon.ru", timeout=5)
+        retry_after = None
+        try:
+            connection.connect()
+            connection.sock.settimeout(15)
+            connection.request("POST", "/v3/product/list", body=body, headers={
+                "Client-Id": client_id, "Api-Key": api_key,
+                "Content-Type": "application/json", "User-Agent": "OptiCards/0.1",
+            })
+            response = connection.getresponse()
+            status = response.status
+            retry_after = response.getheader("Retry-After")
+            raw = response.read(512 * 1024 + 1)
+            if status in (401, 403):
+                raise OzonSellerError("ozon_auth_error", 409)
+            if status not in (429, 500, 502, 503, 504):
+                if status != 200 or len(raw) > 512 * 1024:
+                    raise OzonSellerError("ozon_invalid_response")
+                try:
+                    data = json.loads(raw)
+                    result = data["result"]
+                    total = result["total"]
+                    if not isinstance(result["items"], list) or isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                        raise ValueError
+                except (ValueError, KeyError, TypeError, UnicodeError):
+                    raise OzonSellerError("ozon_invalid_response") from None
+                return {"productCount": total}
+            failure = OzonSellerError("ozon_rate_limited" if status == 429 else "ozon_unavailable", 429 if status == 429 else 502)
+        except (OSError, http.client.HTTPException):
+            failure = OzonSellerError("ozon_unavailable")
+        finally:
+            connection.close()
+        if attempt == 2:
+            raise failure
+        delay = 0.5 * (2 ** attempt)
+        if retry_after:
+            try:
+                delay = max(delay, float(retry_after))
+            except ValueError:
+                try:
+                    delay = max(delay, (parsedate_to_datetime(retry_after) - dt.datetime.now(dt.timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            # Do not retry before a long Retry-After; return control to the user.
+            if delay > 5:
+                raise failure
+        time.sleep(delay)
+
+
+OZON_CONNECTION_LOCK = threading.Lock()
+OZON_CONNECTION_NEXT_CHECK = {}
+OZON_CONNECTION_INFLIGHT = set()
+
+
+def ozon_connection_row(portal_id):
+  with connect_db() as db:
+    return db.execute("SELECT * FROM portal_integrations WHERE portal_id = ? AND provider = 'ozon'", (portal_id,)).fetchone()
+
+
+def public_ozon_connection(portal_id, user):
+  numeric_id = ensure_ozon_portal_access(portal_id, user)
+  row = ozon_connection_row(numeric_id)
+  return {"connection": {
+    "hasCredentials": bool(row),
+    "status": row["status"] if row else "not_connected",
+    "lastCheckedAt": (row["last_checked_at"] or "") if row else "",
+  }}
+
+
+def update_ozon_connection(portal_id, payload, user):
+  numeric_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  action = payload.get("action", "connect")
+  if not isinstance(action, str) or action not in {"connect", "check"}:
+    raise ValueError("invalid_ozon_connection_action")
+  previous = ozon_connection_row(numeric_id)
+  if action == "check":
+    if not previous:
+      raise ValueError("ozon_connection_required")
+    try:
+      credentials = json.loads(decrypt_secret(previous["token_nonce"], previous["token_ciphertext"], integration_aad(numeric_id, "ozon")))
+    except (InvalidTag, ValueError, KeyError, TypeError):
+      raise RuntimeError("secret_storage_unavailable") from None
+    if not isinstance(credentials, dict):
+      raise RuntimeError("secret_storage_unavailable")
+  else:
+    credentials = {"clientId": str(payload.get("clientId") or "").strip(), "apiKey": str(payload.get("apiKey") or "").strip()}
+  client_id, api_key = credentials.get("clientId", ""), credentials.get("apiKey", "")
+  if not re.fullmatch(r"[0-9]{1,20}", client_id) or not re.fullmatch(r"[\x21-\x7e]{20,4096}", api_key):
+    raise ValueError("ozon_credentials_required")
+  account_digest = secret_digest("ozon-client:" + client_id)
+  # Check configuration before contacting Ozon; a missing encryption key must not discard a working connection.
+  nonce, ciphertext = encrypt_secret(json.dumps(credentials), integration_aad(numeric_id, "ozon"))
+  with OZON_CONNECTION_LOCK:
+    if numeric_id in OZON_CONNECTION_INFLIGHT or time.monotonic() < OZON_CONNECTION_NEXT_CHECK.get(numeric_id, 0):
+      raise OzonSellerError("ozon_check_rate_limited", 429)
+    OZON_CONNECTION_INFLIGHT.add(numeric_id)
+    OZON_CONNECTION_NEXT_CHECK[numeric_id] = time.monotonic() + 10
+  try:
+    result = check_ozon_credentials(client_id, api_key)
+    with connect_db() as db:
+      db.execute("BEGIN IMMEDIATE")
+      duplicate = db.execute("SELECT portal_id FROM portal_integrations WHERE provider = 'ozon' AND external_key = ? AND portal_id != ?", (account_digest, numeric_id)).fetchone()
+      if duplicate:
+        raise ValueError("ozon_account_already_connected")
+      current = db.execute("SELECT external_key FROM portal_integrations WHERE portal_id = ? AND provider = 'ozon'", (numeric_id,)).fetchone()
+      if current and current["external_key"] and current["external_key"] != account_digest:
+        raise ValueError("ozon_account_mismatch")
+      if action == "check":
+        # A slow check must not override a newly replaced connection.
+        changed = db.execute("UPDATE portal_integrations SET status = 'verified', last_checked_at = CURRENT_TIMESTAMP WHERE portal_id = ? AND provider = 'ozon' AND token_digest = ?",
+                             (numeric_id, previous["token_digest"])).rowcount
+        if not changed:
+          raise ValueError("ozon_connection_changed")
+      else:
+        db.execute("""
+          INSERT INTO portal_integrations (portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at)
+          VALUES (?, 'ozon', 'verified', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(portal_id, provider) DO UPDATE SET status = 'verified', token_nonce = excluded.token_nonce,
+            token_ciphertext = excluded.token_ciphertext, token_digest = excluded.token_digest,
+            external_key = excluded.external_key, last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        """, (numeric_id, nonce, ciphertext, secret_digest(json.dumps(credentials)), account_digest))
+    record_admin_event(user, "ozon_connection_verified", "portal", numeric_id, portal_id=numeric_id,
+                       details={"action": action, "productCount": result["productCount"]})
+    return {**public_ozon_connection(numeric_id, user), **result}
+  except OzonSellerError as exc:
+    if action == "check":
+      with connect_db() as db:
+        db.execute("UPDATE portal_integrations SET status = ?, last_checked_at = CURRENT_TIMESTAMP WHERE portal_id = ? AND provider = 'ozon' AND token_digest = ?",
+                   (exc.code, numeric_id, previous["token_digest"]))
+    record_admin_event(user, "ozon_connection_failed", "portal", numeric_id, portal_id=numeric_id, details={"action": action, "code": exc.code})
+    raise
+  finally:
+    with OZON_CONNECTION_LOCK:
+      OZON_CONNECTION_INFLIGHT.discard(numeric_id)
 
 
 def normalize_ozon_task(raw_task):
@@ -22074,6 +22222,19 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.OK, result)
       return
 
+    if path.startswith("/api/portals/") and path.endswith("/ozon-connection"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id = path[len("/api/portals/"):-len("/ozon-connection")].strip("/")
+      try:
+        self.send_json(HTTPStatus.OK, public_ozon_connection(portal_id, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+      return
+
     if path == "/api/integrations/mpstats":
       if not self.require_user():
         return
@@ -22637,6 +22798,27 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           max_age=SESSION_TTL_REMEMBER_SECONDS if remember else SESSION_TTL_SECONDS,
         )},
       )
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/ozon-connection"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id = path[len("/api/portals/"):-len("/ozon-connection")].strip("/")
+      payload = self.read_json() or {}
+      if not isinstance(payload, dict):
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_ozon_connection_action"})
+        return
+      try:
+        self.send_json(HTTPStatus.OK, update_ozon_connection(portal_id, payload, user))
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+      except OzonSellerError as exc:
+        self.send_json(exc.status, {"error": exc.code})
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
       return
 
     if path.startswith("/api/portals/") and path.endswith("/wb-token"):

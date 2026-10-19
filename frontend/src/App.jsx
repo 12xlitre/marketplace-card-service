@@ -16,6 +16,7 @@ import {
   Eye,
   ExternalLink,
   HelpCircle,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Pencil,
@@ -9159,7 +9160,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   <div>
                     <Settings size={17} />
                     <strong>Настройки кабинета</strong>
-                    <span>Название Ozon-кабинета</span>
+                    <span>Название, источники и API</span>
                   </div>
                 </summary>
                 <div className="cabinet-management-body">
@@ -9241,10 +9242,11 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       />
                     </div>
                   </details>
+                  <OzonConnectionPanel key={portal.id} portalId={portal.id} isDemo={portal.isDemo} />
                   <details className="management-subpanel">
                     <summary><Settings size={16} />Контур Ozon</summary>
                     <div className="security-inline-list">
-                      <div><span>Ozon Seller API</span><strong>не подключен</strong></div>
+                      <div><span>Ozon Seller API</span><strong>доступ настраивается выше</strong></div>
                       <div><span>Контур данных</span><strong>только Ozon snapshot</strong></div>
                       <div><span>MPStats</span><strong>keyword-база для СЯ</strong></div>
                     </div>
@@ -9442,6 +9444,81 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         </div>
       </div>
     </section>
+  );
+}
+
+function OzonConnectionPanel({ portalId, isDemo = false }) {
+  const [connection, setConnection] = useState(null);
+  const [clientId, setClientId] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [message, setMessage] = useState("");
+  const path = `/api/portals/${encodeURIComponent(portalId)}/ozon-connection`;
+  useEffect(() => {
+    let active = true;
+    if (isDemo) { setBusy(false); return () => { active = false; }; }
+    apiRequest(path).then((result) => {
+      if (active) setConnection(result.connection);
+    }).catch(() => {
+      if (active) setMessage("Не удалось загрузить состояние подключения.");
+    }).finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, [path, isDemo]);
+
+  async function submit(action) {
+    if (busy || isDemo) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await apiRequest(path, {
+        method: "POST",
+        body: JSON.stringify(action === "check" ? { action } : { action, clientId, apiKey }),
+      });
+      setConnection(result.connection);
+      if (action === "connect") { setClientId(""); setApiKey(""); }
+      setMessage(`Доступ к списку товаров проверен: ${formatNumber(result.productCount)} товаров. ${action === "connect" ? "Ключ сохранён." : ""}`);
+    } catch (error) {
+      const messages = {
+        ozon_auth_error: "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров.",
+        ozon_credentials_required: "Введите числовой Client-Id и API-ключ из настроек Ozon Seller API.",
+        ozon_check_rate_limited: "Проверка уже выполняется или была запущена только что. Повторите через 10 секунд.",
+        ozon_rate_limited: "Ozon ограничил частоту запросов. Повторите проверку позднее.",
+        ozon_account_already_connected: "Этот Ozon-аккаунт уже подключён к другому кабинету приложения.",
+        ozon_account_mismatch: "Кабинет уже связан с другим Client-Id. Для замены ключа укажите Client-Id этого же магазина.",
+        ozon_connection_changed: "Подключение уже изменилось. Обновите страницу.",
+        ozon_connection_required: "Сначала сохраните Client-Id и API-ключ.",
+        secret_storage_unavailable: "Хранилище ключей сейчас недоступно. Повторите позднее.",
+        forbidden: "Недостаточно прав для изменения подключения этого кабинета.",
+      };
+      setMessage(messages[error.message] || "Проверка Ozon недоступна. Сохранённый ключ не заменён. Повторите позднее.");
+      try { const result = await apiRequest(path); setConnection(result.connection); } catch { /* Keep the previous metadata. */ }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details className="management-subpanel">
+      <summary><KeyRound size={16} />Подключение Ozon Seller API <Tag tone={connection?.status === "verified" ? "green" : "amber"}>{connection?.status === "verified" ? "Проверен" : connection?.hasCredentials ? "Требует проверки" : "Не подключён"}</Tag></summary>
+      <div className="management-subpanel-body">
+        <p>Укажите доступ к этому Ozon-кабинету. Проверка читает список товаров; загрузка карточек и SEO-подготовка выполняются отдельно.</p>
+        <form className="integration-form flat" onSubmit={(event) => { event.preventDefault(); submit("connect"); }}>
+          <label className="field-label">Client-Id
+            <input value={clientId} onChange={(event) => setClientId(event.target.value)} inputMode="numeric" autoComplete="off" maxLength={20} disabled={busy || isDemo} placeholder="Client-Id из настроек Seller API" />
+          </label>
+          <label className="field-label">API-ключ
+            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" maxLength={4096} disabled={busy || isDemo} placeholder={connection?.hasCredentials ? "Новый ключ для замены сохранённого" : "API-ключ Ozon"} />
+          </label>
+          <p>Ключ хранится зашифрованно на сервере. При замене введите оба значения; если проверка не пройдёт, прежний доступ сохранится.</p>
+          <div className="panel-actions">
+            <button className={loadingButtonClass("btn primary", busy)} type="submit" disabled={busy || isDemo || !clientId.trim() || !apiKey.trim()}><Save size={16} />Проверить и сохранить</button>
+            <button className="btn" type="button" onClick={() => submit("check")} disabled={busy || isDemo || !connection?.hasCredentials}><RefreshCw size={16} />Проверить сохранённый доступ</button>
+          </div>
+          {connection?.lastCheckedAt ? <p className="status-note">Последняя проверка: {new Date(`${connection.lastCheckedAt.replace(" ", "T")}Z`).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })} МСК</p> : null}
+          {message ? <p className="status-note" role="status">{message}</p> : null}
+        </form>
+      </div>
+    </details>
   );
 }
 
@@ -22423,7 +22500,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             </div>
             <div className="disabled">
               <strong>Ozon Seller API</strong>
-              <span>Позже: точные заказы, остатки, экономика и отчеты.</span>
+              <span>Client-Id и API-ключ можно добавить в настройках созданного кабинета.</span>
             </div>
           </div>
           <div className="ozon-scope-toggle" role="group" aria-label="Охват Ozon-кабинета">

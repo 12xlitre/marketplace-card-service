@@ -79,6 +79,8 @@ POST /api/portals/<portal_id>/client-contact
 POST /api/portals/<portal_id>/manual-source
 POST /api/portals/<portal_id>/ozon-mpstats-probe
 POST /api/portals/<portal_id>/ozon-mpstats-cards
+GET /api/portals/<portal_id>/ozon-connection
+POST /api/portals/<portal_id>/ozon-connection
 POST /api/portals/<portal_id>/archive
 POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
@@ -115,6 +117,8 @@ DELETE /api/portal-work-periods?portal_id=1&period_id=1
 `POST /api/portals/<portal_id>/ozon-mpstats-probe` доступен только для Ozon-порталов с edit/manage правами пользователя и проверяет сохраненный Ozon-источник через MPStats малым лимитом. Если в источнике указаны тестовые артикулы/SKU, item-кандидаты проверяются первыми и агрегируются пачкой до 50 найденных карточек; seller/brand/category остаются fallback, если SKU ничего не дали. Маршрут возвращает статус, найденный источник, попытки endpoint-ов и sample-карточки, но не сохраняет карточки и не запускает WB-загрузчик.
 
 `POST /api/portals/<portal_id>/ozon-mpstats-cards` доступен только для Ozon-порталов с edit/manage правами пользователя и сохраняет явно выбранный результат Ozon MPStats probe в `cards_snapshot_json`. Карточки нормализуются как `marketplace=ozon`, мержатся по SKU/offer/id с уже сохраненным Ozon snapshot и обновляют `card_count/problem_count/last_sync_at`; WB API и WB bootstrap не запускаются.
+
+`GET/POST /api/portals/<portal_id>/ozon-connection` обслуживает форму `Настройки кабинета → Подключение Ozon Seller API`. GET возвращает только статус, наличие доступа и время проверки. POST с `action=connect`, `clientId`, `apiKey` проверяет чтение списка товаров, затем шифрует оба значения в существующей `portal_integrations` с provider `ozon`; `action=check` использует сохранённую пару. Нужен доступ к Ozon-кабинету, для POST — право редактирования. Неудачная замена сохраняет прежний ключ; повторная привязка одного аккаунта и смена Client-Id у существующей связи запрещены. Карточки, задачи, WB API и `api_connected` не меняются. Полный контракт и ревизия: [Ozon Seller connection](docs/ozon-seller-connection.md).
 
 Для числовых порталов env fallback отключен: у каждого портала должен быть свой зашифрованный WB-токен. WB write-операции ограничены ручной публикацией принятого контента; цены, остатки, медиа и автоматическая публикация при принятии не реализуются.
 
