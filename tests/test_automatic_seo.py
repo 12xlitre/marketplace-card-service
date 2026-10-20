@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from openpyxl import load_workbook
 from openpyxl.cell.rich_text import CellRichText
@@ -255,6 +256,47 @@ class AutomaticSeoTest(unittest.TestCase):
         with patch.object(self.service, 'chat', return_value={'structure': [], 'phrases': [{'phrase': 'выдумано'}]}):
             with self.assertRaisesRegex(SeoError, 'seo_competitor_witness_missing'):
                 self.service.generate(own, src, [], None, {})
+
+    def test_model_failure_diagnostics_are_specific_and_private(self):
+        samples = [
+            ({'choices': [{'message': {'content': '{"broken":'}, 'finish_reason': 'length'}]}, 'seo_llm_response_truncated'),
+            ({'choices': [{'message': {'content': '{"broken":'}, 'finish_reason': 'stop'}]}, 'seo_llm_invalid_json'),
+            ({'choices': []}, 'seo_invalid_model_response'),
+        ]
+        for payload, code in samples:
+            journal = {}
+            with self.subTest(code=code), patch.object(self.host, 'audit_llm_chat_completion', return_value=(payload, 'model', 'test')):
+                with self.assertRaisesRegex(SeoError, code):
+                    self.service.chat('Test', {}, journal=journal, journal_key='response:draft:1001')
+            self.assertNotIn('response:draft:1001', self.service.view(1, 'batch', self.tech))
+        for exc, code in [(TimeoutError('secret must not leak'), 'seo_llm_timeout'),
+                          (HTTPError('https://secret-url', 429, 'secret', {}, None), 'seo_llm_http_error')]:
+            with self.subTest(code=code), patch.object(self.host, 'audit_llm_chat_completion', side_effect=exc):
+                with self.assertRaisesRegex(SeoError, code):
+                    self.service.chat('Test', {})
+
+    def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
+        complete = self.host.audit_llm_chat_completion
+        def answer(messages):
+            if 'ownEvidence' in json.loads(messages[1]['content']):
+                return {'choices': [{'message': {'content': '{"private product diagnostic":'}, 'finish_reason': 'length'}]}, 'model', 'test'
+            return complete(messages)
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer), self.assertLogs('automatic_seo', level='ERROR') as logs:
+            self.action()
+            version = self.finish()
+        self.assertTrue(all(e['code'] == 'seo_llm_response_truncated' for e in version['errors']))
+        state = self.service.load(self.service.directory(1, 'batch'))
+        self.assertIn('response:draft:1001', state['versions'][-1]['cache'])
+        public = json.dumps(self.service.view(1, 'batch', self.tech))
+        self.assertNotIn('private product diagnostic', public)
+        self.assertNotIn('private product diagnostic', '\n'.join(logs.output))
+        try:
+            raise RuntimeError('api-key-secret-sensitive-response')
+        except RuntimeError as exc:
+            with self.assertLogs('automatic_seo', level='ERROR') as logs:
+                record = self.service.failure(exc, 1, 'batch', version, '1001')
+        self.assertNotIn('api-key-secret-sensitive-response', json.dumps(record) + '\n'.join(logs.output))
+        self.assertIn('RuntimeError', '\n'.join(logs.output))
 
     def test_capacity_limit_does_not_start_or_spend_generation(self):
         self.service.slots.acquire(); self.service.slots.acquire()

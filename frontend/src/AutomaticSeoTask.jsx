@@ -2,10 +2,16 @@ import { useEffect, useState } from "react";
 
 const messages = {
   forbidden: "Для этого действия нужны права назначенного специалиста или аккаунта.",
-  seo_card_failed: "Не удалось обработать товар. Проверьте источники и повторите подготовку этого SKU.",
+  seo_card_failed: "Внутренняя ошибка обработки. Диагностика записана для исправления; менять товар или конкурента не требуется.",
+  seo_llm_timeout: "Сервис генерации текста не ответил за отведённое время. Excel не создан; причина не связана с выбором конкурента.",
+  seo_llm_http_error: "Сервис генерации текста отклонил запрос. Статус ответа показан ниже.",
+  seo_llm_connection_failed: "Не удалось соединиться с сервисом генерации текста.",
+  seo_llm_response_truncated: "Сервис генерации оборвал ответ по пределу длины. Требуется исправить объём запроса; менять конкурента не нужно.",
+  seo_llm_invalid_json: "Сервис генерации вернул ответ, который не удалось прочитать. Диагностика сохранена.",
+  seo_invalid_model_response: "Сервис генерации вернул ответ неверной структуры. Диагностика сохранена.",
   seo_generation_failed: "Подготовка файла прервана. Повторите запуск; готовые результаты будут использованы повторно.",
   seo_characteristic_evidence_missing: "Для предлагаемой характеристики не найдено подтверждение в собственных данных товара.",
-  seo_competitor_witness_missing: "Не удалось подтвердить ключи по описанию конкурента. Excel ещё не создан. Повторите подготовку проблемных товаров; при повторной ошибке выберите другого конкурента.",
+  seo_competitor_witness_missing: "Выделенные алгоритмом фразы не найдены в описании конкурента. Формулировки показаны ниже; требуется проверить разбор текста.",
   seo_keyword_decisions_incomplete: "Не для всех формулировок конкурента объяснён выбор. Требуется доработка.",
   seo_semantic_decisions_incomplete: "Не для всех запросов объяснено решение. Требуется повторная подготовка.",
   seo_semantic_witness_missing: "Заявленный ключ не найден в указанном разделе результата. Требуется доработка.",
@@ -132,7 +138,12 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         </label>)}</div>
       </details>
       {error ? <p className="status-note error" role="alert">{error}</p> : null}
-      {latest?.errors?.length ? <ul>{latest.errors.map((row, i) => <li key={`${row.sku}-${i}`}>{row.sku}: {errorText({ message: row.code })}</li>)}</ul> : null}
+      {latest?.errors?.length ? <ul>{latest.errors.map((row, i) => <li key={`${row.sku}-${i}`}>
+        {row.sku}: {errorText({ message: row.code })}
+        {row.details?.httpStatus ? <span> Статус сервиса: {row.details.httpStatus}.</span> : null}
+        {row.details?.field ? <span> Поле: {row.details.field}.</span> : null}
+        {row.details?.phrases?.length ? <details><summary>Какие фразы не подтверждены</summary><ul>{row.details.phrases.map((phrase, j) => <li key={j}>{phrase}</li>)}</ul></details> : null}
+      </li>)}</ul> : null}
       {latest && !latest.sha256 ? <p role="status" className="status-note">{running ? "Excel появится здесь после завершения подготовки." : "Excel этой версии не создан: подготовка не завершена. Повторите проблемные товары кнопкой ниже — готовые результаты сохранятся."}</p> : null}
       {latest?.issues?.length ? <details><summary>Вопросы к проверке: {latest.issues.length}</summary><ul>{latest.issues.map((row, i) => <li key={i}><strong>{row.sku} · {row.field}{row.blocking ? " · блокирует принятие" : ""}</strong>: {row.detail} {row.question}</li>)}</ul></details> : null}
       {mayRemark ? <div className="automatic-seo-remark">
