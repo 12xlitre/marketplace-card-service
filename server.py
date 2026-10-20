@@ -14,7 +14,9 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import sys
 import ssl
 import time
 import threading
@@ -274,6 +276,32 @@ def connect_db():
   connection.row_factory = sqlite3.Row
   connection.execute("PRAGMA foreign_keys = ON")
   return connection
+
+
+def migrate_ozon_task_scope(db):
+  """Retain task IDs/history while allowing manual and automatic tasks per card."""
+  row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ozon_tasks'").fetchone()
+  if not row or not re.search(r",\s*UNIQUE\s*\(portal_id,\s*card_key\)", row["sql"], re.I):
+    return
+  db.execute("SAVEPOINT ozon_task_scope")
+  try:
+    db.execute("UPDATE ozon_tasks SET status = status WHERE 0")  # serialize schema migrations
+    sql = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ozon_tasks'").fetchone()["sql"]
+    if re.search(r",\s*UNIQUE\s*\(portal_id,\s*card_key\)", sql, re.I):
+      sequence = db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'ozon_tasks'").fetchone()
+      sql = re.sub(r",\s*UNIQUE\s*\(portal_id,\s*card_key\)", "", sql, flags=re.I)
+      sql = re.sub(r"CREATE TABLE (?:IF NOT EXISTS )?[\"`]?ozon_tasks[\"`]?", "CREATE TABLE ozon_tasks_with_modes", sql, count=1, flags=re.I)
+      db.execute(sql)
+      db.execute("INSERT INTO ozon_tasks_with_modes SELECT * FROM ozon_tasks")
+      db.execute("DROP TABLE ozon_tasks")
+      db.execute("ALTER TABLE ozon_tasks_with_modes RENAME TO ozon_tasks")
+      if sequence:
+        db.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'ozon_tasks'", (sequence["seq"],))
+    db.execute("RELEASE ozon_task_scope")
+  except Exception:
+    db.execute("ROLLBACK TO ozon_task_scope")
+    db.execute("RELEASE ozon_task_scope")
+    raise
 
 
 def init_db():
@@ -601,6 +629,7 @@ def init_db():
     if "token_expires_at" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN token_expires_at TEXT")
     competitor_columns = {row["name"] for row in db.execute("PRAGMA table_info(card_competitors)").fetchall()}
+    migrate_ozon_task_scope(db)
     if "review_json" not in competitor_columns:
       db.execute("ALTER TABLE card_competitors ADD COLUMN review_json TEXT NOT NULL DEFAULT '{}'")
     if "next_auto_check_at" not in competitor_columns:
@@ -2152,6 +2181,11 @@ def delete_portal(portal_id, actor=None):
       ),
     )
     db.execute("DELETE FROM portals WHERE id = ?", (numeric_portal_id,))
+  report_directory = DB_PATH.parent / "automatic-seo" / str(numeric_portal_id)
+  try:
+    shutil.rmtree(report_directory)
+  except FileNotFoundError:
+    pass
   return portal_details
 
 
@@ -3640,7 +3674,8 @@ class OzonSellerError(Exception):
 
 
 OZON_READ_PATHS = {"/v3/product/list", "/v3/product/info/list", "/v4/product/info/attributes",
-                   "/v1/description-category/attribute", "/v1/description-category/tree"}
+                   "/v1/description-category/attribute", "/v1/description-category/tree",
+                   "/v1/description-category/attribute/values"}
 OZON_MAX_SYNC_CARDS = 2000
 OZON_SYNC_SECONDS = 45
 
@@ -4157,6 +4192,10 @@ def normalize_ozon_task(raw_task):
     payload["workComment"] = work_comment
   if batch_position:
     payload["batchPosition"] = batch_position
+  if raw_task.get("optimizationMode") == "automatic":
+    payload["optimizationMode"] = "automatic"
+    payload["workType"] = "content"
+    payload["workTypes"] = ["content"]
   return payload if card_key else None
 
 
@@ -4184,6 +4223,7 @@ def public_ozon_task(row, semantic_map=None, content_map=None):
     "batchCreatedBy": payload.get("batchCreatedBy") or "",
     "batchPosition": payload.get("batchPosition") or "",
     "workComment": payload.get("workComment") or "",
+    "optimizationMode": payload.get("optimizationMode") or "",
     "hasSemanticFinal": bool(semantic.get("hasFinal")),
     "hasFinalContent": bool(content.get("hasFinalContent")),
     "auditStatus": content.get("auditStatus") or "idle",
@@ -5011,6 +5051,21 @@ def build_ozon_card_audit(portal_id, payload, user):
   }, user)
 
 
+_AUTOMATIC_SEO_SERVICES = {}
+_AUTOMATIC_SEO_SERVICE_LOCK = threading.Lock()
+
+
+def automatic_seo_service():
+  from automatic_seo import AutomaticSeoService
+  from automatic_seo_host import OzonSeoHost
+  root = DB_PATH.parent / "automatic-seo"
+  with _AUTOMATIC_SEO_SERVICE_LOCK:
+    key = str(root.resolve())
+    if key not in _AUTOMATIC_SEO_SERVICES:
+      _AUTOMATIC_SEO_SERVICES[key] = AutomaticSeoService(OzonSeoHost(sys.modules[__name__]), root)
+    return _AUTOMATIC_SEO_SERVICES[key]
+
+
 def list_ozon_tasks(portal_id, user):
   numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=False)
   with connect_db() as db:
@@ -5077,26 +5132,47 @@ def save_ozon_tasks(portal_id, payload, user):
   numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
   payload = payload if isinstance(payload, dict) else {}
   raw_tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+  with connect_db() as db:
+    automatic_ids = {row["task_id"] for row in db.execute("SELECT task_id, payload_json FROM ozon_tasks WHERE portal_id = ?", (numeric_portal_id,)).fetchall()
+                     if json.loads(row["payload_json"] or "{}").get("optimizationMode") == "automatic"}
   tasks = []
   seen = set()
   for raw_task in raw_tasks:
     task = normalize_ozon_task(raw_task)
-    if not task or task["cardKey"] in seen:
+    if task and task["id"] in automatic_ids:
+      task["optimizationMode"] = "automatic"
+    identity = (task["cardKey"], task.get("optimizationMode", "")) if task else None
+    if not task or identity in seen:
       continue
-    seen.add(task["cardKey"])
+    seen.add(identity)
     tasks.append(task)
+  if len(tasks) > 500 and any(task.get("optimizationMode") == "automatic" for task in tasks):
+    raise ValueError("ozon_task_limit")
   tasks = tasks[:500]
   now = utc_now().isoformat()
   actor_login = user_login_value(user) or ""
   with connect_db() as db:
     previous_rows = db.execute(
-      "SELECT task_id, card_key, status, title FROM ozon_tasks WHERE portal_id = ?",
+      "SELECT task_id, card_key, status, title, payload_json FROM ozon_tasks WHERE portal_id = ?",
       (numeric_portal_id,),
     ).fetchall()
     previous = {row["task_id"]: row for row in previous_rows}
     next_task_ids = {task["id"] for task in tasks}
     for task in tasks:
       previous_row = previous.get(task["id"])
+      previous_payload = json.loads(previous_row["payload_json"] or "{}") if previous_row else {}
+      if previous_payload.get("optimizationMode") == "automatic":
+        # Report transitions are version-checked by the report API, never by
+        # the generic task-list save or a stale browser's copy of that list.
+        task["optimizationMode"] = "automatic"
+        task["workType"], task["workTypes"] = "content", ["content"]
+        task["status"] = previous_row["status"]
+        for key in ("batchId", "cardKey", "sku", "offerId", "batchPosition"):
+          task[key] = previous_payload.get(key, task.get(key))
+      elif task.get("optimizationMode") == "automatic":
+        if db.execute("SELECT 1 FROM ozon_task_events WHERE portal_id = ? AND task_id = ? AND action = 'deleted' LIMIT 1", (numeric_portal_id, task["id"])).fetchone():
+          raise ValueError("seo_deleted_task_restore_blocked")
+        task["status"] = "draft"
       db.execute(
         """
         INSERT INTO ozon_tasks (
@@ -22453,9 +22529,48 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return None
     return user
 
+  def handle_automatic_seo(self, path, method):
+    match = re.fullmatch(r"/api/portals/([0-9]+)/automatic-seo/([^/]+)(/file)?", path)
+    if not match:
+      return False
+    user = self.require_user()
+    if not user:
+      return True
+    portal, batch, file_suffix = match.groups()
+    batch = unquote(batch)
+    try:
+      service = automatic_seo_service()
+      if method == "GET" and file_suffix:
+        query = parse_qs(urlparse(self.path).query)
+        version = int(query.get("version", ["0"])[0])
+        data = service.download(portal, batch, user, version)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="SEO_v{version}.xlsx"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+      elif method == "GET":
+        self.send_json(HTTPStatus.OK, service.view(portal, batch, user))
+      elif not file_suffix:
+        self.send_json(HTTPStatus.OK, service.action(portal, batch, user, self.read_json() or {}))
+      else:
+        self.send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "method_not_allowed"})
+    except PermissionError:
+      self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+    except ValueError as exc:
+      self.send_json(getattr(exc, "status", 400), {"error": str(exc) or "seo_invalid_request"})
+    except Exception:
+      self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "seo_service_unavailable"})
+    return True
+
   def do_GET(self):
     parsed = urlparse(self.path)
     path = parsed.path
+    if self.handle_automatic_seo(path, "GET"):
+      return
     if path == "/healthz":
       self.send_response(HTTPStatus.OK)
       self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -23102,6 +23217,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
 
   def do_POST(self):
     path = urlparse(self.path).path
+    if self.handle_automatic_seo(path, "POST"):
+      return
     if path == "/api/login":
       payload = self.read_json() or {}
       login = str(payload.get("login", "")).strip()

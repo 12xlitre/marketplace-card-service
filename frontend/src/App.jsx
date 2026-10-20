@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import AutomaticSeoTask from "./AutomaticSeoTask";
 import {
   Archive,
   AlertTriangle,
@@ -8802,7 +8803,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
-  async function persistOzonWorkState(nextState) {
+  async function persistOzonWorkState(nextState, options = {}) {
     writeOzonWorkState(portal.id, nextState);
     if (!portal?.id || portal.isDemo) {
       setOzonWorkStatus("local");
@@ -8822,15 +8823,17 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       setOzonWorkState(savedState);
       setOzonWorkStatus("saved");
       return savedState;
-    } catch {
+    } catch (error) {
       setOzonWorkStatus("local-fallback");
+      if (options.requireSaved) throw error;
       return nextState;
     }
   }
 
-  function applyOzonWorkState(nextState) {
+  function applyOzonWorkState(nextState, options = {}) {
+    if (options.requireSaved) return persistOzonWorkState(nextState, options);
     setOzonWorkState(nextState);
-    persistOzonWorkState(nextState);
+    return persistOzonWorkState(nextState, options);
   }
 
   function replaceOzonWorkPeriod(period) {
@@ -9449,6 +9452,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 </section>
 
                 <OzonCardsPanel
+                  workPeriods={workPeriods}
+                  workPeriodsStatus={workPeriodsStatus}
+                  onLinkTaskGroup={linkOzonTaskGroupToWorkPeriod}
                   hasSellerApi={hasSellerApi}
                   cards={portal.realCards || []}
                   portalId={portal.id}
@@ -9466,6 +9472,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
 
             {activeSellerTab === "tasks" ? (
               <OzonTasksPanel
+                portalId={portal.id}
+                onAutomaticTasksUpdated={(updatedTasks) => setOzonWorkState((current) => ({ ...current, tasks: current.tasks.map((task) => updatedTasks.find((item) => item.id === task.id) || task) }))}
                 cards={portal.realCards || []}
                 workState={ozonWorkState}
                 workStatus={ozonWorkStatus}
@@ -9854,7 +9862,7 @@ function readOzonWorkState(portalId) {
     const parsed = JSON.parse(localStorage.getItem(ozonWorkStorageKey(portalId)) || "{}");
     return {
       selectedKeys: Array.isArray(parsed.selectedKeys) ? parsed.selectedKeys.map(String).filter(Boolean) : [],
-      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter((task) => task.optimizationMode !== "automatic") : [],
       recentEvents: Array.isArray(parsed.recentEvents) ? parsed.recentEvents : [],
     };
   } catch {
@@ -9866,7 +9874,7 @@ function writeOzonWorkState(portalId, state) {
   if (typeof window === "undefined") return;
   localStorage.setItem(ozonWorkStorageKey(portalId), JSON.stringify({
     selectedKeys: Array.isArray(state?.selectedKeys) ? state.selectedKeys : [],
-    tasks: Array.isArray(state?.tasks) ? state.tasks : [],
+    tasks: Array.isArray(state?.tasks) ? state.tasks.filter((task) => task.optimizationMode !== "automatic") : [],
     recentEvents: Array.isArray(state?.recentEvents) ? state.recentEvents.slice(0, 30) : [],
   }));
 }
@@ -9897,7 +9905,9 @@ function ozonTaskWorkTypes(task) {
 
 function ozonTaskForCard(card, tasks = []) {
   const key = ozonCardStableKey(card);
-  return (Array.isArray(tasks) ? tasks : []).find((task) => task.cardKey === key) || null;
+  const matches = (Array.isArray(tasks) ? tasks : []).filter((task) => task.cardKey === key);
+  return matches.find((task) => task.optimizationMode === "automatic" && !["approved", "done", "skipped"].includes(task.status))
+    || matches.find((task) => !["approved", "done", "skipped"].includes(task.status)) || matches[0] || null;
 }
 
 function ozonWorkStateForCard(card, selectedSet, tasks = []) {
@@ -10991,11 +11001,14 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
   );
 }
 
-function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks }) {
+function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", onWorkStateChange, onOpenCard, onOpenTasks, workPeriods = [], workPeriodsStatus = "idle", onLinkTaskGroup }) {
   const [query, setQuery] = useState("");
   const [issueFilter, setIssueFilter] = useState("all");
   const [workFilter, setWorkFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [packageForm, setPackageForm] = useState(null);
+  const [packageError, setPackageError] = useState("");
+  const [packageSaving, setPackageSaving] = useState(false);
   const visibleCards = Array.isArray(cards) ? cards : [];
   const selectedKeys = Array.isArray(workState?.selectedKeys) ? workState.selectedKeys : [];
   const selectedSet = new Set(selectedKeys);
@@ -11072,9 +11085,9 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
   const visibleKeys = filteredCards.map(ozonCardStableKey);
   const allVisibleSelected = Boolean(visibleKeys.length) && visibleKeys.every((key) => selectedSet.has(key));
 
-  function updateWorkState(nextPatch) {
+  function updateWorkState(nextPatch, options = {}) {
     const next = { selectedKeys, tasks, recentEvents: workState?.recentEvents || [], ...nextPatch };
-    onWorkStateChange?.(next);
+    return onWorkStateChange?.(next, options);
   }
 
   function toggleCard(card) {
@@ -11095,15 +11108,19 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
     updateWorkState({ selectedKeys: [...nextSet] });
   }
 
-  function createOzonTaskBatch() {
+  async function createOzonTaskBatch(options) {
+    const automatic = options.optimizationMode === "automatic";
     const now = new Date().toISOString();
     const batchId = `ozon-batch-${Date.now()}`;
-    const batchTitle = `Контент Ozon: ${formatNumber(selectedCards.length)} ${pluralRu(selectedCards.length, "карточка", "карточки", "карточек")}`;
-    const existingKeys = new Set(tasks.map((task) => task.cardKey));
+    const batchTitle = options.title || `${automatic ? "Автоматическая оптимизация" : "Контент"} Ozon: ${formatNumber(selectedCards.length)} ${pluralRu(selectedCards.length, "карточка", "карточки", "карточек")}`;
+    const existingKeys = new Set(tasks.filter((task) => (task.optimizationMode === "automatic") === automatic).map((task) => task.cardKey));
+    const eligibleCards = selectedCards.filter((card) => !existingKeys.has(ozonCardStableKey(card)));
+    if (!eligibleCards.length) { setPackageError("Для выбранных карточек уже есть задачи этого вида. Откройте их во вкладке задач."); return; }
+    if (automatic && eligibleCards.length > 200) { setPackageError("В одной задаче автоматической оптимизации — до 200 SKU."); return; }
+    if (automatic && tasks.length + eligibleCards.length > 500) { setPackageError("В кабинете достигнут предел 500 задач. Завершите и уберите прежние задачи перед созданием новой пачки."); return; }
     const nextTasks = [
       ...tasks,
-      ...selectedCards
-        .filter((card) => !existingKeys.has(ozonCardStableKey(card)))
+      ...eligibleCards
         .map((card, index) => {
           const rawFields = rawFieldsForCard(card);
           const { sku, offerId } = ozonCardIdentity(card);
@@ -11115,27 +11132,35 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
             offerId,
             category: ozonCardCategory(card),
             status: "draft",
-            workType: "semantic-content",
-            workTypes: ["semantic", "content"],
+            workType: automatic ? "content" : "semantic-content",
+            workTypes: automatic ? ["content"] : options.workTypes,
+            optimizationMode: automatic ? "automatic" : "",
             batchId,
             batchTitle,
             batchCreatedAt: now,
             batchPosition: index,
-            workComment: "Ozon beta: СЯ, заголовки, описание и характеристики",
+            workComment: options.comment || (automatic ? "Подготовка SEO-файла для проверки специалистом и согласования аккаунтом" : "Ozon beta: СЯ, заголовки, описание и характеристики"),
             createdAt: now,
             updatedAt: now,
           };
         }),
     ];
-    updateWorkState({
+    setPackageSaving(true); setPackageError("");
+    try { await updateWorkState({
       tasks: nextTasks,
       selectedKeys: [],
       recentEvents: [
         { id: `event-${Date.now()}`, action: "created", label: `Создана Ozon-задача: ${selectedCards.length} карточек`, at: now },
         ...(workState?.recentEvents || []),
       ],
-    });
-    onOpenTasks?.();
+    }, { requireSaved: true });
+      if (options.workPeriodLinks?.length) {
+        await onLinkTaskGroup?.({ batchId, batchTitle, key: `${automatic ? "content" : options.workTypes[0]}:${batchId}`, tasks: nextTasks.filter((t) => t.batchId === batchId) }, options.workPeriodLinks);
+      }
+      setPackageForm(null);
+      onOpenTasks?.();
+    } catch { setPackageError("Не удалось сохранить задачу на сервере. Проверьте соединение и повторите."); }
+    finally { setPackageSaving(false); }
   }
 
   function resetFilters() {
@@ -11245,7 +11270,7 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
               {draftStatus === "loading" ? " · загружаем результаты" : ""}
             </span>
             <div className="toolbar">
-              <button className="btn primary" type="button" onClick={createOzonTaskBatch} disabled={!selectedCards.length}>
+              <button className="btn primary" type="button" onClick={() => { setPackageError(""); setPackageForm({ workTypes: ["semantic", "content"], title: "", comment: "", optimizationMode: "manual" }); }} disabled={!selectedCards.length}>
                 <Plus size={16} />Взять в работу
               </button>
               <button className="btn" type="button" onClick={toggleVisible} disabled={!filteredCards.length}>
@@ -11335,11 +11360,12 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
           </div>
         )}
       </div>
+      {packageForm ? <WorkPackageModal selectedCount={selectedCards.length} value={packageForm} loading={packageSaving} onChange={setPackageForm} onClose={() => !packageSaving && setPackageForm(null)} onSubmit={createOzonTaskBatch} allowAutomatic automaticAvailable={hasSellerApi} workPeriods={workPeriods} workPeriodsStatus={workPeriodsStatus} error={packageError} /> : null}
     </section>
   );
 }
 
-function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", semanticImportStatus = "", semanticImportError = "", semanticImportPreview = null, semanticImportDisabled = false, onPickSemanticImportFile, onApplySemanticImport, workPeriods = [], workPeriodsStatus = "idle", taskActionStatus = "", onOpenCard, onUpdateTaskStatus, onUpdateTaskGroupStatus, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteTaskGroup, onDeleteTask }) {
+function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, workStatus = "idle", semanticDrafts = [], cardDrafts = [], draftStatus = "idle", semanticImportStatus = "", semanticImportError = "", semanticImportPreview = null, semanticImportDisabled = false, onPickSemanticImportFile, onApplySemanticImport, workPeriods = [], workPeriodsStatus = "idle", taskActionStatus = "", onOpenCard, onUpdateTaskStatus, onUpdateTaskGroupStatus, onLinkTaskGroup, onUnlinkTaskGroup, onDeleteTaskGroup, onDeleteTask }) {
   const tasks = Array.isArray(workState?.tasks) ? workState.tasks : [];
   const events = Array.isArray(workState?.recentEvents) ? workState.recentEvents : [];
   const [taskFilter, setTaskFilter] = useState("all");
@@ -11478,6 +11504,7 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
                   const actionBusy = taskActionStatus.includes(group.key) || (group.batchId && taskActionStatus.includes(group.batchId));
                   const firstOpenableTask = group.tasks.find((task) => cardsByKey.has(task.cardKey)) || group.tasks[0];
                   const firstCard = cardsByKey.get(firstOpenableTask?.cardKey);
+                  const automatic = group.tasks.some((task) => task.optimizationMode === "automatic");
                   return (
                     <article className="task-batch-card" key={group.key}>
                       <div className="task-batch-main">
@@ -11488,17 +11515,20 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
                         <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
                       </div>
                       {group.comment ? <p className="approval-task-reason">{group.comment}</p> : null}
-                      <div className="task-batch-status-line">
+                      {automatic ? <AutomaticSeoTask portalId={portalId} group={group} apiRequest={apiRequest} onTasksUpdated={onAutomaticTasksUpdated} /> : null}
+                      {!automatic ? <div className="task-batch-status-line">
                         <Tag tone={progress.semanticReady === progress.total ? "green" : "amber"}>{formatNumber(progress.semanticReady)} с итоговым СЯ</Tag>
                         <Tag tone={progress.contentReady === progress.total ? "green" : "blue"}>{formatNumber(progress.contentReady)} с контентом</Tag>
                         {progress.submitted ? <Tag tone="amber">{formatNumber(progress.submitted)} на согласовании</Tag> : null}
                         {progress.returned ? <Tag tone="red">{formatNumber(progress.returned)} возвратов</Tag> : null}
                         {progress.later ? <Tag tone="blue">{formatNumber(progress.later)} позже</Tag> : null}
-                      </div>
+                      </div> : null}
                       <div className="task-batch-actions">
+                        {!automatic ? <>
                         <button className="btn primary" type="button" onClick={() => firstCard && onOpenCard?.(firstCard)} disabled={!firstCard}>
                           <Eye size={17} />Начать работу
                         </button>
+                        </> : null}
                         <button className="btn" type="button" onClick={() => setLinkingGroup({ group, workType: section.key })} disabled={Boolean(taskActionStatus)}>
                           <ClipboardList size={16} />{linkedPlans.length ? "Изменить пункты плана" : "Привязать к плану"}
                         </button>
@@ -11507,18 +11537,20 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
                             <Unlink size={16} />{linkedPlans.length > 1 ? "Отвязать от всех" : "Отвязать"}
                           </button>
                         ) : null}
+                        {!automatic ? <>
                         <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "submitted")} disabled={Boolean(taskActionStatus)}>
                           <Upload size={16} />На согласование
                         </button>
-                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "approved")} disabled={Boolean(taskActionStatus)}>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "approved")} disabled={automatic || Boolean(taskActionStatus)}>
                           <CheckSquare size={16} />Согласовано
                         </button>
-                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "returned")} disabled={Boolean(taskActionStatus)}>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "returned")} disabled={automatic || Boolean(taskActionStatus)}>
                           <RotateCcw size={16} />Возврат
                         </button>
-                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "later")} disabled={Boolean(taskActionStatus)}>
+                        <button className="btn" type="button" onClick={() => onUpdateTaskGroupStatus?.(group, "later")} disabled={automatic || Boolean(taskActionStatus)}>
                           <RotateCcw size={16} />Позже
                         </button>
+                        </> : null}
                         <button className={loadingButtonClass("btn danger", actionBusy)} type="button" onClick={() => onDeleteTaskGroup?.(group)} disabled={Boolean(taskActionStatus)} aria-busy={actionBusy || undefined}>
                           <Trash2 size={16} />Удалить задачу
                         </button>
@@ -11543,11 +11575,13 @@ function OzonTasksPanel({ cards, workState, workStatus = "idle", semanticDrafts 
                                   <Tag tone={statusMeta.tone}>{statusMeta.label}</Tag>
                                   <Tag tone={resultMeta.tone}>{resultMeta.label}</Tag>
                                   <button className="btn mini" type="button" onClick={() => card && onOpenCard?.(card)} disabled={!card}>Открыть</button>
+                                  {!automatic ? <>
                                   <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "submitted")}>На согласование</button>
                                   <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "approved")}>Согласовано</button>
                                   <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "later")}>Позже</button>
                                   <button className="btn mini" type="button" onClick={() => onUpdateTaskStatus?.(task.id, "returned")}>Возврат</button>
                                   <button className="btn mini danger" type="button" onClick={() => onDeleteTask?.(task.id)}>Удалить</button>
+                                  </> : null}
                                 </div>
                               </div>
                             );
@@ -15199,7 +15233,7 @@ function WorkPeriodTaskLinkPicker({ options = [], value = "", values = [], multi
   );
 }
 
-function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit }) {
+function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit, allowAutomatic = false, automaticAvailable = true, error = "" }) {
   const workTypes = normalizeWorkTypes(value.workTypes);
   const title = value.title || "";
   const comment = value.comment || "";
@@ -15226,7 +15260,7 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
   };
   const submit = (event) => {
     event.preventDefault();
-    onSubmit({ workTypes, title, comment, workPeriodLinks, workPeriodLink: workPeriodLinks[0] || "" });
+    onSubmit({ workTypes, title, comment, workPeriodLinks, workPeriodLink: workPeriodLinks[0] || "", optimizationMode: value.optimizationMode || "manual" });
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -15239,10 +15273,17 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
+          {allowAutomatic ? <label className="field-label">Вид работы
+            <select value={value.optimizationMode || "manual"} onChange={(event) => onChange({ ...value, optimizationMode: event.target.value, workTypes: event.target.value === "automatic" ? ["content"] : ["semantic", "content"] })}>
+              <option value="manual">Ручная работа</option><option value="automatic" disabled={!automaticAvailable}>Автоматическая оптимизация</option>
+            </select>
+          </label> : null}
+          {allowAutomatic && !automaticAvailable ? <p className="status-note">Для автоматической оптимизации подключите Ozon Seller API в настройках кабинета.</p> : null}
+          {error ? <p role="alert" className="status-note error">{error}</p> : null}
           <div className="work-type-picker">
             {workTypeOptions.map((option) => (
               <label className={`work-type-option ${workTypes.includes(option.key) ? "active" : ""}`} key={option.key}>
-                <input type="checkbox" checked={workTypes.includes(option.key)} onChange={() => toggleType(option.key)} />
+                <input type="checkbox" checked={workTypes.includes(option.key)} onChange={() => toggleType(option.key)} disabled={value.optimizationMode === "automatic"} />
                 <span>{option.label}</span>
               </label>
             ))}
