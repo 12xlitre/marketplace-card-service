@@ -34,6 +34,8 @@ PROFILE_SCHEMA = schema_object({'structure': {'type': 'array', 'items': TEXT},
                                 'phrases': schema_rows({'phrase': TEXT, 'quote': TEXT})})
 SEMANTIC_DECISION_SCHEMA = schema_object({'reason': TEXT,
     'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']}})
+KEYWORD_DECISION_SCHEMA = schema_object({'outputPhrase': TEXT, 'reason': TEXT,
+    'decision': {'type': 'string', 'enum': ['использовать', 'адаптировать', 'объединить', 'исключить']}})
 DRAFT_SCHEMA = schema_object({
     'compatibility': schema_object({'comparable': {'type': 'boolean'}, 'reason': TEXT}),
     'title': schema_object({'value': TEXT, 'reason': TEXT}), 'draftDescription': TEXT,
@@ -465,6 +467,14 @@ class AutomaticSeoService:
             structured = getattr(self.host, 'automatic_seo_chat_completion', None)
             if structured:
                 schema = schema_object({key: SEMANTIC_DECISION_SCHEMA for key in evidence['semanticBatch']}) if 'semanticBatch' in evidence else DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA
+                if 'ownEvidence' in evidence:
+                    schema = deepcopy(schema)
+                    schema['properties']['keywords'] = schema_object({key: KEYWORD_DECISION_SCHEMA for key in evidence.get('keywordIds', {})})
+                    schema['properties']['additionalKeywords'] = deepcopy(DRAFT_SCHEMA['properties']['keywords'])
+                    schema['required'].append('additionalKeywords')
+                    allowed = [str(d['id']) for d in evidence.get('definitions', []) if str(d['id']) not in {'4180', '4191', '11254'}]
+                    if allowed:
+                        schema['properties']['characteristics']['items']['properties']['id'] = {'type': 'string', 'enum': allowed}
                 payload, model, provider = structured(messages, schema)
             else:
                 payload, model, provider = self.host.audit_llm_chat_completion(messages)
@@ -594,25 +604,33 @@ class AutomaticSeoService:
 Проверь назначенного конкурента по назначению, конструкции, материалу, размерам/монтажу и комплектации. Верни compatibility:{"comparable":true,"reason":"подтверждённые совпадения и различия"}. При явной несовместимости comparable=false; неизвестные свойства не называй совпадающими.
 Описание перепиши по структуре конкурента и НАШИМ фактам; сохрани важные факты исходного текста, комплектацию и применение.
 Выбор/количество ключей опирается на реально использованные у конкурента формулировки, соответствие нашему товару и естественный текст, без квоты в два ключа.
-Для КАЖДОЙ формулировки competitorProfile.phrases укажи решение использовать/адаптировать/объединить/исключить, точную sourcePhrase, outputPhrase и причину. Новые подтверждённые запросы из семантики можно добавить отдельно. outputPhrase для использованных форм должна реально входить в итоговое описание.
+Для КАЖДОГО идентификатора k0/k1/… из keywordIds укажи в объекте keywords решение использовать/адаптировать/объединить/исключить, outputPhrase и причину. Не пропускай идентификаторы, текст sourcePhrase уже известен приложению. Новые подтверждённые запросы из семантики можно добавить в массив additionalKeywords с sourcePhrase/outputPhrase/decision/reason. outputPhrase для использованных форм должна реально входить в итоговое описание.
 Сначала draftDescription, затем редактура естественного русского языка: description.value. После редактуры проверь сохранение фактов и ключей. Не переносить чужие бренды, модели, материалы, размеры, цвета, гарантии, эффекты. Не обещать медицинский/гарантированный результат.
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
-JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}],"removedValues":[]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
+JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[],"keywords":{"k0":{"outputPhrase":"...","decision":"использовать","reason":"..."}},"additionalKeywords":[],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
 semantic — релевантные кандидаты для естественного дополнения текста, не обязательный перечень для вставки. Не переписывай весь список: решения по релевантности уже сохранены, реальные вхождения проверит приложение. Для адаптированного запроса из semantic укажи sourcePhrase и outputPhrase в keywords.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]
+        keyword_ids = {f'k{i}': row['phrase'] for i, row in enumerate(profile['phrases'])}
         previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics', 'keywords', 'issues') if k in previous} if previous else None
         evidence = {'ownEvidence': own_evidence(card), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
                     'characteristics': characteristic_rows(card), 'definitions': compact_definitions,
-                    'competitor': competitor, 'competitorProfile': profile,
+                    'competitor': competitor, 'competitorProfile': profile, 'keywordIds': keyword_ids,
                     'semantic': [{k: row.get(k) for k in ('query', 'count', 'position')} for row in sources['semantic']
                                  if row['query'] in relevant_queries],
                     'remarks': remarks, 'previous': previous_texts}
         if progress:
             progress('Подготовка заголовка, характеристик и описания')
         result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']))
+        if isinstance(result.get('keywords'), dict):
+            if set(result['keywords']) != set(keyword_ids) or not all(isinstance(row, dict) for row in result['keywords'].values()):
+                raise SeoError('seo_keyword_decisions_incomplete', details={'phrases': [keyword_ids[k] for k in keyword_ids if k not in result['keywords']]})
+            extra = result.get('additionalKeywords', [])
+            if not isinstance(extra, list) or not all(isinstance(row, dict) for row in extra):
+                raise SeoError('seo_invalid_model_response', details={'field': 'additionalKeywords'})
+            result['keywords'] = [dict(result['keywords'][key], sourcePhrase=phrase) for key, phrase in keyword_ids.items()] + extra
         compatibility = result.get('compatibility', {})
         if not isinstance(compatibility, dict) or not isinstance(compatibility.get('comparable'), bool) or not compatibility.get('reason'):
             raise SeoError('seo_competitor_comparison_missing')
@@ -630,10 +648,24 @@ blocking=true, если неподтверждённое свойство ост
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
                                      'question': 'Назначить сопоставимый товар и пересобрать этот SKU.', 'blocking': True})
         proofs = own_evidence(card)
+        canonical_phrases = {normalized(p): p for p in list(keyword_ids.values()) + [q['query'] for q in sources['semantic']]}
+        for keyword in result['keywords']:
+            if normalized(keyword.get('sourcePhrase')) in canonical_phrases:
+                keyword['sourcePhrase'] = canonical_phrases[normalized(keyword.get('sourcePhrase'))]
+            actual = source_phrase(keyword.get('outputPhrase'), result['description']['value'])
+            if actual:
+                keyword['outputPhrase'] = actual
         verified_characteristics = []
+        existing_rows = {row['id']: row for row in characteristic_rows(card)}
         for row in result['characteristics']:
+            aid = str(row.get('id', ''))
+            if aid in {'4180', '4191', '11254'}:
+                continue  # Separate title/description fields and unchanged rich content.
             if not isinstance(row.get('values'), list) or not row['values'] or not all(isinstance(v, str) and v.strip() for v in row['values']):
                 raise SeoError('seo_invalid_characteristic_values', details={'field': str(row.get('id', ''))[:30]})
+            existing = existing_rows.get(aid)
+            if existing and sorted(map(normalized, existing['values'])) == sorted(map(normalized, row['values'])):
+                continue  # The exporter retains the exact original values.
             evidence = row.get('evidence')
             confirmed = isinstance(evidence, list) and bool(evidence)
             for proof in evidence if isinstance(evidence, list) else []:
@@ -653,8 +685,6 @@ blocking=true, если неподтверждённое свойство ост
             if confirmed:
                 verified_characteristics.append(row)
             else:
-                aid = str(row.get('id', ''))
-                existing = next((c for c in characteristic_rows(card) if c['id'] == aid), None)
                 result['issues'].append({'field': 'Характеристика ' + aid + (' · ' + existing['name'] if existing else ''),
                     'detail': 'Предложение модели исключено: нет подтверждения в собственных данных. '
                               'Текущее значение сохранено: ' + ('; '.join(existing['values']) if existing else 'не заполнено') +

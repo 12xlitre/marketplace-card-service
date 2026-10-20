@@ -288,6 +288,11 @@ class AutomaticSeoTest(unittest.TestCase):
                     'function_call': {'name': 'prepare_seo_data', 'arguments': schema_result}}, 'finish_reason': 'function_call'}]}
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             self.assertEqual(self.service.chat('Test', {}), schema_result)
+        with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True) as transport:
+            self.service.chat('Test', {'ownEvidence': {}, 'keywordIds': {'k0': 'запрос'}, 'definitions': [{'id': 100}, {'id': 4191}]})
+            schema = transport.call_args.args[1]
+            self.assertEqual(schema['properties']['keywords']['required'], ['k0'])
+            self.assertEqual(schema['properties']['characteristics']['items']['properties']['id']['enum'], ['100'])
         payload['choices'][0]['message']['function_call']['name'] = 'wrong_function'
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             with self.assertRaisesRegex(SeoError, 'seo_invalid_model_response'):
@@ -323,7 +328,8 @@ class AutomaticSeoTest(unittest.TestCase):
                                                    'missingQueries': ['смеситель из латуни']})
 
     def test_characteristic_quote_can_resolve_to_an_actual_own_source(self):
-        own = card('1001'); src = sources(own, self.mapping['1001']); result = generated()
+        own = card('1001'); own['characteristics'][1]['values'] = []
+        src = sources(own, self.mapping['1001']); result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['латунь'],
                                      'evidence': [{'source': 'Материал', 'quote': 'МАТЕРИАЛ:  латунь'}]}]
         with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessment(), result]):
