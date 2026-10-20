@@ -266,7 +266,9 @@ class AutomaticSeoService:
                     raise SeoError('seo_return_before_revision', 409)
                 if action == 'revise' and not previous:
                     raise SeoError('seo_report_missing')
-                if action == 'recheck' and (not previous or previous['status'] not in {'partial', 'failed', 'interrupted'} or payload.get('refreshSources') or payload.get('remarks') or payload.get('competitors') is not None):
+                recheckable = previous and (previous['status'] in {'partial', 'failed', 'interrupted'} or
+                    (previous['status'] == 'review' and any(i.get('blocking') for i in previous.get('issues', []))))
+                if action == 'recheck' and (not recheckable or payload.get('refreshSources') or payload.get('remarks') or payload.get('competitors') is not None):
                     raise SeoError('seo_invalid_recheck')
                 remarks = self.remarks(payload.get('remarks', []), context)
                 if action == 'revise' and not remarks and not previous.get('remarks'):
@@ -284,7 +286,7 @@ class AutomaticSeoService:
                 version = {'number': len(state['versions']) + 1, 'status': 'running', 'createdAt': now(),
                            'stage': 'Получение источников', 'done': 0, 'total': len(context['tasks']),
                            'errors': [], 'issues': [], 'results': {}, 'competitors': mappings,
-                           'taskHash': task_hash, 'remarks': remarks or (previous.get('remarks', []) if previous and previous['status'] in {'returned', 'partial', 'failed', 'interrupted'} else []),
+                           'taskHash': task_hash, 'remarks': remarks or (previous.get('remarks', []) if previous and (action == 'recheck' or previous['status'] in {'returned', 'partial', 'failed', 'interrupted'}) else []),
                            'refreshSources': bool(payload.get('refreshSources')),
                            'reuseResponses': action == 'recheck',
                            'period': previous['period'] if previous and not payload.get('refreshSources') else closed_period(), 'method': METHOD}
@@ -708,12 +710,26 @@ class AutomaticSeoService:
         text = output_text(response.get('value'))
         if not text:
             raise SeoError('seo_empty_text', details={'field': 'description.value'})
+        # Marketplace annotations are plain text. Formatting does not change facts.
+        text = re.sub(r'(?m)^\s*#{1,6}\s+', '', text)
+        text = re.sub(r'\*\*([^*\n]+)\*\*|(?<!\w)\*([^*\n]+)\*(?!\w)', lambda m: m.group(1) or m.group(2), text)
+        text = re.sub(r'(?m)^\s*(?:[-*]|\d+[.)])\s+', '', text).strip()
         compact = re.sub(r'\s+', '', text.casefold()).replace(',', '.')
+        restored = []
         for fact in numeric_facts:
             term = re.sub(r'\s+', '', fact.casefold()).replace(',', '.')
             if not re.search(r'(?<!\d)' + re.escape(term), compact):
-                plan['issues'].append({'field': 'Сохранение исходного факта', 'detail': 'В новом описании не подтверждено сохранение условия «' + fact + '».',
-                    'question': 'Вернуть подтверждённое условие в описание или явно проверить равнозначную формулировку.', 'blocking': True})
+                # Restore the whole original sentence, not an invented paraphrase
+                # or a bare measurement detached from the object it describes.
+                sentence = next((s.strip() for s in re.split(r'(?<=[.!?])\s+|\n+', before) if fact in s), '')
+                if sentence and sentence not in restored:
+                    restored.append(sentence)
+                elif not sentence:
+                    plan['issues'].append({'field': 'Сохранение исходного факта', 'detail': 'В новом описании не подтверждено сохранение условия «' + fact + '».',
+                        'question': 'Вернуть подтверждённое условие в описание или явно проверить равнозначную формулировку.', 'blocking': True})
+        if restored:
+            text += '\n\n' + ' '.join(restored)
+            plan['restoredDescriptionFacts'] = restored
         return text
 
     def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False):
@@ -812,6 +828,8 @@ blocking=true, если неподтверждённое свойство ост
         if rewrite_description:
             text = self.write_description(card, sources, profile, result, remarks, cache, progress, reuse_responses)
             result['description'] = {'value': text, 'reason': 'Описание доработано по структуре конкурента, собственным фактам и выбранным формулировкам; выполнена редактура.', 'editorChanges': []}
+            if result.get('restoredDescriptionFacts'):
+                result['description']['reason'] += ' Восстановлены дословные исходные предложения с потерянными моделью числовыми условиями: ' + ' '.join(result['restoredDescriptionFacts'])
         else:
             result['description'], result['keywords'] = deepcopy(previous['description']), deepcopy(previous['keywords'])
         result['title']['value'] = output_text(result['title'].get('value')).replace('\n', ' ')

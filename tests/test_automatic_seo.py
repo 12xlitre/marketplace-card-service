@@ -402,6 +402,20 @@ class AutomaticSeoTest(unittest.TestCase):
         self.assertEqual(evidence['competitorStructure'], profile['structure'])
         self.assertEqual(plan['issues'], [])
 
+    def test_description_restores_missing_numeric_sentence_and_removes_markdown(self):
+        own = card('1001'); own['description'] += ' Защитный выступ высотой 4 см. Пакеты шириной от 25 см.'
+        src = sources(own, self.mapping['1001'])
+        profile = {'structure': [], 'phrases': []}
+        plan = {'keywords': [], 'issues': []}
+        with patch.object(self.service, 'chat', return_value={'value': '## Описание\n**Кран** для умывальника. Пакеты шириной 25 см.'}):
+            text = self.service.write_description(own, src, profile, plan, [], {})
+        self.assertIn('Защитный выступ высотой 4 см.', text)
+        self.assertIn('Пакеты шириной от 25 см.', text)
+        self.assertNotIn('#', text)
+        self.assertNotIn('*', text)
+        self.assertEqual(plan['restoredDescriptionFacts'], ['Защитный выступ высотой 4 см.', 'Пакеты шириной от 25 см.'])
+        self.assertEqual(plan['issues'], [])
+
     def test_characteristic_quote_can_resolve_to_an_actual_own_source(self):
         own = card('1001'); own['characteristics'][1]['values'] = []
         src = sources(own, self.mapping['1001']); result = generated()
@@ -426,6 +440,22 @@ class AutomaticSeoTest(unittest.TestCase):
         self.assertEqual(result['status'], 'review')
         self.assertEqual(self.host.calls, calls)
         self.assertTrue(self.service.download(1, 'batch', self.tech, 2).startswith(b'PK'))
+
+    def test_recheck_blocked_review_preserves_scope_without_paid_calls(self):
+        self.action(); self.finish()
+        directory = self.service.directory(1, 'batch')
+        state = self.service.load(directory)
+        previous = state['versions'][-1]
+        previous['issues'] = [{'field': 'Test', 'detail': 'Requires verification', 'blocking': True}]
+        previous['remarks'] = [{'sku': '*', 'section': 'description', 'text': 'Сохранить факты'}]
+        self.service.save(directory, state)
+        calls = list(self.host.calls)
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('Must not call model')):
+            self.service.action(1, 'batch', self.tech, {'action': 'recheck', 'version': 1})
+            result = self.finish()
+        self.assertEqual(result['status'], 'review')
+        self.assertEqual(self.host.calls, calls)
+        self.assertEqual(self.service.load(directory)['versions'][-1]['remarks'], previous['remarks'])
 
     def test_recheck_missing_response_never_falls_back_to_paid_generation(self):
         with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('Must not call model')):
