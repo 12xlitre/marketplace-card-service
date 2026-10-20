@@ -227,8 +227,9 @@ class AutomaticSeoTest(unittest.TestCase):
         result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['пластик'], 'evidence': [{'source': 'description', 'quote': 'Пластиковый'}]}]
         with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
-            with self.assertRaisesRegex(SeoError, 'seo_characteristic_evidence_missing'):
-                self.service.generate(own, src, [], None, {})
+            checked = self.service.generate(own, src, [], None, {})
+            self.assertEqual(checked['characteristics'], [])
+            self.assertTrue(any(i.get('blocking') and 'пластик' in i['detail'] for i in checked['issues']))
 
     def test_missing_competitor_rejected_before_api_calls(self):
         self.mapping.pop('1002')
@@ -320,6 +321,14 @@ class AutomaticSeoTest(unittest.TestCase):
                 self.service.assess_semantics(own, src, {})
         self.assertEqual(caught.exception.details, {'expectedQueries': 2, 'receivedQueries': 1,
                                                    'missingQueries': ['смеситель из латуни']})
+
+    def test_characteristic_quote_can_resolve_to_an_actual_own_source(self):
+        own = card('1001'); src = sources(own, self.mapping['1001']); result = generated()
+        result['characteristics'] = [{'id': '100', 'values': ['латунь'],
+                                     'evidence': [{'source': 'Материал', 'quote': 'МАТЕРИАЛ:  латунь'}]}]
+        with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessment(), result]):
+            checked = self.service.generate(own, src, [], None, {})
+        self.assertEqual(checked['characteristics'][0]['evidence'], [{'source': 'description', 'quote': 'Материал: латунь'}])
 
     def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
         complete = self.host.audit_llm_chat_completion

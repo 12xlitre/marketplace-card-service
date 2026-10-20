@@ -630,11 +630,38 @@ blocking=true, если неподтверждённое свойство ост
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
                                      'question': 'Назначить сопоставимый товар и пересобрать этот SKU.', 'blocking': True})
         proofs = own_evidence(card)
+        verified_characteristics = []
         for row in result['characteristics']:
             if not isinstance(row.get('values'), list) or not row['values'] or not all(isinstance(v, str) and v.strip() for v in row['values']):
                 raise SeoError('seo_invalid_characteristic_values', details={'field': str(row.get('id', ''))[:30]})
-            if not isinstance(row.get('evidence'), list) or not row['evidence'] or not all(isinstance(p, dict) and isinstance(p.get('quote'), str) and p['quote'] and isinstance(p.get('source'), str) and p['quote'] in proofs.get(p['source'], '') for p in row['evidence']):
-                raise SeoError('seo_characteristic_evidence_missing')
+            evidence = row.get('evidence')
+            confirmed = isinstance(evidence, list) and bool(evidence)
+            for proof in evidence if isinstance(evidence, list) else []:
+                quote = source_phrase(proof.get('quote'), proofs.get(proof.get('source'), '')) if isinstance(proof, dict) and isinstance(proof.get('source'), str) else ''
+                if not quote and isinstance(proof, dict) and isinstance(proof.get('quote'), str):
+                    # Resolve a mislabeled source only when its literal quote exists
+                    # in this product's own data. Never search competitor evidence.
+                    for source, text in proofs.items():
+                        quote = source_phrase(proof['quote'], text)
+                        if quote:
+                            proof['source'] = source
+                            break
+                if not quote:
+                    confirmed = False
+                    break
+                proof['quote'] = quote
+            if confirmed:
+                verified_characteristics.append(row)
+            else:
+                aid = str(row.get('id', ''))
+                existing = next((c for c in characteristic_rows(card) if c['id'] == aid), None)
+                result['issues'].append({'field': 'Характеристика ' + aid + (' · ' + existing['name'] if existing else ''),
+                    'detail': 'Предложение модели исключено: нет подтверждения в собственных данных. '
+                              'Текущее значение сохранено: ' + ('; '.join(existing['values']) if existing else 'не заполнено') +
+                              '. Неподтверждённое предложение: ' + '; '.join(row['values']),
+                    'question': 'Оставить текущее значение и убрать связанное утверждение из текста либо подтвердить собственным источником.',
+                    'blocking': True})
+        result['characteristics'] = verified_characteristics
         result['issues'].append({'field': 'Ограничения названия', 'detail': 'Использован рабочий предел приложения 200 символов. Официальное ограничение категории не подтверждено автоматически.',
                                  'question': 'Проверить требования категории перед переносом.', 'blocking': False})
         result['sources'] = sources
