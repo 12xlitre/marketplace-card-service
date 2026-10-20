@@ -83,6 +83,8 @@ class OzonSeoHost:
     def mp(self, path, cache):
         key = 'mp:' + path
         if key not in cache:
+            if cache.get('_readOnlyReplay'):
+                raise SeoError('seo_recheck_sources_missing')
             token = self.server.get_service_integration_secret(self.server.MPSTATS_PROVIDER)
             if not token:
                 raise SeoError('seo_mpstats_not_connected')

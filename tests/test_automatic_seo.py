@@ -222,8 +222,9 @@ class AutomaticSeoTest(unittest.TestCase):
         own, src = card('1001'), sources(card('1001'), self.mapping['1001'])
         result = generated('Латунный смеситель.')
         with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
-            with self.assertRaisesRegex(SeoError, 'seo_keyword_lost_after_editing'):
-                self.service.generate(own, src, [], None, {})
+            checked = self.service.generate(own, src, [], None, {})
+            self.assertEqual(checked['keywords'][0]['decision'], 'исключить')
+            self.assertTrue(any(i.get('blocking') and i['field'] == 'Вхождение ключа' for i in checked['issues']))
         result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['пластик'], 'evidence': [{'source': 'description', 'quote': 'Пластиковый'}]}]
         with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
@@ -335,6 +336,48 @@ class AutomaticSeoTest(unittest.TestCase):
         with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessment(), result]):
             checked = self.service.generate(own, src, [], None, {})
         self.assertEqual(checked['characteristics'][0]['evidence'], [{'source': 'description', 'quote': 'Материал: латунь'}])
+
+    def test_recheck_reuses_saved_responses_without_model_calls(self):
+        self.action(); self.finish()
+        directory = self.service.directory(1, 'batch')
+        state = self.service.load(directory)
+        previous = state['versions'][-1]
+        previous.update(status='partial', results={}, errors=[{'sku': '1001', 'code': 'seo_keyword_lost_after_editing'}])
+        previous.pop('sha256', None)
+        self.service.save(directory, state)
+        calls = list(self.host.calls)
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('Recheck must not call model')):
+            self.service.action(1, 'batch', self.tech, {'action': 'recheck', 'version': 1})
+            result = self.finish()
+        self.assertEqual(result['status'], 'review')
+        self.assertEqual(self.host.calls, calls)
+        self.assertTrue(self.service.download(1, 'batch', self.tech, 2).startswith(b'PK'))
+
+    def test_recheck_missing_response_never_falls_back_to_paid_generation(self):
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('Must not call model')):
+            with self.assertRaisesRegex(SeoError, 'seo_recheck_response_missing'):
+                self.service.chat('Test', {}, journal={}, journal_key='absent', reuse_response=True)
+
+    def test_unsupported_proposal_keeps_original_value_and_blocks_acceptance(self):
+        complete = self.host.audit_llm_chat_completion
+        def answer(messages):
+            payload, model, provider = complete(messages)
+            if 'ownEvidence' in json.loads(messages[1]['content']):
+                data = json.loads(payload['choices'][0]['message']['content'])
+                data['characteristics'] = [{'id': '101', 'values': ['латунь'], 'reason': 'Предложение',
+                    'evidence': [{'source': 'description', 'quote': 'Материал: латунь'}]}]
+                payload['choices'][0]['message']['content'] = json.dumps(data)
+            return payload, model, provider
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer), \
+             patch.object(self.host, 'automatic_seo_verify_characteristics', side_effect=SeoError('seo_dictionary_value_not_allowed')):
+            self.action(); result = self.finish()
+        self.assertEqual(result['status'], 'review')
+        self.assertTrue(any(i.get('blocking') and 'официальном словаре' in i['detail'] for i in result['issues']))
+        with self.assertRaisesRegex(SeoError, 'seo_blocking_issues'):
+            self.action('accept', 1, acknowledgeIssues=True)
+        self.assertTrue(self.service.download(1, 'batch', self.tech, 1).startswith(b'PK'))
+        state = self.service.load(self.service.directory(1, 'batch'))
+        self.assertEqual(state['versions'][0]['results']['1001']['characteristics'], [])
 
     def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
         complete = self.host.audit_llm_chat_completion

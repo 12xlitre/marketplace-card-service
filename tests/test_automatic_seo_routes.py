@@ -81,6 +81,13 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         self.assertNotIn('response_format', requests[1][0])
         self.assertNotIn('function_call', requests[1][0])
 
+    def test_readonly_recheck_never_requests_missing_mpstats_sources(self):
+        adapter = OzonSeoHost(server)
+        with patch.object(server, 'mpstats_get_json', side_effect=AssertionError('Recheck must not call MPStats')) as external:
+            with self.assertRaisesRegex(SeoError, 'seo_recheck_sources_missing'):
+                adapter.mp('/not-cached', {'_readOnlyReplay': True})
+        external.assert_not_called()
+
     def test_http_generation_download_accept_and_approval_keep_manual_task(self):
         from test_automatic_seo import card, sources, FakeHost
         service = server.automatic_seo_service()
