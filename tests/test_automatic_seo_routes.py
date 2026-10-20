@@ -76,7 +76,8 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
             server.audit_llm_chat_completion([])
         self.assertEqual(requests[0][0]['function_call'], {'name': 'prepare_seo_data'})
         self.assertEqual(requests[0][0]['functions'][0]['parameters'], PROFILE_SCHEMA)
-        self.assertEqual(requests[0][1], 60)
+        self.assertEqual(requests[0][1], 120)
+        self.assertEqual(requests[1][1], 60)
         self.assertNotIn('response_format', requests[1][0])
         self.assertNotIn('function_call', requests[1][0])
 

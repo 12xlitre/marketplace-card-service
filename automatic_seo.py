@@ -43,8 +43,6 @@ DRAFT_SCHEMA = schema_object({
                                     'removedValues': schema_rows({'value': TEXT, 'reason': TEXT})}),
     'keywords': schema_rows({'sourcePhrase': TEXT, 'outputPhrase': TEXT, 'reason': TEXT,
                              'decision': {'type': 'string', 'enum': ['использовать', 'адаптировать', 'объединить', 'исключить']}}),
-    'semanticDecisions': schema_rows({'query': TEXT, 'relevance': TEXT, 'outputPhrase': TEXT, 'reason': TEXT,
-                                     'destination': {'type': 'string', 'enum': ['заголовок', 'описание', 'характеристика', 'не добавлять']}}),
     'issues': schema_rows({'field': TEXT, 'detail': TEXT, 'question': TEXT, 'blocking': {'type': 'boolean'}}),
 })
 
@@ -535,6 +533,31 @@ class AutomaticSeoService:
             decisions.extend(deepcopy(cache[key]))
         return decisions
 
+    def semantic_placements(self, result, assessments, sources):
+        characteristics = {str(r['id']): r['values'] for r in sources.get('ownCharacteristics', [])}
+        characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
+        texts = {'заголовок': result['title']['value'], 'описание': result['description']['value'],
+                 'характеристика': ' '.join(' '.join(v) for v in characteristics.values())}
+        adapted = {row.get('sourcePhrase'): row.get('outputPhrase') for row in result['keywords']
+                   if row.get('decision') in {'использовать', 'адаптировать', 'объединить'}}
+        decisions = []
+        for assessment in assessments:
+            row = dict(assessment, destination='не добавлять', outputPhrase='')
+            if assessment['relevance'] == 'релевантен':
+                for destination, text in texts.items():
+                    witness = source_phrase(assessment['query'], text)
+                    if witness:
+                        row.update(destination=destination, outputPhrase=witness)
+                        break
+                else:
+                    witness = adapted.get(assessment['query'])
+                    if occurrence(witness, texts['описание']):
+                        row.update(destination='описание', outputPhrase=witness)
+                    else:
+                        row['reason'] += ' В этой редакции отдельное вхождение запроса не предложено.'
+            decisions.append(row)
+        return decisions
+
     def generate(self, card, sources, remarks, previous, cache, progress=None):
         competitor = sources['competitor']
         profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
@@ -576,8 +599,8 @@ class AutomaticSeoService:
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
-JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}],"removedValues":[]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"semanticDecisions":[{"query":"...","relevance":"релевантен/не добавлять","destination":"заголовок","outputPhrase":"точное реальное вхождение в выбранном разделе","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
-semanticDecisions: верни только запросы semantic, фактически размещённые в результате. Для каждого destination — заголовок/характеристика/описание, outputPhrase — точное реальное вхождение в этом разделе. Не нужно переписывать весь список запросов или решения об исключении: они уже сохранены отдельно. Не обещай наличие ключа «по смыслу» без точного outputPhrase в результате.
+JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}],"removedValues":[]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
+semantic — релевантные кандидаты для естественного дополнения текста, не обязательный перечень для вставки. Не переписывай весь список: решения по релевантности уже сохранены, реальные вхождения проверит приложение. Для адаптированного запроса из semantic укажи sourcePhrase и outputPhrase в keywords.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]
         previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics', 'keywords', 'issues') if k in previous} if previous else None
@@ -597,15 +620,8 @@ blocking=true, если неподтверждённое свойство ост
             raise SeoError('seo_empty_text')
         if len(result['title']['value']) > 200 or len(result['description']['value']) > 6000:
             raise SeoError('seo_text_exceeds_review_limit')
-        if not all(isinstance(result.get(k), list) and all(isinstance(row, dict) for row in result[k]) for k in ('characteristics', 'keywords', 'issues', 'semanticDecisions')):
+        if not all(isinstance(result.get(k), list) and all(isinstance(row, dict) for row in result[k]) for k in ('characteristics', 'keywords', 'issues')):
             raise SeoError('seo_invalid_model_response')
-        placed = {row.get('query'): row for row in result['semanticDecisions']}
-        if len(placed) != len(result['semanticDecisions']) or set(placed) - relevant_queries:
-            raise SeoError('seo_invalid_semantic_assessment')
-        result['semanticDecisions'] = [dict(placed[a['query']], relevance=a['relevance']) if a['query'] in placed else {
-            **a, 'destination': 'не добавлять', 'outputPhrase': '',
-            'reason': a['reason'] + (' В этой редакции отдельное вхождение запроса не предложено.' if a['relevance'] == 'релевантен' else ''),
-        } for a in assessments]
         if profile.get('rejectedPhrases'):
             result['issues'].append({'field': 'Формулировки конкурента',
                                      'detail': 'Не найдены в исходном описании и исключены из перечня ключей: ' + '; '.join(profile['rejectedPhrases']),
@@ -623,6 +639,7 @@ blocking=true, если неподтверждённое свойство ост
                                  'question': 'Проверить требования категории перед переносом.', 'blocking': False})
         result['sources'] = sources
         result['competitorProfile'] = profile
+        result['semanticDecisions'] = self.semantic_placements(result, assessments, sources)
         self.verify_final_facts(result, card)
         self.verify_keywords(result, sources)
         return result

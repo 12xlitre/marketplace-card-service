@@ -18760,7 +18760,7 @@ def audit_llm_chat_completion(messages, response_schema=None):
       },
       method="POST",
     )
-    with gigachat_urlopen(request, timeout=60) as response:
+    with gigachat_urlopen(request, timeout=120 if response_schema is not None else 60) as response:
       return json.loads(response.read().decode("utf-8")), GIGACHAT_MODEL, "gigachat"
 
   token = audit_str(OPTICARDS_LLM_API_KEY)
