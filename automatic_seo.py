@@ -32,6 +32,8 @@ def schema_rows(properties):
 TEXT = {'type': 'string'}
 PROFILE_SCHEMA = schema_object({'structure': {'type': 'array', 'items': TEXT},
                                 'phrases': schema_rows({'phrase': TEXT, 'quote': TEXT})})
+SEMANTIC_SCHEMA = schema_object({'decisions': schema_rows({'query': TEXT, 'reason': TEXT,
+    'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']}})})
 DRAFT_SCHEMA = schema_object({
     'compatibility': schema_object({'comparable': {'type': 'boolean'}, 'reason': TEXT}),
     'title': schema_object({'value': TEXT, 'reason': TEXT}), 'draftDescription': TEXT,
@@ -374,7 +376,12 @@ class AutomaticSeoService:
                         version['stage'] = f'Источники и текст: {sku}'
                         self.update(directory, version, portal, batch, user)
                         sources = self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], cache, user)
-                        result = self.generate(card, sources, remarks, old, cache)
+                        def progress(stage):
+                            if time.monotonic() > deadline:
+                                raise SeoError('seo_run_deadline')
+                            version['stage'] = f'{stage}: {sku}'
+                            self.update(directory, version, portal, batch, user)
+                        result = self.generate(card, sources, remarks, old, cache, progress=progress)
                         if old and same_competitor and remarks and not any(r['section'] in {'competitor', 'semantic'} for r in remarks):
                             sections = {r['section'] for r in remarks}
                             for section in {'title', 'description', 'characteristics'} - sections:
@@ -459,7 +466,8 @@ class AutomaticSeoService:
             ]
             structured = getattr(self.host, 'automatic_seo_chat_completion', None)
             if structured:
-                payload, model, provider = structured(messages, DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA)
+                schema = SEMANTIC_SCHEMA if 'semanticBatch' in evidence else DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA
+                payload, model, provider = structured(messages, schema)
             else:
                 payload, model, provider = self.host.audit_llm_chat_completion(messages)
         except HTTPError as exc:
@@ -496,7 +504,31 @@ class AutomaticSeoService:
             raise SeoError('seo_invalid_model_response')
         return parsed
 
-    def generate(self, card, sources, remarks, previous, cache):
+    def assess_semantics(self, card, sources, cache, progress=None):
+        queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
+        decisions = []
+        for offset in range(0, len(queries), 32):
+            batch = queries[offset:offset + 32]
+            key = 'semantic-relevance:' + fingerprint({'facts': own_evidence(card), 'queries': batch})
+            if key not in cache:
+                if progress:
+                    progress(f'Проверка запросов {offset + 1}–{min(offset + 32, len(queries))} из {len(queries)}')
+                response = self.chat('Оцени соответствие каждого поискового запроса конкретному товару по его подтверждённым данным. '
+                    'Верни decisions: query точно из списка, relevance (релевантен/нерелевантен/недостаточно данных), reason — одна короткая конкретная причина. '
+                    'Не выбирай по частотности. Не приписывай товару чужой цвет, размер, модель, комплектацию. Не генерируй описание.',
+                    {'ownFacts': own_evidence(card), 'semanticBatch': batch}, journal=cache, journal_key='response:' + key)
+                rows = response.get('decisions')
+                if not isinstance(rows, list) or not all(isinstance(r, dict) and isinstance(r.get('query'), str)
+                        and r.get('relevance') in {'релевантен', 'нерелевантен', 'недостаточно данных'}
+                        and isinstance(r.get('reason'), str) and r['reason'].strip() for r in rows):
+                    raise SeoError('seo_invalid_semantic_assessment')
+                if len(rows) != len(batch) or {r['query'] for r in rows} != set(batch):
+                    raise SeoError('seo_semantic_decisions_incomplete')
+                cache[key] = rows
+            decisions.extend(deepcopy(cache[key]))
+        return decisions
+
+    def generate(self, card, sources, remarks, previous, cache, progress=None):
         competitor = sources['competitor']
         profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
         if profile_key not in cache:
@@ -525,6 +557,8 @@ class AutomaticSeoService:
             profile['phrases'], profile['rejectedPhrases'] = verified, rejected
             cache[profile_key] = profile
         profile = cache[profile_key]
+        assessments = self.assess_semantics(card, sources, cache, progress)
+        relevant_queries = {a['query'] for a in assessments if a['relevance'] == 'релевантен'}
         instruction = '''Подготовь SEO-предложения для существующей карточки Ozon по методике Насти.
 Смысл и релевантные ключи текущего заголовка сохранить, расширить по своему товару; не сокращать ради краткости.
 Проверь назначенного конкурента по назначению, конструкции, материалу, размерам/монтажу и комплектации. Верни compatibility:{"comparable":true,"reason":"подтверждённые совпадения и различия"}. При явной несовместимости comparable=false; неизвестные свойства не называй совпадающими.
@@ -536,14 +570,18 @@ class AutomaticSeoService:
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
 JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}],"removedValues":[]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"semanticDecisions":[{"query":"...","relevance":"релевантен/не добавлять","destination":"заголовок","outputPhrase":"точное реальное вхождение в выбранном разделе","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
-semanticDecisions: охвати ВСЕ запросы semantic. destination — одно из заголовок/характеристика/описание/не добавлять. Если запрос не размещён или нет подтверждения, выбери не добавлять и объясни. Не обещай наличие ключа «по смыслу» без точного outputPhrase в результате.
+semanticDecisions: верни только запросы semantic, фактически размещённые в результате. Для каждого destination — заголовок/характеристика/описание, outputPhrase — точное реальное вхождение в этом разделе. Не нужно переписывать весь список запросов или решения об исключении: они уже сохранены отдельно. Не обещай наличие ключа «по смыслу» без точного outputPhrase в результате.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]
         previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics', 'keywords', 'issues') if k in previous} if previous else None
         evidence = {'ownEvidence': own_evidence(card), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
                     'characteristics': characteristic_rows(card), 'definitions': compact_definitions,
-                    'competitor': competitor, 'competitorProfile': profile, 'semantic': sources['semantic'],
+                    'competitor': competitor, 'competitorProfile': profile,
+                    'semantic': [{k: row.get(k) for k in ('query', 'count', 'position')} for row in sources['semantic']
+                                 if row['query'] in relevant_queries],
                     'remarks': remarks, 'previous': previous_texts}
+        if progress:
+            progress('Подготовка заголовка, характеристик и описания')
         result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']))
         compatibility = result.get('compatibility', {})
         if not isinstance(compatibility, dict) or not isinstance(compatibility.get('comparable'), bool) or not compatibility.get('reason'):
@@ -554,6 +592,13 @@ blocking=true, если неподтверждённое свойство ост
             raise SeoError('seo_text_exceeds_review_limit')
         if not all(isinstance(result.get(k), list) and all(isinstance(row, dict) for row in result[k]) for k in ('characteristics', 'keywords', 'issues', 'semanticDecisions')):
             raise SeoError('seo_invalid_model_response')
+        placed = {row.get('query'): row for row in result['semanticDecisions']}
+        if len(placed) != len(result['semanticDecisions']) or set(placed) - relevant_queries:
+            raise SeoError('seo_invalid_semantic_assessment')
+        result['semanticDecisions'] = [dict(placed[a['query']], relevance=a['relevance']) if a['query'] in placed else {
+            **a, 'destination': 'не добавлять', 'outputPhrase': '',
+            'reason': a['reason'] + (' В этой редакции отдельное вхождение запроса не предложено.' if a['relevance'] == 'релевантен' else ''),
+        } for a in assessments]
         if profile.get('rejectedPhrases'):
             result['issues'].append({'field': 'Формулировки конкурента',
                                      'detail': 'Не найдены в исходном описании и исключены из перечня ключей: ' + '; '.join(profile['rejectedPhrases']),

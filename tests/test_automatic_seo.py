@@ -40,6 +40,10 @@ def generated(text='Смеситель для раковины. Латунный
             'semanticDecisions': [{'query': 'кран для умывальника', 'relevance': 'релевантен', 'destination': 'описание', 'reason': 'Подтверждено назначение.'}], 'issues': []}
 
 
+def assessment():
+    return {'decisions': [{'query': 'кран для умывальника', 'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'}]}
+
+
 class FakeHost:
     def __init__(self):
         self.tasks = [{'id': 'task-' + sku, 'cardKey': sku, 'sku': sku, 'offerId': sku, 'status': 'draft'} for sku in ['1001', '1002']]
@@ -73,7 +77,9 @@ class FakeHost:
 
     def audit_llm_chat_completion(self, messages):
         evidence = json.loads(messages[1]['content'])
-        if 'ownEvidence' not in evidence:
+        if 'semanticBatch' in evidence:
+            answer = {'decisions': [{'query': q, 'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'} for q in evidence['semanticBatch']]}
+        elif 'ownEvidence' not in evidence:
             self.profile_calls += 1
             answer = {'structure': ['Назначение', 'Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}
         else:
@@ -215,12 +221,12 @@ class AutomaticSeoTest(unittest.TestCase):
     def test_lost_key_and_fabricated_characteristic_evidence_rejected(self):
         own, src = card('1001'), sources(card('1001'), self.mapping['1001'])
         result = generated('Латунный смеситель.')
-        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, result]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
             with self.assertRaisesRegex(SeoError, 'seo_keyword_lost_after_editing'):
                 self.service.generate(own, src, [], None, {})
         result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['пластик'], 'evidence': [{'source': 'description', 'quote': 'Пластиковый'}]}]
-        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, result]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
             with self.assertRaisesRegex(SeoError, 'seo_characteristic_evidence_missing'):
                 self.service.generate(own, src, [], None, {})
 
@@ -247,7 +253,7 @@ class AutomaticSeoTest(unittest.TestCase):
         profile = {'structure': ['Назначение'], 'phrases': [
             {'phrase': 'КРАН  ДЛЯ\nУМЫВАЛЬНИКА', 'quote': 'Сочинённая цитата'},
             {'phrase': 'несуществующий поисковый запрос', 'quote': 'Сочинённая цитата'}]}
-        with patch.object(self.service, 'chat', side_effect=[profile, generated()]):
+        with patch.object(self.service, 'chat', side_effect=[profile, assessment(), generated()]):
             result = self.service.generate(own, src, [], None, {})
         self.assertEqual(result['competitorProfile']['phrases'], [
             {'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}])
@@ -285,6 +291,26 @@ class AutomaticSeoTest(unittest.TestCase):
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             with self.assertRaisesRegex(SeoError, 'seo_invalid_model_response'):
                 self.service.chat('Test', {})
+
+    def test_all_semantics_are_assessed_in_small_cached_batches(self):
+        own = card('1001'); src = sources(own, self.mapping['1001'])
+        src['semantic'] += [{'query': f'тестовый запрос {i}', 'count': i, 'position': None} for i in range(190)]
+        complete = self.host.audit_llm_chat_completion
+        batches = []
+        def answer(messages):
+            evidence = json.loads(messages[1]['content'])
+            if 'semanticBatch' in evidence:
+                batches.append(evidence['semanticBatch'])
+            return complete(messages)
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
+            result = self.service.generate(own, src, [], None, cache)
+            self.service.generate(own, src, [], None, cache)
+        self.assertEqual([len(batch) for batch in batches], [32, 32, 32, 32, 32, 31])
+        self.assertEqual(len(result['semanticDecisions']), 191)
+        unplaced = result['semanticDecisions'][1:]
+        self.assertTrue(all(r['destination'] == 'не добавлять' and r['relevance'] == 'релевантен' for r in unplaced))
+        self.assertTrue(all('В этой редакции' in r['reason'] for r in unplaced))
 
     def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
         complete = self.host.audit_llm_chat_completion
