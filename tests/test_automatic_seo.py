@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from openpyxl import load_workbook
 from openpyxl.cell.rich_text import CellRichText
 
-from automatic_seo import AutomaticSeoService, METHOD, SeoError, closed_period
+from automatic_seo import AutomaticSeoService, METHOD, SeoError, closed_period, output_text, source_phrase
 from automatic_seo_xlsx import build_workbook, delta
 
 
@@ -77,7 +77,12 @@ class FakeHost:
 
     def audit_llm_chat_completion(self, messages):
         evidence = json.loads(messages[1]['content'])
-        if 'semanticBatch' in evidence:
+        if evidence.get('writeDescription'):
+            text = 'Смеситель для раковины. Латунный кран для умывальника.'
+            if evidence.get('remarks'):
+                text += ' Материал — латунь.'
+            answer = {'value': text}
+        elif 'semanticBatch' in evidence:
             answer = {label: {'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'} for label in evidence['semanticBatch']}
         elif 'ownEvidence' not in evidence:
             self.profile_calls += 1
@@ -221,16 +226,17 @@ class AutomaticSeoTest(unittest.TestCase):
     def test_lost_key_and_fabricated_characteristic_evidence_rejected(self):
         own, src = card('1001'), sources(card('1001'), self.mapping['1001'])
         result = generated('Латунный смеситель.')
-        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}, assessment(), result, {'value': result['description']['value']}]):
             checked = self.service.generate(own, src, [], None, {})
             self.assertEqual(checked['keywords'][0]['decision'], 'исключить')
             self.assertTrue(any(i.get('blocking') and i['field'] == 'Вхождение ключа' for i in checked['issues']))
         result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['пластик'], 'evidence': [{'source': 'description', 'quote': 'Пластиковый'}]}]
-        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': []}, assessment(), result, {'value': result['description']['value']}]):
             checked = self.service.generate(own, src, [], None, {})
             self.assertEqual(checked['characteristics'], [])
-            self.assertTrue(any(i.get('blocking') and 'пластик' in i['detail'] for i in checked['issues']))
+            self.assertTrue(any('пластик' in i['detail'] for i in checked['issues']))
+            self.assertNotIn('пластик', checked['description']['value'])
 
     def test_missing_competitor_rejected_before_api_calls(self):
         self.mapping.pop('1002')
@@ -255,7 +261,7 @@ class AutomaticSeoTest(unittest.TestCase):
         profile = {'structure': ['Назначение'], 'phrases': [
             {'phrase': 'КРАН  ДЛЯ\nУМЫВАЛЬНИКА', 'quote': 'Сочинённая цитата'},
             {'phrase': 'несуществующий поисковый запрос', 'quote': 'Сочинённая цитата'}]}
-        with patch.object(self.service, 'chat', side_effect=[profile, assessment(), generated()]):
+        with patch.object(self.service, 'chat', side_effect=[profile, assessment(), generated(), {'value': generated()['description']['value']}]):
             result = self.service.generate(own, src, [], None, {})
         self.assertEqual(result['competitorProfile']['phrases'], [
             {'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}])
@@ -328,12 +334,30 @@ class AutomaticSeoTest(unittest.TestCase):
         self.assertEqual(caught.exception.details, {'expectedQueries': 2, 'receivedQueries': 1,
                                                    'missingQueries': ['смеситель из латуни']})
 
+    def test_generated_paragraph_escapes_and_hyphens_have_real_keyword_witnesses(self):
+        text = output_text(r'Вступление.\n\nОбычный горшок для дома. Мобильный горшок-трансформер.')
+        self.assertIn('\n\n', text)
+        self.assertEqual(source_phrase('Обычный горшок для дома', text), 'Обычный горшок для дома')
+        self.assertEqual(source_phrase('Мобильный горшок трансформер', text), 'Мобильный горшок-трансформер')
+
+    def test_description_writer_gets_own_facts_and_structure_without_foreign_description(self):
+        own = card('1001'); own['description'] += ' Высота 4 см, ширина от 25 см.'
+        src = sources(own, self.mapping['1001']); src['competitor']['description'] += ' FOREIGN_BRAND с тремя чужими пакетами.'
+        profile = {'structure': ['Назначение', 'Применение'], 'phrases': [{'phrase': 'кран для умывальника'}]}
+        plan = {'keywords': generated()['keywords'], 'issues': []}
+        with patch.object(self.service, 'chat', return_value={'value': r'Кран для умывальника.\n\nВысота 4 см, ширина от 25 см.'}) as writer:
+            self.service.write_description(own, src, profile, plan, [], {})
+        evidence = writer.call_args.args[1]
+        self.assertNotIn('FOREIGN_BRAND', json.dumps(evidence))
+        self.assertEqual(evidence['competitorStructure'], profile['structure'])
+        self.assertEqual(plan['issues'], [])
+
     def test_characteristic_quote_can_resolve_to_an_actual_own_source(self):
         own = card('1001'); own['characteristics'][1]['values'] = []
         src = sources(own, self.mapping['1001']); result = generated()
         result['characteristics'] = [{'id': '100', 'values': ['латунь'],
                                      'evidence': [{'source': 'Материал', 'quote': 'МАТЕРИАЛ:  латунь'}]}]
-        with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessment(), result]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessment(), result, {'value': result['description']['value']}]):
             checked = self.service.generate(own, src, [], None, {})
         self.assertEqual(checked['characteristics'][0]['evidence'], [{'source': 'description', 'quote': 'Материал: латунь'}])
 

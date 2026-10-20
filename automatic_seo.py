@@ -47,6 +47,10 @@ DRAFT_SCHEMA = schema_object({
                              'decision': {'type': 'string', 'enum': ['использовать', 'адаптировать', 'объединить', 'исключить']}}),
     'issues': schema_rows({'field': TEXT, 'detail': TEXT, 'question': TEXT, 'blocking': {'type': 'boolean'}}),
 })
+PLAN_SCHEMA = deepcopy(DRAFT_SCHEMA)
+for _field in ('description', 'draftDescription'):
+    PLAN_SCHEMA['properties'].pop(_field)
+    PLAN_SCHEMA['required'].remove(_field)
 
 
 class SeoError(ValueError):
@@ -64,6 +68,40 @@ def plain(value):
     import html
     value = re.sub(r'<br\s*/?>|</p>|</li>', '\n', str(value or ''), flags=re.I)
     return html.unescape(re.sub(r'<[^>]*>', '', value)).strip()
+
+
+def output_text(value):
+    # Native function arguments can contain literal, double-escaped paragraph breaks.
+    return str(value or '').replace('\\r\\n', '\n').replace('\\n\\n', '\n\n').strip()
+
+
+def model_evidence(card):
+    facts = own_evidence(card)
+    for row in characteristic_rows(card):
+        if row['id'] in {'4180', '4191'}:
+            facts.pop('attribute:' + row['id'], None)
+        elif row['id'] == '11254' or 'rich' in str(row['name'] or '').casefold():
+            fragments = []
+            def walk(node):
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        if key in {'text', 'title', 'caption', 'description', 'alt'} and isinstance(value, str) and not value.startswith(('http:', 'https:')):
+                            fragments.append(plain(value))
+                        elif isinstance(value, (dict, list)):
+                            walk(value)
+                elif isinstance(node, list):
+                    for child in node:
+                        walk(child)
+            for value in row['values']:
+                try:
+                    walk(json.loads(value))
+                except (ValueError, TypeError):
+                    continue
+            if any(fragments):
+                facts['attribute:' + row['id']] = '\n'.join(dict.fromkeys(filter(None, fragments)))
+            else:
+                facts.pop('attribute:' + row['id'], None)
+    return facts
 
 
 def fingerprint(value):
@@ -105,7 +143,7 @@ def source_phrase(phrase, text):
     words = str(phrase or '').strip().split()
     if not words:
         return ''
-    pattern = r'\s+'.join(re.escape(word) for word in words)
+    pattern = r'[\s\-\u2010-\u2015]+'.join(re.escape(word) for word in words)
     pattern = re.sub('[еёЕЁ]', '[её]', pattern)
     match = re.search(r'(?<!\w)' + pattern + r'(?!\w)', text, flags=re.I)
     return match.group() if match else ''
@@ -464,7 +502,7 @@ class AutomaticSeoService:
         }, ensure_ascii=False))
         return record
 
-    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False):
+    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None):
         if reuse_response:
             saved = journal.get(journal_key) if journal is not None else None
             if not saved or not isinstance(saved.get('content'), str) or saved.get('contentLength') != len(saved['content']) or saved.get('finishReason') in {'length', 'max_tokens'}:
@@ -483,8 +521,8 @@ class AutomaticSeoService:
             ]
             structured = getattr(self.host, 'automatic_seo_chat_completion', None)
             if structured:
-                schema = schema_object({key: SEMANTIC_DECISION_SCHEMA for key in evidence['semanticBatch']}) if 'semanticBatch' in evidence else DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA
-                if 'ownEvidence' in evidence:
+                schema = response_schema or (schema_object({key: SEMANTIC_DECISION_SCHEMA for key in evidence['semanticBatch']}) if 'semanticBatch' in evidence else PLAN_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA)
+                if 'ownEvidence' in evidence and response_schema is None:
                     schema = deepcopy(schema)
                     schema['properties']['keywords'] = schema_object({key: KEYWORD_DECISION_SCHEMA for key in evidence.get('keywordIds', {})})
                     schema['properties']['additionalKeywords'] = deepcopy(DRAFT_SCHEMA['properties']['keywords'])
@@ -606,13 +644,54 @@ class AutomaticSeoService:
                 result['issues'].append({'field': 'Характеристика ' + str(proposal['id']),
                     'detail': 'Предложение исключено, текущее значение сохранено: ' + reasons[str(exc)] +
                               '. Непринятое значение: ' + '; '.join(proposal['values']),
-                    'question': 'Оставить текущее значение либо предложить подтверждённое допустимое значение через замечание.', 'blocking': True})
+                    'question': 'Непринятое предложение не переносить. Если это значение осталось в тексте, убрать его либо подтвердить допустимое значение.',
+                    'blocking': any(occurrence(value, result['title']['value'] + ' ' + result['description']['value']) for value in proposal['values'])})
             else:
                 accepted.append(proposal)
         if len(accepted) != len(result['characteristics']):
             result['characteristics'] = accepted
             result['semanticDecisions'] = self.semantic_placements(result, result['semanticDecisions'], result['sources'])
             self.verify_keywords(result, result['sources'])
+
+    def write_description(self, card, sources, profile, plan, remarks, cache, progress=None, reuse_responses=False):
+        key = 'response:description:' + str(card['sku'])
+        if reuse_responses and key not in cache and isinstance(plan.get('description'), dict):
+            return output_text(plan['description'].get('value'))  # Legacy snapshot, never new generation.
+        allowed = {normalized(p['phrase']) for p in profile['phrases']} | {normalized(q['query']) for q in sources['semantic']}
+        core = {normalized(p['phrase']) for p in profile['phrases']}
+        required = list(dict.fromkeys(k.get('outputPhrase') or k.get('sourcePhrase') for k in plan['keywords']
+                                     if k.get('decision') != 'исключить' and normalized(k.get('sourcePhrase')) in core))
+        required = [p for p in required if isinstance(p, str) and p.strip()]
+        additional = list(dict.fromkeys(k.get('outputPhrase') or k.get('sourcePhrase') for k in plan['keywords']
+                                       if k.get('decision') != 'исключить' and normalized(k.get('sourcePhrase')) in allowed - core))
+        before = plain(card.get('description', ''))
+        numeric_facts = re.findall(r'(?<!\w)(?:(?:от|до|не менее|не более)\s*)?\d+(?:[.,]\d+)?\s*(?:мм|см|мл|кг|шт\.?|лет|года?|месяцев|мес\.?)\b', before, flags=re.I)
+        evidence = {'writeDescription': True, 'sku': str(card['sku']), 'currentTitle': card.get('title', ''),
+                    'currentDescription': before, 'ownFacts': model_evidence(card),
+                    'competitorStructure': profile['structure'], 'requiredPhrases': required,
+                    'additionalCandidates': additional, 'numericFactsToKeep': numeric_facts, 'remarks': remarks}
+        if progress:
+            progress('Написание и редактура описания')
+        response = self.chat('Перепиши существующее описание товара Ozon по переданной структуре и ТОЛЬКО нашим фактам. '
+            'Не копируй исходное описание без изменений. Сохрани важные факты, комплектацию, применение и все numericFactsToKeep. '
+            'Естественно включи каждую фразу requiredPhrases; можно менять регистр и использовать дефис, но не терять смысл. '
+            'additionalCandidates — необязательные кандидаты: используй только добавляющие отдельный смысл, без перестановок одних слов и переспама. '
+            'Не добавляй чужие бренды, модели, непроверенный возраст, количество расходников, гарантии или медицинские обещания. '
+            'Структура задаёт только порядок блоков: если для блока нет наших фактов, не выдумывай их. '
+            'Описание — связный текст по абзацам, без списков запросов, хештегов и технического JSON внутри текста. '
+            'Выполни редактуру русского языка перед ответом. Верни только готовый текст в поле value.',
+            evidence, journal=cache, journal_key=key, reuse_response=reuse_responses,
+            response_schema=schema_object({'value': TEXT}))
+        text = output_text(response.get('value'))
+        if not text:
+            raise SeoError('seo_empty_text', details={'field': 'description.value'})
+        compact = re.sub(r'\s+', '', text.casefold()).replace(',', '.')
+        for fact in numeric_facts:
+            term = re.sub(r'\s+', '', fact.casefold()).replace(',', '.')
+            if not re.search(r'(?<!\d)' + re.escape(term), compact):
+                plan['issues'].append({'field': 'Сохранение исходного факта', 'detail': 'В новом описании не подтверждено сохранение условия «' + fact + '».',
+                    'question': 'Вернуть подтверждённое условие в описание или явно проверить равнозначную формулировку.', 'blocking': True})
+        return text
 
     def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False):
         competitor = sources['competitor']
@@ -645,30 +724,33 @@ class AutomaticSeoService:
         profile = cache[profile_key]
         assessments = self.assess_semantics(card, sources, cache, progress, reuse_responses=reuse_responses)
         relevant_queries = {a['query'] for a in assessments if a['relevance'] == 'релевантен'}
-        instruction = '''Подготовь SEO-предложения для существующей карточки Ozon по методике Насти.
+        instruction = '''Составь короткий ПЛАН SEO-правок существующей карточки Ozon по методике Насти. НЕ пиши описание: его напишет отдельный этап.
 Смысл и релевантные ключи текущего заголовка сохранить, расширить по своему товару; не сокращать ради краткости.
 Проверь назначенного конкурента по назначению, конструкции, материалу, размерам/монтажу и комплектации. Верни compatibility:{"comparable":true,"reason":"подтверждённые совпадения и различия"}. При явной несовместимости comparable=false; неизвестные свойства не называй совпадающими.
-Описание перепиши по структуре конкурента и НАШИМ фактам; сохрани важные факты исходного текста, комплектацию и применение.
+Выбери формулировки для будущего описания по структуре конкурента и НАШИМ фактам.
 Выбор/количество ключей опирается на реально использованные у конкурента формулировки, соответствие нашему товару и естественный текст, без квоты в два ключа.
 Для КАЖДОГО идентификатора k0/k1/… из keywordIds укажи в объекте keywords решение использовать/адаптировать/объединить/исключить, outputPhrase и причину. Не пропускай идентификаторы, текст sourcePhrase уже известен приложению. Новые подтверждённые запросы из семантики можно добавить в массив additionalKeywords с sourcePhrase/outputPhrase/decision/reason. outputPhrase для использованных форм должна реально входить в итоговое описание.
-Сначала draftDescription, затем редактура естественного русского языка: description.value. После редактуры проверь сохранение фактов и ключей. Не переносить чужие бренды, модели, материалы, размеры, цвета, гарантии, эффекты. Не обещать медицинский/гарантированный результат.
+Не предлагай все перестановки одних слов из semantic. Ориентир — уникальные смыслы и структура текста конкурента; дополнительный ключ нужен, только если добавляет подтверждённый смысл. Не переносить чужие бренды, модели, материалы, размеры, цвета, гарантии, эффекты. Не обещать медицинский/гарантированный результат.
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
-JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[],"keywords":{"k0":{"outputPhrase":"...","decision":"использовать","reason":"..."}},"additionalKeywords":[],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
+JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"characteristics":[],"keywords":{"k0":{"outputPhrase":"...","decision":"использовать","reason":"..."}},"additionalKeywords":[],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
 semantic — релевантные кандидаты для естественного дополнения текста, не обязательный перечень для вставки. Не переписывай весь список: решения по релевантности уже сохранены, реальные вхождения проверит приложение. Для адаптированного запроса из semantic укажи sourcePhrase и outputPhrase в keywords.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]
         keyword_ids = {f'k{i}': row['phrase'] for i, row in enumerate(profile['phrases'])}
-        previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics', 'keywords', 'issues') if k in previous} if previous else None
-        evidence = {'ownEvidence': own_evidence(card), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
-                    'characteristics': characteristic_rows(card), 'definitions': compact_definitions,
+        previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics') if k in previous} if previous else None
+        if previous:
+            previous_texts['keywordDecisions'] = [row for row in previous.get('keywords', []) if row.get('sourcePhrase') in keyword_ids.values()]
+            previous_texts['openFields'] = list(dict.fromkeys(row.get('field', '') for row in previous.get('issues', [])))
+        evidence = {'ownEvidence': model_evidence(card), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
+                    'definitions': compact_definitions,
                     'competitor': competitor, 'competitorProfile': profile, 'keywordIds': keyword_ids,
                     'semantic': [{k: row.get(k) for k in ('query', 'count', 'position')} for row in sources['semantic']
                                  if row['query'] in relevant_queries],
                     'remarks': remarks, 'previous': previous_texts}
         if progress:
-            progress('Подготовка заголовка, характеристик и описания')
+            progress('План заголовка, характеристик и ключей')
         result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']), reuse_response=reuse_responses)
         if isinstance(result.get('keywords'), dict):
             if set(result['keywords']) != set(keyword_ids) or not all(isinstance(row, dict) for row in result['keywords'].values()):
@@ -680,6 +762,29 @@ blocking=true, если неподтверждённое свойство ост
         compatibility = result.get('compatibility', {})
         if not isinstance(compatibility, dict) or not isinstance(compatibility.get('comparable'), bool) or not compatibility.get('reason'):
             raise SeoError('seo_competitor_comparison_missing')
+        if not isinstance(result.get('title'), dict) or not isinstance(result['title'].get('value'), str):
+            raise SeoError('seo_empty_text', details={'field': 'title.value'})
+        if not all(isinstance(result.get(k), list) and all(isinstance(row, dict) for row in result[k]) for k in ('characteristics', 'keywords', 'issues')):
+            raise SeoError('seo_invalid_model_response')
+        rewrite_description = not previous or not remarks or any(r['section'] in {'description', 'semantic', 'competitor'} for r in remarks)
+        if rewrite_description:
+            text = self.write_description(card, sources, profile, result, remarks, cache, progress, reuse_responses)
+            result['description'] = {'value': text, 'reason': 'Описание доработано по структуре конкурента, собственным фактам и выбранным формулировкам; выполнена редактура.', 'editorChanges': []}
+        else:
+            result['description'], result['keywords'] = deepcopy(previous['description']), deepcopy(previous['keywords'])
+        result['title']['value'] = output_text(result['title'].get('value')).replace('\n', ' ')
+        own_text = ' '.join(model_evidence(card).values())
+        foreign = set(re.findall(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*', str(competitor.get('title') or '') + ' ' + competitor['description']))
+        foreign.update(str(value) for name, value in competitor.get('characteristics', {}).items() if any(part in str(name).casefold() for part in ('бренд', 'модель', 'серия')))
+        for name in sorted(foreign):
+            phrase = name.replace('-', ' ')
+            if len(name) < 4 or source_phrase(phrase, own_text):
+                continue
+            if source_phrase(phrase, result['title']['value']):
+                result['title'] = {'value': card.get('title', ''), 'reason': 'Предложение с чужим наименованием исключено; исходный заголовок сохранён.'}
+            if source_phrase(phrase, result['description']['value']):
+                result['issues'].append({'field': 'Чужое наименование в описании', 'detail': 'Обнаружено неподтверждённое собственными данными наименование «' + name + '».',
+                    'question': 'Убрать чужое наименование и проверить связанные свойства по нашим данным.', 'blocking': True})
         if not all(isinstance(result.get(k), dict) and isinstance(result[k].get('value'), str) and result[k]['value'].strip() for k in ('title', 'description')):
             raise SeoError('seo_empty_text')
         if len(result['title']['value']) > 200 or len(result['description']['value']) > 6000:
@@ -693,29 +798,34 @@ blocking=true, если неподтверждённое свойство ост
         if not compatibility['comparable']:
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
                                      'question': 'Назначить сопоставимый товар и пересобрать этот SKU.', 'blocking': True})
-        proofs = own_evidence(card)
+        proofs = dict(own_evidence(card), **model_evidence(card))
         canonical_phrases = {normalized(p): p for p in list(keyword_ids.values()) + [q['query'] for q in sources['semantic']]}
-        verified_keywords = []
+        verified_keywords, seen_keywords = [], set()
         for keyword in result['keywords']:
             if normalized(keyword.get('sourcePhrase')) in canonical_phrases:
                 keyword['sourcePhrase'] = canonical_phrases[normalized(keyword.get('sourcePhrase'))]
             else:
                 result['issues'].append({'field': 'Источник дополнительного ключа',
                     'detail': 'Формулировка «' + str(keyword.get('sourcePhrase', '')) + '» не найдена среди подтверждённых ключей конкурента или MPStats и не включена в перечень добавленных ключей.',
-                    'question': 'Убрать неподтверждённую формулировку из текста либо подтвердить её источник и релевантность.', 'blocking': True})
+                    'question': 'Формулировка не учитывается как подтверждённый поисковый запрос; проверить естественность текста по фактам товара.', 'blocking': False})
                 continue
+            if keyword['sourcePhrase'] in seen_keywords:
+                continue
+            seen_keywords.add(keyword['sourcePhrase'])
             actual = source_phrase(keyword.get('outputPhrase'), result['description']['value'])
             if not actual and keyword.get('decision') in {'использовать', 'адаптировать', 'объединить'}:
                 actual = source_phrase(keyword['sourcePhrase'], result['description']['value'])
             if actual:
                 keyword['outputPhrase'] = actual
             elif keyword.get('decision') in {'использовать', 'адаптировать', 'объединить'}:
-                result['issues'].append({'field': 'Вхождение ключа',
-                    'detail': 'Модель заявила использование фразы «' + str(keyword.get('outputPhrase', '')) +
-                              '», но она не найдена в итоговом описании. Исходная формулировка: «' + str(keyword.get('sourcePhrase', '')) + '».',
-                    'question': 'Добавить релевантную формулировку либо обосновать её исключение через замечание к описанию.', 'blocking': True})
+                is_core = normalized(keyword.get('sourcePhrase')) in {normalized(p) for p in keyword_ids.values()}
+                if is_core:
+                    result['issues'].append({'field': 'Вхождение ключа',
+                        'detail': 'Выбранная формулировка «' + str(keyword.get('outputPhrase', '')) +
+                                  '» не найдена в итоговом описании. Источник: «' + str(keyword.get('sourcePhrase', '')) + '».',
+                        'question': 'Добавить релевантную формулировку либо обосновать её исключение через замечание к описанию.', 'blocking': True})
                 keyword['decision'], keyword['outputPhrase'] = 'исключить', ''
-                keyword['reason'] = str(keyword.get('reason') or '') + ' Заявленное вхождение не подтвердилось: ключ не учитывается как добавленный.'
+                keyword['reason'] = str(keyword.get('reason') or '') + (' Выбранный ключ не найден: не учитывается как добавленный.' if is_core else ' Дополнительный кандидат не вошёл в естественный итоговый текст; не учитывается как добавленный.')
             verified_keywords.append(keyword)
         result['keywords'] = verified_keywords
         verified_characteristics = []
@@ -726,6 +836,13 @@ blocking=true, если неподтверждённое свойство ост
                 continue  # Separate title/description fields and unchanged rich content.
             if not isinstance(row.get('values'), list) or not row['values'] or not all(isinstance(v, str) and v.strip() for v in row['values']):
                 raise SeoError('seo_invalid_characteristic_values', details={'field': str(row.get('id', ''))[:30]})
+            if aid == '23171' and re.fullmatch(r'(?:#\w+[\s,;]*)+', ' '.join(row['values'])):
+                tags, seen_tags = [], set()
+                for tag in re.findall(r'#\w+', ' '.join(row['values'])):
+                    if normalized(tag) not in seen_tags:
+                        tags.append(tag)
+                        seen_tags.add(normalized(tag))
+                row['values'] = [' '.join(tags)]
             existing = existing_rows.get(aid)
             if existing and sorted(map(normalized, existing['values'])) == sorted(map(normalized, row['values'])):
                 continue  # The exporter retains the exact original values.
@@ -752,14 +869,27 @@ blocking=true, если неподтверждённое свойство ост
                     'detail': 'Предложение модели исключено: нет подтверждения в собственных данных. '
                               'Текущее значение сохранено: ' + ('; '.join(existing['values']) if existing else 'не заполнено') +
                               '. Неподтверждённое предложение: ' + '; '.join(row['values']),
-                    'question': 'Оставить текущее значение и убрать связанное утверждение из текста либо подтвердить собственным источником.',
-                    'blocking': True})
+                    'question': 'Неподтверждённое предложение не переносить. Если это значение осталось в тексте, убрать его либо подтвердить собственным источником.',
+                    'blocking': any(occurrence(value, result['title']['value'] + ' ' + result['description']['value']) for value in row['values'])})
         result['characteristics'] = verified_characteristics
         result['issues'].append({'field': 'Ограничения названия', 'detail': 'Использован рабочий предел приложения 200 символов. Официальное ограничение категории не подтверждено автоматически.',
                                  'question': 'Проверить требования категории перед переносом.', 'blocking': False})
         result['sources'] = sources
         result['competitorProfile'] = profile
         result['semanticDecisions'] = self.semantic_placements(result, assessments, sources)
+        keyword_rows = {row['sourcePhrase']: row for row in result['keywords']}
+        for decision in result['semanticDecisions']:
+            if decision['destination'] != 'описание' or not decision.get('outputPhrase'):
+                continue
+            query = decision['query']
+            if query not in keyword_rows or keyword_rows[query].get('decision') == 'исключить':
+                row = {'sourcePhrase': query, 'outputPhrase': decision['outputPhrase'], 'decision': 'использовать',
+                       'reason': 'Подтверждено фактическим вхождением в итоговое описание; релевантность проверена по данным товара.'}
+                if query in keyword_rows:
+                    keyword_rows[query].update(row)
+                else:
+                    result['keywords'].append(row)
+                    keyword_rows[query] = row
         self.verify_final_facts(result, card)
         self.verify_keywords(result, sources)
         return result
