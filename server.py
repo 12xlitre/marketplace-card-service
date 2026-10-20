@@ -18735,7 +18735,7 @@ def gigachat_access_token():
   return access_token
 
 
-def audit_llm_chat_completion(messages, response_schema=None):
+def audit_llm_chat_completion(messages, response_schema=None, plain_text=False):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
@@ -18745,7 +18745,7 @@ def audit_llm_chat_completion(messages, response_schema=None):
       "temperature": 0.2,
       "messages": messages,
     }
-    if response_schema is not None:
+    if response_schema is not None and not plain_text:
       # Native function arguments work on the configured legacy v1 endpoint too.
       body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
       body["function_call"] = {"name": "prepare_seo_data"}
@@ -18773,6 +18773,8 @@ def audit_llm_chat_completion(messages, response_schema=None):
     "response_format": {"type": "json_object"},
     "messages": messages,
   }
+  if plain_text:
+    body.pop("response_format", None)
   request = urlrequest.Request(
     url,
     data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

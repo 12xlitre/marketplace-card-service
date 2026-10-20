@@ -74,12 +74,14 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
              patch.object(server, 'gigachat_urlopen', side_effect=response):
             server.audit_llm_chat_completion([], response_schema=PROFILE_SCHEMA)
             server.audit_llm_chat_completion([])
+            server.audit_llm_chat_completion([], plain_text=True)
         self.assertEqual(requests[0][0]['function_call'], {'name': 'prepare_seo_data'})
         self.assertEqual(requests[0][0]['functions'][0]['parameters'], PROFILE_SCHEMA)
         self.assertEqual(requests[0][1], 120)
         self.assertEqual(requests[1][1], 60)
         self.assertNotIn('response_format', requests[1][0])
         self.assertNotIn('function_call', requests[1][0])
+        self.assertNotIn('function_call', requests[2][0])
 
     def test_readonly_recheck_never_requests_missing_mpstats_sources(self):
         adapter = OzonSeoHost(server)
@@ -96,7 +98,8 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         with patch.object(service.host, 'automatic_seo_preflight'), \
              patch.object(service.host, 'automatic_seo_own_cards', return_value=[card('1001')]), \
              patch.object(service.host, 'automatic_seo_sources', side_effect=lambda portal, own, mapping, period, cache, user: sources(own, mapping)), \
-             patch.object(service.host, 'automatic_seo_chat_completion', side_effect=lambda messages, schema: provider.audit_llm_chat_completion(messages)):
+             patch.object(service.host, 'automatic_seo_chat_completion', side_effect=lambda messages, schema: provider.audit_llm_chat_completion(messages)), \
+             patch.object(service.host, 'automatic_seo_chat_text', side_effect=provider.audit_llm_chat_completion):
             status, raw = self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {'1001': {'sku': 'https://www.ozon.ru/product/smesitel-9001/?from=share'}}})
             self.assertEqual(status, 200, raw)
             deadline = time.monotonic() + 5

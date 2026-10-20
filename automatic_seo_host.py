@@ -71,6 +71,9 @@ class OzonSeoHost:
     def automatic_seo_chat_completion(self, messages, schema):
         return self.server.audit_llm_chat_completion(messages, response_schema=schema)
 
+    def automatic_seo_chat_text(self, messages):
+        return self.server.audit_llm_chat_completion(messages, plain_text=True)
+
     def automatic_seo_own_cards(self, portal, tasks, user):
         h = self.server
         h.ensure_ozon_portal_access(portal, user, edit=True)

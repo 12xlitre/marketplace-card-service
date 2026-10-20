@@ -301,6 +301,16 @@ class AutomaticSeoTest(unittest.TestCase):
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             self.assertEqual(self.service.chat('Test', {}), {'structure': [], 'phrases': []})
 
+    def test_plain_description_writer_does_not_request_json_or_function_arguments(self):
+        prose = 'Описание товара.\n\nВторой абзац.'
+        payload = {'choices': [{'message': {'content': prose}, 'finish_reason': 'stop'}]}
+        with patch.object(self.host, 'automatic_seo_chat_text', return_value=(payload, 'model', 'gigachat'), create=True) as writer:
+            result = self.service.chat('Напиши описание', {'writeDescription': True}, raw_text=True)
+        self.assertEqual(result, {'value': prose})
+        instruction = writer.call_args.args[0][0]['content']
+        self.assertNotIn('Ответ только JSON', instruction)
+        self.assertIn('готовое описание', instruction)
+
     def test_scoped_revision_after_failed_attempt_keeps_last_reviewed_other_fields(self):
         self.action(); self.finish()
         directory = self.service.directory(1, 'batch')
@@ -380,6 +390,7 @@ class AutomaticSeoTest(unittest.TestCase):
 
     def test_description_writer_gets_own_facts_and_structure_without_foreign_description(self):
         own = card('1001'); own['description'] += ' Высота 4 см, ширина от 25 см.'
+        own['characteristics'].append({'id': 23171, 'name': '#Хештеги', 'values': ['#Неподтверждённое_свойство']})
         src = sources(own, self.mapping['1001']); src['competitor']['description'] += ' FOREIGN_BRAND с тремя чужими пакетами.'
         profile = {'structure': ['Назначение', 'Применение'], 'phrases': [{'phrase': 'кран для умывальника'}]}
         plan = {'keywords': generated()['keywords'], 'issues': []}
@@ -387,6 +398,7 @@ class AutomaticSeoTest(unittest.TestCase):
             self.service.write_description(own, src, profile, plan, [], {})
         evidence = writer.call_args.args[1]
         self.assertNotIn('FOREIGN_BRAND', json.dumps(evidence))
+        self.assertNotIn('attribute:23171', evidence['ownFacts'])
         self.assertEqual(evidence['competitorStructure'], profile['structure'])
         self.assertEqual(plan['issues'], [])
 
