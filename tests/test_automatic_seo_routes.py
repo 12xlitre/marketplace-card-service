@@ -71,7 +71,7 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
              patch.object(service.host, 'automatic_seo_own_cards', return_value=[card('1001')]), \
              patch.object(service.host, 'automatic_seo_sources', side_effect=lambda portal, own, mapping, period, cache, user: sources(own, mapping)), \
              patch.object(service.host, 'audit_llm_chat_completion', side_effect=provider.audit_llm_chat_completion):
-            status, raw = self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {'1001': {'sku': '9001', 'reason': 'Подтверждена сопоставимость товара.'}}})
+            status, raw = self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {'1001': {'sku': 'https://www.ozon.ru/product/smesitel-9001/?from=share'}}})
             self.assertEqual(status, 200, raw)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:

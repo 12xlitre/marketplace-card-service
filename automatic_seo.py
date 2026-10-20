@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 METHOD = 'competitor-structure-v1'
 SECTIONS = {'title', 'description', 'characteristics', 'semantic', 'competitor'}
@@ -65,6 +66,36 @@ def own_evidence(card):
 
 def occurrence(phrase, text):
     return bool(phrase and re.search(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', text, flags=re.I))
+
+
+def source_phrase(phrase, text):
+    """Return the actual source spelling, tolerating whitespace/case and е/ё only."""
+    words = str(phrase or '').strip().split()
+    if not words:
+        return ''
+    pattern = r'\s+'.join(re.escape(word) for word in words)
+    pattern = re.sub('[еёЕЁ]', '[её]', pattern)
+    match = re.search(r'(?<!\w)' + pattern + r'(?!\w)', text, flags=re.I)
+    return match.group() if match else ''
+
+
+def competitor_sku(value):
+    value = str(value or '').strip()
+    if re.fullmatch(r'[1-9]\d{2,19}', value):
+        return value
+    if value.startswith(('ozon.ru/', 'www.ozon.ru/', 'm.ozon.ru/')):
+        value = 'https://' + value
+    try:
+        parsed = urlparse(value)
+        allowed = parsed.scheme in {'http', 'https'} and parsed.hostname in {'ozon.ru', 'www.ozon.ru', 'm.ozon.ru'} and not parsed.username and not parsed.password
+    except ValueError:
+        allowed = False
+    if not allowed:
+        raise SeoError('seo_competitor_confirmation_required')
+    match = re.fullmatch(r'/product/(?:[^/]*-)?([1-9]\d{2,19})/?', parsed.path)
+    if not match:
+        raise SeoError('seo_competitor_confirmation_required')
+    return match[1]
 
 
 class AutomaticSeoService:
@@ -257,10 +288,13 @@ class AutomaticSeoService:
         output = {}
         for sku in skus:
             row = rows.get(sku, {})
+            if isinstance(row, str):
+                row = {'sku': row}
             if not isinstance(row, dict):
                 raise SeoError('seo_invalid_competitors')
-            cid, reason = str(row.get('sku', '')).strip(), str(row.get('reason', '')).strip()
-            if not re.fullmatch(r'[1-9]\d{2,19}', cid) or cid in skus or len(reason) < 10 or len(reason) > 2000:
+            cid = competitor_sku(row.get('sku') or row.get('url'))
+            reason = str(row.get('reason') or '').strip()
+            if cid in skus or len(reason) > 2000:
                 raise SeoError('seo_competitor_confirmation_required')
             output[sku] = {'sku': cid, 'reason': reason}
         return output
@@ -392,13 +426,26 @@ class AutomaticSeoService:
         if profile_key not in cache:
             profile = self.chat(
                 'Разбери описание прямого конкурента. Выдели последовательность смысловых блоков и реально употреблённые поисковые формулировки. '
-                'Не генерируй новые запросы. Верни {"structure":["..."],"phrases":[{"phrase":"точная цитата запроса","quote":"точный фрагмент описания"}]}. '
+                'Не генерируй новые запросы. Копируй phrase непосредственно из описания, сохраняя падеж и порядок слов: не приводи слова к начальной форме. '
+                'Верни {"structure":["..."],"phrases":[{"phrase":"точная цитата запроса","quote":"точный фрагмент описания"}]}. '
                 'Различай вложенные фразы и независимые смыслы, не добавляй рекламные обещания в ключи.', competitor)
             if not isinstance(profile.get('structure'), list) or not isinstance(profile.get('phrases'), list):
                 raise SeoError('seo_invalid_competitor_analysis')
+            verified, rejected, seen = [], [], set()
             for phrase in profile['phrases']:
-                if not occurrence(phrase.get('phrase', ''), competitor['description']) or phrase.get('quote', '') not in competitor['description']:
-                    raise SeoError('seo_competitor_witness_missing')
+                if not isinstance(phrase, dict):
+                    raise SeoError('seo_invalid_competitor_analysis')
+                actual = source_phrase(phrase.get('phrase'), competitor['description'])
+                if not actual:
+                    rejected.append(str(phrase.get('phrase') or '')[:300])
+                    continue
+                if normalized(actual) not in seen:
+                    # Witnesses come from our source, never from a model's fabricated quote.
+                    verified.append({'phrase': actual, 'quote': actual})
+                    seen.add(normalized(actual))
+            if profile['phrases'] and not verified:
+                raise SeoError('seo_competitor_witness_missing')
+            profile['phrases'], profile['rejectedPhrases'] = verified, rejected
             cache[profile_key] = profile
         profile = cache[profile_key]
         instruction = '''Подготовь SEO-предложения для существующей карточки Ozon по методике Насти.
@@ -430,6 +477,10 @@ blocking=true, если неподтверждённое свойство ост
             raise SeoError('seo_text_exceeds_review_limit')
         if not isinstance(result.get('characteristics'), list) or not isinstance(result.get('keywords'), list) or not isinstance(result.get('issues'), list):
             raise SeoError('seo_invalid_model_response')
+        if profile.get('rejectedPhrases'):
+            result['issues'].append({'field': 'Формулировки конкурента',
+                                     'detail': 'Не найдены в исходном описании и исключены из перечня ключей: ' + '; '.join(profile['rejectedPhrases']),
+                                     'question': 'Проверить перечень подтверждённых ключей на листе «Семантика».', 'blocking': False})
         if not compatibility['comparable']:
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
                                      'question': 'Назначить сопоставимый товар и пересобрать этот SKU.', 'blocking': True})

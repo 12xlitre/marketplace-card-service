@@ -8121,3 +8121,6 @@ tr:last-child td {
 .automatic-seo-task li { margin: 8px 0; overflow-wrap: anywhere; }
 .automatic-seo-remark { display: grid; gap: 10px; }
 .automatic-seo-task .field-label { min-width: 180px; }
+.automatic-seo-competitors { display: grid; gap: 12px; margin-top: 12px; }
+.automatic-seo-competitor { padding: 12px; border: 1px solid var(--border, #dce4ed); border-radius: 8px; }
+.automatic-seo-competitor input { box-sizing: border-box; width: 100%; min-width: 0; }

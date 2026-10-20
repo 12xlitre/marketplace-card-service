@@ -229,6 +229,33 @@ class AutomaticSeoTest(unittest.TestCase):
             self.action()
         self.assertEqual(self.host.own_fetches, 0)
 
+    def test_competitor_product_links_and_skus_need_no_written_reason(self):
+        context = self.host.automatic_seo_context(1, 'batch', self.tech)
+        rows = self.service.mappings({'1001': {'sku': 'https://www.ozon.ru/product/smesitel-9001/?from=share'},
+                                      '1002': '9002'}, context)
+        self.assertEqual(rows, {'1001': {'sku': '9001', 'reason': ''}, '1002': {'sku': '9002', 'reason': ''}})
+        for bad in ['https://ozon.ru.evil.test/product/9001/', 'https://evil.test/product/9001/',
+                    'https://ozon.ru/seller/9001/', 'https://ozon.ru/t/short', 'https://[invalid', '1001']:
+            with self.subTest(bad=bad), self.assertRaises(SeoError):
+                self.service.mappings({'1001': bad, '1002': '9002'}, context)
+        self.assertEqual(self.host.own_fetches, 0)
+
+    def test_competitor_phrase_uses_actual_source_and_reports_unverified_candidates(self):
+        own = card('1001')
+        src = sources(own, self.mapping['1001'])
+        profile = {'structure': ['Назначение'], 'phrases': [
+            {'phrase': 'КРАН  ДЛЯ\nУМЫВАЛЬНИКА', 'quote': 'Сочинённая цитата'},
+            {'phrase': 'несуществующий поисковый запрос', 'quote': 'Сочинённая цитата'}]}
+        with patch.object(self.service, 'chat', side_effect=[profile, generated()]):
+            result = self.service.generate(own, src, [], None, {})
+        self.assertEqual(result['competitorProfile']['phrases'], [
+            {'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}])
+        self.assertTrue(any('несуществующий поисковый запрос' in i['detail'] for i in result['issues']))
+        self.assertNotIn('несуществующий поисковый запрос', result['description']['value'])
+        with patch.object(self.service, 'chat', return_value={'structure': [], 'phrases': [{'phrase': 'выдумано'}]}):
+            with self.assertRaisesRegex(SeoError, 'seo_competitor_witness_missing'):
+                self.service.generate(own, src, [], None, {})
+
     def test_capacity_limit_does_not_start_or_spend_generation(self):
         self.service.slots.acquire(); self.service.slots.acquire()
         try:

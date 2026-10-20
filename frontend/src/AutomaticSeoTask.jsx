@@ -5,7 +5,7 @@ const messages = {
   seo_card_failed: "Не удалось обработать товар. Проверьте источники и повторите подготовку этого SKU.",
   seo_generation_failed: "Подготовка файла прервана. Повторите запуск; готовые результаты будут использованы повторно.",
   seo_characteristic_evidence_missing: "Для предлагаемой характеристики не найдено подтверждение в собственных данных товара.",
-  seo_competitor_witness_missing: "Выбранная формулировка не подтверждается фактическим текстом конкурента.",
+  seo_competitor_witness_missing: "Не удалось подтвердить ключи по описанию конкурента. Excel ещё не создан. Повторите подготовку проблемных товаров; при повторной ошибке выберите другого конкурента.",
   seo_keyword_decisions_incomplete: "Не для всех формулировок конкурента объяснён выбор. Требуется доработка.",
   seo_semantic_decisions_incomplete: "Не для всех запросов объяснено решение. Требуется повторная подготовка.",
   seo_semantic_witness_missing: "Заявленный ключ не найден в указанном разделе результата. Требуется доработка.",
@@ -14,7 +14,10 @@ const messages = {
   seo_text_exceeds_review_limit: "Подготовленный текст превышает рабочий предел. Укажите замечание для доработки.",
   seo_task_scope_changed: "Состав задачи изменился после подготовки. Создайте новую задачу для актуального набора карточек.",
   seo_tag_removal_reason_missing: "Удаление существующего хештега не обосновано. Нужна доработка.",
-  seo_competitor_confirmation_required: "Для каждого SKU укажите конкурента и объяснение сопоставимости (от 10 символов).",
+  seo_competitor_confirmation_required: "Для каждого товара вставьте ссылку на карточку конкурента Ozon или его SKU. Для короткой ссылки откройте товар и скопируйте полный адрес из браузера.",
+  seo_file_verification_failed: "Файл не прошёл проверку целостности. Пересоберите его; прежние версии сохраняются.",
+  seo_report_missing: "Эта версия файла ещё не создана. Дождитесь завершения подготовки.",
+  unauthorized: "Сессия истекла. Войдите в приложение снова.",
   seo_version_conflict: "Версия изменилась. Обновите задачу и проверьте актуальный файл.",
   seo_blocking_issues: "Сначала устраните блокирующие вопросы через замечания и пересборку.",
   seo_review_issues_required: "Подтвердите проверку вопросов к источникам.",
@@ -41,6 +44,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
   const [report, setReport] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(null);
   const [mapping, setMapping] = useState(null);
   const [remark, setRemark] = useState({ sku: "*", section: "description", text: "", attributeId: "" });
   const [acknowledged, setAcknowledged] = useState(false);
@@ -63,10 +67,10 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         setReport(value);
         setError("");
         const current = value.versions.at(-1);
-        setMapping((text) => text ?? group.tasks.map((task) => {
+        setMapping((text) => text ?? Object.fromEntries(group.tasks.map((task) => {
           const row = current?.competitors?.[task.sku];
-          return `${task.sku}; ${row?.sku || ""}; ${row?.reason || ""}`;
-        }).join("\n"));
+          return [task.sku, { sku: row?.sku || "", reason: row?.reason || "" }];
+        })));
         if (current?.status === "running") timer = setTimeout(load, 3000);
       } catch (e) {
         if (active) setError(errorText(e));
@@ -77,13 +81,24 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
   }, [endpoint, running]);
 
   function competitors() {
-    const rows = {};
-    for (const line of String(mapping || "").split("\n").filter((v) => v.trim())) {
-      const [own, other, ...reason] = line.split(/[;\t]/);
-      if (rows[own?.trim()]) throw new Error("Повтор нашего SKU в сопоставлении");
-      rows[own?.trim()] = { sku: other?.trim() || "", reason: reason.join("; ").trim() };
-    }
-    return rows;
+    return Object.fromEntries(group.tasks.map((task) => [task.sku, mapping?.[task.sku] || { sku: "" }]));
+  }
+
+  async function downloadFile(number) {
+    setDownloading(number); setError("");
+    try {
+      const response = await fetch(`${endpoint}/file?version=${number}`, { credentials: "same-origin" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || "request_failed");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url; link.download = `SEO_v${number}.xlsx`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { setError(errorText(e)); }
+    finally { setDownloading(null); }
   }
 
   async function act(action, refreshSources = false) {
@@ -107,15 +122,18 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
       <div className="task-batch-main"><strong>Автоматическая оптимизация</strong><span>{statusNames[latest?.status] || "Подготовка ещё не запускалась"}</span></div>
       {latest ? <p role="status">Версия {latest.number} · {latest.stage} · обработано {latest.done} из {latest.total}</p> : <p>Подготовка заголовков, характеристик и описаний с Excel для проверки.</p>}
       {latest?.sourceCapturedAt ? <p className="status-note">Свои данные получены {new Date(latest.sourceCapturedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}. Период MPStats: {latest.period?.d1} — {latest.period?.d2}.</p> : null}
-      <details open={!latest}>
-        <summary>Прямые конкуренты для выбранных SKU</summary>
-        <label className="field-label">Одна строка: наш SKU; SKU конкурента; почему товары сопоставимы
-          <textarea rows={Math.min(10, group.tasks.length + 1)} value={mapping || ""} onChange={(e) => setMapping(e.target.value)} disabled={!mayGenerate || busy} placeholder="5318115666; 194446985; Смеситель для раковины с сопоставимым монтажом и высотой" />
-        </label>
-        <p className="status-note">Сверьте назначение, конструкцию, материал и комплектацию. Анализ общего конкурента используется повторно; факты проверяются отдельно по каждому нашему SKU.</p>
+      <details open={!latest || ["partial", "failed", "interrupted"].includes(latest.status)}>
+        <summary>Товары конкурентов</summary>
+        <p className="status-note">Напротив каждого вашего товара вставьте ссылку на похожий товар Ozon или его SKU. Писать пояснение не нужно — сопоставимость проверится при подготовке.</p>
+        <div className="automatic-seo-competitors">{group.tasks.map((task) => <label className="field-label automatic-seo-competitor" key={task.sku}>
+          <strong>{task.title || task.offerId || "Ваш товар"}</strong>
+          <span className="status-note">Ваш SKU: {task.sku}{task.offerId ? ` · Артикул: ${task.offerId}` : ""}</span>
+          <input aria-label={`Конкурент для ${task.sku}`} value={mapping?.[task.sku]?.sku || ""} onChange={(e) => setMapping((rows) => ({ ...rows, [task.sku]: { sku: e.target.value, reason: "" } }))} disabled={!mayGenerate || busy} placeholder="https://www.ozon.ru/product/… или SKU конкурента" />
+        </label>)}</div>
       </details>
       {error ? <p className="status-note error" role="alert">{error}</p> : null}
       {latest?.errors?.length ? <ul>{latest.errors.map((row, i) => <li key={`${row.sku}-${i}`}>{row.sku}: {errorText({ message: row.code })}</li>)}</ul> : null}
+      {latest && !latest.sha256 ? <p role="status" className="status-note">{running ? "Excel появится здесь после завершения подготовки." : "Excel этой версии не создан: подготовка не завершена. Повторите проблемные товары кнопкой ниже — готовые результаты сохранятся."}</p> : null}
       {latest?.issues?.length ? <details><summary>Вопросы к проверке: {latest.issues.length}</summary><ul>{latest.issues.map((row, i) => <li key={i}><strong>{row.sku} · {row.field}{row.blocking ? " · блокирует принятие" : ""}</strong>: {row.detail} {row.question}</li>)}</ul></details> : null}
       {mayRemark ? <div className="automatic-seo-remark">
         <strong>{canReview && submitted ? "Замечание аккаунта" : "Замечание для доработки"}</strong>
@@ -136,7 +154,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
       </div>
       {report?.versions?.length ? <details open><summary>Файлы и история версий</summary><ul>{[...report.versions].reverse().map((version) => <li key={version.number}>
         <span>Версия {version.number} · {statusNames[version.status]} · {new Date(version.createdAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })} </span>
-        {version.sha256 ? <a className="btn mini" href={`${endpoint}/file?version=${version.number}`}>Скачать Excel</a> : null}
+        {version.sha256 ? <button type="button" className="btn mini" disabled={downloading !== null} onClick={() => downloadFile(version.number)}>{downloading === version.number ? "Скачивание…" : `Скачать Excel · версия ${version.number}`}</button> : <span className="status-note"> · {version.status === "running" ? "Файл готовится" : "Excel не создан"}</span>}
         {version.remarks?.map((r, i) => <p key={i}>{r.sku === "*" ? "Вся пачка" : r.sku} · {sectionNames[r.section] || "Замечание"}: {r.text}</p>)}
       </li>)}</ul></details> : null}
     </section>
