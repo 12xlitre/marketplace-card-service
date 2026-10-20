@@ -275,6 +275,17 @@ class AutomaticSeoTest(unittest.TestCase):
                 with self.assertRaisesRegex(SeoError, code):
                     self.service.chat('Test', {})
 
+    def test_native_gigachat_arguments_are_used_instead_of_free_text(self):
+        schema_result = {'structure': ['Назначение'], 'phrases': []}
+        payload = {'choices': [{'message': {'content': 'Текст вне схемы игнорируется',
+                    'function_call': {'name': 'prepare_seo_data', 'arguments': schema_result}}, 'finish_reason': 'function_call'}]}
+        with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
+            self.assertEqual(self.service.chat('Test', {}), schema_result)
+        payload['choices'][0]['message']['function_call']['name'] = 'wrong_function'
+        with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
+            with self.assertRaisesRegex(SeoError, 'seo_invalid_model_response'):
+                self.service.chat('Test', {})
+
     def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
         complete = self.host.audit_llm_chat_completion
         def answer(messages):

@@ -473,6 +473,11 @@ class AutomaticSeoService:
         choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
         message = choice.get('message')
         content = message.get('content') if isinstance(message, dict) else None
+        if structured and provider == 'gigachat':
+            call = message.get('function_call') if isinstance(message, dict) else None
+            if not isinstance(call, dict) or call.get('name') != 'prepare_seo_data' or not isinstance(call.get('arguments'), (dict, str)):
+                raise SeoError('seo_invalid_model_response', details={'field': 'message.function_call.arguments'})
+            content = json.dumps(call['arguments'], ensure_ascii=False) if isinstance(call['arguments'], dict) else call['arguments']
         if not isinstance(content, str):
             raise SeoError('seo_invalid_model_response', details={'field': 'choices[0].message.content'})
         if journal is not None and journal_key:
@@ -530,7 +535,7 @@ class AutomaticSeoService:
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
-JSON: {"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"semanticDecisions":[{"query":"...","relevance":"релевантен/не добавлять","destination":"заголовок","outputPhrase":"точное реальное вхождение в выбранном разделе","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
+JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"draftDescription":"...","description":{"value":"...","reason":"...","editorChanges":["..."]},"characteristics":[{"id":"123","values":["..."],"reason":"...","evidence":[{"source":"attribute:123","quote":"..."}],"removedValues":[]}],"keywords":[{"sourcePhrase":"...","outputPhrase":"...","decision":"использовать","reason":"..."}],"semanticDecisions":[{"query":"...","relevance":"релевантен/не добавлять","destination":"заголовок","outputPhrase":"точное реальное вхождение в выбранном разделе","reason":"..."}],"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
 semanticDecisions: охвати ВСЕ запросы semantic. destination — одно из заголовок/характеристика/описание/не добавлять. Если запрос не размещён или нет подтверждения, выбери не добавлять и объясни. Не обещай наличие ключа «по смыслу» без точного outputPhrase в результате.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]

@@ -18746,7 +18746,9 @@ def audit_llm_chat_completion(messages, response_schema=None):
       "messages": messages,
     }
     if response_schema is not None:
-      body["response_format"] = {"type": "json_schema", "schema": response_schema, "strict": True}
+      # Native function arguments work on the configured legacy v1 endpoint too.
+      body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
+      body["function_call"] = {"name": "prepare_seo_data"}
     request = urlrequest.Request(
       url,
       data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

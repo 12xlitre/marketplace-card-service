@@ -74,9 +74,11 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
              patch.object(server, 'gigachat_urlopen', side_effect=response):
             server.audit_llm_chat_completion([], response_schema=PROFILE_SCHEMA)
             server.audit_llm_chat_completion([])
-        self.assertEqual(requests[0][0]['response_format'], {'type': 'json_schema', 'schema': PROFILE_SCHEMA, 'strict': True})
+        self.assertEqual(requests[0][0]['function_call'], {'name': 'prepare_seo_data'})
+        self.assertEqual(requests[0][0]['functions'][0]['parameters'], PROFILE_SCHEMA)
         self.assertEqual(requests[0][1], 60)
         self.assertNotIn('response_format', requests[1][0])
+        self.assertNotIn('function_call', requests[1][0])
 
     def test_http_generation_download_accept_and_approval_keep_manual_task(self):
         from test_automatic_seo import card, sources, FakeHost
