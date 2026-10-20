@@ -1,5 +1,6 @@
 from copy import deepcopy
 import http.client
+import io
 import json
 import re
 from pathlib import Path
@@ -62,6 +63,21 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         self.assertEqual(self.request('GET', path.replace(str(self.portal), str(self.other), 1))[0], 403)
         self.assertEqual(self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {}})[0], 400)
 
+    def test_gigachat_seo_enforces_json_schema_without_changing_other_calls(self):
+        from automatic_seo import PROFILE_SCHEMA
+        requests = []
+        def response(request, timeout):
+            requests.append((json.loads(request.data), timeout))
+            return io.BytesIO(b'{"choices":[{"message":{"content":"{}"}}]}')
+        with patch.object(server, 'OPTICARDS_LLM_PROVIDER', 'gigachat'), \
+             patch.object(server, 'gigachat_access_token', return_value='test-token'), \
+             patch.object(server, 'gigachat_urlopen', side_effect=response):
+            server.audit_llm_chat_completion([], response_schema=PROFILE_SCHEMA)
+            server.audit_llm_chat_completion([])
+        self.assertEqual(requests[0][0]['response_format'], {'type': 'json_schema', 'schema': PROFILE_SCHEMA, 'strict': True})
+        self.assertEqual(requests[0][1], 60)
+        self.assertNotIn('response_format', requests[1][0])
+
     def test_http_generation_download_accept_and_approval_keep_manual_task(self):
         from test_automatic_seo import card, sources, FakeHost
         service = server.automatic_seo_service()
@@ -70,7 +86,7 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         with patch.object(service.host, 'automatic_seo_preflight'), \
              patch.object(service.host, 'automatic_seo_own_cards', return_value=[card('1001')]), \
              patch.object(service.host, 'automatic_seo_sources', side_effect=lambda portal, own, mapping, period, cache, user: sources(own, mapping)), \
-             patch.object(service.host, 'audit_llm_chat_completion', side_effect=provider.audit_llm_chat_completion):
+             patch.object(service.host, 'automatic_seo_chat_completion', side_effect=lambda messages, schema: provider.audit_llm_chat_completion(messages)):
             status, raw = self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {'1001': {'sku': 'https://www.ozon.ru/product/smesitel-9001/?from=share'}}})
             self.assertEqual(status, 200, raw)
             deadline = time.monotonic() + 5

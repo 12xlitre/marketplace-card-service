@@ -18735,7 +18735,7 @@ def gigachat_access_token():
   return access_token
 
 
-def audit_llm_chat_completion(messages):
+def audit_llm_chat_completion(messages, response_schema=None):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
@@ -18745,6 +18745,8 @@ def audit_llm_chat_completion(messages):
       "temperature": 0.2,
       "messages": messages,
     }
+    if response_schema is not None:
+      body["response_format"] = {"type": "json_schema", "schema": response_schema, "strict": True}
     request = urlrequest.Request(
       url,
       data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
