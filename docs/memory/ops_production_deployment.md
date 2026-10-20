@@ -54,3 +54,5 @@ sudo opticards-ps
 - `OPTICARDS_SECRET_KEY` уже находится в `/opt/opticards/.env.prod`, права `600`, заново его не генерировать;
 - WB API ключ вводится через интерфейс и шифруется в SQLite.
 - на рабочей машине Chromium для Playwright можно запускать без sudo: сам браузер установлен в `~/.cache/ms-playwright`, недостающие системные библиотеки распакованы в `/home/dmitriy/.local/chromium-deps/root`; перед запуском нужен `LD_LIBRARY_PATH=/home/dmitriy/.local/chromium-deps/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH`.
+
+С 20.10.2026 для автоматической оптимизации Ozon серверный Dockerfile включает в `COPY` также `automatic_seo.py`, `automatic_seo_host.py`, `automatic_seo_xlsx.py`; `requirements.txt` включает openpyxl. Изменение согласовано и применено при штатной выкладке; точный патч хранится в `docs/automatic-seo-runtime.patch`. При добавлении Python-модулей проверять состав серверного образа: файлы репозитория вне `COPY` в контейнер не попадают. Текущий релиз и резервные копии — в `WORK.md`.

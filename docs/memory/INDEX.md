@@ -7,7 +7,7 @@
 - `backend_auth_and_sessions.md` — backend-only auth, сессии с разным TTL и remember-me, восстановление состояния после refresh.
 - `backend_portals.md` — кабинеты и состав проекта живут в SQLite/backend API, браузерный localStorage только fallback.
 - `backend_wb_readonly.md` — WB API подключение через backend, токены только env/demo или encrypted per portal, чтение карточек и строго ограниченная ручная публикация принятого контента.
-- `ops_production_deployment.md` — OptiCards развернут на `opticards.weboptai.ru`, прод-обвязка живет на сервере.
+- `ops_production_deployment.md` — OptiCards развернут на `opticards.weboptai.ru`, прод-обвязка живет на сервере; новые Python-модули требуют явного включения в образ.
 - `product_wb_characteristic_values.md` — правила по значениям характеристик WB: где есть официальный справочник, где только подсказки из карточек, и почему нужен MPStats.
 - `product_approval_workflow.md` — роли согласования, хранение задач/событий, правило soft reset анализа при обновлении WB и кабинетная XLSX-выгрузка итогового контента.
 - `product_mass_workflow.md` — постоянные правила массовой обработки: источники, конкуренты, тексты, Excel, проверки, пачки и согласование. Текущая версия файла и открытые вопросы — в WORK.md.
