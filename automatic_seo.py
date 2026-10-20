@@ -32,8 +32,8 @@ def schema_rows(properties):
 TEXT = {'type': 'string'}
 PROFILE_SCHEMA = schema_object({'structure': {'type': 'array', 'items': TEXT},
                                 'phrases': schema_rows({'phrase': TEXT, 'quote': TEXT})})
-SEMANTIC_SCHEMA = schema_object({'decisions': schema_rows({'query': TEXT, 'reason': TEXT,
-    'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']}})})
+SEMANTIC_DECISION_SCHEMA = schema_object({'reason': TEXT,
+    'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']}})
 DRAFT_SCHEMA = schema_object({
     'compatibility': schema_object({'comparable': {'type': 'boolean'}, 'reason': TEXT}),
     'title': schema_object({'value': TEXT, 'reason': TEXT}), 'draftDescription': TEXT,
@@ -466,7 +466,7 @@ class AutomaticSeoService:
             ]
             structured = getattr(self.host, 'automatic_seo_chat_completion', None)
             if structured:
-                schema = SEMANTIC_SCHEMA if 'semanticBatch' in evidence else DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA
+                schema = schema_object({key: SEMANTIC_DECISION_SCHEMA for key in evidence['semanticBatch']}) if 'semanticBatch' in evidence else DRAFT_SCHEMA if 'ownEvidence' in evidence else PROFILE_SCHEMA
                 payload, model, provider = structured(messages, schema)
             else:
                 payload, model, provider = self.host.audit_llm_chat_completion(messages)
@@ -509,16 +509,23 @@ class AutomaticSeoService:
         decisions = []
         for offset in range(0, len(queries), 32):
             batch = queries[offset:offset + 32]
-            key = 'semantic-relevance:' + fingerprint({'facts': own_evidence(card), 'queries': batch})
+            key = 'semantic-relevance-v2:' + fingerprint({'facts': own_evidence(card), 'queries': batch})
             if key not in cache:
                 if progress:
                     progress(f'Проверка запросов {offset + 1}–{min(offset + 32, len(queries))} из {len(queries)}')
-                response = self.chat('Оцени соответствие каждого поискового запроса конкретному товару по его подтверждённым данным. '
-                    'Верни decisions: query точно из списка, relevance (релевантен/нерелевантен/недостаточно данных), reason — одна короткая конкретная причина. '
+                labeled = {f'q{i}': query for i, query in enumerate(batch)}
+                response = self.chat('Оцени соответствие КАЖДОГО поискового запроса конкретному товару по его подтверждённым данным. '
+                    'Для КАЖДОГО идентификатора q0, q1 и так далее из semanticBatch верни отдельное поле объекта: '
+                    '{"q0":{"relevance":"релевантен/нерелевантен/недостаточно данных","reason":"одна короткая конкретная причина"},"q1":{...},...}. '
+                    'Нельзя пропускать идентификаторы. Не переписывай запросы: они уже сопоставлены с идентификаторами. '
                     'Не выбирай по частотности. Не приписывай товару чужой цвет, размер, модель, комплектацию. Не генерируй описание.',
-                    {'ownFacts': own_evidence(card), 'semanticBatch': batch}, journal=cache, journal_key='response:' + key)
-                rows = response.get('decisions')
-                if not isinstance(rows, list) or not all(isinstance(r, dict) and isinstance(r.get('query'), str)
+                    {'ownFacts': own_evidence(card), 'semanticBatch': labeled}, journal=cache, journal_key='response:' + key)
+                if set(response) != set(labeled):
+                    raise SeoError('seo_semantic_decisions_incomplete', details={
+                        'expectedQueries': len(batch), 'receivedQueries': len(set(response) & set(labeled)),
+                        'missingQueries': [labeled[label] for label in labeled if label not in response]})
+                rows = [{'query': query, **response[label]} if isinstance(response[label], dict) else None for label, query in labeled.items()]
+                if not all(isinstance(r, dict) and isinstance(r.get('query'), str)
                         and r.get('relevance') in {'релевантен', 'нерелевантен', 'недостаточно данных'}
                         and isinstance(r.get('reason'), str) and r['reason'].strip() for r in rows):
                     raise SeoError('seo_invalid_semantic_assessment')

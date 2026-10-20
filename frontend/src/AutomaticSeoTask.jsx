@@ -16,7 +16,7 @@ const messages = {
   seo_characteristic_evidence_missing: "Для предлагаемой характеристики не найдено подтверждение в собственных данных товара.",
   seo_competitor_witness_missing: "Выделенные алгоритмом фразы не найдены в описании конкурента. Формулировки показаны ниже; требуется проверить разбор текста.",
   seo_keyword_decisions_incomplete: "Не для всех формулировок конкурента объяснён выбор. Требуется доработка.",
-  seo_semantic_decisions_incomplete: "Не для всех запросов объяснено решение. Требуется повторная подготовка.",
+  seo_semantic_decisions_incomplete: "Модель пропустила часть поисковых запросов. Неполная оценка остановлена; пропущенные запросы показаны ниже.",
   seo_semantic_witness_missing: "Заявленный ключ не найден в указанном разделе результата. Требуется доработка.",
   seo_official_definitions_missing: "Не получен официальный справочник характеристик категории.",
   seo_incomplete_dictionary: "Не удалось полностью проверить официальный словарь. Повторите подготовку.",
@@ -146,6 +146,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         {row.details?.httpStatus ? <span> Статус сервиса: {row.details.httpStatus}.</span> : null}
         {row.details?.field ? <span> Поле: {row.details.field}.</span> : null}
         {row.details?.phrases?.length ? <details><summary>Какие фразы не подтверждены</summary><ul>{row.details.phrases.map((phrase, j) => <li key={j}>{phrase}</li>)}</ul></details> : null}
+        {row.details?.missingQueries?.length ? <details><summary>Какие запросы пропущены · оценено {row.details.receivedQueries} из {row.details.expectedQueries}</summary><ul>{row.details.missingQueries.map((query, j) => <li key={j}>{query}</li>)}</ul></details> : null}
       </li>)}</ul> : null}
       {latest && !latest.sha256 ? <p role="status" className="status-note">{running ? "Excel появится здесь после завершения подготовки." : "Excel этой версии не создан: подготовка не завершена. Повторите проблемные товары кнопкой ниже — готовые результаты сохранятся."}</p> : null}
       {latest?.issues?.length ? <details><summary>Вопросы к проверке: {latest.issues.length}</summary><ul>{latest.issues.map((row, i) => <li key={i}><strong>{row.sku} · {row.field}{row.blocking ? " · блокирует принятие" : ""}</strong>: {row.detail} {row.question}</li>)}</ul></details> : null}

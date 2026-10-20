@@ -41,7 +41,7 @@ def generated(text='Смеситель для раковины. Латунный
 
 
 def assessment():
-    return {'decisions': [{'query': 'кран для умывальника', 'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'}]}
+    return {'q0': {'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'}}
 
 
 class FakeHost:
@@ -78,7 +78,7 @@ class FakeHost:
     def audit_llm_chat_completion(self, messages):
         evidence = json.loads(messages[1]['content'])
         if 'semanticBatch' in evidence:
-            answer = {'decisions': [{'query': q, 'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'} for q in evidence['semanticBatch']]}
+            answer = {label: {'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'} for label in evidence['semanticBatch']}
         elif 'ownEvidence' not in evidence:
             self.profile_calls += 1
             answer = {'structure': ['Назначение', 'Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}
@@ -300,7 +300,7 @@ class AutomaticSeoTest(unittest.TestCase):
         def answer(messages):
             evidence = json.loads(messages[1]['content'])
             if 'semanticBatch' in evidence:
-                batches.append(evidence['semanticBatch'])
+                batches.append(list(evidence['semanticBatch'].values()))
             return complete(messages)
         cache = {}
         with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
@@ -311,6 +311,15 @@ class AutomaticSeoTest(unittest.TestCase):
         unplaced = result['semanticDecisions'][1:]
         self.assertTrue(all(r['destination'] == 'не добавлять' and r['relevance'] == 'релевантен' for r in unplaced))
         self.assertTrue(all('В этой редакции' in r['reason'] for r in unplaced))
+
+    def test_missing_semantic_decision_names_the_actual_query(self):
+        own = card('1001'); src = sources(own, self.mapping['1001'])
+        src['semantic'].append({'query': 'смеситель из латуни'})
+        with patch.object(self.service, 'chat', return_value=assessment()):
+            with self.assertRaises(SeoError) as caught:
+                self.service.assess_semantics(own, src, {})
+        self.assertEqual(caught.exception.details, {'expectedQueries': 2, 'receivedQueries': 1,
+                                                   'missingQueries': ['смеситель из латуни']})
 
     def test_worker_keeps_private_model_reply_and_logs_no_exception_secrets(self):
         complete = self.host.audit_llm_chat_completion
