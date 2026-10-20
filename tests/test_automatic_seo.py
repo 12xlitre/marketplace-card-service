@@ -289,6 +289,44 @@ class AutomaticSeoTest(unittest.TestCase):
                 with self.assertRaisesRegex(SeoError, code):
                     self.service.chat('Test', {})
 
+    def test_failed_new_call_cannot_leave_a_stale_replay_response(self):
+        cache = {'response:draft:1001': {'content': '{}', 'contentLength': 2}}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=TimeoutError()):
+            with self.assertRaisesRegex(SeoError, 'seo_llm_timeout'):
+                self.service.chat('Test', {}, journal=cache, journal_key='response:draft:1001')
+        self.assertNotIn('response:draft:1001', cache)
+
+    def test_plain_json_provider_response_still_passes_strict_validation(self):
+        payload = {'choices': [{'message': {'content': '{"structure":[],"phrases":[]}'}, 'finish_reason': 'stop'}]}
+        with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
+            self.assertEqual(self.service.chat('Test', {}), {'structure': [], 'phrases': []})
+
+    def test_scoped_revision_after_failed_attempt_keeps_last_reviewed_other_fields(self):
+        self.action(); self.finish()
+        directory = self.service.directory(1, 'batch')
+        original = self.service.load(directory)['versions'][0]['results']['1002']['description']
+        self.host.fail_sku = '1002'
+        self.action('revise', 1, remarks=[{'sku': '*', 'section': 'description', 'text': 'Доработать описание.'}])
+        self.assertEqual(self.finish()['status'], 'partial')
+        self.host.fail_sku = None
+        self.action('revise', 2, remarks=[{'sku': '1002', 'section': 'title', 'text': 'Доработать только заголовок.'}])
+        self.assertEqual(self.finish()['status'], 'review')
+        current = self.service.load(directory)['versions'][-1]['results']['1002']['description']
+        self.assertEqual(current, original)
+
+    def test_retry_keeps_remarks_and_does_not_regenerate_completed_sku(self):
+        self.action(); self.finish()
+        self.host.fail_sku = '1002'
+        self.action('revise', 1, remarks=[{'sku': '*', 'section': 'description', 'text': 'Доработать описание.'}])
+        self.assertEqual(self.finish()['status'], 'partial')
+        previous_calls = list(self.host.calls)
+        self.host.fail_sku = None
+        self.action('generate', 2)
+        self.assertEqual(self.finish()['status'], 'review')
+        self.assertEqual(self.host.calls[len(previous_calls):], ['1002'])
+        state = self.service.load(self.service.directory(1, 'batch'))
+        self.assertEqual(state['versions'][-1]['remarks'], state['versions'][-2]['remarks'])
+
     def test_native_gigachat_arguments_are_used_instead_of_free_text(self):
         schema_result = {'structure': ['Назначение'], 'phrases': []}
         payload = {'choices': [{'message': {'content': 'Текст вне схемы игнорируется',
