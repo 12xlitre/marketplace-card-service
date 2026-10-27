@@ -3911,7 +3911,17 @@ def create_connected_ozon_portal(name, scope, user, team, payload, store_url="",
 def ozon_selected_identifiers(manual_source):
   text = str(manual_source or "").strip()
   match = re.search(r"(?:Ozon SKU / offer ID|SKU|offer ID|Ozon ID)\s*:\s*([^\n]+)", text, re.I)
-  text = match.group(1) if match else text
+  if match:
+    lines = [match.group(1)]
+    # Older forms stored a pasted SKU column after the labelled first line.
+    # Keep numeric continuation rows, without interpreting a legacy note as IDs.
+    for line in text[match.end():].splitlines():
+      if not line.strip():
+        continue
+      if not re.fullmatch(r"[0-9,;\s]+", line):
+        break
+      lines.append(line)
+    text = "\n".join(lines)
   identifiers = set(filter(None, (part.strip() for part in re.split(r"[,;\s]+", text))))
   if not identifiers:
     raise ValueError("ozon_selected_cards_required")

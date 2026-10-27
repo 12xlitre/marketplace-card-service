@@ -22369,6 +22369,11 @@ function CharacteristicsList({ items }) {
   );
 }
 
+function ozonPortalSource(identifiers, comment = "") {
+  const list = String(identifiers || "").trim().split(/[,;\s]+/).filter(Boolean).join(", ");
+  return [list ? `Ozon SKU / offer ID: ${list}` : "", comment.trim() ? `Комментарий: ${comment.trim()}` : ""].filter(Boolean).join("\n");
+}
+
 function ozonPortalErrorText(errorObject) {
   if (["ozon_sync_timeout", "ozon_sync_limit", "ozon_response_too_large", "ozon_selected_cards_required", "ozon_selected_cards_not_found", "ozon_incomplete_response"].includes(errorObject.message)) return `${ozonSellerErrorText(errorObject)} Кабинет не создан.`;
   if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
@@ -22465,7 +22470,7 @@ function PortalModal({ mode, users, allowOzon = false, targetPortal = null, onMo
         ...(isOzon && mode === "api" ? { clientId: form.clientId.trim() } : {}),
         storeUrl: !isReplacement && mode === "manual" ? form.storeUrl.trim() : "",
         manualSource: isOzon
-          ? [form.scope === "selected" ? `Ozon SKU / offer ID: ${form.testSkus.trim()}` : "", form.manualSource.trim()].filter(Boolean).join("\n")
+          ? ozonPortalSource(form.scope === "selected" ? form.testSkus : "", form.manualSource)
           : (!isReplacement && mode === "manual" ? form.manualSource.trim() : ""),
       });
       update("apiKey", "");
@@ -22607,10 +22612,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
       setError("Для выбранных карточек вставьте SKU, Ozon ID или offer ID.");
       return;
     }
-    const sourceDetails = [
-      scope === "selected" && testSkus ? `Ozon SKU / offer ID: ${testSkus}` : "",
-      manualSource,
-    ].filter(Boolean).join("\n");
+    const sourceDetails = ozonPortalSource(scope === "selected" ? testSkus : "", manualSource);
     setLoading(true);
     try {
       const saved = await onSubmit({

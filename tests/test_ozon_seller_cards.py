@@ -80,6 +80,20 @@ class OzonFetchTest(unittest.TestCase):
             with self.assertRaisesRegex(server.OzonSellerError, "ozon_selected_cards_not_found"):
                 server.fetch_ozon_seller_cards(self.credentials, "selected", "1001, foreign-offer")
 
+    def test_pasted_sku_column_keeps_every_row_in_legacy_source(self):
+        skus = [1753743119, 1753742199, 1354236110, 1736511259, 2006792225]
+        products = [product(i, sku=sku) for i, sku in enumerate(skus, 1)] + [product(6)]
+        source = "Ozon SKU / offer ID: " + "\r\n".join(map(str, skus))
+        for text in (source, source + "\nКомментарий: 1006 не добавлять", "\n".join(map(str, skus))):
+            with self.subTest(source=text), patch.object(server, "ozon_request_json", side_effect=fake_api(products)):
+                snapshot = server.fetch_ozon_seller_cards(self.credentials, "selected", text)
+            self.assertEqual([card["sku"] for card in snapshot["cards"]], list(map(str, skus)))
+
+    def test_missing_sku_on_second_row_blocks_partial_import(self):
+        with patch.object(server, "ozon_request_json", side_effect=fake_api([product(1)])):
+            with self.assertRaisesRegex(server.OzonSellerError, "ozon_selected_cards_not_found"):
+                server.fetch_ozon_seller_cards(self.credentials, "selected", "Ozon SKU / offer ID: 1001\n9999")
+
     def test_missing_info_or_attributes_fails_closed(self):
         for broken_path, field in [("/v3/product/info/list", "items"), ("/v4/product/info/attributes", "result")]:
             request = fake_api([product(1), product(2)])
