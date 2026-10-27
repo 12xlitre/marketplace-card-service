@@ -353,6 +353,41 @@ class AutomaticSeoTest(unittest.TestCase):
             with self.assertRaisesRegex(SeoError, 'seo_invalid_model_response'):
                 self.service.chat('Test', {})
 
+    def test_semantic_alias_cannot_erase_exact_competitor_phrase(self):
+        own = card('1001')
+        src = sources(own, self.mapping['1001'])
+        src['competitor']['description'] = 'Кран для умывальника.'
+        result = self.service.generate(own, src, [], None, {})
+        self.assertIn('Кран для умывальника', {row['sourcePhrase'] for row in result['keywords']})
+        self.service.verify_keywords(result, src)
+
+    def test_invalid_native_arguments_retry_once_and_keep_private_envelopes(self):
+        invalid = {'choices': [{'message': {'content': '', 'function_call': {'name': 'prepare_seo_data', 'arguments': None}}, 'finish_reason': 'error'}]}
+        valid = {'choices': [{'message': {'content': '', 'function_call': {'name': 'prepare_seo_data', 'arguments': {'structure': [], 'phrases': []}}}, 'finish_reason': 'function_call'}]}
+        journal = {}
+        with patch.object(self.host, 'automatic_seo_chat_completion', side_effect=[(invalid, 'model', 'gigachat'), (valid, 'model', 'gigachat')], create=True) as call:
+            self.assertEqual(self.service.chat('Test', {}, journal=journal, journal_key='probe'), {'structure': [], 'phrases': []})
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(len(journal['envelopes:probe']), 2)
+        self.assertIn('probe', journal)
+
+    def test_refusal_does_not_retry_or_become_description(self):
+        payload = {'choices': [{'message': {'content': 'Refused'}, 'finish_reason': 'blacklist'}]}
+        with patch.object(self.host, 'automatic_seo_chat_text', return_value=(payload, 'model', 'gigachat'), create=True) as call:
+            with self.assertRaisesRegex(SeoError, 'seo_llm_refused'):
+                self.service.chat('Test', {}, raw_text=True)
+        self.assertEqual(call.call_count, 1)
+
+    def test_malformed_native_response_has_a_two_call_limit(self):
+        payload = {'choices': [{'message': {'content': ''}, 'finish_reason': 'error'}]}
+        journal = {}
+        with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True) as call:
+            with self.assertRaisesRegex(SeoError, 'seo_llm_invalid_arguments'):
+                self.service.chat('Test', {}, journal=journal, journal_key='probe')
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(len(journal['envelopes:probe']), 2)
+        self.assertNotIn('probe', journal)
+
     def test_all_semantics_are_assessed_in_small_cached_batches(self):
         own = card('1001'); src = sources(own, self.mapping['1001'])
         src['semantic'] += [{'query': f'тестовый запрос {i}', 'count': i, 'position': None} for i in range(190)]

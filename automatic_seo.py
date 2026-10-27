@@ -506,6 +506,23 @@ class AutomaticSeoService:
         return record
 
     def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False):
+        if journal is not None and journal_key and not reuse_response:
+            journal.pop('envelopes:' + journal_key, None)
+        retryable = {'seo_invalid_model_response', 'seo_llm_invalid_arguments',
+                     'seo_llm_invalid_json', 'seo_llm_response_truncated'}
+        for attempt in range(2):
+            try:
+                prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
+                return self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text)
+            except SeoError as exc:
+                if reuse_response or attempt or str(exc) not in retryable:
+                    raise
+                logging.getLogger(__name__).warning(json.dumps({
+                    'event': 'automatic_seo_model_retry', 'stageHash': fingerprint(journal_key),
+                    'code': str(exc), 'attempt': attempt + 2,
+                }))
+
+    def _chat_once(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False):
         if reuse_response:
             saved = journal.get(journal_key) if journal is not None else None
             if not saved or not isinstance(saved.get('content'), str) or saved.get('contentLength') != len(saved['content']) or saved.get('finishReason') in {'length', 'max_tokens'}:
@@ -554,6 +571,24 @@ class AutomaticSeoService:
             raise SeoError('seo_llm_not_configured')
         choices = payload.get('choices') if isinstance(payload, dict) else None
         choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        if journal is not None and journal_key:
+            envelope = json.dumps(choice, ensure_ascii=False)
+            journal.setdefault('envelopes:' + journal_key, []).append({
+                'content': envelope[:262144], 'contentLength': len(envelope),
+                'provider': provider, 'model': model, 'capturedAt': now(),
+            })
+        finish_reason = choice.get('finish_reason')
+        if finish_reason in {'length', 'max_tokens'}:
+            message = choice.get('message')
+            content = message.get('content') if isinstance(message, dict) else None
+            if journal is not None and journal_key and isinstance(content, str):
+                journal[journal_key] = {'content': content[:262144], 'contentLength': len(content),
+                                        'finishReason': finish_reason, 'model': model, 'provider': provider, 'capturedAt': now()}
+            raise SeoError('seo_llm_response_truncated')
+        if finish_reason == 'blacklist':
+            raise SeoError('seo_llm_refused')
+        if finish_reason == 'error':
+            raise SeoError('seo_llm_invalid_arguments')
         message = choice.get('message')
         content = message.get('content') if isinstance(message, dict) else None
         if structured and provider == 'gigachat':
@@ -864,7 +899,11 @@ blocking=true, если неподтверждённое свойство ост
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
                                      'question': 'Назначить сопоставимый товар и пересобрать этот SKU.', 'blocking': True})
         proofs = factual_evidence(card)
-        canonical_phrases = {normalized(p): p for p in list(keyword_ids.values()) + [q['query'] for q in sources['semantic']]}
+        canonical_phrases = {}
+        for phrase in list(keyword_ids.values()) + [q['query'] for q in sources['semantic']]:
+            # A differently cased MPStats alias must not overwrite the literal
+            # competitor witness later required by the coverage verifier.
+            canonical_phrases.setdefault(normalized(phrase), phrase)
         verified_keywords, seen_keywords = [], set()
         for keyword in result['keywords']:
             if normalized(keyword.get('sourcePhrase')) in canonical_phrases:
@@ -971,7 +1010,7 @@ blocking=true, если неподтверждённое свойство ост
         phrases = {p['phrase'] for p in result.get('competitorProfile', {}).get('phrases', [])}
         accounted = {k.get('sourcePhrase') for k in result['keywords']}
         if not phrases <= accounted:
-            raise SeoError('seo_keyword_decisions_incomplete')
+            raise SeoError('seo_keyword_decisions_incomplete', details={'missingPhrases': sorted(phrases - accounted)[:30]})
         for row in result['keywords']:
             if row.get('sourcePhrase') not in phrases | {q['query'] for q in sources['semantic']}:
                 raise SeoError('seo_keyword_source_missing')
