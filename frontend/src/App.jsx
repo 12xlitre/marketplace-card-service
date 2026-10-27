@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import AutomaticSeoTask from "./AutomaticSeoTask";
+import CabinetFilesDialog from "./CabinetFilesDialog";
 import {
   Archive,
   AlertTriangle,
@@ -3798,9 +3799,9 @@ function SemanticCoreImportPanel({ status = "", error = "", preview = null, onPi
         <button className={loadingButtonClass("btn", busy && status !== "applying")} type="button" onClick={() => inputRef.current?.click()} disabled={disabled || busy} aria-busy={(busy && status !== "applying") || undefined}>
           <Upload size={16} />{busy && status !== "applying" ? "Проверяем файл" : title}
         </button>
-        <button className={loadingButtonClass("btn primary", status === "applying")} type="button" onClick={onApply} disabled={!canApply} aria-busy={status === "applying" || undefined}>
+        {preview ? <button className={loadingButtonClass("btn primary", status === "applying")} type="button" onClick={onApply} disabled={!canApply} aria-busy={status === "applying" || undefined}>
           <CheckSquare size={16} />{status === "applying" ? "Применяем" : applyTitle}
-        </button>
+        </button> : null}
       </div>
       {statusLabel ? <p className={`status-note ${status === "error" ? "error" : ""}`}>{statusLabel}</p> : null}
       {preview ? (
@@ -8474,7 +8475,6 @@ function ozonSellerErrorText(error) {
 
 function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, onBack, sellerTab = "cabinet", onSellerTabChange, onUpdateTeam, onUpdateName, onUpdateSource, onPortalUpdated, onOpenCard, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
-  const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
   const sourceStoreUrl = String(portal.storeUrl || "").trim();
   const sourceManualText = String(portal.manualSource || "").trim();
@@ -8512,6 +8512,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const [workPeriodsStatus, setWorkPeriodsStatus] = useState("idle");
   const [taskActionStatus, setTaskActionStatus] = useState("");
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
+  const [filesOpen, setFilesOpen] = useState(false);
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
   const [semanticImportError, setSemanticImportError] = useState("");
   const [semanticImportPreview, setSemanticImportPreview] = useState(null);
@@ -8783,7 +8784,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     await saveOzonCards(cards);
   }
 
-  async function loadOzonResultDrafts() {
+  async function loadOzonResultDrafts({ strict = false } = {}) {
     if (!portal?.id || portal.isDemo) {
       setOzonSemanticDrafts([]);
       setOzonCardDrafts([]);
@@ -8802,8 +8803,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       setOzonCardDrafts(cardDrafts);
       setOzonDraftStatus("loaded");
       return { semanticDrafts, cardDrafts };
-    } catch {
+    } catch (error) {
       setOzonDraftStatus("error");
+      if (strict) throw error;
       return { semanticDrafts: ozonSemanticDrafts, cardDrafts: ozonCardDrafts };
     }
   }
@@ -8936,10 +8938,22 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     }
   }
 
+  async function loadCabinetFileAvailability() {
+    if (portal.isDemo) return { semantic: false, content: false };
+    const [semantic, content] = await Promise.all([
+      apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-drafts`),
+      apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-card-drafts`),
+    ]);
+    return {
+      semantic: buildOzonSemanticCoreSheets(portal.realCards || [], semantic.drafts || []).length > 0,
+      content: buildOzonContentSheets(portal.realCards || [], content.drafts || []).length > 0,
+    };
+  }
+
   async function downloadOzonSemanticCore() {
     setCabinetExportStatus("semantic-loading");
     try {
-      const { semanticDrafts } = await loadOzonResultDrafts();
+      const { semanticDrafts } = await loadOzonResultDrafts({ strict: true });
       const sheets = buildOzonSemanticCoreSheets(portal.realCards || [], semanticDrafts);
       if (!sheets.length) {
         setCabinetExportStatus("semantic-empty");
@@ -9011,7 +9025,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   async function downloadOzonFinalContent() {
     setCabinetExportStatus("content-loading");
     try {
-      const { cardDrafts } = await loadOzonResultDrafts();
+      const { cardDrafts } = await loadOzonResultDrafts({ strict: true });
       const sheets = buildOzonContentSheets(portal.realCards || [], cardDrafts);
       if (!sheets.length) {
         setCabinetExportStatus("content-empty");
@@ -9138,17 +9152,47 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     <section className="screen active marketplace-theme-ozon">
       <header className="topbar">
         <div className="title">
-          <div className="seller-title-row">
+          <div className="seller-title-row"><span className="marketplace-label">Ozon</span>
             <h1>{displayName}</h1>
           </div>
-          <p>Ozon · beta-кабинет · {scopeLabel} · отдельная логика данных · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
+          <p>{scopeLabel} · {hasSellerApi ? "Ozon Seller API · только чтение" : "без API"} · ответственный {owner?.full_name || "не назначен"}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
           {canManage && hasSellerApi ? <button className={loadingButtonClass("btn", sellerApiLoading)} type="button" onClick={refreshOzonSellerCards} disabled={sellerApiLoading || portal.isDemo} aria-busy={sellerApiLoading || undefined}><RefreshCw size={17} />{sellerApiLoading ? "Загружаем из Ozon" : "Обновить карточки"}</button> : null}
-          <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
+          <button className="btn primary" type="button" onClick={() => setFilesOpen(true)}><Download size={17} />Выгрузки</button>
         </div>
       </header>
+      {filesOpen ? (
+        <CabinetFilesDialog
+          portalId={portal.id}
+          exportStatus={cabinetExportStatus}
+          disabled={portal.isDemo}
+          onDownloadSemantic={downloadOzonSemanticCore}
+          onDownloadContent={downloadOzonFinalContent}
+          onClose={() => setFilesOpen(false)}
+          busy={cabinetExportStatus.endsWith("loading") || semanticImportBusy}
+          revision={semanticImportStatus === "applied" ? semanticImportPreview : null}
+          loadAvailability={loadCabinetFileAvailability}
+        >
+          {(availability) => (
+            <section className="cabinet-files-content">
+              <details className="cabinet-files-import"><summary><Upload size={16} />Загрузить согласованное СЯ</summary><SemanticCoreImportPanel
+                status={semanticImportStatus}
+                error={semanticImportError}
+                preview={semanticImportPreview}
+                onPickFile={previewOzonPortalSemanticImport}
+                onApply={applyOzonPortalSemanticImport}
+                disabled={portal.isDemo || semanticImportBusy}
+                title="Выбрать файл СЯ"
+                applyTitle="Применить по Ozon-кабинету"
+              /></details>
+              {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Итоговое Ozon-СЯ нечего скачать: откройте карточку, сохраните финальный набор во вкладке СЯ и повторите выгрузку.</p> : null}
+              {cabinetExportStatus === "content-empty" ? <p className="status-note">Итоговый Ozon-контент нечего скачать: сначала примите контент хотя бы по одной карточке во вкладке Изменения.</p> : null}
+            </section>
+          )}
+        </CabinetFilesDialog>
+      ) : null}
 
       <div className="content">
         {sellerApiError ? <div className="form-error" role="alert">{sellerApiError}</div> : null}
@@ -9278,18 +9322,6 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   </div>
                 </section>
 
-                <SellerCommandCenter
-                  marketplace="Ozon"
-                  cardsCount={portal.cardCount}
-                  issueCount={portal.problemCount}
-                  activeTaskCount={ozonActiveTasks}
-                  submittedCount={ozonSubmittedTasks}
-                  sourceStatus={hasSellerApi ? "Ozon Seller API" : sourceConfigured ? "MPStats" : "не задан"}
-                  onOpenTasks={() => setSellerTab("tasks")}
-                  onOpenReports={() => setSellerTab("reports")}
-                  onOpenWorkPeriods={() => setSellerTab("work-periods")}
-                />
-
                 <div className="seller-context-grid">
                   <section className="workspace-strip project-strip">
                     <div className="panel-title-row">
@@ -9336,55 +9368,17 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
 
                 </div>
 
-                <section className="workspace-strip">
-                  <div className="strip-head">
-                    <div>
-                      <h2>Маршрут Ozon</h2>
-                      <p>Форма работы единая с остальными кабинетами, но карточки, задачи и отчеты хранятся в Ozon-контуре.</p>
-                    </div>
-                    <Tag tone="blue">{ozonRouteRows.filter((step) => step.className === "active").length} из {ozonRouteRows.length}</Tag>
-                  </div>
-                  <div className="pipeline">
-                    {ozonRouteRows.map((step) => (
-                      <div className={`step ${step.className}`} key={step.title}>
-                        <strong>{step.title}</strong>
-                        <span>{step.status}</span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="workspace-strip">
-                  <div className="strip-head">
-                    <div>
-                      <h2>Итоговые выгрузки</h2>
-                      <p>Файлы Ozon собираются только из сохраненных результатов Ozon-карточек.</p>
-                    </div>
-                    <Tag tone={cabinetExportStatus.endsWith("loading") ? "blue" : "green"}>
-                      {cabinetExportStatus.endsWith("loading") ? "готовим файл" : "XLSX"}
-                    </Tag>
-                  </div>
-                  <div className="panel-actions">
-                    <button className={loadingButtonClass("btn", cabinetExportStatus === "semantic-loading")} type="button" onClick={downloadOzonSemanticCore} disabled={portal.isDemo || cabinetExportStatus === "semantic-loading"} aria-busy={cabinetExportStatus === "semantic-loading" || undefined}>
-                      <Download size={16} />{cabinetExportStatus === "semantic-loading" ? "Собираем СЯ" : "Скачать итоговое СЯ по кабинету"}
-                    </button>
-                    <button className={loadingButtonClass("btn", cabinetExportStatus === "content-loading")} type="button" onClick={downloadOzonFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"} aria-busy={cabinetExportStatus === "content-loading" || undefined}>
-                      <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
-                    </button>
-                  </div>
-                  <SemanticCoreImportPanel
-                    status={semanticImportStatus}
-                    error={semanticImportError}
-                    preview={semanticImportPreview}
-                    onPickFile={previewOzonPortalSemanticImport}
-                    onApply={applyOzonPortalSemanticImport}
-                    disabled={portal.isDemo || semanticImportBusy}
-                    title="Загрузить согласованное СЯ"
-                    applyTitle="Применить по Ozon-кабинету"
-                  />
-                  {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Итоговое Ozon-СЯ нечего скачать: откройте карточку, сохраните финальный набор во вкладке СЯ и повторите выгрузку.</p> : null}
-                  {cabinetExportStatus === "content-empty" ? <p className="status-note">Итоговый Ozon-контент нечего скачать: сначала примите контент хотя бы по одной карточке во вкладке Изменения.</p> : null}
-                </section>
+                <SellerCommandCenter
+                  marketplace="Ozon"
+                  cardsCount={portal.cardCount}
+                  issueCount={portal.problemCount}
+                  activeTaskCount={ozonActiveTasks}
+                  submittedCount={ozonSubmittedTasks}
+                  sourceStatus={hasSellerApi ? "Ozon Seller API" : sourceConfigured ? "MPStats" : "не задан"}
+                  onOpenTasks={() => setSellerTab("tasks")}
+                  onOpenReports={() => setSellerTab("reports")}
+                  onOpenWorkPeriods={() => setSellerTab("work-periods")}
+                />
 
                 <OzonCardsPanel
                   workPeriods={workPeriods}
@@ -9402,6 +9396,26 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   onOpenCard={onOpenCard}
                   onOpenTasks={() => setSellerTab("tasks")}
                 />
+                <details className="cabinet-route">
+                  <summary><span>Маршрут Ozon</span><ChevronRight size={17} /></summary>
+                  <section className="workspace-strip">
+                  <div className="strip-head">
+                    <div>
+
+                      <p>Форма работы единая с остальными кабинетами, но карточки, задачи и отчеты хранятся в Ozon-контуре.</p>
+                    </div>
+                    <Tag tone="blue">{ozonRouteRows.filter((step) => step.className === "active").length} из {ozonRouteRows.length}</Tag>
+                  </div>
+                  <div className="pipeline">
+                    {ozonRouteRows.map((step) => (
+                      <div className={`step ${step.className}`} key={step.title}>
+                        <strong>{step.title}</strong>
+                        <span>{step.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+                </details>
               </>
             ) : null}
 
@@ -11075,7 +11089,7 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
       <div className="strip-head">
         <div>
           <h2>Карточки Ozon</h2>
-          <p>{hasSellerApi ? "Карточки из Ozon Seller API. Статусы, замечания и рабочий набор считаются по сохранённым данным." : "Сохраненные карточки из Ozon MPStats probe. Статусы, замечания и рабочий набор считаются только по Ozon snapshot."}</p>
+          <p>Выберите товары для работы с семантикой и контентом.</p>
         </div>
         <Tag tone="blue">{formatNumber(visibleCards.length)}</Tag>
       </div>
@@ -11146,11 +11160,10 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
 
           <div className="cards-toolbar">
             <span>
-              Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · Ozon snapshot из MPStats
+              Показано {formatNumber(filteredCards.length)} из {formatNumber(visibleCards.length)} · {hasSellerApi ? "Ozon Seller API" : "MPStats"}
               {workStatus === "loading" ? " · загружаем задачи" : ""}
               {workStatus === "saving" ? " · сохраняем задачи" : ""}
-              {workStatus === "saved" || workStatus === "loaded" ? " · задачи в backend" : ""}
-              {workStatus === "local-fallback" ? " · задачи временно локально" : ""}
+              {workStatus === "local-fallback" ? " · задачи пока не сохранены на сервере" : ""}
               {draftStatus === "loading" ? " · загружаем результаты" : ""}
             </span>
             <div className="toolbar">
@@ -12561,7 +12574,6 @@ function OzonCompetitorAuditPanel({ card, portal, draft, status = "idle" }) {
 
 function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, currentUser, displayUsers, findUser, canManage = false, onBack, onOpenCard, sellerTab = "cabinet", onSellerTabChange, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
-  const creator = portalCreatorInfo(portal, findUser);
   const displayName = portalDisplayName(portal);
   const isApi = portal.mode === "api";
   const isManual = !isApi;
@@ -12586,6 +12598,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [taskActionStatus, setTaskActionStatus] = useState("");
   const [importJob, setImportJob] = useState(null);
   const [cabinetExportStatus, setCabinetExportStatus] = useState("");
+  const [filesOpen, setFilesOpen] = useState(false);
   const [contentPublicationStatus, setContentPublicationStatus] = useState("");
   const [contentPublicationPreview, setContentPublicationPreview] = useState(null);
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
@@ -13012,6 +13025,14 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     return Array.isArray(payload.drafts) ? payload.drafts : [];
   }
 
+  async function loadCabinetFileAvailability() {
+    const drafts = await loadPortalDraftsForExport();
+    return {
+      semantic: buildPortalSemanticCoreSheets(cards, drafts).length > 0,
+      content: buildPortalContentSheets(cards, drafts).length > 0,
+    };
+  }
+
   async function downloadPortalSemanticCore() {
     setCabinetExportStatus("semantic-loading");
     try {
@@ -13179,17 +13200,64 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
     <section className="screen active marketplace-theme-wildberries">
       <header className="topbar">
         <div className="title">
-          <div className="seller-title-row">
+          <div className="seller-title-row"><span className="marketplace-label">Wildberries</span>
             <h1>{displayName}</h1>
           </div>
-          <p>{portal.marketplace} · {scopeLabel} · {portal.syncStatus === "loaded" ? "read-only WB API" : (isMpstatsLoaded ? "MPStats витрина" : (isApi ? "API подключение" : "ручной режим"))} · ответственный {owner?.full_name} · создал {creator.name}{creator.date ? ` · ${creator.date}` : ""}</p>
+          <p>{scopeLabel} · {portal.syncStatus === "loaded" ? "WB API" : (isMpstatsLoaded ? "MPStats" : (isApi ? "подключение API" : "без API"))} · ответственный {owner?.full_name || "не назначен"}</p>
         </div>
         <div className="toolbar">
           <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />Клиент</button>
           <button className="btn" type="button" onClick={() => onOpenModal("api")}><Upload size={17} />{apiConnectButtonText(portal)}</button>
-          <button className="btn primary" type="button" onClick={() => setSellerTab("tasks")}><ClipboardList size={17} />Задачи</button>
+          <button className="btn primary" type="button" onClick={() => setFilesOpen(true)}><Download size={17} />Выгрузки</button>
         </div>
       </header>
+      {filesOpen ? (
+        <CabinetFilesDialog
+          portalId={portal.id}
+          exportStatus={cabinetExportStatus}
+          disabled={portal.isDemo}
+          onDownloadSemantic={downloadPortalSemanticCore}
+          onDownloadContent={downloadPortalFinalContent}
+          onClose={() => setFilesOpen(false)}
+          busy={cabinetExportStatus.endsWith("loading") || contentPublicationLoading || ["reading", "previewing", "applying"].includes(semanticImportStatus)}
+          revision={semanticImportStatus === "applied" ? semanticImportPreview : null}
+          loadAvailability={loadCabinetFileAvailability}
+        >
+          {(availability) => (
+            <section className="cabinet-files-content">
+              <div className="panel-actions">
+
+                {canPublishWbContent && availability.status === "loaded" && availability.content ? (
+                  <>
+                    <button className={loadingButtonClass("btn primary", contentPublicationStatus === "api-loading")} type="button" onClick={() => publishPortalContent("api")} disabled={portal.isDemo || !wbApiPublicationAvailable || contentPublicationLoading} aria-busy={contentPublicationStatus === "api-loading" || undefined} title={wbApiPublicationAvailable ? "Обновить принятый контент карточек через подключенный WB API." : "WB API не подключен: подготовьте таблицу для кабинета WB."}>
+                      <Upload size={16} />{contentPublicationStatus === "api-loading" ? "Публикуем в WB" : "Опубликовать в WB по API"}
+                    </button>
+                    <button className={loadingButtonClass("btn", contentPublicationStatus === "table-loading")} type="button" onClick={() => publishPortalContent("table")} disabled={portal.isDemo || contentPublicationLoading} aria-busy={contentPublicationStatus === "table-loading" || undefined}>
+                      <Download size={16} />{contentPublicationStatus === "table-loading" ? "Готовим WB-таблицу" : "Скачать таблицу WB"}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <details className="cabinet-files-import"><summary><Upload size={16} />Загрузить согласованное СЯ</summary><SemanticCoreImportPanel
+                status={semanticImportStatus}
+                error={semanticImportError}
+                preview={semanticImportPreview}
+                onPickFile={previewPortalSemanticImport}
+                onApply={applyPortalSemanticImport}
+                disabled={portal.isDemo}
+                title="Выбрать файл СЯ"
+                applyTitle="Применить по кабинету"
+              /></details>
+              {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового СЯ по карточкам пока нет.</p> : null}
+              {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого контента по карточкам пока нет.</p> : null}
+              {contentPublicationStatus === "api-done" ? <p className="status-note">Контент опубликован в WB: {formatNumber(contentPublicationSummary?.publishedCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || 0, "карточка", "карточки", "карточек")}.</p> : null}
+              {contentPublicationStatus === "table-done" ? <p className="status-note">WB-таблица подготовлена: {formatNumber(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0, "строка", "строки", "строк")}.</p> : null}
+              {contentPublicationStatus === "empty" ? <p className="status-note">Нет принятого контента, готового к публикации.</p> : null}
+              {contentPublicationStatus === "error" ? <p className="status-note">Публикация контента не выполнена. Проверьте принятые карточки, права и подключение WB API.</p> : null}
+            </section>
+          )}
+        </CabinetFilesDialog>
+      ) : null}
 
       <div className="content">
         <div className="seller-layout">
@@ -13307,18 +13375,6 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </div>
             </section>
 
-            <SellerCommandCenter
-              marketplace="WB"
-              cardsCount={portal.cardCount}
-              issueCount={portal.problemCount}
-              activeTaskCount={sellerActiveTaskCount}
-              submittedCount={sellerSubmittedTaskCount}
-              sourceStatus={portal.apiConnected ? "WB API" : (isMpstatsLoaded ? "MPStats" : "без API")}
-              onOpenTasks={() => setSellerTab("tasks")}
-              onOpenReports={() => setSellerTab("reports")}
-              onOpenWorkPeriods={() => setSellerTab("work-periods")}
-            />
-
             <div className="seller-context-grid">
               <section className="workspace-strip project-strip">
                 <div className="panel-title-row">
@@ -13366,72 +13422,17 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 
             </div>
 
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Маршрут работы</h2>
-                  <p>{workRoute.copy}</p>
-                </div>
-                <Tag tone={workRoute.done ? "blue" : "amber"}>{workRoute.done ? `Факт: ${workRoute.done} из 5` : "Ожидает данные"}</Tag>
-              </div>
-              <HelpHint enabled={helpEnabled} title="Маршрут работы по кабинету">
-                Идите слева направо: загрузили данные, открыли карточки, запустили рыночный аудит, проверили товарный аудит и изменения, отправили готовые правки на согласование.
-              </HelpHint>
-              <div className="pipeline">
-                {workRoute.rows.map((step) => (
-                  <div className={`step ${step.className}`} key={step.title}>
-                    <strong>{step.title}</strong>
-                    <span>{step.status}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="workspace-strip">
-              <div className="strip-head">
-                <div>
-                  <h2>Итоговые выгрузки</h2>
-                  <p>Файлы по кабинету собираются только из сохраненных результатов карточек.</p>
-                </div>
-                <Tag tone={cabinetExportStatus.endsWith("loading") ? "blue" : "green"}>
-                  {cabinetExportStatus.endsWith("loading") ? "готовим файл" : "XLSX"}
-                </Tag>
-              </div>
-              <div className="panel-actions">
-                <button className={loadingButtonClass("btn", cabinetExportStatus === "semantic-loading")} type="button" onClick={downloadPortalSemanticCore} disabled={portal.isDemo || cabinetExportStatus === "semantic-loading"} aria-busy={cabinetExportStatus === "semantic-loading" || undefined}>
-                  <Download size={16} />{cabinetExportStatus === "semantic-loading" ? "Собираем СЯ" : "Скачать итоговое СЯ по кабинету"}
-                </button>
-                <button className={loadingButtonClass("btn", cabinetExportStatus === "content-loading")} type="button" onClick={downloadPortalFinalContent} disabled={portal.isDemo || cabinetExportStatus === "content-loading"} aria-busy={cabinetExportStatus === "content-loading" || undefined}>
-                  <Download size={16} />{cabinetExportStatus === "content-loading" ? "Собираем контент" : "Скачать итоговый контент"}
-                </button>
-                {canPublishWbContent ? (
-                  <>
-                    <button className={loadingButtonClass("btn primary", contentPublicationStatus === "api-loading")} type="button" onClick={() => publishPortalContent("api")} disabled={portal.isDemo || !wbApiPublicationAvailable || contentPublicationLoading} aria-busy={contentPublicationStatus === "api-loading" || undefined} title={wbApiPublicationAvailable ? "Обновить принятый контент карточек через подключенный WB API." : "WB API не подключен: подготовьте таблицу для кабинета WB."}>
-                      <Upload size={16} />{contentPublicationStatus === "api-loading" ? "Публикуем в WB" : "Опубликовать в WB по API"}
-                    </button>
-                    <button className={loadingButtonClass("btn", contentPublicationStatus === "table-loading")} type="button" onClick={() => publishPortalContent("table")} disabled={portal.isDemo || contentPublicationLoading} aria-busy={contentPublicationStatus === "table-loading" || undefined}>
-                      <Download size={16} />{contentPublicationStatus === "table-loading" ? "Готовим WB-таблицу" : "Скачать таблицу WB"}
-                    </button>
-                  </>
-                ) : null}
-              </div>
-              <SemanticCoreImportPanel
-                status={semanticImportStatus}
-                error={semanticImportError}
-                preview={semanticImportPreview}
-                onPickFile={previewPortalSemanticImport}
-                onApply={applyPortalSemanticImport}
-                disabled={portal.isDemo}
-                title="Загрузить согласованное СЯ"
-                applyTitle="Применить по кабинету"
-              />
-              {cabinetExportStatus === "semantic-empty" ? <p className="status-note">Сохраненного итогового СЯ по карточкам пока нет.</p> : null}
-              {cabinetExportStatus === "content-empty" ? <p className="status-note">Принятого контента по карточкам пока нет.</p> : null}
-              {contentPublicationStatus === "api-done" ? <p className="status-note">Контент опубликован в WB: {formatNumber(contentPublicationSummary?.publishedCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || 0, "карточка", "карточки", "карточек")}.</p> : null}
-              {contentPublicationStatus === "table-done" ? <p className="status-note">WB-таблица подготовлена: {formatNumber(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0)} {pluralRu(contentPublicationSummary?.publishedCount || contentPublicationSummary?.readyCount || 0, "строка", "строки", "строк")}.</p> : null}
-              {contentPublicationStatus === "empty" ? <p className="status-note">Нет принятого контента, готового к публикации.</p> : null}
-              {contentPublicationStatus === "error" ? <p className="status-note">Публикация контента не выполнена. Проверьте принятые карточки, права и подключение WB API.</p> : null}
-            </section>
+            <SellerCommandCenter
+              marketplace="WB"
+              cardsCount={portal.cardCount}
+              issueCount={portal.problemCount}
+              activeTaskCount={sellerActiveTaskCount}
+              submittedCount={sellerSubmittedTaskCount}
+              sourceStatus={portal.apiConnected ? "WB API" : (isMpstatsLoaded ? "MPStats" : "без API")}
+              onOpenTasks={() => setSellerTab("tasks")}
+              onOpenReports={() => setSellerTab("reports")}
+              onOpenWorkPeriods={() => setSellerTab("work-periods")}
+            />
 
             <section className="workspace-strip">
               <div className="strip-head">
@@ -13455,6 +13456,29 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                onWorkPeriodChange={replaceSellerWorkPeriod}
 	              />
             </section>
+            <details className="cabinet-route">
+              <summary><span>Маршрут работы</span><ChevronRight size={17} /></summary>
+              <section className="workspace-strip">
+              <div className="strip-head">
+                <div>
+
+                  <p>{workRoute.copy}</p>
+                </div>
+                <Tag tone={workRoute.done ? "blue" : "amber"}>{workRoute.done ? `Факт: ${workRoute.done} из 5` : "Ожидает данные"}</Tag>
+              </div>
+              <HelpHint enabled={helpEnabled} title="Маршрут работы по кабинету">
+                Идите слева направо: загрузили данные, открыли карточки, запустили рыночный аудит, проверили товарный аудит и изменения, отправили готовые правки на согласование.
+              </HelpHint>
+              <div className="pipeline">
+                {workRoute.rows.map((step) => (
+                  <div className={`step ${step.className}`} key={step.title}>
+                    <strong>{step.title}</strong>
+                    <span>{step.status}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+            </details>
               </>
             ) : null}
             {activeSellerTab === "tasks" ? (

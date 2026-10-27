@@ -2080,11 +2080,23 @@ tr.selected-row td {
 }
 
 .marketplace-theme-wildberries {
+  --brand: #8627bd;
+  --brand-strong: #681d96;
+  --brand-soft: #f3e7fb;
+  --blue: #7c2cb2;
+  --blue-soft: #f3e7fb;
+  --surface-soft: #fcf9ff;
   background: linear-gradient(180deg, #f7f2ff 0%, #fff 36%);
   border-color: #d8c8ed;
 }
 
 .marketplace-theme-ozon {
+  --brand: #005bff;
+  --brand-strong: #0046c7;
+  --brand-soft: #e9f1ff;
+  --blue: #0055e8;
+  --blue-soft: #e9f1ff;
+  --surface-soft: #f8fbff;
   background: linear-gradient(180deg, #f0f6ff 0%, #fff 36%);
   border-color: #c4d8f6;
 }
@@ -2587,7 +2599,7 @@ tr.selected-row td {
 
 .seller-context-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -8017,3 +8029,106 @@ tr:last-child td {
 .automatic-seo-competitors { display: grid; gap: 12px; margin-top: 12px; }
 .automatic-seo-competitor { padding: 12px; border: 1px solid var(--border, #dce4ed); border-radius: 8px; }
 .automatic-seo-competitor input { box-sizing: border-box; width: 100%; min-width: 0; }
+
+/* Marketplace accents apply to navigation, actions and cabinet surfaces together. */
+.marketplace-theme-wildberries .btn.primary,
+.marketplace-theme-ozon .btn.primary {
+  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+}
+
+.marketplace-theme-wildberries .seller-tabs button.active,
+.marketplace-theme-ozon .seller-tabs button.active {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: none;
+}
+
+.marketplace-theme-wildberries.screen > .topbar,
+.marketplace-theme-ozon.screen > .topbar {
+  background: linear-gradient(100deg, var(--brand-soft), var(--surface));
+  border-top: 3px solid var(--brand);
+}
+
+.marketplace-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.marketplace-theme-wildberries .command-card,
+.marketplace-theme-ozon .command-card {
+  min-height: 94px;
+}
+
+.cabinet-route {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.cabinet-route > summary,
+.cabinet-files-import > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.cabinet-route > summary::-webkit-details-marker,
+.cabinet-files-import > summary::-webkit-details-marker { display: none; }
+.cabinet-route[open] > summary svg { transform: rotate(90deg); }
+.cabinet-route > .workspace-strip { border: 0; border-top: 1px solid var(--line); box-shadow: none; }
+
+.cabinet-files-dialog { width: min(840px, 100%); }
+.cabinet-files-content { display: grid; gap: 16px; }
+.cabinet-files-content > .panel-actions { display: grid; grid-template-columns: 1fr; gap: 10px; }
+
+.cabinet-export-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.cabinet-export-row > svg { color: var(--brand); }
+.cabinet-export-row > div { display: grid; gap: 5px; }
+.cabinet-export-row strong { font-size: 14px; }
+.cabinet-export-row span { color: var(--muted); font-size: 13px; }
+.cabinet-export-row.ready { background: var(--brand-soft); }
+
+.cabinet-files-import { border: 1px solid var(--line); border-radius: 8px; }
+.cabinet-files-import > summary { justify-content: flex-start; color: var(--brand); }
+.cabinet-files-import .semantic-import-panel { margin: 0 14px 14px; }
+
+@media (max-width: 700px) {
+  .cabinet-export-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .cabinet-export-row > .btn { grid-column: 1 / -1; width: 100%; }
+  .seller-title-row { flex-wrap: wrap; }
+}
+
+@media (max-width: 700px) {
+  .seller-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    max-width: 100%;
+  }
+  .seller-tabs button { min-width: 0; padding: 7px 10px; }
+  .seller-main .summary-grid,
+  .seller-main .command-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
