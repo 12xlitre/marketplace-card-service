@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import AutomaticSeoTask from "./AutomaticSeoTask";
 import CabinetFilesDialog from "./CabinetFilesDialog";
+import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import {
   Archive,
   AlertTriangle,
@@ -6209,7 +6210,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [userPortals, setUserPortals] = useState([]);
   const [demoPortal, setDemoPortal] = useState(initialDemoPortal);
-  const [demoPortalArchived, setDemoPortalArchived] = useState(() => localStorage.getItem("opticards-demo-archived") === "1");
+  const [demoPortalArchived, setDemoPortalArchived] = useState(() => readBrowserValue("opticards-demo-archived") === "1");
   const [screen, setScreen] = useState(initialView.screen || "cabinets");
   const [portalStatusFilter, setPortalStatusFilter] = useState("active");
   const [selectedClientId, setSelectedClientId] = useState(initialView.clientId || "");
@@ -6233,7 +6234,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [portalWorkSummaries, setPortalWorkSummaries] = useState({});
   const [mpstatsIntegration, setMpstatsIntegration] = useState(null);
-  const [helpEnabled, setHelpEnabled] = useState(() => localStorage.getItem(helpModeStorageKey) === "1");
+  const [helpEnabled, setHelpEnabled] = useState(() => readBrowserValue(helpModeStorageKey) === "1");
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
@@ -6286,7 +6287,7 @@ export default function App() {
     if (!currentUser) {
       return;
     }
-    localStorage.setItem(appViewStorageKey, JSON.stringify({
+    writeBrowserValue(appViewStorageKey, JSON.stringify({
       screen: displayScreen,
       clientId: selectedClientId,
       portalId: selectedPortalId,
@@ -6296,7 +6297,7 @@ export default function App() {
   }, [currentUser, displayScreen, selectedClientId, selectedPortalId, selectedCardKey, sellerTab]);
 
   useEffect(() => {
-    localStorage.setItem(helpModeStorageKey, helpEnabled ? "1" : "0");
+    writeBrowserValue(helpModeStorageKey, helpEnabled ? "1" : "0");
   }, [helpEnabled]);
 
   useEffect(() => {
@@ -8811,9 +8812,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   }
 
   async function persistOzonWorkState(nextState, options = {}) {
-    writeOzonWorkState(portal.id, nextState);
+    const cached = writeOzonWorkState(portal.id, nextState);
     if (!portal?.id || portal.isDemo) {
-      setOzonWorkStatus("local");
+      setOzonWorkStatus(cached ? "local" : "unsaved");
       return nextState;
     }
     setOzonWorkStatus("saving");
@@ -8831,7 +8832,8 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       setOzonWorkStatus("saved");
       return savedState;
     } catch (error) {
-      setOzonWorkStatus("local-fallback");
+      setOzonWorkStatus(cached ? "local-fallback" : "unsaved");
+      if (!cached) onNotice?.("Не удалось сохранить задачи на сервере и в браузере. Данные остаются в открытой вкладке; повторите сохранение.");
       if (options.requireSaved) throw error;
       return nextState;
     }
@@ -9769,12 +9771,15 @@ function readOzonWorkState(portalId) {
 }
 
 function writeOzonWorkState(portalId, state) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(ozonWorkStorageKey(portalId), JSON.stringify({
-    selectedKeys: Array.isArray(state?.selectedKeys) ? state.selectedKeys : [],
-    tasks: Array.isArray(state?.tasks) ? state.tasks.filter((task) => task.optimizationMode !== "automatic") : [],
-    recentEvents: Array.isArray(state?.recentEvents) ? state.recentEvents.slice(0, 30) : [],
-  }));
+  try {
+    return writeBrowserValue(ozonWorkStorageKey(portalId), JSON.stringify({
+      selectedKeys: Array.isArray(state?.selectedKeys) ? state.selectedKeys : [],
+      tasks: Array.isArray(state?.tasks) ? state.tasks.filter((task) => task.optimizationMode !== "automatic") : [],
+      recentEvents: Array.isArray(state?.recentEvents) ? state.recentEvents.slice(0, 30) : [],
+    }));
+  } catch {
+    return false;
+  }
 }
 
 function ozonTaskStatusMeta(status) {
@@ -11164,6 +11169,7 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
               {workStatus === "loading" ? " · загружаем задачи" : ""}
               {workStatus === "saving" ? " · сохраняем задачи" : ""}
               {workStatus === "local-fallback" ? " · задачи пока не сохранены на сервере" : ""}
+              {workStatus === "unsaved" ? " · задачи не сохранены" : ""}
               {draftStatus === "loading" ? " · загружаем результаты" : ""}
             </span>
             <div className="toolbar">
@@ -11318,7 +11324,7 @@ function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, w
           <h2>Задачи Ozon</h2>
           <p>Beta-набор задач по Ozon-карточкам. Статусы читают сохраненное итоговое СЯ и итоговый контент из Ozon-таблиц.</p>
         </div>
-        <Tag tone={workStatus === "local-fallback" ? "amber" : "blue"}>{workStatus === "saving" ? "сохраняем" : workStatus === "local-fallback" ? "локально" : `${formatNumber(tasks.length)} задач`}</Tag>
+        <Tag tone={["local-fallback", "unsaved"].includes(workStatus) ? "amber" : "blue"}>{workStatus === "saving" ? "сохраняем" : workStatus === "unsaved" ? "не сохранено" : workStatus === "local-fallback" ? "локально" : `${formatNumber(tasks.length)} задач`}</Tag>
       </div>
 
       <div className="cards-work-summary">
