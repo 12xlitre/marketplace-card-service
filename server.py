@@ -23441,7 +23441,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
       bootstrap = {"status": "skipped", "cardCount": 0, "warnings": []}
-      if store_url or manual_source:
+      if marketplace != "Ozon" and (store_url or manual_source):
         try:
           row, bootstrap = refresh_manual_portal_from_mpstats(portal_id, user)
         except RuntimeError:

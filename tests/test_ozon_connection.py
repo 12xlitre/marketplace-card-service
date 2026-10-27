@@ -228,6 +228,20 @@ class OzonConnectionTest(unittest.TestCase):
                 self.assertEqual(created["marketplace"], "Ozon")
                 self.assertEqual(server.ozon_connection_row(created["id"])["status"], "verified")
                 client.close()
+                creation = {"mode": "manual", "marketplace": "Ozon", "scope": "selected", "name": "Manual Ozon",
+                            "teamRoles": {"lead": "owner"}, "storeUrl": "https://www.ozon.ru/seller/123/",
+                            "manualSource": "Ozon SKU / offer ID: 123456789"}
+                client = http.client.HTTPConnection(*httpd.server_address, timeout=5)
+                client.request("POST", "/api/portals", json.dumps(creation), headers={"Content-Type": "application/json", "Cookie": f"{server.SESSION_COOKIE}={session}"})
+                response = client.getresponse()
+                body = response.read().decode()
+                self.assertEqual(response.status, 201, body)
+                created = json.loads(body)["portal"]
+                self.assertEqual(created["marketplace"], "Ozon")
+                self.assertFalse(created["ozonApiConnected"])
+                self.assertEqual(created["manualBootstrap"]["status"], "skipped")
+                self.assertIsNone(server.ozon_connection_row(created["id"]))
+                client.close()
         finally:
             httpd.shutdown()
             httpd.server_close()

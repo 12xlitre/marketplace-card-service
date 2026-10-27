@@ -7094,7 +7094,11 @@ export default function App() {
     setSelectedPortalId(portal.id);
     setSellerTab("cabinet");
     setScreen("seller");
-    if (portal.mode === "manual") {
+    if (isOzonPortal(portal)) {
+      setNotice(portal.mode === "manual"
+        ? "Ozon-кабинет создан без API. Для загрузки карточек нажмите «Обновить из MPStats» в кабинете."
+        : `Ozon-кабинет создан. Загружено ${formatNumber(response.saved?.total || 0)} карточек. Подключение только для чтения.`);
+    } else if (portal.mode === "manual") {
       setNotice(manualBootstrapNotice(portal, "create"));
     }
   }
@@ -7572,6 +7576,7 @@ export default function App() {
           <PortalModal
             mode={portalModalMode}
             users={displayUsers}
+            allowOzon={userCanSeeOzonBeta(currentUser)}
             targetPortal={portalModalTarget}
             onMode={setPortalModalMode}
             onClose={() => {
@@ -7763,7 +7768,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           title="Как начать работу"
           items={[
             "Откройте клиента, чтобы увидеть общую информацию и перейти в раздел WB или Ozon.",
-            "Новый клиент создается через первый WB-кабинет, а Ozon beta добавляется уже внутри клиента.",
+            canSeeOzonBeta ? "При добавлении клиента выберите Wildberries или Ozon, затем способ подключения. Ozon Seller API работает только на чтение." : "Новый клиент создается через первый WB-кабинет.",
             "Фильтр Активные / Неактивные помогает спрятать завершенные кабинеты без удаления истории.",
           ]}
         />
@@ -22364,7 +22369,24 @@ function CharacteristicsList({ items }) {
   );
 }
 
-function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubmit }) {
+function ozonPortalErrorText(errorObject) {
+  if (["ozon_sync_timeout", "ozon_sync_limit", "ozon_response_too_large", "ozon_selected_cards_required", "ozon_selected_cards_not_found", "ozon_incomplete_response"].includes(errorObject.message)) return `${ozonSellerErrorText(errorObject)} Кабинет не создан.`;
+  if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
+  if (errorObject.message === "invalid_portal_team") return "Проверьте назначенных сотрудников в команде клиента. Кабинет не создан.";
+  if (errorObject.message === "ozon_credentials_required") return "Введите числовой Client-Id и API-ключ из настроек Seller API.";
+  if (errorObject.message === "ozon_account_already_connected") return "Этот Ozon-аккаунт уже подключён к другому кабинету приложения.";
+  if (["ozon_check_rate_limited", "ozon_rate_limited"].includes(errorObject.message)) return "Проверка временно ограничена. Повторите позже; новый кабинет пока не создан.";
+  if (["ozon_unavailable", "ozon_invalid_response"].includes(errorObject.message)) return "Не удалось проверить доступ к Ozon. Повторите позже; кабинет не создан.";
+  if (errorObject.message === "secret_storage_unavailable") return "Хранилище ключей недоступно. Повторите позднее; кабинет не создан.";
+  if (errorObject.status === 403) return "Недостаточно прав для создания Ozon-кабинета.";
+  if (errorObject.message === "store_url_too_long") return "Ссылка или Seller ID слишком длинные.";
+  if (errorObject.message === "manual_source_too_long") return "Комментарий по источнику слишком длинный.";
+  if (errorObject.message === "client_name_too_long") return "Название клиента слишком длинное.";
+  if (errorObject.status === 401) return "Сессия истекла. Войдите заново.";
+  return "Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.";
+}
+
+function PortalModal({ mode, users, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
   const isReplacement = Boolean(targetPortal);
   const [form, setForm] = useState({
     name: "",
@@ -22374,17 +22396,21 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
     tech: "",
     manager: "",
     apiKey: "",
+    clientId: "",
+    testSkus: "",
     storeUrl: "",
     manualSource: "",
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const isOzon = !isReplacement && form.marketplace === "Ozon";
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
   }
 
   function errorText(errorObject) {
+    if (isOzon) return ozonPortalErrorText(errorObject);
     if (errorObject.message === "portal_already_connected") {
       return `Этот WB кабинет уже подключен: ${errorObject.payload?.portal?.name || "существующий кабинет"}. Повторно добавить его нельзя.`;
     }
@@ -22404,7 +22430,11 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
     event.preventDefault();
     setError("");
     if ((isReplacement || mode === "api") && !form.apiKey.trim()) {
-      setError("Введите WB API ключ.");
+      setError(isOzon ? "Введите API-ключ Ozon." : "Введите WB API ключ.");
+      return;
+    }
+    if (isOzon && mode === "api" && !/^[0-9]{1,20}$/.test(form.clientId.trim())) {
+      setError("Введите числовой Client-Id из настроек Seller API.");
       return;
     }
     if (!isReplacement && !form.marketplace) {
@@ -22415,6 +22445,10 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
       setError("Выберите охват кабинета.");
       return;
     }
+    if (isOzon && form.scope === "selected" && !form.testSkus.trim()) {
+      setError("Для выбранных карточек вставьте SKU, Ozon ID или offer ID.");
+      return;
+    }
     if (!isReplacement && (!form.lead || !form.tech || !form.manager)) {
       setError("Выберите руководителя отдела, технического специалиста и аккаунт-менеджера.");
       return;
@@ -22422,14 +22456,17 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
     setLoading(true);
     try {
       await onSubmit({
-        name: mode === "api" || isReplacement ? "" : form.name.trim(),
+        name: isOzon ? (form.name.trim() || "Кабинет Ozon") : (mode === "api" || isReplacement ? "" : form.name.trim()),
         marketplace: form.marketplace,
         mode: isReplacement ? "api" : mode,
         scope: form.scope,
         teamRoles: { lead: form.lead, tech: form.tech, manager: form.manager },
         apiKey: mode === "api" || isReplacement ? form.apiKey.trim() : "",
+        ...(isOzon && mode === "api" ? { clientId: form.clientId.trim() } : {}),
         storeUrl: !isReplacement && mode === "manual" ? form.storeUrl.trim() : "",
-        manualSource: !isReplacement && mode === "manual" ? form.manualSource.trim() : "",
+        manualSource: isOzon
+          ? [form.scope === "selected" ? `Ozon SKU / offer ID: ${form.testSkus.trim()}` : "", form.manualSource.trim()].filter(Boolean).join("\n")
+          : (!isReplacement && mode === "manual" ? form.manualSource.trim() : ""),
       });
       update("apiKey", "");
     } catch (submitError) {
@@ -22448,37 +22485,45 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
             <h2>{isReplacement ? "Заменить WB API ключ" : "Добавить кабинет"}</h2>
             <p>{isReplacement
               ? `Ключ будет заменен только в кабинете ${targetPortal?.name || "Wildberries"}, после проверки read-only запросом WB.`
-              : (mode === "api"
+              : isOzon
+                ? "Подключение только для чтения: загрузим товары в OptiCards. Карточки, цены и остатки в Ozon не изменяются."
+                : !form.marketplace && !isReplacement
+                  ? "Выберите маркетплейс и способ подключения кабинета."
+                : (mode === "api"
                 ? "API-ключ отправляется только на backend, проверяется read-only запросом WB и не хранится в браузере."
                 : "Создаем рабочий кабинет без ключа WB: команда, ссылка на магазин и первичный источник сохраняются в OptiCards.")}</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
+          {!isReplacement ? <label className="field-label">
+            Маркетплейс
+            <select className="select" value={form.marketplace} disabled={loading} onChange={(event) => {
+              setForm((current) => ({ ...current, marketplace: event.target.value, apiKey: "", clientId: "", storeUrl: "", manualSource: "", testSkus: "" }));
+              setError("");
+            }} required>
+              <option value="" disabled>Выберите маркетплейс</option>
+              <option value="Wildberries">Wildberries</option>
+              {allowOzon ? <option value="Ozon">Ozon</option> : null}
+            </select>
+          </label> : null}
           {!isReplacement ? <div className="connect-mode">
-            <button className={mode === "api" ? "active" : ""} type="button" onClick={() => onMode("api")}>
-              <strong>WB API</strong>
+            <button className={mode === "api" ? "active" : ""} type="button" disabled={loading} onClick={() => { onMode("api"); setError(""); }}>
+              <strong>{isOzon ? "Ozon Seller API" : form.marketplace === "Wildberries" ? "WB API" : "Через API"}</strong>
               <span>Определить кабинет и загрузить карточки.</span>
             </button>
-            <button className={mode === "manual" ? "active" : ""} type="button" onClick={() => onMode("manual")}>
+            <button className={mode === "manual" ? "active" : ""} type="button" disabled={loading} onClick={() => { onMode("manual"); update("apiKey", ""); setError(""); }}>
               <strong>Без API</strong>
               <span>Завести магазин по ссылке, таблице или списку карточек.</span>
             </button>
           </div> : null}
-          {!isReplacement && mode === "manual" ? (
+          {!isReplacement && (mode === "manual" || isOzon) ? (
             <label className="field-label">
               Название кабинета
-              <input value={form.name} onChange={(event) => update("name", event.target.value)} required />
+              <input value={form.name} onChange={(event) => update("name", event.target.value)} maxLength={120} required />
             </label>
           ) : null}
           {!isReplacement ? <div className="form-two">
-            <label className="field-label">
-              Маркетплейс
-              <select className="select" value={form.marketplace} onChange={(event) => update("marketplace", event.target.value)} required>
-                <option value="" disabled>Выберите маркетплейс</option>
-                <option value="Wildberries">Wildberries</option>
-              </select>
-            </label>
             <label className="field-label">
               Охват
               <select className="select" value={form.scope} onChange={(event) => update("scope", event.target.value)} required>
@@ -22493,20 +22538,28 @@ function PortalModal({ mode, users, targetPortal = null, onMode, onClose, onSubm
             <UserSelect label="Технический специалист" value={form.tech} users={users} onChange={(value) => update("tech", value)} />
           </div> : null}
           {!isReplacement ? <UserSelect label="Аккаунт-менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} /> : null}
+          {isOzon && form.scope === "selected" ? <label className="field-label">
+            SKU, Ozon ID или offer ID
+            <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} required placeholder="Например: 123456789, OZON-OFFER-01" />
+          </label> : null}
+          {isOzon && mode === "api" ? <label className="field-label">
+            Client-Id
+            <input value={form.clientId} onChange={(event) => update("clientId", event.target.value)} inputMode="numeric" pattern="[0-9]+" maxLength={20} autoComplete="off" required />
+          </label> : null}
           {mode === "api" || isReplacement ? (
             <label className="field-label">
-              WB API ключ
+              {isOzon ? "API-ключ Ozon" : "WB API ключ"}
               <input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} autoComplete="off" />
             </label>
           ) : (
             <>
               <label className="field-label">
                 Ссылка на магазин или первую карточку
-                <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder="https://www.wildberries.ru/brands/... или ссылка на карточку" />
+                <input value={form.storeUrl} onChange={(event) => update("storeUrl", event.target.value)} placeholder={isOzon ? "https://www.ozon.ru/seller/... или ссылка на карточку" : "https://www.wildberries.ru/brands/... или ссылка на карточку"} />
               </label>
               <label className="field-label">
                 Что есть на старте
-                <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder="Например: клиент прислал Excel, список nmID, ссылку на магазин или 3 карточки для ручного старта." />
+                <textarea value={form.manualSource} onChange={(event) => update("manualSource", event.target.value)} placeholder={isOzon ? "Например: файл клиента, список SKU или комментарий по кабинету." : "Например: клиент прислал Excel, список nmID, ссылку на магазин или 3 карточки для ручного старта."} />
               </label>
             </>
           )}
@@ -22537,23 +22590,6 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
-  }
-
-  function errorText(errorObject) {
-    if (["ozon_sync_timeout", "ozon_sync_limit", "ozon_response_too_large", "ozon_selected_cards_required", "ozon_selected_cards_not_found", "ozon_incomplete_response"].includes(errorObject.message)) return `${ozonSellerErrorText(errorObject)} Кабинет не создан.`;
-    if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
-    if (errorObject.message === "invalid_portal_team") return "Проверьте назначенных сотрудников в команде клиента. Кабинет не создан.";
-    if (errorObject.message === "ozon_credentials_required") return "Введите числовой Client-Id и API-ключ из настроек Seller API.";
-    if (errorObject.message === "ozon_account_already_connected") return "Этот Ozon-аккаунт уже подключён к другому кабинету приложения.";
-    if (["ozon_check_rate_limited", "ozon_rate_limited"].includes(errorObject.message)) return "Проверка временно ограничена. Повторите позже; новый кабинет пока не создан.";
-    if (["ozon_unavailable", "ozon_invalid_response"].includes(errorObject.message)) return "Не удалось проверить доступ к Ozon. Повторите позже; кабинет не создан.";
-    if (errorObject.message === "secret_storage_unavailable") return "Хранилище ключей недоступно. Повторите позднее; кабинет не создан.";
-    if (errorObject.status === 403) return "Недостаточно прав для создания Ozon-кабинета.";
-    if (errorObject.message === "store_url_too_long") return "Ссылка или Seller ID слишком длинные.";
-    if (errorObject.message === "manual_source_too_long") return "Комментарий по источнику слишком длинный.";
-    if (errorObject.message === "client_name_too_long") return "Название клиента слишком длинное.";
-    if (errorObject.status === 401) return "Сессия истекла. Войдите заново.";
-    return "Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.";
   }
 
   async function submit(event) {
@@ -22589,7 +22625,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
         setError("Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.");
       }
     } catch (submitError) {
-      setError(errorText(submitError));
+      setError(ozonPortalErrorText(submitError));
     } finally {
       setLoading(false);
     }
@@ -22637,7 +22673,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
             <label className="field-label">API-ключ Ozon
               <input type="password" value={form.apiKey} onChange={(event) => update("apiKey", event.target.value)} autoComplete="off" maxLength={4096} disabled={loading} required placeholder="API-ключ этого магазина" />
             </label>
-            <p className="status-note">Проверим доступ, загрузим карточки и сохраним ключ зашифрованно. При ошибке новый кабинет не создаётся.</p>
+            <p className="status-note">Только чтение: проверим доступ, загрузим карточки и сохраним ключ зашифрованно. Карточки, цены и остатки в Ozon не изменяются. При ошибке новый кабинет не создаётся.</p>
           </> : null}
           <label className="field-label">
             Ссылка на Ozon-кабинет, Seller ID или карточку{form.mode === "api" ? " (необязательно)" : ""}
