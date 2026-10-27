@@ -3236,102 +3236,6 @@ tr.selected-row td {
   gap: 8px;
 }
 
-.ozon-launch-checklist {
-  gap: 14px;
-}
-
-.ozon-launch-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 8px;
-}
-
-.ozon-launch-row {
-  min-height: 96px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 10px;
-  padding: 11px;
-}
-
-.ozon-launch-row.ready {
-  border-color: #b8ddcc;
-  background: var(--green-soft);
-}
-
-.ozon-launch-row.pending {
-  border-color: #eccd9e;
-  background: var(--amber-soft);
-}
-
-.ozon-launch-status {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--muted);
-  display: grid;
-  place-items: center;
-}
-
-.ozon-launch-row.ready .ozon-launch-status {
-  color: var(--green);
-}
-
-.ozon-launch-row.pending .ozon-launch-status {
-  color: var(--amber);
-}
-
-.ozon-launch-row > div:nth-child(2) {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-}
-
-.ozon-launch-row strong {
-  color: var(--ink);
-  font-size: 13px;
-  line-height: 1.2;
-}
-
-.ozon-launch-row span,
-.ozon-launch-next span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.ozon-launch-row .tag {
-  justify-self: end;
-  white-space: nowrap;
-}
-
-.ozon-launch-next {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 12px;
-}
-
-.ozon-launch-next > div {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.ozon-launch-next strong {
-  color: var(--ink);
-  font-size: 15px;
-}
-
 .step {
   min-height: 82px;
   border: 1px solid var(--line);
@@ -7919,17 +7823,6 @@ tr:last-child td {
   .approval-panel-head,
   .approval-review {
     grid-template-columns: 1fr;
-  }
-
-  .ozon-launch-row,
-  .ozon-launch-next {
-    grid-template-columns: 1fr;
-  }
-
-  .ozon-launch-status,
-  .ozon-launch-row .tag,
-  .ozon-launch-next .btn {
-    justify-self: start;
   }
 
   .client-marketplace-head,

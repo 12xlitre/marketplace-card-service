@@ -6059,7 +6059,7 @@ function SellerCommandCenter({ marketplace = "WB", cardsCount = 0, issueCount = 
     <section className="workspace-strip command-center">
       <div className="strip-head">
         <div>
-          <h2>Рабочий пульт</h2>
+          <h2>Быстрые действия</h2>
           <p>{marketplace}: быстрые переходы к тому, что требует действия.</p>
         </div>
         <Tag tone={focusTone}>{focusText}</Tag>
@@ -9132,64 +9132,6 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   const ozonTasks = Array.isArray(ozonWorkState.tasks) ? ozonWorkState.tasks : [];
   const ozonActiveTasks = ozonTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status)).length;
   const ozonSubmittedTasks = ozonTasks.filter((task) => task.status === "submitted").length;
-  const ozonCards = Array.isArray(portal.realCards) ? portal.realCards : [];
-  const semanticDraftMap = ozonDraftMap(ozonSemanticDrafts);
-  const contentDraftMap = ozonDraftMap(ozonCardDrafts);
-  const ozonSemanticFinalCount = ozonCards.filter((card) => ozonSemanticDraftHasFinal(semanticDraftMap.get(ozonCardStableKey(card)))).length;
-  const ozonContentFinalCount = ozonCards.filter((card) => ozonCardDraftHasFinalContent(contentDraftMap.get(ozonCardStableKey(card)))).length;
-  const ozonLaunchChecks = [
-    {
-      key: "source",
-      label: "Источник Ozon",
-      ready: sourceConfigured,
-      value: hasSellerApi ? "Seller API" : sourceConfigured ? "MPStats" : "не задан",
-      note: hasSellerApi ? "Данные карточек получаем напрямую из Ozon по сохранённому ключу." : sourceConfigured ? "MPStats может искать карточки по сохраненному ориентиру." : "Нужна ссылка продавца, Seller ID, SKU/Ozon ID или offer ID.",
-    },
-    {
-      key: "cards",
-      label: "Карточки",
-      ready: ozonCards.length > 0,
-      value: ozonCards.length ? `${formatNumber(ozonCards.length)} сохранено` : "нет карточек",
-      note: ozonCards.length ? "Ozon snapshot готов для задач и отчета." : hasSellerApi ? "Нажмите «Обновить карточки» для загрузки через Seller API." : "Сначала выполните MPStats-проверку и сохраните найденные карточки.",
-    },
-    {
-      key: "tasks",
-      label: "Задачи",
-      ready: ozonTasks.length > 0,
-      value: ozonTasks.length ? `${formatNumber(ozonTasks.length)} создано` : "нет задач",
-      note: ozonTasks.length ? "Рабочий набор уже заведен в Ozon-контуре." : "Выберите карточки ниже и нажмите Взять в работу.",
-    },
-    {
-      key: "semantic-workflow",
-      label: "СЯ workflow",
-      ready: ozonCards.length > 0,
-      value: ozonCards.length ? "готов" : "ждет карточки",
-      note: ozonCards.length ? "Процесс СЯ работает как в WB: текущие, к добавлению, к исключению и итог." : "СЯ станет доступно сразу после сохранения Ozon-карточек.",
-    },
-    {
-      key: "semantic-result",
-      label: "Итоговое СЯ",
-      ready: ozonSemanticFinalCount > 0,
-      value: ozonSemanticFinalCount ? `${formatNumber(ozonSemanticFinalCount)} карточек` : "результат не сохранен",
-      note: ozonSemanticFinalCount ? "Файл итогового СЯ можно собирать по сохраненным карточкам." : "Workflow готов; осталось открыть карточку и сохранить финальный набор.",
-    },
-    {
-      key: "content",
-      label: "Итоговый контент",
-      ready: ozonContentFinalCount > 0,
-      value: ozonContentFinalCount ? `${formatNumber(ozonContentFinalCount)} карточек` : "не принят",
-      note: ozonContentFinalCount ? "Есть принятый Ozon-контент для выгрузки." : "Во вкладке Изменения примите контент хотя бы по одной карточке.",
-    },
-    {
-      key: "report",
-      label: "Отчет XLSX",
-      ready: ozonCards.length > 0,
-      value: ozonCards.length ? "можно скачать" : "пока нечего",
-      note: ozonCards.length ? "Клиентский Ozon XLSX соберется из текущего snapshot." : "Отчет станет доступен после сохранения Ozon-карточек.",
-    },
-  ];
-  const launchReadyCount = ozonLaunchChecks.filter((item) => item.ready).length;
-  const launchNextStep = ozonLaunchChecks.find((item) => !item.ready);
   const semanticImportBusy = ["reading", "previewing", "applying"].includes(semanticImportStatus);
 
   return (
@@ -9335,18 +9277,6 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                     <Metric label="На согласовании" value={formatNumber(ozonSubmittedTasks)} />
                   </div>
                 </section>
-
-                <OzonLaunchChecklist
-                  items={ozonLaunchChecks}
-                  readyCount={launchReadyCount}
-                  totalCount={ozonLaunchChecks.length}
-                  nextStep={launchNextStep}
-                  loading={sellerApiLoading || probeStatus === "loading" || probeSaveStatus === "saving"}
-                  onEditSource={canManage ? () => setSourceEditing(true) : null}
-                  onRefreshCards={canManage && sourceConfigured ? refreshOzonCards : null}
-                  onOpenTasks={() => setSellerTab("tasks")}
-                  onOpenReports={() => setSellerTab("reports")}
-                />
 
                 <SellerCommandCenter
                   marketplace="Ozon"
@@ -9610,57 +9540,6 @@ function OzonPlaceholderPanel({ title, copy, tag, steps = [] }) {
           <div className="empty-state-steps">
             {steps.map((step) => <em key={step}>{step}</em>)}
           </div>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-function OzonLaunchChecklist({ items, readyCount, totalCount, nextStep, loading = false, onEditSource, onRefreshCards, onOpenTasks, onOpenReports }) {
-  const complete = readyCount >= totalCount;
-  const tone = complete ? "green" : readyCount > 1 ? "blue" : "amber";
-  const nextAction = (() => {
-    if (!nextStep) return { label: "Открыть отчеты", onClick: onOpenReports, Icon: FileText };
-    if (nextStep.key === "source") return { label: "Задать источник", onClick: onEditSource, Icon: Store };
-    if (nextStep.key === "cards") return { label: "Обновить карточки", onClick: onRefreshCards, Icon: RefreshCw };
-    if (nextStep.key === "tasks") return { label: "Выбрать карточки ниже", onClick: null, Icon: ClipboardList };
-    if (nextStep.key === "semantic-workflow") return { label: "Обновить карточки", onClick: onRefreshCards, Icon: RefreshCw };
-    if (nextStep.key === "semantic-result" || nextStep.key === "content") return { label: "Открыть задачи", onClick: onOpenTasks, Icon: ClipboardList };
-    return { label: "Открыть отчеты", onClick: onOpenReports, Icon: FileText };
-  })();
-  const ActionIcon = nextAction.Icon;
-  return (
-    <section className="workspace-strip ozon-launch-checklist">
-      <div className="strip-head">
-        <div>
-          <h2>Ozon перед запуском</h2>
-          <p>{complete ? "Базовый контур готов: источник, карточки, задачи и выгрузки доступны." : `Ближайший шаг: ${nextStep?.note || "проверьте Ozon-контур."}`}</p>
-        </div>
-        <Tag tone={tone}>{formatNumber(readyCount)} из {formatNumber(totalCount)}</Tag>
-      </div>
-      <div className="ozon-launch-grid">
-        {items.map((item) => (
-          <div className={`ozon-launch-row ${item.ready ? "ready" : "pending"}`} key={item.key}>
-            <div className="ozon-launch-status">
-              {item.ready ? <CheckSquare size={16} /> : <AlertTriangle size={16} />}
-            </div>
-            <div>
-              <strong>{item.label}</strong>
-              <span>{item.note}</span>
-            </div>
-            <Tag tone={item.ready ? "green" : "amber"}>{item.value}</Tag>
-          </div>
-        ))}
-      </div>
-      <div className="ozon-launch-next">
-        <div>
-          <span>{complete ? "Статус" : "Следующее действие"}</span>
-          <strong>{complete ? "Можно проводить первый рабочий проход" : nextStep?.label || "Проверка Ozon"}</strong>
-        </div>
-        {nextAction.onClick ? (
-          <button className={loadingButtonClass("btn primary", loading && nextStep?.key === "cards")} type="button" onClick={nextAction.onClick} disabled={loading && nextStep?.key === "cards"} aria-busy={(loading && nextStep?.key === "cards") || undefined}>
-            <ActionIcon size={16} />{loading && nextStep?.key === "cards" ? "Обновляем" : nextAction.label}
-          </button>
         ) : null}
       </div>
     </section>
