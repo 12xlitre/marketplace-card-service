@@ -3,7 +3,7 @@
 Устойчивые договоренности и решения проекта.
 
 - `product_visual_first.md` — продукт делаем через визуальный прототип и пошаговое уточнение процесса.
-- `product_store_onboarding.md` — магазин можно заводить через WB API или вручную, с возможностью подключить API позже.
+- `product_store_onboarding.md` — выбор Wildberries/Ozon при создании; API или ручной режим, Ozon пока только для чтения.
 - `backend_auth_and_sessions.md` — backend-only auth, сессии с разным TTL и remember-me, восстановление состояния после refresh.
 - `backend_portals.md` — кабинеты и состав проекта живут в SQLite/backend API, браузерный localStorage только fallback.
 - `backend_wb_readonly.md` — WB API подключение через backend, токены только env/demo или encrypted per portal, чтение карточек и строго ограниченная ручная публикация принятого контента.
