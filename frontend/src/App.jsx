@@ -939,6 +939,7 @@ function normalizePortal(portal) {
       ? portal.memberLogins
       : [teamRoles.lead, teamRoles.tech, teamRoles.manager]),
     realCards: portal.realCards || [],
+    cardsLoaded: portal.cardsLoaded !== false,
     tokenMeta: portal.tokenMeta || {},
     draftSummary: {
       draftCount: Number(portal.draftSummary?.draftCount || 0),
@@ -1937,6 +1938,7 @@ function applyWbSnapshotToPortal(portal, payload) {
   return normalizePortal({
     ...portal,
     realCards,
+    cardsLoaded: true,
     name: stats.portalName || firstUsefulPortalCardName(realCards) || portal.name,
     status: "WB read-only",
     apiConnected: true,
@@ -6233,6 +6235,8 @@ export default function App() {
     demoCards.find((card) => cardDraftKey(card) === initialView.cardKey) || demoCards[0],
   );
   const [loadingPortalCards, setLoadingPortalCards] = useState({});
+  const portalCardRequests = useRef(new Set());
+  const [portalCardErrors, setPortalCardErrors] = useState({});
   const [portalModalOpen, setPortalModalOpen] = useState(false);
   const [portalModalMode, setPortalModalMode] = useState("api");
   const [portalModalTarget, setPortalModalTarget] = useState(null);
@@ -6325,14 +6329,14 @@ export default function App() {
   }, [displayScreen, currentPortal, selectedCardKey, selectedCard]);
 
   useEffect(() => {
-    if (!currentUser || !currentPortal || currentPortal.isDemo || !currentPortal.apiConnected) {
+    if (!currentUser || !currentPortal || currentPortal.isDemo || currentPortal.cardsLoaded !== false) {
       return;
     }
-    if (!["seller", "card"].includes(displayScreen)) {
+    if (!["seller", "card", "ozon-card"].includes(displayScreen)) {
       return;
     }
     loadPortalCards(currentPortal);
-  }, [currentUser, displayScreen, currentPortal?.id, currentPortal?.apiConnected, currentPortal?.realCards?.length]);
+  }, [currentUser, displayScreen, currentPortal?.id, currentPortal?.cardsLoaded]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -6355,46 +6359,30 @@ export default function App() {
   }
 
   async function loadAppData(user) {
-    let nextUsers = [];
-    try {
-      const payload = await apiRequest("/api/users");
-      nextUsers = normalizeUserList(payload.users || []);
-    } catch {
-      nextUsers = [];
-    }
+    const [usersResult, portalsResult, integrationResult] = await Promise.allSettled([
+      apiRequest("/api/users"),
+      apiRequest("/api/portals?view=summary"),
+      apiRequest("/api/integrations/mpstats"),
+    ]);
+    const nextUsers = usersResult.status === "fulfilled" ? normalizeUserList(usersResult.value.users || []) : [];
     const teamRoles = defaultTeamFromUsers(nextUsers.length ? nextUsers : [user, ...hardcodedDirectoryFallback]);
     setUsers(nextUsers);
     setDemoPortal((portal) => ({
-      ...portal,
-      ownerLogin: teamRoles.lead,
-      teamRoles,
+      ...portal, ownerLogin: teamRoles.lead, teamRoles,
       memberLogins: uniqueLogins(Object.values(teamRoles)),
     }));
-
-    try {
-      const payload = await apiRequest("/api/portals");
-      setUserPortals((payload.portals || []).map(normalizePortal));
-    } catch {
-      setUserPortals([]);
-    }
-
-    try {
-      const payload = await apiRequest("/api/integrations/mpstats");
-      setMpstatsIntegration(payload.integration || null);
-    } catch {
-      setMpstatsIntegration(null);
-    }
-
+    setUserPortals(portalsResult.status === "fulfilled" ? (portalsResult.value.portals || []).map(normalizePortal) : []);
+    setMpstatsIntegration(integrationResult.status === "fulfilled" ? integrationResult.value.integration || null : null);
   }
 
   async function refreshPortals() {
-    const payload = await apiRequest("/api/portals");
+    const payload = await apiRequest("/api/portals?view=summary");
     setUserPortals((current) => {
       const currentById = Object.fromEntries(current.map((portal) => [String(portal.id), portal]));
       return (payload.portals || []).map((portal) => {
         const normalized = normalizePortal(portal);
         const existing = currentById[String(normalized.id)];
-        return existing ? { ...normalized, realCards: existing.realCards || [] } : normalized;
+        return existing ? { ...normalized, realCards: existing.realCards || [], cardsLoaded: existing.cardsLoaded } : normalized;
       });
     });
   }
@@ -6594,6 +6582,8 @@ export default function App() {
       // The local UI should still return to the login screen.
     }
     setCurrentUser(null);
+    setUserPortals([]);
+    setPortalCardErrors({});
     setScreen("cabinets");
     setSelectedClientId("");
     setSelectedPortalId("");
@@ -6962,40 +6952,37 @@ export default function App() {
   }
 
   async function loadPortalCards(portal, { force = false, resetWork = false } = {}) {
-    if (!portal || portal.isDemo || !portal.apiConnected || (!force && portal.realCards?.length)) {
+    if (!portal || portal.isDemo || (!force && portal.cardsLoaded !== false) || (force && !portal.apiConnected)) {
       return;
     }
     const portalKey = String(portal.id);
-    if (loadingPortalCards[portalKey]) {
-      return;
-    }
+    if (portalCardRequests.current.has(portalKey)) return;
+    portalCardRequests.current.add(portalKey);
     setLoadingPortalCards((items) => ({ ...items, [portalKey]: true }));
+    setPortalCardErrors((items) => ({ ...items, [portalKey]: false }));
     try {
+      if (!force) {
+        const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/cards`);
+        setUserPortals((items) => items.map((item) => String(item.id) === portalKey
+          ? (item.cardsLoaded === false ? { ...item, realCards: payload.cards || [], cardsLoaded: true } : item) : item));
+        return;
+      }
       let portalForLoad = portal;
       if (resetWork) {
         const result = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/clear-draft-work`, {
-          method: "POST",
-          body: JSON.stringify({}),
+          method: "POST", body: JSON.stringify({}),
         });
         clearLocalDraftsForPortal(portal.id);
         resetPortalWorkSummary(portal.id);
-        portalForLoad = normalizePortal({
-          ...portal,
-          ...(result.portal || {}),
-          realCards: portal.realCards || [],
-        });
+        portalForLoad = normalizePortal({ ...portal, ...(result.portal || {}), realCards: portal.realCards || [] });
         replaceUserPortal(portalForLoad);
       }
       const payload = await apiRequest(`/api/wb/cards?portal_id=${encodeURIComponent(portal.id)}&limit=100`);
-      const updatedPortal = applyWbSnapshotToPortal(portalForLoad, payload);
-      replaceUserPortal(updatedPortal);
+      replaceUserPortal(applyWbSnapshotToPortal(portalForLoad, payload));
     } catch {
-      replaceUserPortal({
-        ...portal,
-        syncStatus: "error",
-        draftSummary: portal.draftSummary,
-      });
+      setPortalCardErrors((items) => ({ ...items, [portalKey]: true }));
     } finally {
+      portalCardRequests.current.delete(portalKey);
       setLoadingPortalCards((items) => {
         const next = { ...items };
         delete next[portalKey];
@@ -7389,12 +7376,12 @@ export default function App() {
   const selectedCardFromPortal = currentPortalCards.find((card) => cardMatchesDraftKey(card, selectedCardKey)) || null;
   const currentPortalKey = String(currentPortal?.id || "");
   const cardScreenLoading = Boolean(
-    displayScreen === "card"
+    ["card", "ozon-card"].includes(displayScreen)
     && !selectedCardFromPortal
     && currentPortal
     && !currentPortal.isDemo
-    && currentPortal.apiConnected
-    && (loadingPortalCards[currentPortalKey] || !currentPortal.realCards?.length)
+    && !portalCardErrors[currentPortalKey]
+    && (loadingPortalCards[currentPortalKey] || currentPortal.cardsLoaded === false)
   );
 
   if (sessionLoading) {
@@ -7422,6 +7409,13 @@ export default function App() {
         onLogout={logout}
       />
       <main className="main">
+        {screenNeedsPortal && currentPortal && portalCardErrors[currentPortalKey] ? (
+          <div className="notice" role="alert">
+            <span>Не удалось загрузить карточки кабинета.</span>
+            <button className="btn" type="button" onClick={() => loadPortalCards(currentPortal, { force: currentPortal.cardsLoaded !== false })}>Повторить</button>
+          </div>
+        ) : null}
+        {screenNeedsPortal && loadingPortalCards[currentPortalKey] ? <p role="status">Загружаем карточки кабинета…</p> : null}
         {notice ? (
           <div className="notice">
             <span>{notice}</span>
@@ -7482,7 +7476,7 @@ export default function App() {
           />
         ) : null}
 
-        {displayScreen === "seller" && currentPortal && isOzonPortal(currentPortal) ? (
+        {displayScreen === "seller" && currentPortal && currentPortal.cardsLoaded !== false && isOzonPortal(currentPortal) ? (
           <OzonSellerScreen
             portal={currentPortal}
             displayUsers={displayUsers}
@@ -7501,7 +7495,7 @@ export default function App() {
           />
         ) : null}
 
-        {displayScreen === "seller" && currentPortal && !isOzonPortal(currentPortal) ? (
+        {displayScreen === "seller" && currentPortal && currentPortal.cardsLoaded !== false && !isOzonPortal(currentPortal) ? (
           <SellerScreen
             portal={currentPortal}
             cards={currentPortalCards}
@@ -7563,7 +7557,7 @@ export default function App() {
         ) : null}
 
         {displayScreen === "ozon-card" && !selectedCardFromPortal ? (
-          <CardRecoveryScreen loading={false} onBack={backFromCard} />
+          <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
         ) : null}
 
         {displayScreen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
@@ -7680,7 +7674,7 @@ function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNa
   const nav = [
     { key: "cabinets", label: "Клиенты", Icon: LayoutDashboard },
     { key: "audit", label: "Рыночный аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
-    canManage ? { key: "admin", label: "Админка", Icon: Settings } : null,
+    canManage ? { key: "admin", label: "Администрирование", Icon: Settings } : null,
   ].filter(Boolean);
   const cabinetScreens = new Set(["cabinets", "client", "seller", "card"]);
   return (
@@ -7895,10 +7889,6 @@ function ClientCard({ client, canSeeOzon, onOpen, onOpenMarketplace, onOpenTasks
         <MiniStat value={cardCount} label="карточки" />
         <MiniStat value={taskCount} label="задачи" />
         <MiniStat value={issueCount} label="к проверке" />
-      </div>
-      <div className="client-marketplace-badges">
-        <span className="client-marketplace-badge wb">Wildberries · {formatNumber(wbCount)}</span>
-        {canSeeOzon ? <span className="client-marketplace-badge ozon">Ozon · {formatNumber(ozonCount)}</span> : null}
       </div>
       <div className="client-quick-panel">
         <button type="button" onClick={() => onOpenMarketplace?.("wildberries")} disabled={!wbCount}>
@@ -22424,6 +22414,10 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
       return `Этот WB кабинет уже подключен, но находится в архиве: ${errorObject.payload?.portal?.name || "существующий кабинет"}. Верните его из архива вместо повторного добавления.`;
     }
     if (errorObject.message === "wb_token_required") return "Введите WB API ключ для подключения кабинета.";
+    if (errorObject.message === "wb_selected_cards_required") return "Вставьте артикулы WB (nmID) для выбранных карточек. Кабинет не создан.";
+    if (errorObject.message === "wb_selected_cards_invalid") return "Укажите числовые артикулы WB (nmID) или полные ссылки на карточки Wildberries.";
+    if (errorObject.message === "wb_selected_cards_limit") return "В одном кабинете можно выбрать до 1000 карточек.";
+    if (errorObject.message === "wb_selected_cards_not_found") return `Не удалось подтвердить выбранные карточки через WB API: ${(errorObject.payload?.missingNmIds || []).join(", ")}. Кабинет не создан.`;
     if (errorObject.message === "wb_api_error") return `WB API не подключился: ${errorObject.payload?.message || "WB отклонил запрос."}`;
     if (errorObject.message === "store_url_too_long") return "Ссылка или ориентир по магазину слишком длинные. Оставьте ссылку на магазин или первую карточку.";
     if (errorObject.message === "manual_source_too_long") return "Описание первичного источника слишком длинное. Оставьте кратко: таблица, список nmID или комментарий от клиента.";
@@ -22451,8 +22445,8 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
       setError("Выберите охват кабинета.");
       return;
     }
-    if (isOzon && form.scope === "selected" && !form.testSkus.trim()) {
-      setError("Для выбранных карточек вставьте SKU, Ozon ID или offer ID.");
+    if (!isReplacement && (isOzon || mode === "api") && form.scope === "selected" && !form.testSkus.trim()) {
+      setError(isOzon ? "Для выбранных карточек вставьте SKU, Ozon ID или offer ID." : "Для выбранных карточек вставьте артикулы WB (nmID) или ссылки на карточки.");
       return;
     }
     if (!isReplacement && (!form.lead || !form.tech || !form.manager)) {
@@ -22469,6 +22463,7 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
         teamRoles: { lead: form.lead, tech: form.tech, manager: form.manager },
         apiKey: mode === "api" || isReplacement ? form.apiKey.trim() : "",
         ...(isOzon && mode === "api" ? { clientId: form.clientId.trim() } : {}),
+        ...(!isOzon && !isReplacement && mode === "api" && form.scope === "selected" ? { selectedNmIds: form.testSkus.trim() } : {}),
         storeUrl: !isReplacement && mode === "manual" ? form.storeUrl.trim() : "",
         manualSource: isOzon
           ? ozonPortalSource(form.scope === "selected" ? form.testSkus : "", form.manualSource)
@@ -22544,9 +22539,9 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
             <UserSelect label="Технический специалист" value={form.tech} users={users} onChange={(value) => update("tech", value)} />
           </div> : null}
           {!isReplacement ? <UserSelect label="Аккаунт-менеджер" value={form.manager} users={users} onChange={(value) => update("manager", value)} /> : null}
-          {isOzon && form.scope === "selected" ? <label className="field-label">
-            SKU, Ozon ID или offer ID
-            <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} required placeholder="Например: 123456789, OZON-OFFER-01" />
+          {!isReplacement && (isOzon || mode === "api") && form.scope === "selected" ? <label className="field-label">
+            {isOzon ? "SKU, Ozon ID или offer ID" : "Артикулы WB (nmID) или ссылки на карточки"}
+            <textarea value={form.testSkus} onChange={(event) => update("testSkus", event.target.value)} required placeholder={isOzon ? "Например: 123456789, OZON-OFFER-01" : "По одному в строке или через запятую: 123456789, 987654321"} />
           </label> : null}
           {isOzon && mode === "api" ? <label className="field-label">
             Client-Id
@@ -23531,7 +23526,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
     <section className="screen active">
       <header className="topbar">
         <div className="title">
-          <h1>Админка</h1>
+          <h1>Администрирование</h1>
           <p>Пользователи, доступы к кабинетам и сервисные интеграции.</p>
         </div>
       </header>

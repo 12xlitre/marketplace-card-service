@@ -3,9 +3,9 @@
 Устойчивые договоренности и решения проекта.
 
 - `product_visual_first.md` — продукт делаем через визуальный прототип и пошаговое уточнение процесса.
-- `product_store_onboarding.md` — выбор Wildberries/Ozon при создании; API или ручной режим, Ozon пока только для чтения.
+- `product_store_onboarding.md` — выбор Wildberries/Ozon при создании, обязательный список nmID для выбранных WB API карточек; API или ручной режим, Ozon только для чтения.
 - `backend_auth_and_sessions.md` — backend-only auth, сессии с разным TTL и remember-me, восстановление состояния после refresh.
-- `backend_portals.md` — кабинеты и состав проекта в SQLite/backend API; отдельное право создания для Насти, справочник команды и привязка нового кабинета к клиенту.
+- `backend_portals.md` — метаданные и отложенная загрузка карточек кабинета, состав проекта в SQLite/backend API; отдельное право создания для Насти, справочник команды и привязка нового кабинета к клиенту.
 - `backend_wb_readonly.md` — WB API подключение через backend, токены только env/demo или encrypted per portal, чтение карточек и строго ограниченная ручная публикация принятого контента.
 - `ops_production_deployment.md` — OptiCards развернут на `opticards.weboptai.ru`, прод-обвязка живет на сервере; новые Python-модули требуют явного включения в образ.
 - `product_wb_characteristic_values.md` — правила по значениям характеристик WB: где есть официальный справочник, где только подсказки из карточек, и почему нужен MPStats.

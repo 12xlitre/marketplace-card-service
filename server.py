@@ -638,6 +638,8 @@ def init_db():
       db.execute("ALTER TABLE portals ADD COLUMN client_contact_json TEXT NOT NULL DEFAULT '{}'")
     if "client_name" not in portal_columns:
       db.execute("ALTER TABLE portals ADD COLUMN client_name TEXT NOT NULL DEFAULT ''")
+    if "selected_ids_json" not in portal_columns:
+      db.execute("ALTER TABLE portals ADD COLUMN selected_ids_json TEXT NOT NULL DEFAULT '[]'")
     integration_columns = {row["name"] for row in db.execute("PRAGMA table_info(portal_integrations)").fetchall()}
     if "external_key" not in integration_columns:
       db.execute("ALTER TABLE portal_integrations ADD COLUMN external_key TEXT NOT NULL DEFAULT ''")
@@ -1485,7 +1487,74 @@ def create_portal(name, marketplace, scope, created_by, team, store_url="", manu
   return portal_id
 
 
-def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot, client_name=""):
+class WbSelectionError(ValueError):
+  def __init__(self, code, missing=None):
+    super().__init__(code)
+    self.missing_nm_ids = missing or []
+
+
+def clean_wb_selected_ids(value):
+  if isinstance(value, str):
+    values = re.split(r'[\s,;]+', value.strip())
+  elif isinstance(value, list):
+    values = value
+  else:
+    values = [] if value is None else [value]
+  result = []
+  for raw in values:
+    text = str(raw).strip()
+    if not text:
+      continue
+    if not re.fullmatch(r'[1-9]\d{2,19}', text):
+      try:
+        url = urlparse(text if '://' in text else 'https://' + text)
+        match = re.fullmatch(r'/catalog/([1-9]\d{2,19})/detail\.aspx/?', url.path)
+        if url.scheme not in {'http', 'https'} or url.hostname not in {'wildberries.ru', 'www.wildberries.ru'} or url.username or url.password or not match:
+          raise ValueError()
+        text = match[1]
+      except ValueError:
+        raise WbSelectionError('wb_selected_cards_invalid') from None
+    if text not in result:
+      result.append(text)
+  if not result:
+    raise WbSelectionError('wb_selected_cards_required')
+  if len(result) > WB_MAX_CARDS_PER_SYNC:
+    raise WbSelectionError('wb_selected_cards_limit')
+  return result
+
+
+def wb_portal_selected_ids(row):
+  if not row or row['scope'] != 'selected' or audit_normalized(row['marketplace']) not in {'wb', 'wildberries'}:
+    return None
+  explicit = json.loads(row['selected_ids_json'] or '[]') if 'selected_ids_json' in row.keys() else []
+  # Legacy selected cabinets keep their saved composition until an explicit selection is supplied.
+  return clean_wb_selected_ids(explicit or [card.get('nmID') for card in wb_snapshot_cards_from_row(row)])
+
+
+def scope_wb_snapshot(snapshot, selected_ids):
+  wanted = clean_wb_selected_ids(selected_ids)
+  by_id = {str(card.get('nmID')): card for card in snapshot.get('cards', [])}
+  missing = [nm for nm in wanted if nm not in by_id]
+  if missing:
+    raise WbSelectionError('wb_selected_cards_not_found', missing)
+  cards = [by_id[nm] for nm in wanted]
+  problems = sum(1 for card in cards if int(card.get('issueCount') or 0) > 0)
+  return {**snapshot, 'cards': cards, 'stats': {**snapshot.get('stats', {}), 'cardCount': len(cards),
+          'workCount': problems, 'problemCount': problems, 'sampleLimit': len(cards)}}
+
+
+def fetch_wb_cards_for_portal(token, portal_id, max_cards=100):
+  row = get_portal_row(portal_id) if str(portal_id).isdigit() else None
+  selected = wb_portal_selected_ids(row)
+  if selected:
+    return scope_wb_snapshot(fetch_wb_cards(token, max_cards=WB_MAX_CARDS_PER_SYNC, selected_nm_ids=selected), selected)
+  return fetch_wb_cards(token, max_cards=max_cards)
+
+
+def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot, client_name="", selected_nm_ids=None):
+  selected = clean_wb_selected_ids(selected_nm_ids) if scope == 'selected' else []
+  if selected:
+    snapshot = scope_wb_snapshot(snapshot, selected)
   init_db()
   stats = snapshot.get("stats") or {}
   token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
@@ -1496,9 +1565,9 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
       """
       INSERT INTO portals (
         name, marketplace, scope, status, api_connected,
-        card_count, work_count, problem_count, cards_snapshot_json, client_name, created_by, last_sync_at
+        card_count, work_count, problem_count, cards_snapshot_json, client_name, created_by, last_sync_at, selected_ids_json
       )
-      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 'WB read-only', 1, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
       (
         portal_name,
@@ -1511,6 +1580,7 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
         client_name,
         created_by,
         stats.get("loadedAt"),
+        json.dumps(selected),
       ),
     )
     portal_id = cursor.lastrowid
@@ -1638,7 +1708,8 @@ def save_integration_token(portal_id, provider, token):
     )
 
 
-def list_portals(user=None):
+def list_portals(user=None, include_cards=True):
+  cards_column = "portals.cards_snapshot_json" if include_cards else "'[]'"
   init_db()
   params = []
   filters = []
@@ -1666,13 +1737,14 @@ def list_portals(user=None):
         portals.name,
         portals.marketplace,
         portals.scope,
+        portals.selected_ids_json,
         portals.status,
         portals.is_active,
         portals.api_connected,
         portals.card_count,
         portals.work_count,
         portals.problem_count,
-        portals.cards_snapshot_json,
+        {cards_column} AS cards_snapshot_json,
         portals.store_url,
         portals.manual_source,
         portals.client_contact_json,
@@ -1836,7 +1908,7 @@ def portal_work_task_summary(portal_id):
   return portal_work_task_summaries([numeric_id]).get(numeric_id, empty_portal_work_task_summary())
 
 
-def public_portal_from_row(row, task_summary=None):
+def public_portal_from_row(row, task_summary=None, include_cards=True):
   team = parse_portal_members(row["members"])
   integrations = row["integrations"] or ""
   has_wb_integration = "wb:" in integrations
@@ -1854,6 +1926,7 @@ def public_portal_from_row(row, task_summary=None):
     "marketplace": row["marketplace"],
     "mode": mode,
     "scope": row["scope"],
+    "selectedNmIds": json.loads(row['selected_ids_json'] or '[]') if 'selected_ids_json' in row.keys() else [],
     "status": status,
     "isActive": bool(row["is_active"]),
     "ownerLogin": team.get("lead", ""),
@@ -1870,7 +1943,8 @@ def public_portal_from_row(row, task_summary=None):
     "createdAt": row["created_at"] or "",
     "teamRoles": team,
     "memberLogins": [login for login in dict.fromkeys(team.values()) if login],
-    "realCards": wb_snapshot_cards_from_row(row),
+    "realCards": wb_snapshot_cards_from_row(row) if include_cards else [],
+    "cardsLoaded": bool(include_cards),
     "syncStatus": ("loaded" if row["last_sync_at"] else "stored-token") if ozon_connected else ("loaded" if api_connected else ("stored-token" if has_wb_integration else manual_sync_status)),
     "lastSyncAt": row["last_sync_at"] or "",
     "tokenMeta": wb_token_meta_for_portal_row(row),
@@ -1918,6 +1992,7 @@ def get_portal_row(portal_id, user=None):
         portals.name,
         portals.marketplace,
         portals.scope,
+        portals.selected_ids_json,
         portals.status,
         portals.is_active,
         portals.api_connected,
@@ -2236,6 +2311,10 @@ def update_portal_sync_stats(portal_id, snapshot):
     numeric_portal_id = int(portal_id)
   except (TypeError, ValueError):
     return
+  with connect_db() as db:
+    selected_row = db.execute("SELECT selected_ids_json FROM portals WHERE id=? AND scope='selected' AND marketplace IN ('Wildberries','WB')", (numeric_portal_id,)).fetchone()
+  if selected_row and json.loads(selected_row['selected_ids_json'] or '[]'):
+    snapshot = scope_wb_snapshot(snapshot, json.loads(selected_row['selected_ids_json']))
   stats = snapshot.get("stats") or {}
   token_meta = snapshot.get("tokenMeta") or {}
   external_key = wb_snapshot_external_key(snapshot)
@@ -2378,6 +2457,9 @@ def build_saved_manual_portal_snapshot(row, bootstrap=None, limit=MPSTATS_STORE_
 
 def replace_wb_token_for_portal(portal_id, token, snapshot):
   numeric_portal_id = int(portal_id)
+  selected = wb_portal_selected_ids(get_portal_row(numeric_portal_id))
+  if selected:
+    snapshot = scope_wb_snapshot(snapshot, selected)
   token_meta = snapshot.get("tokenMeta") or wb_token_meta(token)
   external_key = wb_snapshot_external_key(snapshot)
   aad = integration_aad(numeric_portal_id, WB_PROVIDER)
@@ -21887,7 +21969,16 @@ def enrich_wb_cards_with_commercial_data(cards, prices, seller_stock_rows, wb_st
   return cards
 
 
-def fetch_wb_cards(token, max_cards=100):
+def fetch_wb_cards(token, max_cards=100, selected_nm_ids=None):
+  selected = clean_wb_selected_ids(selected_nm_ids) if selected_nm_ids is not None else None
+  selection_deadline = time.monotonic() + 90 if selected else None
+
+  def check_selection_deadline():
+    if selection_deadline is not None and time.monotonic() >= selection_deadline:
+      raise WbApiError(HTTPStatus.GATEWAY_TIMEOUT, "wb_selected_cards_timeout", retryable=True)
+
+  if selected:
+    max_cards = WB_MAX_CARDS_PER_SYNC
   max_cards = max(1, min(int(max_cards), WB_MAX_CARDS_PER_SYNC))
   cards = []
   cursor = {"limit": min(100, max_cards)}
@@ -21900,6 +21991,7 @@ def fetch_wb_cards(token, max_cards=100):
     seller_info_warning = wb_warning("seller_info", exc)
 
   while len(cards) < max_cards:
+    check_selection_deadline()
     cursor["limit"] = min(100, max_cards - len(cards))
     payload = {
       "settings": {
@@ -21911,6 +22003,8 @@ def fetch_wb_cards(token, max_cards=100):
     response = wb_request_json(token, "/content/v2/get/cards/list", payload)
     batch = response.get("cards") or []
     cards.extend(batch)
+    if selected and set(selected) <= {str(card.get('nmID')) for card in cards}:
+      break
     response_cursor = response.get("cursor") or {}
     total = int(response_cursor.get("total") or len(batch))
     updated_at = response_cursor.get("updatedAt")
@@ -21924,6 +22018,21 @@ def fetch_wb_cards(token, max_cards=100):
       "nmID": nm_id,
     }
 
+  if selected:
+    by_id = {str(card.get('nmID')): card for card in cards}
+    for nm in selected:
+      if nm in by_id:
+        continue
+      check_selection_deadline()
+      response = wb_request_json(token, '/content/v2/get/cards/list', {'settings': {
+          'sort': {'ascending': True}, 'cursor': {'limit': 100}, 'filter': {'withPhoto': -1, 'textSearch': nm}}})
+      for card in response.get('cards') or []:
+        if str(card.get('nmID')) == nm:
+          by_id[nm] = card
+    missing = [nm for nm in selected if nm not in by_id]
+    if missing:
+      raise WbSelectionError('wb_selected_cards_not_found', missing)
+    cards = [by_id[nm] for nm in selected]
   normalized_cards = [normalize_wb_card(card) for card in cards[:max_cards]]
   wb_warnings = []
   nm_ids = wb_cards_nm_ids(normalized_cards)
@@ -22865,12 +22974,29 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       user = self.require_user()
       if not user:
         return
-      rows = list_portals(user)
+      include_cards = parse_qs(parsed.query).get("view", [""])[0] != "summary"
+      rows = list_portals(user, include_cards=include_cards)
       task_summaries = portal_work_task_summaries([row["id"] for row in rows])
       self.send_json(
         HTTPStatus.OK,
-        {"portals": [public_portal_from_row(row, task_summaries.get(int(row["id"]))) for row in rows]},
+        {"portals": [public_portal_from_row(row, task_summaries.get(int(row["id"])), include_cards=include_cards) for row in rows]},
       )
+      return
+
+    if path.startswith("/api/portals/") and path.endswith("/cards"):
+      user = self.require_user()
+      if not user:
+        return
+      portal_id = path[len("/api/portals/"):-len("/cards")].strip("/")
+      if not user_can_access_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      with connect_db() as db:
+        row = db.execute("SELECT cards_snapshot_json FROM portals WHERE id = ?", (portal_id,)).fetchone()
+      if row is None:
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "portal_not_found"})
+        return
+      self.send_json(HTTPStatus.OK, {"cards": public_wb_value(wb_snapshot_cards_from_row(row)), "cardsLoaded": True})
       return
 
     if path.startswith("/api/portal-imports/"):
@@ -23320,7 +23446,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         )
         return
       try:
-        snapshot = fetch_wb_cards(token, max_cards=limit)
+        snapshot = fetch_wb_cards_for_portal(token, portal_id, max_cards=limit)
+      except WbSelectionError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc), 'missingNmIds': exc.missing_nm_ids})
+        return
       except WbApiError as exc:
         status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
         if status < 400 or status >= 600:
@@ -23518,7 +23647,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
         return
       try:
-        snapshot = fetch_wb_cards(api_key, max_cards=100)
+        snapshot = fetch_wb_cards_for_portal(api_key, portal_id, max_cards=100)
         existing_portal = find_portal_by_integration_external_key(
           WB_PROVIDER,
           wb_snapshot_external_key(snapshot),
@@ -23616,7 +23745,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           self.send_json(HTTPStatus.CONFLICT, portal_conflict_payload(existing_portal, user))
           return
         try:
-          snapshot = fetch_wb_cards(api_key, max_cards=100)
+          selected = clean_wb_selected_ids(payload.get('selectedNmIds')) if scope == 'selected' else None
+          snapshot = (fetch_wb_cards(api_key, max_cards=WB_MAX_CARDS_PER_SYNC, selected_nm_ids=selected)
+                      if selected else fetch_wb_cards(api_key, max_cards=100))
+          if selected:
+            snapshot = scope_wb_snapshot(snapshot, selected)
           existing_portal = find_portal_by_integration_external_key(
             WB_PROVIDER,
             wb_snapshot_external_key(snapshot),
@@ -23633,7 +23766,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
             api_key,
             snapshot,
             client_name,
+            selected_nm_ids=selected,
           )
+        except WbSelectionError as exc:
+          self.send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc), 'missingNmIds': exc.missing_nm_ids})
+          return
         except WbApiError as exc:
           status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
           if status < 400 or status >= 600:
@@ -23657,7 +23794,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
 
         self.send_json(
           HTTPStatus.CREATED,
-          {"portal": public_portal_payload(portal_id, name, marketplace, mode, scope, team, snapshot, client_name=client_name)},
+          {"portal": public_portal_from_row(get_portal_row(portal_id, user))},
         )
         return
 
@@ -25197,7 +25334,7 @@ def main():
         raise SystemExit(f"WB token is missing. Set {WB_ENV_TOKEN} in .env.local.")
       raise SystemExit("WB token is missing. Run set-wb-token for this portal.")
     try:
-      snapshot = fetch_wb_cards(token, max_cards=args.limit)
+      snapshot = fetch_wb_cards_for_portal(token, args.portal_id, max_cards=args.limit)
     except WbApiError as exc:
       raise SystemExit(f"WB API error {exc.status}: {exc.message}") from exc
     stats = snapshot["stats"]
