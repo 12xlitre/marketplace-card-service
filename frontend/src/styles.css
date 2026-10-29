@@ -8143,3 +8143,6 @@ tr:last-child td {
 .seo-generation-progress progress { display: block; width: 100%; height: 12px; accent-color: var(--brand, #8627bd); }
 .seo-query-progress { display: grid; gap: 6px; }
 .seo-query-progress progress { height: 7px; }
+.seo-active-cards { font-size: 13px; }
+.seo-active-cards ul { margin: 6px 0 0; padding-left: 18px; }
+.seo-active-cards li { overflow-wrap: anywhere; }

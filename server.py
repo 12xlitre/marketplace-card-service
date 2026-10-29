@@ -127,6 +127,20 @@ WB_CHARACTERISTICS_CACHE = {}
 WB_DIRECTORY_CACHE = {}
 AUDIT_MARKET_CACHE = {}
 GIGACHAT_TOKEN_CACHE = {"accessToken": "", "expiresAt": 0}
+GIGACHAT_TOKEN_LOCK = threading.Lock()
+def llm_request_capacity(provider, scope):
+  return 1 if provider == "gigachat" and scope not in {"GIGACHAT_API_B2B", "GIGACHAT_API_CORP"} else 4
+
+
+LLM_CONCURRENT_REQUESTS = llm_request_capacity(OPTICARDS_LLM_PROVIDER, GIGACHAT_SCOPE)
+LLM_REQUEST_SLOTS = threading.BoundedSemaphore(LLM_CONCURRENT_REQUESTS)
+MPSTATS_REQUEST_SLOTS = threading.BoundedSemaphore(2)
+
+
+def automatic_seo_parallelism():
+  return 4
+
+
 MPSTATS_USAGE_CONTEXT = contextvars.ContextVar("mpstats_usage", default=None)
 MPSTATS_CALL_CONTEXT = contextvars.ContextVar("mpstats_call_context", default={})
 CARD_COMPETITOR_AUTO_CHECK_LOCK = threading.Lock()
@@ -1131,6 +1145,8 @@ def admin_system_status(user):
       "model": model,
       "configured": configured,
       "status": "configured" if configured else "missing",
+      "maxConcurrentRequests": LLM_CONCURRENT_REQUESTS,
+      "connectionType": GIGACHAT_SCOPE if provider == "gigachat" else provider,
     },
     "storage": {
       "secretKeyConfigured": bool(os.environ.get(SECRET_KEY_ENV, "").strip()),
@@ -5224,7 +5240,70 @@ def bitrix_seo_notifier():
 
 
 def automatic_seo_completed(portal, batch, version):
+  intent_id = version.get('_resumeIntentId')
+  if intent_id:
+    with connect_db() as db:
+      row = db.execute('SELECT details_json FROM admin_events WHERE id=? AND action=?', (intent_id,'seo_resume_requested')).fetchone()
+      if row:
+        details = json.loads(row['details_json'] or '{}')
+        details.update(phase='finished',status=version['status'],finishedAt=utc_now().isoformat())
+        db.execute('UPDATE admin_events SET details_json=? WHERE id=?',(json.dumps(details),intent_id))
   bitrix_seo_notifier().enqueue(portal, batch, version)
+
+
+def recover_automatic_seo_handoffs():
+  """Only owner-authorized, scoped intents; restore run locks before accepting HTTP."""
+  with connect_db() as db:
+    rows = db.execute("SELECT * FROM admin_events WHERE action='seo_resume_requested' ORDER BY id").fetchall()
+  for row in rows:
+    details = {}
+    try:
+      details = json.loads(row["details_json"] or "{}")
+      if details.get("phase") in {"finished", "failed"}:
+        continue
+      with connect_db() as db:
+        user = db.execute("SELECT * FROM users WHERE login=? AND is_active=1", (row["actor_login"],)).fetchone()
+      if not user or not user_is_admin(user):
+        raise PermissionError("forbidden")
+      if int(details.get("attempts", 0)) >= 3:
+        raise ValueError("seo_resume_attempt_limit")
+      details.update(phase="resuming", attempts=int(details.get("attempts", 0))+1)
+      with connect_db() as db:
+        db.execute("UPDATE admin_events SET details_json=? WHERE id=?", (json.dumps(details),row["id"]))
+      portal, batch = int(row["portal_id"]), str(details["batchId"])
+      service = automatic_seo_service()
+      result = service.resume(portal,batch,dict(user),int(details["version"]),str(details["taskHash"]),row["id"])
+      details.update(phase="running", resumedAt=utc_now().isoformat(), preservedCount=result['versions'][-1].get('continuation',{}).get('preservedCount',0))
+    except Exception as exc:
+      details = details if 'details' in locals() and isinstance(details, dict) else {}
+      details.update(phase="failed", errorCode=str(exc) if isinstance(exc, (ValueError, PermissionError)) else "seo_resume_failed")
+    with connect_db() as db:
+      current = db.execute('SELECT details_json FROM admin_events WHERE id=?',(row['id'],)).fetchone()
+      if current and json.loads(current['details_json']).get('phase') == 'finished':
+        continue
+      db.execute("UPDATE admin_events SET details_json=? WHERE id=?", (json.dumps(details),row["id"]))
+
+
+def automatic_seo_handoff_report(portal, batch, user):
+  if not user_is_admin(user):
+    raise PermissionError("forbidden")
+  service = automatic_seo_service()
+  service.context(portal,batch,user,edit=True)
+  directory = service.directory(portal,batch)
+  paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
+  if not paths:
+    raise ValueError("seo_checkpoint_missing")
+  manifest = json.loads(paths[-1].read_text())
+  with service.lock(directory):
+    version = service.load(directory)['versions'][-1]
+  from automatic_seo import fingerprint
+  preserved = manifest['preservedResults']
+  unchanged = [sku for sku,digest in preserved.items() if sku in version['results'] and fingerprint(version['results'][sku])==digest]
+  return {"version":version['number'],"status":version['status'],"done":version['done'],"total":version['total'],
+          "completedCount":len(version['results']),"workers":version.get('workers',1),"maxConcurrentRequests":LLM_CONCURRENT_REQUESTS,
+          "preservedSkus":list(preserved),"unchangedCount":len(unchanged),"allPreserved":len(unchanged)==len(preserved),
+          "checkpointAt":manifest['savedAt'],"activeCards":version.get('activeCards',{}),
+          "errors":[{"sku":e['sku'],"code":e['code']} for e in version.get('errors',[])]}
 
 
 def list_ozon_tasks(portal_id, user):
@@ -11279,6 +11358,11 @@ def mpstats_error_message(response_body, fallback):
 
 
 def mpstats_get_json(token, path, attempts=3):
+  with MPSTATS_REQUEST_SLOTS:
+    return _mpstats_get_json(token, path, attempts)
+
+
+def _mpstats_get_json(token, path, attempts=3):
   token = str(token or "").strip()
   if not token:
     raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
@@ -11322,6 +11406,11 @@ def mpstats_get_json(token, path, attempts=3):
 
 
 def mpstats_post_json(token, path, params=None, attempts=3):
+  with MPSTATS_REQUEST_SLOTS:
+    return _mpstats_post_json(token, path, params, attempts)
+
+
+def _mpstats_post_json(token, path, params=None, attempts=3):
   token = str(token or "").strip()
   if not token:
     raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
@@ -17133,6 +17222,11 @@ def build_mpstats_storefront_snapshot_paged(
 
 
 def mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
+  with MPSTATS_REQUEST_SLOTS:
+    return _mpstats_post_body_json(token, path, body, params, attempts)
+
+
+def _mpstats_post_body_json(token, path, body=None, params=None, attempts=3):
   token = str(token or "").strip()
   if not token:
     raise MpstatsApiError(HTTPStatus.UNAUTHORIZED, "mpstats_token_missing", retryable=False)
@@ -19011,6 +19105,11 @@ def gigachat_urlopen(request, timeout):
 
 
 def gigachat_access_token():
+  with GIGACHAT_TOKEN_LOCK:
+    return _gigachat_access_token()
+
+
+def _gigachat_access_token():
   now = time.time()
   cached_token = GIGACHAT_TOKEN_CACHE.get("accessToken")
   if cached_token and now < float(GIGACHAT_TOKEN_CACHE.get("expiresAt") or 0) - 60:
@@ -19045,7 +19144,20 @@ def gigachat_access_token():
   return access_token
 
 
-def audit_llm_chat_completion(messages, response_schema=None, plain_text=False):
+def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):
+  for attempt in range(3):
+    try:
+      with LLM_REQUEST_SLOTS:
+        return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens)
+    except urlerror.HTTPError as exc:
+      delay = parse_retry_after(exc.headers.get("Retry-After")) if exc.headers else None
+      if exc.code not in {429, 500, 502, 503, 504} or attempt == 2 or (delay is not None and delay > 60):
+        raise
+      exc.close()
+      time.sleep(delay if delay is not None else 1 * 2 ** attempt)
+
+
+def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
@@ -19055,6 +19167,8 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False):
       "temperature": 0.2,
       "messages": messages,
     }
+    if max_output_tokens is not None:
+      body["max_tokens"] = max(512, min(8192, int(max_output_tokens)))
     if response_schema is not None and not plain_text:
       # Native function arguments work on the configured legacy v1 endpoint too.
       body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
@@ -19083,6 +19197,8 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False):
     "response_format": {"type": "json_object"},
     "messages": messages,
   }
+  if max_output_tokens is not None:
+    body["max_tokens"] = max(512, min(8192, int(max_output_tokens)))
   if plain_text:
     body.pop("response_format", None)
   request = urlrequest.Request(
@@ -22895,7 +23011,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
       return True
-    match = re.fullmatch(r"/api/portals/([0-9]+)/automatic-seo/([^/]+)(/file)?", path)
+    match = re.fullmatch(r"/api/portals/([0-9]+)/automatic-seo/([^/]+)(/file|/handoff)?", path)
     if not match:
       return False
     user = self.require_user()
@@ -22905,7 +23021,9 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     batch = unquote(batch)
     try:
       service = automatic_seo_service()
-      if method == "GET" and file_suffix:
+      if method == "GET" and file_suffix == "/handoff":
+        self.send_json(HTTPStatus.OK, automatic_seo_handoff_report(portal,batch,user))
+      elif method == "GET" and file_suffix:
         query = parse_qs(urlparse(self.path).query)
         version = int(query.get("version", ["0"])[0])
         data = service.download(portal, batch, user, version)
@@ -25305,6 +25423,7 @@ def start_competitor_auto_check_worker():
 
 def run_server(host, port):
   init_db()
+  recover_automatic_seo_handoffs()
   bitrix_seo_notifier().start()
   start_competitor_auto_check_worker()
   server = ThreadingHTTPServer((host, port), OpticardsHandler)

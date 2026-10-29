@@ -159,6 +159,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         {row.details?.missingQueries?.length ? <details><summary>Какие запросы пропущены · оценено {row.details.receivedQueries} из {row.details.expectedQueries}</summary><ul>{row.details.missingQueries.map((query, j) => <li key={j}>{query}</li>)}</ul></details> : null}
       </li>)}</ul> : null}
       {latest && !latest.sha256 ? <p role="status" className="status-note">{running ? "Excel появится здесь после завершения подготовки." : "Excel этой версии не создан: подготовка не завершена. Повторите проблемные товары кнопкой ниже — готовые результаты сохранятся."}</p> : null}
+      {latest?.resolvedErrors?.length ? <details><summary>Исправленные ошибки: {latest.resolvedErrors.length}</summary><ul>{latest.resolvedErrors.map((row, i) => <li key={`${row.sku}-${i}`}>{row.sku} · повторная обработка завершена успешно.</li>)}</ul></details> : null}
       {latest?.issues?.length ? <details><summary>Вопросы к проверке: {latest.issues.length}</summary><ul>{latest.issues.map((row, i) => <li key={i}><strong>{row.sku} · {row.field}{row.blocking ? " · блокирует принятие" : ""}</strong>: {row.detail} {row.question}</li>)}</ul></details> : null}
       {mayRemark ? <div className="automatic-seo-remark">
         <strong>{canReview && submitted ? "Замечание аккаунта" : "Замечание для доработки"}</strong>

@@ -240,7 +240,8 @@ class AutomaticSeoService:
         for version in state['versions']:
             versions.append({k: deepcopy(version[k]) for k in (
                 'number', 'status', 'createdAt', 'finishedAt', 'stage', 'done', 'total', 'errors',
-                'issues', 'sha256', 'remarks', 'decisions', 'submittedBy', 'reviewedBy', 'competitors', 'sourceCapturedAt', 'period') if k in version})
+                'issues', 'sha256', 'remarks', 'decisions', 'submittedBy', 'reviewedBy', 'competitors', 'sourceCapturedAt', 'period',
+                'workers', 'activeCards', 'completedCount', 'cardDurations', 'continuation', 'resolvedErrors', 'runBudgetSeconds') if k in version})
         return {'versions': versions, 'capabilities': context['capabilities'],
                 'method': METHOD, 'marketplace': context.get('marketplace', 'Ozon'), 'tasks': context['tasks']}
 
@@ -418,29 +419,128 @@ class AutomaticSeoService:
             state['versions'][-1] = deepcopy(version)
             self.save(directory, state)
 
-    def worker(self, portal, batch, user, context, version, previous, run_handle):
+    def resume(self, portal, batch, user, version_number, task_hash, intent_id=None):
+        """Continue the same durable version after an explicitly requested handoff."""
+        import shutil
+        context = self.context(portal, batch, user, edit=True)
+        if not context['capabilities']['prepare']:
+            raise PermissionError('forbidden')
+        directory = self.directory(portal, batch)
+        if not (directory / 'state.json').exists():
+            raise SeoError('seo_report_missing')
+        run_handle = (directory / 'run.lock').open('a')
+        try:
+            fcntl.flock(run_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            run_handle.close()
+            raise SeoError('seo_already_running', 409)
+        acquired = False
+        try:
+            with self.lock(directory):
+                state = self.load(directory)
+                version = state['versions'][-1]
+                expected = fingerprint([(t['id'], t['cardKey'], t['sku']) for t in context['tasks']])
+                if version['number'] != version_number or version.get('taskHash') != task_hash or expected != task_hash:
+                    raise SeoError('seo_task_scope_changed', 409)
+                if version.get('status') not in {'running', 'interrupted'} or version.get('sha256'):
+                    raise SeoError('seo_resume_not_running', 409)
+                if version.get('method') != METHOD or not isinstance(version.get('cards'), list):
+                    raise SeoError('seo_resume_sources_missing')
+                acquired = self.slots.acquire(blocking=False)
+                if not acquired:
+                    raise SeoError('seo_capacity_busy', 409)
+                checkpoints = directory / 'checkpoints'
+                checkpoints.mkdir(mode=0o700, exist_ok=True)
+                checkpoint = checkpoints / ('handoff-' + str(time.time_ns()))
+                checkpoint.mkdir(mode=0o700)
+                for name in ('state.json', 'metadata.json'):
+                    if (directory / name).exists():
+                        shutil.copyfile(directory / name, checkpoint / name)
+                        os.chmod(checkpoint / name, 0o600)
+                preserved = {sku: fingerprint(result) for sku, result in version.get('results', {}).items()}
+                manifest = {'version': version_number, 'taskHash': task_hash, 'sourceCapturedAt': version.get('sourceCapturedAt'),
+                            'savedAt': now(), 'done': version['done'], 'total': version['total'],
+                            'preservedResults': preserved, 'errorSkus': [e['sku'] for e in version.get('errors', [])],
+                            'cacheHash': fingerprint(version.get('cache', {}))}
+                (checkpoint / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False))
+                os.chmod(checkpoint / 'manifest.json', 0o600)
+                version['continuation'] = {'startedAt': now(), 'preservedCount': len(preserved),
+                    'retryCount': len(version.get('errors', [])), 'checkpoint': checkpoint.name}
+                version['_resumeIntentId'] = intent_id
+                version['status'], version['stage'] = 'running', 'Продолжаем обработку оставшихся карточек'
+                version.pop('finishedAt', None)
+                self.save(directory, state)
+                thread = threading.Thread(target=self.worker, args=(portal, batch, user, context, deepcopy(version), None, run_handle),
+                                          kwargs={'resuming': True}, daemon=True)
+                thread.start()
+                return self.public(state, context)
+        except BaseException:
+            if acquired:
+                self.slots.release()
+            run_handle.close()
+            raise
+
+    def worker(self, portal, batch, user, context, version, previous, run_handle, resuming=False):
+        from concurrent.futures import ThreadPoolExecutor
         directory = self.directory(portal, batch)
         trace_token = None
+        writer = threading.RLock()
         try:
-            trace_start = getattr(self.host, 'mpstats_call_context_start', None)
-            if trace_start:
-                trace_token = trace_start(user=user, source_area='Автоматическая оптимизация ' + context.get('marketplace', 'Ozon'), portal_id=portal)
-            cards = previous.get('cards') if previous and not version['refreshSources'] else None
+            cards = version.get('cards') if resuming else previous.get('cards') if previous and not version['refreshSources'] else None
             reused_cards = cards is not None
             if cards is None:
                 if version.get('reuseResponses'):
                     raise SeoError('seo_recheck_sources_missing')
                 cards = self.host.automatic_seo_own_cards(portal, context['tasks'], user)
             version['cards'] = cards
-            version['sourceCapturedAt'] = previous.get('sourceCapturedAt', previous['createdAt']) if reused_cards else now()
-            self.update(directory, version, portal, batch, user)
-            cache = previous.get('cache', {}) if previous and not version['refreshSources'] else {}
+            if not resuming:
+                version['sourceCapturedAt'] = previous.get('sourceCapturedAt', previous['createdAt']) if reused_cards else now()
+            cache = version.get('cache', {}) if resuming else deepcopy(previous.get('cache', {})) if previous and not version['refreshSources'] else {}
             cache['_readOnlyReplay'] = bool(version.get('reuseResponses'))
             version['cache'] = cache
-            deadline = time.monotonic() + max(300, len(cards) * 180)
-            for task in context['tasks']:
+            scope_skus = {task['sku'] for task in context['tasks']}
+            if set(version['results']) - scope_skus:
+                raise SeoError('seo_task_scope_changed')
+            processed = set(version.get('processedSkus', [])) if resuming else set()
+            if resuming and not processed:
+                processed.update(task['sku'] for task in context['tasks'][:int(version.get('done') or 0)])
+            processed.update(version['results'])
+            processed.update(e['sku'] for e in version.get('errors', []) if e['sku'] in scope_skus)
+            version['processedSkus'] = sorted(processed)
+            parallelism = getattr(self.host, 'automatic_seo_parallelism', None)
+            workers = max(1, min(4, int(parallelism() if parallelism else 1)))
+            version['workers'], version['activeCards'] = workers, {}
+            version['completedCount'] = len(version['results'])
+            version['done'] = len(processed)
+            version.setdefault('cardDurations', [])
+            # Large semantic sets take longer than three minutes per card. Requests stay bounded.
+            budget = max(3600, len(cards) * 900)
+            deadline = time.monotonic() + budget
+            version['runBudgetSeconds'] = budget
+            self.update(directory, version, portal, batch, user)
+
+            def merge_cache(local_cache, baseline_hashes):
+                for key, value in local_cache.items():
+                    if baseline_hashes.get(key) == fingerprint(value):
+                        continue
+                    if key.startswith('envelopes:') and isinstance(value, list):
+                        existing = cache.get(key, [])
+                        seen = {fingerprint(row) for row in existing}
+                        cache[key] = existing + [row for row in value if fingerprint(row) not in seen]
+                    else:
+                        cache[key] = deepcopy(value)
+
+            def process(task):
                 sku = task['sku']
+                token = None
+                started = time.monotonic()
+                with writer:
+                    local_cache = deepcopy(cache)
+                baseline_hashes = {key: fingerprint(value) for key, value in local_cache.items()}
                 try:
+                    trace_start = getattr(self.host, 'mpstats_call_context_start', None)
+                    if trace_start:
+                        token = trace_start(user=user, source_area='Автоматическая оптимизация ' + context.get('marketplace', 'Ozon'), portal_id=portal)
                     if time.monotonic() > deadline:
                         raise SeoError('seo_run_deadline')
                     if not self.context(portal, batch, user, edit=True)['capabilities']['prepare']:
@@ -448,6 +548,9 @@ class AutomaticSeoService:
                     card = next((c for c in cards if str(c.get('sku')) == sku), None)
                     if not card:
                         raise SeoError('seo_own_card_missing')
+                    with writer:
+                        version['activeCards'][sku] = {'stage': 'Получение источников', 'startedAt': now()}
+                        self.update(directory, version, portal, batch, user)
                     remarks = [r for r in version['remarks'] if r['sku'] in {'*', sku}]
                     old = previous.get('results', {}).get(sku) if previous and not version['refreshSources'] else None
                     same_competitor = previous and previous['competitors'][sku] == version['competitors'][sku]
@@ -455,23 +558,49 @@ class AutomaticSeoService:
                     if old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses') and (not remarks or same_retry):
                         result = deepcopy(old)
                     else:
-                        version['stage'] = f'Источники и текст: {sku}'
-                        self.update(directory, version, portal, batch, user)
-                        sources = self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], cache, user)
                         def progress(stage):
-                            if time.monotonic() > deadline:
+                            if time.monotonic() > deadline or time.monotonic() - started > 3600:
                                 raise SeoError('seo_run_deadline')
-                            version['stage'] = f'{stage}: {sku}'
-                            self.update(directory, version, portal, batch, user)
-                        result = self.generate(card, sources, remarks, old, cache, progress=progress, reuse_responses=bool(version.get('reuseResponses')))
+                            with writer:
+                                merge_cache(local_cache, baseline_hashes)
+                                version['stage'] = f'{stage}: {sku}'
+                                version['activeCards'][sku]['stage'] = stage
+                                self.update(directory, version, portal, batch, user)
+                        progress('Источники и текст')
+                        sources = self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], local_cache, user)
+                        result = self.generate(card, sources, remarks, old, local_cache, progress=progress, reuse_responses=bool(version.get('reuseResponses')))
                         self.verify_final_facts(result, card)
-                        self.verify_characteristic_proposals(portal, card, result, cache, user, reuse_responses=bool(version.get('reuseResponses')))
-                    version['results'][sku] = result
+                        self.verify_characteristic_proposals(portal, card, result, local_cache, user, reuse_responses=bool(version.get('reuseResponses')))
+                    with writer:
+                        version['results'][sku] = result
+                        repaired = [e for e in version['errors'] if e['sku'] == sku]
+                        if repaired:
+                            version.setdefault('resolvedErrors', []).extend(dict(e, resolvedAt=now()) for e in repaired)
+                            version['errors'] = [e for e in version['errors'] if e['sku'] != sku]
+                        version['cardDurations'].append(round(time.monotonic() - started, 3))
                 except Exception as exc:
-                    # Public errors are codes only: response bodies may contain tokens/customer data.
-                    version['errors'].append(self.failure(exc, portal, batch, version, sku))
-                version['done'] += 1
-                self.update(directory, version, portal, batch, user)
+                    with writer:
+                        version['errors'] = [e for e in version['errors'] if e['sku'] != sku]
+                        failure_version = {'number':version['number'], 'stage':version['activeCards'].get(sku,{}).get('stage',version.get('stage',''))}
+                        failure = self.failure(exc, portal, batch, failure_version, sku)
+                        version['errors'].append(failure)
+                finally:
+                    with writer:
+                        merge_cache(local_cache, baseline_hashes)
+                        processed.add(sku)
+                        version['processedSkus'] = sorted(processed)
+                        version['done'], version['completedCount'] = len(processed), len(version['results'])
+                        version['activeCards'].pop(sku, None)
+                        self.update(directory, version, portal, batch, user)
+                    if token is not None:
+                        self.host.mpstats_call_context_stop(token)
+
+            pending = [task for task in context['tasks'] if task['sku'] not in version['results']]
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='seo-card') as pool:
+                futures = [pool.submit(process, task) for task in pending]
+                for future in futures:
+                    future.result()
+            version['results'] = {task['sku']: version['results'][task['sku']] for task in context['tasks'] if task['sku'] in version['results']}
             version['issues'] = [dict(issue, sku=sku) for sku, result in version['results'].items() for issue in result.get('issues', [])]
             if version['errors']:
                 version['status'], version['stage'] = 'partial', 'Требуется повторить проблемные SKU'
@@ -504,17 +633,11 @@ class AutomaticSeoService:
                                 'event': 'automatic_seo_notification_enqueue_error',
                                 'type': type(exc).__name__, 'portalId': int(portal)}))
                 except (PermissionError, ValueError):
-                    # Cabinet/task removed or access revoked while the worker was busy.
-                    # Never recreate private artifacts after offboarding.
                     pass
             finally:
-                try:
-                    if trace_token is not None:
-                        self.host.mpstats_call_context_stop(trace_token)
-                finally:
-                    fcntl.flock(run_handle, fcntl.LOCK_UN)
-                    run_handle.close()
-                    self.slots.release()
+                fcntl.flock(run_handle, fcntl.LOCK_UN)
+                run_handle.close()
+                self.slots.release()
 
     def failure(self, exc, portal, batch, version, sku):
         code = str(exc) if isinstance(exc, SeoError) else ('seo_generation_failed' if sku == '*' else 'seo_card_failed')
@@ -530,11 +653,13 @@ class AutomaticSeoService:
         }, ensure_ascii=False))
         return record
 
-    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False):
+    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True):
         if journal is not None and journal_key and not reuse_response:
             journal.pop('envelopes:' + journal_key, None)
         retryable = {'seo_invalid_model_response', 'seo_llm_invalid_arguments',
                      'seo_llm_invalid_json', 'seo_llm_response_truncated'}
+        if not retry_truncated:
+            retryable.discard('seo_llm_response_truncated')
         for attempt in range(2):
             try:
                 prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
@@ -856,6 +981,64 @@ class AutomaticSeoService:
             plan['restoredDescriptionFacts'] = restored
         return text
 
+    def plan_in_parts(self, instruction, evidence, card, cache, progress=None):
+        """Retry a truncated plan in bounded pieces without omitting keyword IDs or facts."""
+        core = deepcopy(evidence)
+        core['keywordIds'], core['semantic'] = {}, []
+        core['planFields'] = [field for field in evidence.get('planFields', []) if field != 'keywords']
+        core['competitorProfile'] = {'structure': evidence['competitorProfile']['structure'], 'phrases': []}
+        result = self.chat(instruction + '\nСейчас только совместимость, заголовок и характеристики. Ключи будут разобраны отдельно; additionalKeywords: [].',
+                           core, journal=cache, journal_key='response:draft-core:' + str(card['sku']), retry_truncated=False)
+        result['keywords'], result['additionalKeywords'] = {}, []
+        keyword_items = list(evidence['keywordIds'].items()) if 'keywords' in evidence.get('planFields', []) else []
+
+        def choose(items):
+            labeled = dict(items)
+            data = {'ownEvidence': evidence['ownEvidence'], 'marketplace': evidence.get('marketplace'),
+                    'competitor': evidence['competitor'], 'competitorProfile': evidence['competitorProfile'],
+                    'keywordIds': labeled, 'semantic': evidence['semantic'], 'remarks': evidence['remarks']}
+            schema = schema_object({'keywords': schema_object({label: KEYWORD_DECISION_SCHEMA for label in labeled})})
+            key = 'response:keyword-plan:' + fingerprint(data)
+            try:
+                response = self.chat('Для каждого k-идентификатора выбери использовать/адаптировать/объединить/исключить, '
+                    'естественное outputPhrase и конкретную причину. Не пропускай ID. Только собственные подтверждённые факты. '
+                    'Сохраняй релевантные фразы конкурента; не добавляй чужие свойства. Сейчас только keywords для переданных ID.',
+                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False)
+            except SeoError as exc:
+                if str(exc) != 'seo_llm_response_truncated' or len(items) < 2:
+                    raise
+                middle = len(items) // 2
+                return {**choose(items[:middle]), **choose(items[middle:])}
+            rows = response.get('keywords')
+            if not isinstance(rows, dict) or set(rows) != set(labeled):
+                raise SeoError('seo_keyword_decisions_incomplete')
+            return rows
+
+        for offset in range(0, len(keyword_items), 12):
+            if progress:
+                progress(f'Решения по ключам {offset + 1}–{min(offset + 12, len(keyword_items))} из {len(keyword_items)}')
+            result['keywords'].update(choose(keyword_items[offset:offset + 12]))
+        # Additional meanings remain optional, but every relevant candidate is considered.
+        if 'keywords' in evidence.get('planFields', []):
+            for offset in range(0, len(evidence['semantic']), 24):
+                candidates = evidence['semantic'][offset:offset + 24]
+                data = {'ownEvidence': evidence['ownEvidence'], 'semanticCandidates': candidates,
+                        'competitorStructure': evidence['competitorProfile']['structure'],
+                        'selectedKeywords': list(result['keywords'].values()) + result['additionalKeywords']}
+                props = {'sourcePhrase': {'type': 'string', 'enum': [r['query'] for r in candidates]}, **KEYWORD_DECISION_SCHEMA['properties']}
+                schema = schema_object({'additionalKeywords': schema_rows(props)})
+                if progress:
+                    progress(f'Дополнительные смыслы {offset + 1}–{min(offset + 24, len(evidence["semantic"]))} из {len(evidence["semantic"])}')
+                response = self.chat('Выбери только дополнительные подтверждённые смыслы из semanticCandidates, '
+                    'которых ещё нет в selectedKeywords. Не перечисляй перестановки одинаковых слов. Без квот по числу ключей. '
+                    'Для каждого выбранного запроса дай точный sourcePhrase, outputPhrase, decision и reason. Если дополнений нет, additionalKeywords: [].',
+                    data, journal=cache, journal_key='response:additional-plan:' + fingerprint(data), response_schema=schema, retry_truncated=False)
+                extra = response.get('additionalKeywords')
+                if not isinstance(extra, list) or not all(isinstance(row, dict) and row.get('sourcePhrase') in {r['query'] for r in candidates} for row in extra):
+                    raise SeoError('seo_keyword_source_missing')
+                result['additionalKeywords'].extend(extra)
+        return result
+
     def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False):
         competitor = sources['competitor']
         legacy_profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
@@ -943,7 +1126,16 @@ blocking=true, если неподтверждённое свойство ост
                     'remarks': remarks, 'previous': previous_texts}
         if progress:
             progress('План заголовка, характеристик и ключей')
-        result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']), reuse_response=reuse_responses)
+        try:
+            if len(keyword_ids) > 18 and not reuse_responses:
+                raise SeoError('seo_llm_response_truncated')
+            result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']), reuse_response=reuse_responses, retry_truncated=False)
+        except SeoError as exc:
+            if str(exc) != 'seo_llm_response_truncated' or reuse_responses:
+                raise
+            if progress:
+                progress('Разделяем длинный план на проверяемые части')
+            result = self.plan_in_parts(instruction, evidence, card, cache, progress)
         if scoped:
             if 'title' not in targeted:
                 result['title'] = deepcopy(previous['title'])

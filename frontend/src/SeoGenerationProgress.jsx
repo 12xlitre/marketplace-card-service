@@ -18,10 +18,16 @@ export default function SeoGenerationProgress({ version }) {
         <strong>{progress.complete ? "Файл готов к проверке" : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
         <span>{percentage}%</span>
       </div>
+      {version.continuation ? <p className="status-note">Обработка продолжена с сохранённых результатов: {version.continuation.preservedCount} готовых карточек.</p> : null}
+      {Number.isFinite(version.completedCount) ? <span className="status-note">Успешно подготовлено: {version.completedCount} из {total}</span> : null}
       <progress aria-label="Прогресс обработки карточек" max="100" value={percentage} />
       {query ? <div className="seo-query-progress">
         <span>{query.label}: проверено {query.done} из {query.total}, сейчас {query.from}–{query.to}</span>
         <progress aria-label="Прогресс проверки запросов текущей карточки" max={query.total} value={query.done} />
+      </div> : null}
+      {running && Object.keys(version.activeCards || {}).length ? <div className="seo-active-cards">
+        <strong>В работе: {Object.keys(version.activeCards).length} {Object.keys(version.activeCards).length === 1 ? "карточка" : "карточки"}</strong>
+        <ul>{Object.entries(version.activeCards).map(([sku, current]) => <li key={sku}>{sku} · {current.stage}</li>)}</ul>
       </div> : null}
       <div className="seo-progress-time">
         {elapsedSeconds !== null ? <span>{running ? "Прошло" : "Затрачено"}: {formatSeoDuration(elapsedSeconds)}</span> : null}

@@ -70,10 +70,10 @@ class OzonSeoHost:
         self.credentials(portal)
 
     def automatic_seo_chat_completion(self, messages, schema):
-        return self.server.audit_llm_chat_completion(messages, response_schema=schema)
+        return self.server.audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192)
 
     def automatic_seo_chat_text(self, messages):
-        return self.server.audit_llm_chat_completion(messages, plain_text=True)
+        return self.server.audit_llm_chat_completion(messages, plain_text=True, max_output_tokens=4096)
 
     def automatic_seo_own_cards(self, portal, tasks, user):
         h = self.server

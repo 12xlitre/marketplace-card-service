@@ -62,6 +62,6 @@ Keep this section compact. Add only stable locations that help avoid future sear
 - Project docs/memory: `docs/`, `docs/memory/`
 - Current task and reviewed file: `WORK.md`; permanent SEO/file rules: `docs/memory/product_mass_workflow.md`
 - Automatic Ozon SEO: `automatic_seo.py` (jobs/versions), `automatic_seo_host.py` (sources/access), `automatic_seo_xlsx.py` (Excel), `frontend/src/AutomaticSeoTask.jsx` (review); contract/runtime patch: `docs/automatic-seo-workflow.md`. Manual WB runner: `server.py` (`reoptimize_and_save_card_task`).
-- SEO progress/ETA: `frontend/src/SeoGenerationProgress.jsx`, `frontend/src/seoProgress.js`; Bitrix completion: `automatic_seo_host.py` (`BitrixSeoNotifications`), admin routes in `server.py`.
+- SEO progress/ETA: `frontend/src/SeoGenerationProgress.jsx`, `frontend/src/seoProgress.js`; Bitrix completion: `automatic_seo_host.py` (`BitrixSeoNotifications`), admin routes in `server.py`; same-version checkpoint/resume: `automatic_seo.py.resume`, `server.py.recover_automatic_seo_handoffs`.
 - Generated/local runtime data: `var/`
 - Built/cache dependencies: `node_modules/`, `.react-build/`

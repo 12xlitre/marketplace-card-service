@@ -27,7 +27,8 @@ export function seoProgress(version, now = Date.now()) {
     const average = timings.length >= 2
       ? timings.slice(-8).reduce((sum, value) => sum + value, 0) / Math.min(timings.length, 8)
       : elapsedSeconds / done;
-    const estimate = average * (total - done);
+    const lanes = timings.length >= 2 ? Math.max(1, Math.min(4, count(version.workers) || 1)) : 1;
+    const estimate = average * (total - done) / lanes;
     remaining = [Math.max(60, estimate * 0.65), Math.max(120, estimate * 1.5)];
   }
   const match = String(version.stage || "").match(/^(Проверка запросов|Проверка неприменённых запросов) (\d+)[–—-](\d+) из (\d+)/);
