@@ -495,6 +495,14 @@ class AutomaticSeoService:
             try:
                 try:
                     self.update(directory, version, portal, batch, user)
+                    completed = getattr(self.host, 'automatic_seo_completed', None)
+                    if completed:
+                        try:
+                            completed(portal, batch, version)
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning(json.dumps({
+                                'event': 'automatic_seo_notification_enqueue_error',
+                                'type': type(exc).__name__, 'portalId': int(portal)}))
                 except (PermissionError, ValueError):
                     # Cabinet/task removed or access revoked while the worker was busy.
                     # Never recreate private artifacts after offboarding.

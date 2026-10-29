@@ -405,3 +405,219 @@ class MarketplaceSeoHost:
                     'automatic_seo_own_cards', 'automatic_seo_sources', 'automatic_seo_verify_characteristics'}:
             return lambda portal, *args, **kwargs: getattr(self.adapter(portal), name)(portal, *args, **kwargs)
         return getattr(self.ozon, name)
+
+
+BITRIX_NOTIFICATIONS_PROVIDER = 'bitrix-notifications'
+BITRIX_NOTIFICATIONS_HOST = 'weboptimize.bitrix24.ru'
+
+
+def clean_bitrix_notification_webhook(value):
+    from urllib.parse import urlparse
+    value = str(value or '').strip()
+    url = urlparse(value)
+    if (url.scheme != 'https' or url.hostname != BITRIX_NOTIFICATIONS_HOST
+            or url.port not in (None, 443) or url.username or url.password or url.query or url.fragment
+            or not re.fullmatch(r'/rest/[1-9]\d*/[A-Za-z0-9_-]+/?', url.path)):
+        raise SeoError('bitrix_notifications_invalid_webhook')
+    return value.rstrip('/') + '/'
+
+
+def bitrix_notification_request(webhook, method, payload=None):
+    """No arbitrary destinations, redirects, response bodies or credentials in errors."""
+    import socket
+    from http.client import HTTPException
+    from urllib.request import Request, build_opener, HTTPRedirectHandler
+    from urllib.error import HTTPError, URLError
+    if method not in {'scope', 'im.notify.system.add'}:
+        raise SeoError('bitrix_notifications_invalid_method')
+    webhook = clean_bitrix_notification_webhook(webhook)
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    request = Request(webhook + method + '.json', data=json.dumps(payload or {}).encode(),
+                      headers={'Content-Type': 'application/json'})
+    for attempt in range(3):
+        try:
+            with build_opener(NoRedirect).open(request, timeout=15) as response:
+                body = response.read(256 * 1024 + 1)
+            if len(body) > 256 * 1024:
+                raise SeoError('bitrix_notifications_invalid_response', 502)
+            value = json.loads(body)
+            if not isinstance(value, dict):
+                raise SeoError('bitrix_notifications_invalid_response', 502)
+            if value.get('error'):
+                code = value.get('error')
+                if code in {'QUERY_LIMIT_EXCEEDED', 'OPERATION_TIME_LIMIT'} and attempt < 2:
+                    time.sleep(1 * 2 ** attempt)
+                    continue
+                raise SeoError('bitrix_notifications_auth_error' if code in {
+                    'INVALID_CREDENTIALS', 'NO_AUTH_FOUND', 'ACCESS_DENIED', 'insufficient_scope'}
+                    else 'bitrix_notifications_api_error', 502)
+            if 'result' not in value or value['result'] is False:
+                raise SeoError('bitrix_notifications_invalid_response', 502)
+            return value['result']
+        except HTTPError as exc:
+            status = exc.code
+            retry_after = exc.headers.get('Retry-After', '') if exc.headers else ''
+            exc.close()
+            if status in {429, 500, 502, 503, 504} and attempt < 2:
+                delay = min(60, max(1, int(retry_after))) if str(retry_after).isdigit() else 1 * 2 ** attempt
+                time.sleep(delay)
+                continue
+            raise SeoError('bitrix_notifications_auth_error' if status in {401, 403}
+                           else 'bitrix_notifications_http_error', 502) from None
+        except (TimeoutError, socket.timeout, URLError, ConnectionError, HTTPException):
+            # A timeout after sending a notification has an unknown outcome. Do not send twice.
+            raise SeoError('bitrix_notifications_delivery_unknown' if method == 'im.notify.system.add'
+                           else 'bitrix_notifications_unavailable', 502) from None
+        except SeoError:
+            raise
+        except (ValueError, UnicodeDecodeError):
+            raise SeoError('bitrix_notifications_invalid_response', 502) from None
+
+
+def bitrix_seo_notification_payload(portal, batch, version, portal_name='', marketplace=''):
+    import hashlib
+    total, done = int(version.get('total') or 0), int(version.get('done') or 0)
+    errors = len(version.get('errors') or [])
+    status = version.get('status')
+    heading = 'Автоматическая оптимизация завершена. Файл готов к проверке.' if status == 'review' and version.get('sha256') else (
+        'Автоматическая оптимизация завершилась с ошибками. Проверьте проблемные карточки.' if status == 'partial'
+        else 'Автоматическая оптимизация не завершена. Откройте задачу для проверки.')
+    name = re.sub(r'[\[\]\r\n]', ' ', str(portal_name))[:120].strip()
+    message = f'{heading}\n{marketplace} · {name} · версия {int(version["number"])}. Обработано {done} из {total}'
+    if errors:
+        message += f', ошибок: {errors}'
+    url = f'https://opticards.weboptai.ru/?portal={int(portal)}&tab=tasks'
+    message += f'.\n[URL={url}]Открыть задачу в OptiCards[/URL]'
+    tag = f'OPTICARDS_SEO_{int(portal)}_{hashlib.sha256(str(batch).encode()).hexdigest()[:24]}_{int(version["number"])}_91'
+    return {'USER_ID': 91, 'MESSAGE': message, 'MESSAGE_OUT': re.sub(r'\[/?URL[^\]]*\]', '', message),
+            'CLIENT_ID': 'opticards', 'TAG': tag, 'SUB_TAG': f'OPTICARDS_SEO_{int(portal)}'}
+
+
+class BitrixSeoNotifications:
+    """One small durable outbox per version, independent of browser and generator slots."""
+    def __init__(self, server, service):
+        self.server, self.service = server, service
+        self.started = False
+
+    def configured(self):
+        config = self.server.get_service_integration(BITRIX_NOTIFICATIONS_PROVIDER)
+        return config.get('connected') and config.get('status') == 'verified'
+
+    def public_config(self):
+        config = self.server.get_service_integration(BITRIX_NOTIFICATIONS_PROVIDER)
+        counts = {}
+        for path in self.service.root.glob('*/*/bitrix-notification-v*.json'):
+            try:
+                state = json.loads(path.read_text()).get('status', 'error')
+                counts[state] = counts.get(state, 0) + 1
+            except (ValueError, OSError):
+                counts['error'] = counts.get('error', 0) + 1
+        return {**config, 'provider': BITRIX_NOTIFICATIONS_PROVIDER, 'enabled': bool(self.configured()),
+                'portal': BITRIX_NOTIFICATIONS_HOST, 'recipientLogin': 'anastasia.tech', 'recipientId': 91,
+                'recipientName': 'Настя', 'deliveries': counts}
+
+    def disconnect(self):
+        with self.server.connect_db() as db:
+            db.execute('DELETE FROM service_integrations WHERE provider=?', (BITRIX_NOTIFICATIONS_PROVIDER,))
+        for path in self.service.root.glob('*/*/bitrix-notification-v*.json'):
+            with self.service.lock(path.parent, path.name + '.lock'):
+                job = json.loads(path.read_text())
+                if job.get('status') == 'pending':
+                    self.write(path, {**job, 'status': 'cancelled'})
+        return self.public_config()
+
+    def configure(self, webhook, user):
+        webhook = clean_bitrix_notification_webhook(webhook)
+        scopes = bitrix_notification_request(webhook, 'scope')
+        if not isinstance(scopes, list) or 'im' not in scopes:
+            raise SeoError('bitrix_notifications_im_scope_required')
+        self.server.save_service_integration(BITRIX_NOTIFICATIONS_PROVIDER, webhook, user)
+        self.server.update_service_integration_check(BITRIX_NOTIFICATIONS_PROVIDER, 'verified')
+        return self.public_config()
+
+    def assigned(self, portal):
+        if self.server.portal_team_roles(portal).get('tech') != 'anastasia.tech':
+            return False
+        with self.server.connect_db() as db:
+            return bool(db.execute("SELECT 1 FROM users WHERE login='anastasia.tech' AND is_active=1").fetchone())
+
+    def enqueue(self, portal, batch, version):
+        if version.get('status') not in {'review', 'partial', 'failed', 'interrupted'} or not self.configured() or not self.assigned(portal):
+            return
+        row = self.server.get_portal_row(portal)
+        if row is None:
+            return
+        directory = self.service.directory(portal, batch)
+        path = directory / f'bitrix-notification-v{int(version["number"])}.json'
+        with self.service.lock(directory, path.name + '.lock'):
+            if path.exists():
+                return
+            self.write(path, {'status': 'pending', 'portalId': int(portal), 'batchId': batch,
+                              'version': int(version['number']), 'recipientLogin': 'anastasia.tech',
+                              'attempts': 0, 'payload': bitrix_seo_notification_payload(portal, batch, version, row['name'], row['marketplace'])})
+
+    @staticmethod
+    def write(path, value):
+        import os
+        temp = path.with_suffix('.tmp')
+        with temp.open('w') as handle:
+            os.chmod(temp, 0o600)
+            json.dump(value, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.replace(path)
+
+    def process(self):
+        if not self.configured():
+            return
+        for path in self.service.root.glob('*/*/bitrix-notification-v*.json'):
+            if not path.resolve().is_relative_to(self.service.root.resolve()):
+                continue
+            try:
+                with self.service.lock(path.parent, path.name + '.lock', blocking=False):
+                    if not path.exists():
+                        continue
+                    job = json.loads(path.read_text())
+                    if job.get('status') != 'pending':
+                        continue
+                    if not self.configured():
+                        return
+                    if not self.assigned(job['portalId']):
+                        job['status'] = 'cancelled'
+                        self.write(path, job)
+                        continue
+                    # Claim before network: a crash with an unknown delivery must not duplicate a ping.
+                    job['status'], job['attempts'] = 'sending', job.get('attempts', 0) + 1
+                    self.write(path, job)
+                    try:
+                        webhook = self.server.get_service_integration_secret(BITRIX_NOTIFICATIONS_PROVIDER)
+                        result = bitrix_notification_request(webhook, 'im.notify.system.add', job['payload'])
+                        job['status'], job['notificationId'] = 'sent', result
+                    except SeoError as exc:
+                        job['status'] = 'uncertain' if str(exc) == 'bitrix_notifications_delivery_unknown' else 'error'
+                        job['errorCode'] = str(exc)
+                    except RuntimeError:
+                        job['status'], job['errorCode'] = 'error', 'secret_storage_unavailable'
+                    self.write(path, job)
+            except (BlockingIOError, FileNotFoundError):
+                continue
+
+    def start(self):
+        import logging
+        import threading
+        if self.started:
+            return
+        self.started = True
+
+        def run():
+            while True:
+                try:
+                    self.process()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(json.dumps({'event': 'bitrix_notification_worker_error', 'type': type(exc).__name__}))
+                time.sleep(30)
+        threading.Thread(target=run, daemon=True, name='bitrix-seo-notifications').start()

@@ -5199,6 +5199,7 @@ def build_ozon_card_audit(portal_id, payload, user):
 
 _AUTOMATIC_SEO_SERVICES = {}
 _AUTOMATIC_SEO_SERVICE_LOCK = threading.Lock()
+_BITRIX_SEO_NOTIFIERS = {}
 
 
 def automatic_seo_service():
@@ -5210,6 +5211,20 @@ def automatic_seo_service():
     if key not in _AUTOMATIC_SEO_SERVICES:
       _AUTOMATIC_SEO_SERVICES[key] = AutomaticSeoService(MarketplaceSeoHost(sys.modules[__name__]), root)
     return _AUTOMATIC_SEO_SERVICES[key]
+
+
+def bitrix_seo_notifier():
+  from automatic_seo_host import BitrixSeoNotifications
+  service = automatic_seo_service()
+  key = str(service.root.resolve())
+  with _AUTOMATIC_SEO_SERVICE_LOCK:
+    if key not in _BITRIX_SEO_NOTIFIERS:
+      _BITRIX_SEO_NOTIFIERS[key] = BitrixSeoNotifications(sys.modules[__name__], service)
+    return _BITRIX_SEO_NOTIFIERS[key]
+
+
+def automatic_seo_completed(portal, batch, version):
+  bitrix_seo_notifier().enqueue(portal, batch, version)
 
 
 def list_ozon_tasks(portal_id, user):
@@ -10913,7 +10928,7 @@ def update_service_integration_check(provider, status):
 
 
 def save_service_integration(provider, token, user):
-  if provider != MPSTATS_PROVIDER:
+  if provider not in {MPSTATS_PROVIDER, 'bitrix-notifications'}:
     raise ValueError("unsupported_provider")
   token = str(token or "").strip()
   if len(token) < 8:
@@ -23045,6 +23060,16 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
       return
 
+    if path == "/api/integrations/bitrix-notifications":
+      user = self.require_user()
+      if not user:
+        return
+      if not user_is_admin(user):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      self.send_json(HTTPStatus.OK, {"integration": bitrix_seo_notifier().public_config()})
+      return
+
     if path == "/api/integrations/mpstats":
       if not self.require_user():
         return
@@ -23952,6 +23977,29 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_user"})
         return
       self.send_json(HTTPStatus.CREATED, {"user": created_user, "password": password})
+      return
+
+    if path == "/api/integrations/bitrix-notifications":
+      user = self.require_user()
+      if not user:
+        return
+      if not user_is_admin(user):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
+      payload = self.read_json() or {}
+      try:
+        if payload.get("action") == "disconnect":
+          result = bitrix_seo_notifier().disconnect()
+        else:
+          result = bitrix_seo_notifier().configure(payload.get("webhook"), user)
+      except ValueError as exc:
+        code = str(exc)
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": code if code.startswith("bitrix_notifications_") else "bitrix_notifications_invalid_webhook"})
+        return
+      except RuntimeError:
+        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
+        return
+      self.send_json(HTTPStatus.OK, {"integration": result})
       return
 
     if path == "/api/integrations/mpstats":
@@ -25257,6 +25305,7 @@ def start_competitor_auto_check_worker():
 
 def run_server(host, port):
   init_db()
+  bitrix_seo_notifier().start()
   start_competitor_auto_check_worker()
   server = ThreadingHTTPServer((host, port), OpticardsHandler)
   print(f"Serving OptiCards on http://{host}:{port}/")

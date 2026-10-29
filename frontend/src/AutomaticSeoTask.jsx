@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import SeoGenerationProgress from "./SeoGenerationProgress";
 
 const messages = {
   forbidden: "Для этого действия нужны права назначенного специалиста или аккаунта.",
@@ -87,7 +88,10 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         })));
         if (current?.status === "running") timer = setTimeout(load, 3000);
       } catch (e) {
-        if (active) setError(errorText(e));
+        if (active) {
+          setError(errorText(e));
+          if (e.message !== "unauthorized" && e.message !== "forbidden") timer = setTimeout(load, 10000);
+        }
       }
     }
     load();
@@ -135,6 +139,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
     <section className="automatic-seo-task" aria-label="Автоматическая оптимизация">
       <div className="task-batch-main"><strong>Автоматическая оптимизация</strong><span>{statusNames[latest?.status] || "Подготовка ещё не запускалась"}</span></div>
       {latest ? <p role="status">Версия {latest.number} · {latest.stage} · обработано {latest.done} из {latest.total}</p> : <p>Подготовка заголовков, характеристик и описаний с Excel для проверки.</p>}
+      {latest ? <SeoGenerationProgress version={latest} /> : null}
       {latest?.sourceCapturedAt ? <p className="status-note">Свои данные получены {new Date(latest.sourceCapturedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}. Период MPStats: {latest.period?.d1} — {latest.period?.d2}.</p> : null}
       <details open={!latest || ["partial", "failed", "interrupted"].includes(latest.status)}>
         <summary>Товары конкурентов</summary>

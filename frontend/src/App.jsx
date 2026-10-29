@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import AutomaticSeoTask from "./AutomaticSeoTask";
+import BitrixNotificationsSettings from "./BitrixNotificationsSettings";
 import CabinetFilesDialog from "./CabinetFilesDialog";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import {
@@ -255,6 +256,14 @@ function safeSheetName(value, fallback = "Лист", usedNames = new Set()) {
 
 function readSavedAppView() {
   try {
+    const params = new URLSearchParams(window.location.search);
+    const portalId = params.get("portal");
+    if (portalId && /^[1-9]\d*$/.test(portalId)) {
+      const tab = params.get("tab");
+      params.delete("portal"); params.delete("tab");
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
+      return { screen: "seller", portalId, sellerTab: sellerTabs.has(tab) ? tab : "tasks" };
+    }
     const saved = JSON.parse(localStorage.getItem(appViewStorageKey) || "null");
     if (!saved || typeof saved !== "object") {
       return {};
@@ -7567,6 +7576,7 @@ export default function App() {
             portals={allPortals}
             canManage={canManagePortals}
             canManageUsers={canManageUsers}
+            canConfigureBitrix={getUserRoleType(currentUser) === "admin"}
             mpstatsIntegration={mpstatsIntegration}
             onMpstatsIntegrationChange={setMpstatsIntegration}
             onCreateUser={createUserAccount}
@@ -23155,7 +23165,7 @@ function AdminUserRow({ user, canManageUsers, saving, resetting, onSave, onReset
   );
 }
 
-function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
+function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, canConfigureBitrix = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
   const [adminTab, setAdminTab] = useState("users");
   const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
   const [adminEvents, setAdminEvents] = useState([]);
@@ -23768,6 +23778,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
           ) : null}
           {adminTab === "integrations" ? (
           <section className="admin-integrations">
+            {canConfigureBitrix ? <BitrixNotificationsSettings apiRequest={apiRequest} /> : null}
             <div className="panel integration-overview-panel">
               <div className="panel-title-row">
                 <div>
