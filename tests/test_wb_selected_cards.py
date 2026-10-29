@@ -91,3 +91,38 @@ class WbSelectionTest(unittest.TestCase):
             snapshot = server.fetch_wb_cards('test-only', selected_nm_ids=['456', '123'])
         self.assertEqual([c['nmID'] for c in snapshot['cards']], [456, 123])
         self.assertEqual(prices.call_args.args[1], [456, 123])
+
+    def test_compact_task_summary_keeps_mixed_section_and_semantic_completion_rules(self):
+        metas = [
+            {'batch': {'workTypes': ['semantic', 'content']}, 'approval': {'status': 'draft'}},
+            {'batch': {'workTypes': ['semantic']}, 'semanticCoreFinal': {'semanticCore': {'selected': []}}},
+            {'batch': {'workTypes': ['semantic']}, 'semanticCoreFinal': {'semanticCore': {}}},
+            {'batch': {'workTypes': ['semantic']}, 'semanticCoreFinal': {'semanticCore': ['wrong type']}},
+            {'batch': {'workTypes': ['content', 'prices']}, 'approval': {'status': 'submitted'},
+             'approvalSections': {'content': {'status': 'changes_requested'}, 'prices': {'status': 'draft'}}},
+            {'batch': {'workTypes': ['content']}, 'approval': {'status': 'approved'}},
+            {'batch': {'workTypes': ['content']}, 'manualTaskCompletions': {'content': {'completedAt': '2026-10-29'}}},
+            {'batch': {'workTypes': ['semantic', 'stocks']}, 'manualTaskCompletions': {'semantic': {'completedAt': '2026-10-29'}}},
+            {'batch': {'workTypes': ['content']}, 'approval': {'status': 'draft'},
+             'approvalSections': {'content': {}}},
+            {'batch': {'workTypes': []}},
+        ]
+        expected = server.empty_portal_work_task_summary()
+        with server.connect_db() as db:
+            for i, meta in enumerate(metas):
+                db.execute('INSERT INTO card_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',
+                           (self.foreign, str(i), json.dumps({'meta': meta, 'unusedHistory': 'x' * 100000})))
+                work = server.active_task_work_types(meta)
+                status = server.task_status_for_work_types(meta, work)
+                if not work or status not in {'draft', 'submitted', 'changes_requested', 'approved'}:
+                    continue
+                expected['taskTotalCount'] += 1
+                expected[{'draft': 'taskDraftCount', 'submitted': 'taskPendingCount',
+                          'changes_requested': 'taskReturnedCount', 'approved': 'taskApprovedCount'}[status]] += 1
+                if status in {'draft', 'submitted', 'changes_requested'}:
+                    expected['taskActiveCount'] += 1
+            db.execute('INSERT INTO card_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',
+                       (self.foreign, 'invalid', 'invalid json'))
+        actual = server.portal_work_task_summary(self.foreign)
+        expected['lastTaskAt'] = actual['lastTaskAt']
+        self.assertEqual(actual, expected)

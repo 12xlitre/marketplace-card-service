@@ -41,3 +41,5 @@
 - `portal_integrations.external_key` хранит не секретный fingerprint внешнего кабинета/набора карточек для защиты от повторного добавления;
 - счетчики `card_count`, `work_count`, `problem_count` и `last_sync_at` обновляются после read-only загрузки WB;
 - карточки пока не являются отдельной постоянной таблицей; открытие кабинета читает сохранённый snapshot. Только явное обновление WB использует `/api/wb/cards`; выбранный состав сохраняется при обновлении и замене ключа.
+
+29.10.2026: расчёт task summary читает из card_drafts только batch.workTypes, approval/approvalSections, manualTaskCompletions и признак непустого object semanticCoreFinal.semanticCore. Полный payload с СЯ/аудитами может занимать мегабайты и не нужен при входе в приложение. При изменении active_task_work_types/task_work_type_status обновлять SQL-проекцию и проверять равенство статусов/счётчиков.

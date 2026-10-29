@@ -1852,7 +1852,14 @@ def portal_work_task_summaries(portal_ids):
   with connect_db() as db:
     rows = db.execute(
       f"""
-      SELECT portal_id, payload_json, updated_at
+      SELECT portal_id, updated_at,
+        CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,
+          '$.meta.batch.workTypes', '$.meta.approval', '$.meta.approvalSections',
+          '$.meta.manualTaskCompletions') END AS task_fields_json,
+        CASE WHEN json_valid(payload_json)
+          AND json_type(payload_json, '$.meta.semanticCoreFinal.semanticCore') = 'object'
+          AND json_extract(payload_json, '$.meta.semanticCoreFinal.semanticCore') != '{{}}'
+          THEN 1 ELSE 0 END AS has_semantic_final
       FROM card_drafts
       WHERE portal_id IN ({placeholders})
       """,
@@ -1863,10 +1870,15 @@ def portal_work_task_summaries(portal_ids):
     portal_id = int(row["portal_id"])
     summary = summaries.setdefault(portal_id, empty_portal_work_task_summary())
     try:
-      payload = json.loads(row["payload_json"])
+      fields = json.loads(row["task_fields_json"])
     except (TypeError, json.JSONDecodeError):
       continue
-    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    # Summaries need task state only, not megabytes of semantic/audit history per card.
+    # Keep this projection in sync with active_task_work_types/task_work_type_status.
+    meta = {"batch": {"workTypes": fields[0]}, "approval": fields[1],
+            "approvalSections": fields[2], "manualTaskCompletions": fields[3]}
+    if row["has_semantic_final"]:
+      meta["semanticCoreFinal"] = {"semanticCore": {"present": True}}
     work_types = active_task_work_types(meta)
     if not work_types:
       continue
