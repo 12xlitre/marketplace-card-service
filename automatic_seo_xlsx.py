@@ -10,7 +10,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from automatic_seo import characteristic_rows, occurrence, plain, SeoError
+from automatic_seo import characteristic_rows, normalized, occurrence, plain, SeoError
 
 GREEN, YELLOW, RED, BLUE = 'E2F0D9', 'FFF2CC', 'FCE4D6', '17365D'
 
@@ -137,7 +137,7 @@ def build_workbook(path, version, previous=None):
         char_count, first_char = 0, None
         for row in all_rows:
             aid = row['id']
-            if aid in {'4180', '4191'}:
+            if card.get('marketplace') != 'Wildberries' and aid in {'4180', '4191'}:
                 continue
             proposal = proposals.get(aid)
             old = '; '.join(row['values'])
@@ -145,7 +145,7 @@ def build_workbook(path, version, previous=None):
             action = 'оставить' if old == new else ('дополнить' if not old or set(row['values']) < set(proposal['values']) else 'изменить')
             cr = append(chars, [sku, article, aid, row['name'], old, new, action,
                                 (proposal.get('reason', '') + ('\nУдаления: ' + '; '.join(f"{r['value']}: {r['reason']}" for r in proposal['removedValues']) if proposal.get('removedValues') else '')) if proposal else 'Корректное исходное значение сохранено.',
-                                json_proofs(proposal.get('evidence', [])) if proposal else 'Свой Ozon Seller API'])
+                                json_proofs(proposal.get('evidence', [])) if proposal else result['sources'].get('ownSource', 'Свой Ozon Seller API')])
             changed(chars.cell(cr, 6), old, new)
             chars.row_dimensions[cr].height = min(200, max(45, ((max(len(old), len(new)) + 49) // 50) * 15))
             if action == 'оставить':
@@ -159,12 +159,22 @@ def build_workbook(path, version, previous=None):
                        '\n'.join(f"{r['sourcePhrase']} → {r.get('outputPhrase', '')}: {r['decision']}; {r['reason']}" for r in result['keywords'])])
         decisions = {r['query']: r for r in result['semanticDecisions']}
         keyword_map = {r['sourcePhrase']: r for r in result['keywords']}
+        competitor_phrases = {normalized(r['phrase']): r for r in result['competitorProfile'].get('phrases', [])}
         queries = {r['query']: r for r in source['semantic']}
         for phrase in keyword_map:
-            queries.setdefault(phrase, {'query': phrase, 'source': 'Описание конкурента'})
+            queries.setdefault(phrase, {'query': phrase, 'source': ''})
         for query, q in queries.items():
             decision, keyword = decisions.get(query, {}), keyword_map.get(query, {})
-            append(sem, [sku, query, q.get('count'), q.get('position'), q.get('dynamics'), decision.get('relevance', 'По решению из текста конкурента'), decision.get('destination', 'описание' if keyword.get('decision') != 'исключить' else 'не добавлять'), decision.get('reason', keyword.get('reason', '')), q.get('source', '') + (f"; count SKU {q['countSourceSku']}" if q.get('countSourceSku') else ''), keyword.get('decision', ''), keyword.get('sourcePhrase', ''), keyword.get('outputPhrase', ''), decision.get('witness', '')])
+            origin = competitor_phrases.get(normalized(query))
+            origin_text = ''
+            if origin:
+                origin_text = ('Заголовок' if origin.get('source') == 'title' else 'Описание') + ' конкурента: ' + str(origin.get('quote') or origin['phrase'])
+                if origin.get('match') == 'without_parenthetical_synonym':
+                    origin_text += ' (сопоставление без вставки в скобках)'
+            elif not q.get('source'):
+                origin_text = 'Текст конкурента'
+            source_text = '; '.join(part for part in [q.get('source', ''), f"count SKU {q['countSourceSku']}" if q.get('countSourceSku') else '', origin_text] if part)
+            append(sem, [sku, query, q.get('count'), q.get('position'), q.get('dynamics'), decision.get('relevance', 'По решению из текста конкурента'), decision.get('destination', 'описание' if keyword.get('decision') != 'исключить' else 'не добавлять'), decision.get('reason', keyword.get('reason', '')), source_text, keyword.get('decision', ''), keyword.get('sourcePhrase', ''), keyword.get('outputPhrase', ''), decision.get('witness', '')])
         first_issue = None
         for issue in result['issues']:
             ir = append(issues, [sku, issue.get('field', ''), issue.get('detail', ''), issue.get('question', ''), 'Да' if issue.get('blocking') else 'Нет'])
@@ -206,6 +216,8 @@ def build_workbook(path, version, previous=None):
                     rr = append(changes, [sku, 'characteristics', aid, left, right, reason])
                     changed(changes.cell(rr, 5), left, right)
     for ws in wb:
+        if version['cards'] and all(card.get('marketplace') == 'Wildberries' for card in version['cards']):
+            ws.cell(4, 1).value = 'nmID'
         ws.auto_filter.ref = f'A4:{get_column_letter(ws.max_column)}{max(4, ws.max_row)}'
         jump(ws.cell(3, ws.max_column), 'Итог', 4, '← Итог')
     chars.auto_filter.add_filter_column(6, ['дополнить', 'изменить'])

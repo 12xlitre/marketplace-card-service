@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 
-METHOD = 'competitor-structure-v1'
+METHOD = 'competitor-title-description-v2'
 SECTIONS = {'title', 'description', 'characteristics', 'semantic', 'competitor'}
 
 
@@ -48,6 +48,8 @@ DRAFT_SCHEMA = schema_object({
     'issues': schema_rows({'field': TEXT, 'detail': TEXT, 'question': TEXT, 'blocking': {'type': 'boolean'}}),
 })
 PLAN_SCHEMA = deepcopy(DRAFT_SCHEMA)
+PLAN_SCHEMA['properties']['additionalKeywords'] = schema_rows({'sourcePhrase': TEXT, **KEYWORD_DECISION_SCHEMA['properties']})
+PLAN_SCHEMA['required'].append('additionalKeywords')
 for _field in ('description', 'draftDescription'):
     PLAN_SCHEMA['properties'].pop(_field)
     PLAN_SCHEMA['required'].remove(_field)
@@ -78,9 +80,9 @@ def output_text(value):
 def model_evidence(card):
     facts = own_evidence(card)
     for row in characteristic_rows(card):
-        if row['id'] in {'4180', '4191'}:
+        if card.get('marketplace') != 'Wildberries' and row['id'] in {'4180', '4191'}:
             facts.pop('attribute:' + row['id'], None)
-        elif row['id'] == '11254' or 'rich' in str(row['name'] or '').casefold():
+        elif (card.get('marketplace') != 'Wildberries' and row['id'] == '11254') or 'rich' in str(row['name'] or '').casefold():
             fragments = []
             def walk(node):
                 if isinstance(node, dict):
@@ -107,7 +109,10 @@ def model_evidence(card):
 def factual_evidence(card):
     # Search metadata must not be used as proof of age/material/color or fed
     # back into a text writer as a list it is expected to reproduce.
-    return {key: value for key, value in model_evidence(card).items() if key != 'attribute:23171'}
+    search_ids = {r['id'] for r in characteristic_rows(card) if 'хештег' in normalized(r['name']) or 'hashtag' in normalized(r['name'])}
+    if card.get('marketplace') != 'Wildberries':
+        search_ids.add('23171')
+    return {key: value for key, value in model_evidence(card).items() if key not in {'attribute:' + aid for aid in search_ids}}
 
 
 def fingerprint(value):
@@ -129,7 +134,7 @@ def characteristic_rows(card):
         values = row.get('values', row.get('value', []))
         if not isinstance(values, list):
             values = [values]
-        output.append({'id': str(row.get('id', '')), 'name': row.get('name', ''),
+        output.append({'id': str(row.get('id') or row.get('charcID') or row.get('charcId') or ''), 'name': row.get('name', ''),
                        'values': [str(v.get('value', '') if isinstance(v, dict) else v) for v in values],
                        'complexId': row.get('complexId', 0)})
     return output
@@ -155,10 +160,22 @@ def source_phrase(phrase, text):
     return match.group() if match else ''
 
 
-def competitor_sku(value):
+def competitor_sku(value, marketplace='Ozon'):
     value = str(value or '').strip()
     if re.fullmatch(r'[1-9]\d{2,19}', value):
         return value
+    if marketplace == 'Wildberries':
+        if value.startswith(('wildberries.ru/', 'www.wildberries.ru/')):
+            value = 'https://' + value
+        try:
+            parsed = urlparse(value)
+            allowed = parsed.scheme in {'http', 'https'} and parsed.hostname in {'wildberries.ru', 'www.wildberries.ru'} and not parsed.username and not parsed.password
+        except ValueError:
+            allowed = False
+        match = re.fullmatch(r'/catalog/([1-9]\d{2,19})/detail\.aspx/?', parsed.path) if allowed else None
+        if not match:
+            raise SeoError('seo_competitor_confirmation_required')
+        return match[1]
     if value.startswith(('ozon.ru/', 'www.ozon.ru/', 'm.ozon.ru/')):
         value = 'https://' + value
     try:
@@ -225,7 +242,7 @@ class AutomaticSeoService:
                 'number', 'status', 'createdAt', 'finishedAt', 'stage', 'done', 'total', 'errors',
                 'issues', 'sha256', 'remarks', 'decisions', 'submittedBy', 'reviewedBy', 'competitors', 'sourceCapturedAt', 'period') if k in version})
         return {'versions': versions, 'capabilities': context['capabilities'],
-                'method': METHOD, 'tasks': context['tasks']}
+                'method': METHOD, 'marketplace': context.get('marketplace', 'Ozon'), 'tasks': context['tasks']}
 
     def view(self, portal, batch, user):
         context = self.context(portal, batch, user)
@@ -385,7 +402,7 @@ class AutomaticSeoService:
                 row = {'sku': row}
             if not isinstance(row, dict):
                 raise SeoError('seo_invalid_competitors')
-            cid = competitor_sku(row.get('sku') or row.get('url'))
+            cid = competitor_sku(row.get('sku') or row.get('url'), context.get('marketplace', 'Ozon'))
             reason = str(row.get('reason') or '').strip()
             if cid in skus or len(reason) > 2000:
                 raise SeoError('seo_competitor_confirmation_required')
@@ -407,7 +424,7 @@ class AutomaticSeoService:
         try:
             trace_start = getattr(self.host, 'mpstats_call_context_start', None)
             if trace_start:
-                trace_token = trace_start(user=user, source_area='Автоматическая оптимизация Ozon', portal_id=portal)
+                trace_token = trace_start(user=user, source_area='Автоматическая оптимизация ' + context.get('marketplace', 'Ozon'), portal_id=portal)
             cards = previous.get('cards') if previous and not version['refreshSources'] else None
             reused_cards = cards is not None
             if cards is None:
@@ -435,7 +452,7 @@ class AutomaticSeoService:
                     old = previous.get('results', {}).get(sku) if previous and not version['refreshSources'] else None
                     same_competitor = previous and previous['competitors'][sku] == version['competitors'][sku]
                     same_retry = previous and previous['status'] in {'partial', 'failed', 'interrupted'} and sku in previous.get('_completedSkus', []) and [r for r in previous.get('remarks', []) if r['sku'] in {'*', sku}] == remarks
-                    if old and same_competitor and not version.get('reuseResponses') and (not remarks or same_retry):
+                    if old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses') and (not remarks or same_retry):
                         result = deepcopy(old)
                     else:
                         version['stage'] = f'Источники и текст: {sku}'
@@ -448,7 +465,7 @@ class AutomaticSeoService:
                             self.update(directory, version, portal, batch, user)
                         result = self.generate(card, sources, remarks, old, cache, progress=progress, reuse_responses=bool(version.get('reuseResponses')))
                         self.verify_final_facts(result, card)
-                        self.verify_characteristic_proposals(portal, card, result, cache, user)
+                        self.verify_characteristic_proposals(portal, card, result, cache, user, reuse_responses=bool(version.get('reuseResponses')))
                     version['results'][sku] = result
                 except Exception as exc:
                     # Public errors are codes only: response bodies may contain tokens/customer data.
@@ -551,7 +568,11 @@ class AutomaticSeoService:
                 if 'ownEvidence' in evidence and response_schema is None:
                     schema = deepcopy(schema)
                     schema['properties']['keywords'] = schema_object({key: KEYWORD_DECISION_SCHEMA for key in evidence.get('keywordIds', {})})
-                    allowed = [str(d['id']) for d in evidence.get('definitions', []) if str(d['id']) not in {'4180', '4191', '11254'}]
+                    queries = [row['query'] for row in evidence.get('semantic', [])]
+                    if queries:
+                        schema['properties']['additionalKeywords']['items']['properties']['sourcePhrase'] = {'type': 'string', 'enum': queries}
+                    blocked = set() if evidence.get('marketplace') == 'Wildberries' else {'4180', '4191', '11254'}
+                    allowed = [str(d['id']) for d in evidence.get('definitions', []) if str(d['id']) not in blocked]
                     if allowed:
                         schema['properties']['characteristics']['items']['properties']['id'] = {'type': 'string', 'enum': allowed}
                     if evidence.get('planFields') is not None:
@@ -671,7 +692,7 @@ class AutomaticSeoService:
                    if row.get('decision') in {'использовать', 'адаптировать', 'объединить'}}
         decisions = []
         for assessment in assessments:
-            row = dict(assessment, destination='не добавлять', outputPhrase='')
+            row = dict(assessment, destination='не добавлять', outputPhrase='', witness='')
             row['reason'] = row['reason'].removesuffix(' В этой редакции отдельное вхождение запроса не предложено.')
             if assessment['relevance'] == 'релевантен':
                 for destination, text in texts.items():
@@ -681,14 +702,74 @@ class AutomaticSeoService:
                         break
                 else:
                     witness = adapted.get(assessment['query'])
-                    if occurrence(witness, texts['описание']):
+                    previous_destination = assessment.get('destination')
+                    previous_witness = source_phrase(assessment.get('outputPhrase'), texts.get(previous_destination, ''))
+                    if previous_witness:
+                        row.update(destination=previous_destination, outputPhrase=previous_witness)
+                    elif occurrence(witness, texts['описание']):
                         row.update(destination='описание', outputPhrase=witness)
                     else:
-                        row['reason'] += ' В этой редакции отдельное вхождение запроса не предложено.'
+                        if assessment.get('placementReviewed') and previous_destination == 'не добавлять':
+                            row['reason'] = assessment['reason']
+                        else:
+                            row['reason'] = 'Запрос релевантен, но его вхождение или подтверждённая адаптация в результате отсутствуют. Требуется решение по применению.'
             decisions.append(row)
         return decisions
 
-    def verify_characteristic_proposals(self, portal, card, result, cache, user):
+    def explain_unplaced_semantics(self, card, result, cache, progress=None, reuse_responses=False):
+        """Review omissions against final text; never invent a witness or an exclusion reason."""
+        result['issues'] = [i for i in result['issues'] if i.get('code') != 'semantic_placement_unresolved']
+        pending = [r for r in result['semanticDecisions'] if r['relevance'] == 'релевантен' and r['destination'] in {'не добавлять', 'требует решения'}]
+        texts = {'заголовок': result['title']['value'], 'описание': result['description']['value']}
+        characteristics = {str(r['id']): r['values'] for r in result['sources'].get('ownCharacteristics', [])}
+        characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
+        texts['характеристика'] = ' '.join(' '.join(v) for v in characteristics.values())
+        for offset in range(0, len(pending), 24):
+            batch = pending[offset:offset + 24]
+            evidence = {'semanticReviewBatch': {f'q{i}': r['query'] for i, r in enumerate(batch)},
+                        'ownFacts': factual_evidence(card), 'finalTexts': texts}
+            cache_key = 'semantic-placement-v1:' + fingerprint(evidence)
+            key = 'response:' + cache_key
+            schema = schema_object({label: schema_object({
+                'destination': {'type': 'string', 'enum': list(texts) + ['не добавлять']},
+                'outputPhrase': TEXT, 'reason': TEXT}) for label in evidence['semanticReviewBatch']})
+            if progress:
+                progress(f'Проверка неприменённых запросов {offset + 1}–{min(offset + 24, len(pending))} из {len(pending)}')
+            # A legacy offline recheck must never trigger a new paid request.
+            response = deepcopy(cache[cache_key]) if cache_key in cache else ({} if reuse_responses and key not in cache else self.chat(
+                'Для каждого запроса semanticReviewBatch объясни применение в ГОТОВОМ тексте. '
+                'Если смысл покрыт адаптацией или объединён с другим запросом, верни destination, '
+                'outputPhrase — точную цитату из finalTexts, и reason с объяснением смысловой связи. '
+                'Иначе destination="не добавлять", outputPhrase="", reason — конкретная причина пропуска '
+                'по фактам товара, дублированию смысла или естественности русского языка. '
+                'Не считай отсутствие вхождения причиной исключения, не выдумывай намерения автора. '
+                'Если причины нет, верни reason="" — запрос требует доработки. '
+                'Фразы «релевантен», «не предложено», «не использован» не являются объяснением. '
+                'Не меняй готовые тексты. Верни объект по всем идентификаторам q0/q1/… с destination, outputPhrase, reason.',
+                evidence, journal=cache, journal_key=key, reuse_response=reuse_responses, response_schema=schema))
+            if response and set(response) != set(evidence['semanticReviewBatch']):
+                raise SeoError('seo_semantic_decisions_incomplete')
+            if response:
+                cache[cache_key] = deepcopy(response)
+            for i, row in enumerate(batch):
+                decision = response.get(f'q{i}', {})
+                destination = decision.get('destination') if isinstance(decision, dict) else None
+                reason = str(decision.get('reason') or '').strip() if isinstance(decision, dict) else ''
+                witness = source_phrase(decision.get('outputPhrase'), texts.get(destination, '')) if isinstance(decision, dict) else ''
+                if destination in texts and witness and reason:
+                    row.update(destination=destination, outputPhrase=witness, reason=reason, placementReviewed=True)
+                elif destination == 'не добавлять' and not decision.get('outputPhrase') and len(reason) >= 25 and normalized(reason) not in {
+                        'в этой редакции отдельное вхождение запроса не предложено.',
+                        'запрос не использован в итоговом тексте.'}:
+                    row['reason'] = reason
+                    row['placementReviewed'] = True
+                else:
+                    row['destination'] = 'требует решения'
+                    result['issues'].append({'code': 'semantic_placement_unresolved', 'field': 'Применение запроса',
+                        'detail': '«' + row['query'] + '»: релевантность подтверждена, но нет проверяемого применения или конкретной причины пропуска.',
+                        'question': 'Применить запрос в подходящем поле, указать покрывающую его формулировку либо обосновать пропуск.', 'blocking': True})
+
+    def verify_characteristic_proposals(self, portal, card, result, cache, user, reuse_responses=False):
         reasons = {
             'seo_invalid_characteristic_id': 'ID отсутствует в официальных определениях или поле не предназначено для этой правки',
             'seo_duplicate_characteristic_values': 'значения повторяются', 'seo_duplicate_hashtags': 'хештеги повторяются',
@@ -715,15 +796,15 @@ class AutomaticSeoService:
         if len(accepted) != len(result['characteristics']):
             result['characteristics'] = accepted
             result['semanticDecisions'] = self.semantic_placements(result, result['semanticDecisions'], result['sources'])
+            self.explain_unplaced_semantics(card, result, cache, reuse_responses=reuse_responses)
             self.verify_keywords(result, result['sources'])
 
     def write_description(self, card, sources, profile, plan, remarks, cache, progress=None, reuse_responses=False):
         key = 'response:description:' + str(card['sku'])
         if reuse_responses and key not in cache and isinstance(plan.get('description'), dict):
             return output_text(plan['description'].get('value'))  # Legacy snapshot, never new generation.
-        core = {normalized(p['phrase']) for p in profile['phrases']}
         required = list(dict.fromkeys(k.get('outputPhrase') or k.get('sourcePhrase') for k in plan['keywords']
-                                     if k.get('decision') != 'исключить' and normalized(k.get('sourcePhrase')) in core))
+                                     if k.get('decision') != 'исключить'))
         required = [p for p in required if isinstance(p, str) and p.strip()]
         before = plain(card.get('description', ''))
         numeric_facts = re.findall(r'(?<!\w)(?:(?:от|до|не менее|не более)\s*)?\d+(?:[.,]\d+)?\s*(?:мм|см|мл|кг|шт\.?|лет|года?|месяцев|мес\.?)\b', before, flags=re.I)
@@ -733,7 +814,7 @@ class AutomaticSeoService:
                     'numericFactsToKeep': numeric_facts, 'remarks': remarks}
         if progress:
             progress('Написание и редактура описания')
-        response = self.chat('Перепиши существующее описание товара Ozon по переданной структуре и ТОЛЬКО нашим фактам. '
+        response = self.chat('Перепиши существующее описание товара ' + card.get('marketplace', 'Ozon') + ' по переданной структуре и ТОЛЬКО нашим фактам. '
             'Не копируй исходное описание без изменений. Сохрани важные факты, комплектацию, применение и все numericFactsToKeep. '
             'Естественно включи каждую фразу requiredPhrases; можно менять регистр и использовать дефис, но не терять смысл. '
             'Не добавляй чужие бренды, модели, непроверенный возраст, количество расходников, гарантии или медицинские обещания. '
@@ -769,11 +850,14 @@ class AutomaticSeoService:
 
     def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False):
         competitor = sources['competitor']
-        profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
+        legacy_profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
+        profile_key = 'profile:title-description-v2:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
+        if reuse_responses and profile_key not in cache and legacy_profile_key in cache:
+            cache[profile_key] = deepcopy(cache[legacy_profile_key])
         if profile_key not in cache:
             profile = self.chat(
-                'Разбери описание прямого конкурента. Выдели последовательность смысловых блоков и реально употреблённые поисковые формулировки. '
-                'Не генерируй новые запросы. Копируй phrase непосредственно из описания, сохраняя падеж и порядок слов: не приводи слова к начальной форме. '
+                'Разбери заголовок И описание прямого конкурента. Выдели последовательность смысловых блоков описания и реально употреблённые поисковые формулировки из ОБОИХ полей. '
+                'Не генерируй новые запросы. Копируй phrase непосредственно из заголовка или описания, сохраняя падеж и порядок слов: не приводи слова к начальной форме. '
                 'Верни {"structure":["..."],"phrases":[{"phrase":"точная цитата запроса","quote":"точный фрагмент описания"}]}. '
                 'Различай вложенные фразы и независимые смыслы, не добавляй рекламные обещания в ключи.', competitor,
                 journal=cache, journal_key='response:' + profile_key, reuse_response=reuse_responses)
@@ -784,12 +868,14 @@ class AutomaticSeoService:
                 if not isinstance(phrase, dict):
                     raise SeoError('seo_invalid_competitor_analysis')
                 actual = source_phrase(phrase.get('phrase'), competitor['description'])
+                title_actual = source_phrase(phrase.get('phrase'), competitor.get('title', '')) if not actual else ''
+                actual = actual or title_actual
                 if not actual:
                     rejected.append(str(phrase.get('phrase') or '')[:300])
                     continue
                 if normalized(actual) not in seen:
                     # Witnesses come from our source, never from a model's fabricated quote.
-                    verified.append({'phrase': actual, 'quote': actual})
+                    verified.append({'phrase': actual, 'quote': actual, **({'source': 'title'} if title_actual else {})})
                     seen.add(normalized(actual))
             if profile['phrases'] and not verified:
                 raise SeoError('seo_competitor_witness_missing', details={'phrases': rejected[:30], 'competitorSku': competitor['sku']})
@@ -798,30 +884,50 @@ class AutomaticSeoService:
         profile = cache[profile_key]
         assessments = self.assess_semantics(card, sources, cache, progress, reuse_responses=reuse_responses)
         relevant_queries = {a['query'] for a in assessments if a['relevance'] == 'релевантен'}
+        profile = deepcopy(profile)
+        # Search terms in a title remain useful when a parenthetic synonym interrupts the phrase.
+        # Preserve the original title as evidence instead of claiming an exact contiguous quotation.
+        title = competitor.get('title', '')
+        title_without_parentheses = re.sub(r'\(([а-яё -]{1,45})\)',
+            lambda m: m.group() if set(normalized(m.group(1)).split()) & {'не', 'без', 'кроме'} else ' ', title, flags=re.I)
+        seen = {normalized(p['phrase']) for p in profile['phrases']}
+        for query in sorted(relevant_queries):
+            actual = source_phrase(query, title) or source_phrase(query, title_without_parentheses)
+            if actual and normalized(query) not in seen:
+                profile['phrases'].append({'phrase': query, 'quote': title, 'source': 'title',
+                    'match': 'exact' if source_phrase(query, title) else 'without_parenthetical_synonym'})
+                seen.add(normalized(query))
         scoped = bool(previous and remarks and previous.get('sources', {}).get('competitor', {}).get('sku') == competitor['sku']
                       and not any(r['section'] in {'semantic', 'competitor'} for r in remarks))
         targeted = {r['section'] for r in remarks} if scoped else {'title', 'description', 'characteristics'}
+        if scoped and 'description' not in targeted:
+            # A title/attribute-only revision preserves the previous description and its keyword contract.
+            profile = deepcopy(previous.get('competitorProfile', profile))
         plan_fields = [name for name, section in (('title', 'title'), ('characteristics', 'characteristics'), ('keywords', 'description')) if section in targeted]
         instruction = '''Составь короткий ПЛАН SEO-правок существующей карточки Ozon по методике Насти. НЕ пиши описание: его напишет отдельный этап.
 Смысл и релевантные ключи текущего заголовка сохранить, расширить по своему товару; не сокращать ради краткости.
 Проверь назначенного конкурента по назначению, конструкции, материалу, размерам/монтажу и комплектации. Верни compatibility:{"comparable":true,"reason":"подтверждённые совпадения и различия"}. При явной несовместимости comparable=false; неизвестные свойства не называй совпадающими.
 Выбери формулировки для будущего описания по структуре конкурента и НАШИМ фактам.
-Выбор/количество ключей опирается на реально использованные у конкурента формулировки, соответствие нашему товару и естественный текст, без квоты в два ключа.
+Выбор/количество ключей опирается на реально использованные в заголовке И описании конкурента формулировки, соответствие нашему товару и естественный текст, без квоты в два ключа. Релевантные ключи из заголовка нельзя молча пропускать: применить в нашем заголовке/описании либо дать конкретную причину исключения. Не ограничиваться добавлением бренда к нашему заголовку.
 Для КАЖДОГО идентификатора k0/k1/… из keywordIds укажи в объекте keywords решение использовать/адаптировать/объединить/исключить, outputPhrase и причину. Не пропускай идентификаторы, текст sourcePhrase уже известен приложению. Из semantic можно выбрать подходящее написание outputPhrase для того же смысла; не возвращай отдельный список всех запросов. outputPhrase — выбранная естественная формулировка для будущего описания.
 Не предлагай все перестановки одних слов из semantic. Ориентир — уникальные смыслы и структура текста конкурента; дополнительный ключ нужен, только если добавляет подтверждённый смысл. Не переносить чужие бренды, модели, материалы, размеры, цвета, гарантии, эффекты. Не обещать медицинский/гарантированный результат.
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
 JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"characteristics":[],"keywords":{"k0":{"outputPhrase":"...","decision":"использовать","reason":"..."}},"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
-semantic — релевантные кандидаты для естественного дополнения текста, не обязательный перечень для вставки. Не переписывай весь список: решения по релевантности уже сохранены, реальные вхождения проверит приложение. Для адаптированного запроса из semantic укажи sourcePhrase и outputPhrase в keywords.
+semantic — релевантные кандидаты для естественного дополнения текста, не обязательный перечень для вставки. Не переписывай весь список: решения по релевантности уже сохранены, реальные вхождения проверит приложение. Дополнительные выбранные запросы из semantic верни отдельно в additionalKeywords:[{"sourcePhrase":"точный запрос из semantic","outputPhrase":"естественная формулировка","decision":"адаптировать","reason":"конкретная причина"}]. Если дополнительных нет, additionalKeywords: []. Не добавляй для них новые k-идентификаторы.
 blocking=true, если неподтверждённое свойство осталось в предлагаемом тексте. Только собственные факты. Название/аннотацию не дублировать в characteristics.'''
+        if card.get('marketplace') == 'Wildberries':
+            instruction = instruction.replace('карточки Ozon', 'карточки Wildberries')
+            instruction = re.sub(r'Для #Хештеги.*?Не сокращать до четырёх тегов\. ', '', instruction)
+            instruction += '\nНазвание WB — до 60 символов. Описание желательно до 2000 символов; категорийный предел требует проверки. Не добавляй Ozon-хештеги. ID характеристик брать только из definitions WB, max_value_count и типы значений соблюдать.'
         compact_definitions = [{k: d[k] for k in ('id', 'name', 'type', 'dictionary_id', 'is_collection', 'max_value_count', 'description') if k in d} for d in sources['definitions']]
         keyword_ids = {f'k{i}': row['phrase'] for i, row in enumerate(profile['phrases'])}
         previous_texts = {k: previous[k] for k in ('title', 'description', 'characteristics') if k in previous} if previous else None
         if previous:
             previous_texts['keywordDecisions'] = [row for row in previous.get('keywords', []) if row.get('sourcePhrase') in keyword_ids.values()]
             previous_texts['openFields'] = list(dict.fromkeys(row.get('field', '') for row in previous.get('issues', [])))
-        evidence = {'ownEvidence': model_evidence(card), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
+        evidence = {'ownEvidence': model_evidence(card), 'marketplace': card.get('marketplace', 'Ozon'), 'card': {k: card.get(k) for k in ('sku', 'offerId', 'brand')},
                     'definitions': compact_definitions if 'characteristics' in plan_fields else [], 'planFields': plan_fields,
                     'competitor': competitor, 'competitorProfile': profile, 'keywordIds': keyword_ids,
                     'semantic': [{k: row.get(k) for k in ('query', 'count', 'position')} for row in sources['semantic']
@@ -837,12 +943,14 @@ blocking=true, если неподтверждённое свойство ост
                 result['characteristics'] = deepcopy(previous['characteristics'])
             if 'description' not in targeted:
                 result['keywords'] = deepcopy(previous['keywords'])
+        extra = result.get('additionalKeywords', [])
+        if not isinstance(extra, list) or not all(isinstance(row, dict) for row in extra):
+            raise SeoError('seo_invalid_model_response', details={'field': 'additionalKeywords'})
+        if any(row.get('sourcePhrase') not in relevant_queries for row in extra):
+            raise SeoError('seo_keyword_source_missing')
         if isinstance(result.get('keywords'), dict):
             if set(result['keywords']) != set(keyword_ids) or not all(isinstance(row, dict) for row in result['keywords'].values()):
                 raise SeoError('seo_keyword_decisions_incomplete', details={'phrases': [keyword_ids[k] for k in keyword_ids if k not in result['keywords']]})
-            extra = result.get('additionalKeywords', [])
-            if not isinstance(extra, list) or not all(isinstance(row, dict) for row in extra):
-                raise SeoError('seo_invalid_model_response', details={'field': 'additionalKeywords'})
             result['keywords'] = [dict(result['keywords'][key], sourcePhrase=phrase) for key, phrase in keyword_ids.items()] + extra
         compatibility = result.get('compatibility', {})
         if not isinstance(compatibility, dict) or not isinstance(compatibility.get('comparable'), bool) or not compatibility.get('reason'):
@@ -884,16 +992,18 @@ blocking=true, если неподтверждённое свойство ост
                     'question': 'Убрать чужое наименование и проверить связанные свойства по нашим данным.', 'blocking': True})
         if not all(isinstance(result.get(k), dict) and isinstance(result[k].get('value'), str) and result[k]['value'].strip() for k in ('title', 'description')):
             raise SeoError('seo_empty_text')
-        if len(result['title']['value']) > 200 and len(card.get('title', '')) <= 200:
-            result['title'] = {'value': card.get('title', ''), 'reason': 'Расширенный вариант превысил рабочий предел 200 знаков; исходный заголовок сохранён без сокращения фактов.'}
-        if len(result['title']['value']) > 200 or len(result['description']['value']) > 6000:
-            raise SeoError('seo_text_exceeds_review_limit', details={'field': 'title' if len(result['title']['value']) > 200 else 'description',
+        title_limit = 60 if card.get('marketplace') == 'Wildberries' else 200
+        description_limit = 5000 if card.get('marketplace') == 'Wildberries' else 6000
+        if len(result['title']['value']) > title_limit and len(card.get('title', '')) <= title_limit:
+            result['title'] = {'value': card.get('title', ''), 'reason': f'Расширенный вариант превысил предел {title_limit} знаков; исходный заголовок сохранён без сокращения фактов.'}
+        if len(result['title']['value']) > title_limit or len(result['description']['value']) > description_limit:
+            raise SeoError('seo_text_exceeds_review_limit', details={'field': 'title' if len(result['title']['value']) > title_limit else 'description',
                                                                   'titleCharacters': len(result['title']['value']), 'descriptionCharacters': len(result['description']['value'])})
         if not all(isinstance(result.get(k), list) and all(isinstance(row, dict) for row in result[k]) for k in ('characteristics', 'keywords', 'issues')):
             raise SeoError('seo_invalid_model_response')
         if profile.get('rejectedPhrases'):
             result['issues'].append({'field': 'Формулировки конкурента',
-                                     'detail': 'Не найдены в исходном описании и исключены из перечня ключей: ' + '; '.join(profile['rejectedPhrases']),
+                                     'detail': 'Не найдены в исходном заголовке или описании и исключены из перечня ключей: ' + '; '.join(profile['rejectedPhrases']),
                                      'question': 'Проверить перечень подтверждённых ключей на листе «Семантика».', 'blocking': False})
         if not compatibility['comparable']:
             result['issues'].append({'field': 'Сопоставимость конкурента', 'detail': compatibility['reason'],
@@ -936,11 +1046,11 @@ blocking=true, если неподтверждённое свойство ост
         existing_rows = {row['id']: row for row in characteristic_rows(card)}
         for row in result['characteristics']:
             aid = str(row.get('id', ''))
-            if aid in {'4180', '4191', '11254'}:
+            if card.get('marketplace') != 'Wildberries' and aid in {'4180', '4191', '11254'}:
                 continue  # Separate title/description fields and unchanged rich content.
             if not isinstance(row.get('values'), list) or not row['values'] or not all(isinstance(v, str) and v.strip() for v in row['values']):
                 raise SeoError('seo_invalid_characteristic_values', details={'field': str(row.get('id', ''))[:30]})
-            if aid == '23171' and re.fullmatch(r'(?:#\w+[\s,;]*)+', ' '.join(row['values'])):
+            if card.get('marketplace') != 'Wildberries' and aid == '23171' and re.fullmatch(r'(?:#\w+[\s,;]*)+', ' '.join(row['values'])):
                 tags, seen_tags = [], set()
                 for tag in re.findall(r'#\w+', ' '.join(row['values'])):
                     if normalized(tag) not in seen_tags:
@@ -976,11 +1086,12 @@ blocking=true, если неподтверждённое свойство ост
                     'question': 'Неподтверждённое предложение не переносить. Если это значение осталось в тексте, убрать его либо подтвердить собственным источником.',
                     'blocking': any(occurrence(value, result['title']['value'] + ' ' + result['description']['value']) for value in row['values'])})
         result['characteristics'] = verified_characteristics
-        result['issues'].append({'field': 'Ограничения названия', 'detail': 'Использован рабочий предел приложения 200 символов. Официальное ограничение категории не подтверждено автоматически.',
+        result['issues'].append({'field': 'Ограничения названия', 'detail': ('Название WB проверено по пределу 60 символов; категорийный предел описания требует проверки.' if card.get('marketplace') == 'Wildberries' else 'Использован рабочий предел приложения 200 символов. Официальное ограничение категории не подтверждено автоматически.'),
                                  'question': 'Проверить требования категории перед переносом.', 'blocking': False})
         result['sources'] = sources
         result['competitorProfile'] = profile
         result['semanticDecisions'] = self.semantic_placements(result, assessments, sources)
+        self.explain_unplaced_semantics(card, result, cache, progress, reuse_responses)
         keyword_rows = {row['sourcePhrase']: row for row in result['keywords']}
         for decision in result['semanticDecisions']:
             if decision['destination'] != 'описание' or not decision.get('outputPhrase'):
@@ -1030,7 +1141,9 @@ blocking=true, если неподтверждённое свойство ост
                  'характеристика': ' '.join(' '.join(v) for v in characteristics.values())}
         for row in result['semanticDecisions']:
             destination = row.get('destination')
-            if destination == 'не добавлять':
+            if destination in {'не добавлять', 'требует решения'}:
+                if destination == 'требует решения' and not any(i.get('code') == 'semantic_placement_unresolved' and '«' + row['query'] + '»' in i.get('detail', '') and i.get('blocking') for i in result['issues']):
+                    raise SeoError('seo_semantic_witness_missing')
                 row['witness'] = ''
             elif destination in texts:
                 witness = row.get('outputPhrase') or row.get('query', '')

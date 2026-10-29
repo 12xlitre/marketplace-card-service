@@ -84,6 +84,10 @@ class FakeHost:
             answer = {'value': text}
         elif 'semanticBatch' in evidence:
             answer = {label: {'relevance': 'релевантен', 'reason': 'Подтверждено назначение.'} for label in evidence['semanticBatch']}
+        elif 'semanticReviewBatch' in evidence:
+            answer = {label: {'destination': 'не добавлять', 'outputPhrase': '',
+                'reason': 'Тестовый запрос не добавляет подтверждённых сведений о назначении смесителя.'}
+                for label in evidence['semanticReviewBatch']}
         elif 'ownEvidence' not in evidence:
             self.profile_calls += 1
             answer = {'structure': ['Назначение', 'Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}
@@ -226,7 +230,7 @@ class AutomaticSeoTest(unittest.TestCase):
     def test_lost_key_and_fabricated_characteristic_evidence_rejected(self):
         own, src = card('1001'), sources(card('1001'), self.mapping['1001'])
         result = generated('Латунный смеситель.')
-        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}, assessment(), result, {'value': result['description']['value']}]):
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}, assessment(), result, {'value': result['description']['value']}, {}]):
             checked = self.service.generate(own, src, [], None, {})
             self.assertEqual(checked['keywords'][0]['decision'], 'исключить')
             self.assertTrue(any(i.get('blocking') and i['field'] == 'Вхождение ключа' for i in checked['issues']))
@@ -344,10 +348,12 @@ class AutomaticSeoTest(unittest.TestCase):
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             self.assertEqual(self.service.chat('Test', {}), schema_result)
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True) as transport:
-            self.service.chat('Test', {'ownEvidence': {}, 'keywordIds': {'k0': 'запрос'}, 'definitions': [{'id': 100}, {'id': 4191}]})
+            self.service.chat('Test', {'ownEvidence': {}, 'keywordIds': {'k0': 'запрос'}, 'semantic': [{'query': 'дополнительный запрос'}], 'definitions': [{'id': 100}, {'id': 4191}]})
             schema = transport.call_args.args[1]
             self.assertEqual(schema['properties']['keywords']['required'], ['k0'])
             self.assertEqual(schema['properties']['characteristics']['items']['properties']['id']['enum'], ['100'])
+            self.assertIn('additionalKeywords', schema['required'])
+            self.assertEqual(schema['properties']['additionalKeywords']['items']['properties']['sourcePhrase']['enum'], ['дополнительный запрос'])
         payload['choices'][0]['message']['function_call']['name'] = 'wrong_function'
         with patch.object(self.host, 'automatic_seo_chat_completion', return_value=(payload, 'model', 'gigachat'), create=True):
             with self.assertRaisesRegex(SeoError, 'seo_invalid_model_response'):
@@ -392,21 +398,24 @@ class AutomaticSeoTest(unittest.TestCase):
         own = card('1001'); src = sources(own, self.mapping['1001'])
         src['semantic'] += [{'query': f'тестовый запрос {i}', 'count': i, 'position': None} for i in range(190)]
         complete = self.host.audit_llm_chat_completion
-        batches = []
+        batches, reviews = [], []
         def answer(messages):
             evidence = json.loads(messages[1]['content'])
             if 'semanticBatch' in evidence:
                 batches.append(list(evidence['semanticBatch'].values()))
+            if 'semanticReviewBatch' in evidence:
+                reviews.append(list(evidence['semanticReviewBatch'].values()))
             return complete(messages)
         cache = {}
         with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
             result = self.service.generate(own, src, [], None, cache)
             self.service.generate(own, src, [], None, cache)
         self.assertEqual([len(batch) for batch in batches], [32, 32, 32, 32, 32, 31])
+        self.assertEqual([len(batch) for batch in reviews], [24] * 7 + [22])
         self.assertEqual(len(result['semanticDecisions']), 191)
         unplaced = result['semanticDecisions'][1:]
         self.assertTrue(all(r['destination'] == 'не добавлять' and r['relevance'] == 'релевантен' for r in unplaced))
-        self.assertTrue(all('В этой редакции' in r['reason'] for r in unplaced))
+        self.assertTrue(all('не добавляет подтверждённых сведений' in r['reason'] for r in unplaced))
 
     def test_missing_semantic_decision_names_the_actual_query(self):
         own = card('1001'); src = sources(own, self.mapping['1001'])
@@ -416,6 +425,114 @@ class AutomaticSeoTest(unittest.TestCase):
                 self.service.assess_semantics(own, src, {})
         self.assertEqual(caught.exception.details, {'expectedQueries': 2, 'receivedQueries': 1,
                                                    'missingQueries': ['смеситель из латуни']})
+
+    def test_florrey_title_keyword_is_required_even_when_missing_from_competitor_description(self):
+        query = 'флористический краситель для цветов'
+        own = card('1354236110')
+        own.update(title='Набор красителей для живых цветов FLORREY',
+                   description='Профессиональный флористический краситель предназначен для окрашивания живых цветов через стебель.')
+        src = sources(own, self.mapping['1001'])
+        src['semantic'] = [{'query': query, 'count': 38}]
+        src['competitor'].update(title='Флористический краситель (краска) для цветов LOTOS, фуксия. 300мл.',
+                                 description='Краситель предназначен для окрашивания срезанных цветов.')
+        plan = generated()
+        plan['title']['value'] = own['title']
+        plan['keywords'] = {'k0': {'outputPhrase': query, 'decision': 'использовать', 'reason': 'Подтверждено назначением нашего товара.'}}
+        with patch.object(self.service, 'chat', side_effect=[{'structure': ['Назначение'], 'phrases': []},
+                assessment(), plan, {'value': 'Набор FLORREY — флористический краситель для цветов для окрашивания через стебель.'}]) as chat:
+            result = self.service.generate(own, src, [], None, {})
+        self.assertEqual(chat.call_args_list[2].args[1]['keywordIds'], {'k0': query})
+        self.assertIn(query, chat.call_args_list[3].args[1]['requiredPhrases'])
+        phrase = result['competitorProfile']['phrases'][0]
+        self.assertEqual(phrase['source'], 'title')
+        self.assertEqual(phrase['quote'], src['competitor']['title'])
+        self.assertEqual(phrase['match'], 'without_parenthetical_synonym')
+        self.assertEqual(result['semanticDecisions'][0]['destination'], 'описание')
+        self.assertEqual(result['semanticDecisions'][0]['witness'], query)
+
+    def test_title_phrase_extracted_by_model_has_actual_title_witness(self):
+        own = card('1001'); src = sources(own, self.mapping['1001'])
+        src['competitor']['title'] = 'Кран для умывальника ТЕСТ'
+        src['competitor']['description'] = 'Описание без запроса.'
+        result = self.service.generate(own, src, [], None, {})
+        self.assertEqual(result['competitorProfile']['phrases'][0],
+            {'phrase': 'Кран для умывальника', 'quote': 'Кран для умывальника', 'source': 'title'})
+
+    def test_additional_semantic_keyword_reaches_description_writer(self):
+        plan = generated()
+        plan['keywords'].append({'sourcePhrase': 'смеситель латунный', 'outputPhrase': 'латунный смеситель',
+                                 'decision': 'адаптировать', 'reason': 'Наш материал.'})
+        with patch.object(self.service, 'chat', return_value={'value': plan['description']['value']}) as writer:
+            self.service.write_description(card('1001'), {}, {'structure': [], 'phrases': []}, plan, [], {})
+        self.assertIn('латунный смеситель', writer.call_args.args[1]['requiredPhrases'])
+
+    def test_structured_additional_semantic_plan_is_applied_and_unknown_source_stops_before_writer(self):
+        own = card('1001'); src = sources(own, self.mapping['1001'])
+        src['semantic'].append({'query': 'смеситель латунный'})
+        plan = generated()
+        plan['keywords'] = {}
+        plan['additionalKeywords'] = [{'sourcePhrase': 'смеситель латунный', 'outputPhrase': 'латунный смеситель',
+            'decision': 'адаптировать', 'reason': 'Материал подтверждён собственной карточкой.'}]
+        assessments = {'q0': assessment()['q0'], 'q1': assessment()['q0']}
+        with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessments, plan,
+                {'value': 'Кран для умывальника — латунный смеситель.'}]) as chat:
+            result = self.service.generate(own, src, [], None, {})
+        self.assertIn('латунный смеситель', chat.call_args_list[3].args[1]['requiredPhrases'])
+        self.assertEqual(result['semanticDecisions'][1]['destination'], 'описание')
+        plan['additionalKeywords'][0]['sourcePhrase'] = 'выдуманный запрос'
+        with patch.object(self.service, 'chat', side_effect=[{'structure': [], 'phrases': []}, assessments, plan]) as chat:
+            with self.assertRaisesRegex(SeoError, 'seo_keyword_source_missing'):
+                self.service.generate(own, src, [], None, {})
+        self.assertEqual(chat.call_count, 3)
+
+    def review_unplaced(self, decision, reuse=False):
+        own = card('1001'); src = sources(own, self.mapping['1001'])
+        result = generated('Латунный смеситель для ванной.')
+        result['keywords'] = []
+        result['sources'] = src
+        result['semanticDecisions'] = self.service.semantic_placements(result,
+            [{'query': 'кран для умывальника', **assessment()['q0']}], src)
+        with patch.object(self.service, 'chat', return_value={'q0': decision}) as call:
+            self.service.explain_unplaced_semantics(own, result, {}, reuse_responses=reuse)
+        return result, call
+
+    def test_unplaced_semantic_has_concrete_reason_or_blocking_issue(self):
+        result, _ = self.review_unplaced({'destination': 'не добавлять', 'outputPhrase': '',
+            'reason': 'Назначение для умывальника не подтверждено собственными данными этой модели.'})
+        self.assertEqual(result['semanticDecisions'][0]['destination'], 'не добавлять')
+        self.assertTrue(result['semanticDecisions'][0]['placementReviewed'])
+        self.assertFalse(any(i.get('code') == 'semantic_placement_unresolved' for i in result['issues']))
+        for reason in ['', 'релевантен', 'В этой редакции отдельное вхождение запроса не предложено.']:
+            with self.subTest(reason=reason):
+                result, _ = self.review_unplaced({'destination': 'не добавлять', 'outputPhrase': '', 'reason': reason})
+                self.assertEqual(result['semanticDecisions'][0]['destination'], 'требует решения')
+                self.assertTrue(any(i.get('blocking') and i.get('code') == 'semantic_placement_unresolved' for i in result['issues']))
+
+    def test_adaptation_requires_real_witness_and_survives_characteristic_recheck(self):
+        result, _ = self.review_unplaced({'destination': 'описание', 'outputPhrase': 'смеситель для ванной',
+            'reason': 'Запрос объединён с формулировкой назначения смесителя.'})
+        self.assertEqual(result['semanticDecisions'][0]['outputPhrase'], 'смеситель для ванной')
+        refreshed = self.service.semantic_placements(result, result['semanticDecisions'], result['sources'])
+        self.assertEqual(refreshed[0]['destination'], 'описание')
+        self.assertEqual(refreshed[0]['reason'], result['semanticDecisions'][0]['reason'])
+        result, _ = self.review_unplaced({'destination': 'описание', 'outputPhrase': 'выдуманный фрагмент',
+            'reason': 'Запрос покрыт другой формулировкой.'})
+        self.assertEqual(result['semanticDecisions'][0]['destination'], 'требует решения')
+
+    def test_legacy_unplaced_recheck_never_calls_model_or_invents_reason(self):
+        result, call = self.review_unplaced({}, reuse=True)
+        call.assert_not_called()
+        self.assertEqual(result['semanticDecisions'][0]['destination'], 'требует решения')
+
+    def test_method_upgrade_does_not_silently_reuse_old_successful_results(self):
+        self.action(); self.finish()
+        directory = self.service.directory(1, 'batch')
+        state = self.service.load(directory)
+        state['versions'][-1]['method'] = 'competitor-structure-v1'
+        self.service.save(directory, state)
+        self.action(version=1)
+        self.assertEqual(self.finish()['status'], 'review')
+        self.assertEqual(self.host.calls, ['1001', '1002', '1001', '1002'])
 
     def test_generated_paragraph_escapes_and_hyphens_have_real_keyword_witnesses(self):
         text = output_text(r'Вступление.\n\nОбычный горшок для дома. Мобильный горшок-трансформер.')
@@ -563,6 +680,30 @@ class AutomaticSeoTest(unittest.TestCase):
 
 
 class ExportTest(unittest.TestCase):
+    def test_title_evidence_and_unresolved_placement_are_visible_in_workbook(self):
+        own = card('1354236110')
+        query = 'флористический краситель для цветов'
+        result = generated()
+        result['sources'] = sources(own, {'sku': '9001', 'reason': 'Тестовый пример.'})
+        result['sources']['semantic'] = [{'query': query, 'source': 'MPStats', 'count': 38}]
+        result['keywords'] = []
+        title = 'Флористический краситель (краска) для цветов LOTOS'
+        result['competitorProfile'] = {'structure': [], 'phrases': [
+            {'phrase': query, 'quote': title, 'source': 'title', 'match': 'without_parenthetical_synonym'}]}
+        result['semanticDecisions'] = [{'query': query, 'relevance': 'релевантен', 'destination': 'требует решения',
+            'reason': 'Нужно применить запрос либо объяснить пропуск.', 'witness': ''}]
+        version = {'number': 1, 'method': METHOD, 'period': closed_period(), 'cards': [own],
+                   'results': {own['sku']: result}, 'remarks': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'test.xlsx'
+            build_workbook(path, version)
+            with path.open('rb') as stream:
+                book = load_workbook(stream)
+                row = [cell.value for cell in book['Семантика'][5]]
+                self.assertEqual(row[6], 'требует решения')
+                self.assertIn('Заголовок конкурента: ' + title, row[8])
+                self.assertIn('сопоставление без вставки', row[8])
+
     def test_large_batches_preserve_all_skus_and_rich_text_and_safe_strings(self):
         with tempfile.TemporaryDirectory() as temp:
             for size in [5, 50, 200]:

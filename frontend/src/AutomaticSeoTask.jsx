@@ -25,7 +25,9 @@ const messages = {
   seo_text_exceeds_review_limit: "Подготовленный текст превышает рабочий предел. Укажите замечание для доработки.",
   seo_task_scope_changed: "Состав задачи изменился после подготовки. Создайте новую задачу для актуального набора карточек.",
   seo_tag_removal_reason_missing: "Удаление существующего хештега не обосновано. Нужна доработка.",
-  seo_competitor_confirmation_required: "Для каждого товара вставьте ссылку на карточку конкурента Ozon или его SKU. Для короткой ссылки откройте товар и скопируйте полный адрес из браузера.",
+  seo_competitor_confirmation_required: "Для каждого товара вставьте полный адрес карточки конкурента на этом маркетплейсе или его ID. Для короткой ссылки откройте товар и скопируйте полный адрес из браузера.",
+  seo_wb_api_not_connected: "Для автоматической оптимизации подключите WB API этого кабинета.",
+  seo_task_already_exists: "Для одной из выбранных карточек уже есть активная автоматическая задача.",
   seo_file_verification_failed: "Файл не прошёл проверку целостности. Пересоберите его; прежние версии сохраняются.",
   seo_report_missing: "Эта версия файла ещё не создана. Дождитесь завершения подготовки.",
   unauthorized: "Сессия истекла. Войдите в приложение снова.",
@@ -51,7 +53,8 @@ function errorText(error) {
   return messages[code] || "Не удалось выполнить действие. Обновите задачу и повторите; готовые версии сохраняются.";
 }
 
-export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksUpdated }) {
+export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksUpdated, marketplace = "Ozon" }) {
+  const isWb = marketplace === "Wildberries";
   const [report, setReport] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -135,11 +138,11 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
       {latest?.sourceCapturedAt ? <p className="status-note">Свои данные получены {new Date(latest.sourceCapturedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}. Период MPStats: {latest.period?.d1} — {latest.period?.d2}.</p> : null}
       <details open={!latest || ["partial", "failed", "interrupted"].includes(latest.status)}>
         <summary>Товары конкурентов</summary>
-        <p className="status-note">Напротив каждого вашего товара вставьте ссылку на похожий товар Ozon или его SKU. Писать пояснение не нужно — сопоставимость проверится при подготовке.</p>
+        <p className="status-note">Напротив каждого вашего товара вставьте ссылку на похожий товар {isWb ? "Wildberries или его nmID" : "Ozon или его SKU"}. Писать пояснение не нужно — сопоставимость проверится при подготовке.</p>
         <div className="automatic-seo-competitors">{group.tasks.map((task) => <label className="field-label automatic-seo-competitor" key={task.sku}>
           <strong>{task.title || task.offerId || "Ваш товар"}</strong>
-          <span className="status-note">Ваш SKU: {task.sku}{task.offerId ? ` · Артикул: ${task.offerId}` : ""}</span>
-          <input aria-label={`Конкурент для ${task.sku}`} value={mapping?.[task.sku]?.sku || ""} onChange={(e) => setMapping((rows) => ({ ...rows, [task.sku]: { sku: e.target.value, reason: "" } }))} disabled={!mayGenerate || busy} placeholder="https://www.ozon.ru/product/… или SKU конкурента" />
+          <span className="status-note">{isWb ? "Ваш nmID" : "Ваш SKU"}: {task.sku}{task.offerId ? ` · Артикул: ${task.offerId}` : ""}</span>
+          <input aria-label={`Конкурент для ${task.sku}`} value={mapping?.[task.sku]?.sku || ""} onChange={(e) => setMapping((rows) => ({ ...rows, [task.sku]: { sku: e.target.value, reason: "" } }))} disabled={!mayGenerate || busy} placeholder={isWb ? "https://www.wildberries.ru/catalog/…/detail.aspx или nmID конкурента" : "https://www.ozon.ru/product/… или SKU конкурента"} />
         </label>)}</div>
       </details>
       {error ? <p className="status-note error" role="alert">{error}</p> : null}

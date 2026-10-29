@@ -474,6 +474,23 @@ def init_db():
         UNIQUE (portal_id, card_key)
       );
 
+      CREATE TABLE IF NOT EXISTS automatic_seo_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        batch_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        card_key TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        updated_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(portal_id, task_id),
+        UNIQUE(portal_id, batch_id, card_key)
+      );
+
       CREATE TABLE IF NOT EXISTS ozon_task_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
@@ -797,6 +814,7 @@ def public_user(row):
     "role": row["role"],
     "user_role": row["user_role"],
     "access_level": row["access_level"],
+    "canCreatePortals": user_can_create_portals(row),
     "is_active": bool(row["is_active"]) if "is_active" in row.keys() else True,
   }
 
@@ -1126,9 +1144,21 @@ def user_can_manage_portals(row):
   return any(part in marker for part in ("admin", "manager", "all", "полный", "админ", "руковод", "менедж"))
 
 
+def user_can_create_portals(user, marketplace=None):
+  if not user:
+    return False
+  if "is_active" in user.keys() and not user["is_active"]:
+    return False
+  return (user_can_manage_portals(user)
+          or user_login_value(user) == "anastasia.tech"
+          or (marketplace == "Ozon" and user_is_ozon_beta_tester(user)))
+
+
 def user_is_ozon_beta_tester(row):
   if not row:
     return False
+  if "role" in row.keys() and "руководитель отдела" in " ".join(str(row["role"]).casefold().split()):
+    return True
   login = user_login_value(row)
   full_name = row["full_name"] if isinstance(row, sqlite3.Row) and "full_name" in row.keys() else (row.get("full_name") if isinstance(row, dict) else "")
   marker = f"{login} {full_name}".lower()
@@ -1756,6 +1786,7 @@ def portal_work_task_summaries(portal_ids):
       """,
       normalized_ids,
     ).fetchall()
+    automatic_rows = db.execute(f'SELECT portal_id,status,updated_at FROM automatic_seo_tasks WHERE portal_id IN ({placeholders})', normalized_ids).fetchall()
   for row in rows:
     portal_id = int(row["portal_id"])
     summary = summaries.setdefault(portal_id, empty_portal_work_task_summary())
@@ -1784,6 +1815,16 @@ def portal_work_task_summaries(portal_ids):
     updated_at = row["updated_at"] or ""
     if updated_at and updated_at > summary["lastTaskAt"]:
       summary["lastTaskAt"] = updated_at
+  for row in automatic_rows:
+    summary = summaries[int(row['portal_id'])]
+    status = row['status']
+    summary['taskTotalCount'] += 1
+    if status not in {'approved', 'done', 'skipped'}:
+      summary['taskActiveCount'] += 1
+    counter = {'draft':'taskDraftCount', 'submitted':'taskPendingCount', 'returned':'taskReturnedCount', 'approved':'taskApprovedCount'}.get(status)
+    if counter:
+      summary[counter] += 1
+    summary['lastTaskAt'] = max(summary['lastTaskAt'] or '', row['updated_at'] or '')
   return summaries
 
 
@@ -2157,6 +2198,7 @@ def delete_portal(portal_id, actor=None):
       "card_drafts",
       "portal_workset_cards",
       "ozon_tasks",
+      "automatic_seo_tasks",
       "ozon_task_events",
       "card_approval_events",
       "card_competitors",
@@ -3863,7 +3905,7 @@ def update_ozon_connection(portal_id, payload, user):
 
 
 def create_connected_ozon_portal(name, scope, user, team, payload, store_url="", manual_source="", client_name=""):
-  if not (user_can_manage_portals(user) or user_is_ozon_beta_tester(user)):
+  if not user_can_create_portals(user, "Ozon"):
     raise PermissionError("forbidden")
   init_db()
   credentials = ozon_credentials_from_payload(payload)
@@ -5067,12 +5109,12 @@ _AUTOMATIC_SEO_SERVICE_LOCK = threading.Lock()
 
 def automatic_seo_service():
   from automatic_seo import AutomaticSeoService
-  from automatic_seo_host import OzonSeoHost
+  from automatic_seo_host import MarketplaceSeoHost
   root = DB_PATH.parent / "automatic-seo"
   with _AUTOMATIC_SEO_SERVICE_LOCK:
     key = str(root.resolve())
     if key not in _AUTOMATIC_SEO_SERVICES:
-      _AUTOMATIC_SEO_SERVICES[key] = AutomaticSeoService(OzonSeoHost(sys.modules[__name__]), root)
+      _AUTOMATIC_SEO_SERVICES[key] = AutomaticSeoService(MarketplaceSeoHost(sys.modules[__name__]), root)
     return _AUTOMATIC_SEO_SERVICES[key]
 
 
@@ -5251,10 +5293,67 @@ def save_ozon_tasks(portal_id, payload, user):
       """.format(",".join("?" for _ in next_task_ids) or "''"),
       [numeric_portal_id, *next_task_ids],
     )
+    linked_periods = []
+    link_batch = str(payload.get("linkBatchId") or "")
+    if payload.get("workPeriodLinks"):
+      batch_tasks = [t for t in tasks if t.get("batchId") == link_batch]
+      if not link_batch or not batch_tasks:
+        raise ValueError("invalid_work_period_link")
+      types = list(dict.fromkeys(kind for t in batch_tasks for kind in (t.get("workTypes") or ["content"])))
+      linked_periods = link_batch_to_work_periods_in_db(db, numeric_portal_id, link_batch, types,
+          payload["workPeriodLinks"], user, batch_tasks[0].get("batchTitle", ""))
+    removed_batches = {json.loads(r["payload_json"] or "{}").get("batchId") for r in previous_rows if r["task_id"] not in next_task_ids}
+    remaining_batches = {t.get("batchId") for t in tasks}
+    for removed_batch in removed_batches - remaining_batches - {None, ""}:
+      unlink_work_period_task_links_in_db(db, numeric_portal_id,
+          linked_task_ids=work_period_task_link_ids(removed_batch, ["semantic", "content", "prices", "stocks"]),
+          linked_batch_ids=[removed_batch], user=user)
+    for batch in remaining_batches - {None, ""}:
+      sync_work_period_task_statuses_for_batch_in_db(db, numeric_portal_id, batch, user)
   record_admin_event(user, "ozon_tasks_updated", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
     "taskCount": len(tasks),
   })
-  return list_ozon_tasks(numeric_portal_id, user)
+  return {**list_ozon_tasks(numeric_portal_id, user), "workPeriods": linked_periods}
+
+
+def link_batch_to_work_periods_in_db(db, portal_id, batch_id, work_types, targets, user, title=""):
+  """Link within the task's transaction: a bad/cross-cabinet target rolls back creation."""
+  if not isinstance(targets, list) or len(targets) > 100:
+    raise ValueError("invalid_work_period_link")
+  output, seen = [], set()
+  for target in targets:
+    if not isinstance(target, dict):
+      raise ValueError("invalid_work_period_link")
+    try:
+      period_id = int(target.get("periodId") or 0)
+    except (ValueError, TypeError):
+      raise ValueError("invalid_work_period_link") from None
+    task_key = clean_work_period_task_key(target.get("taskKey"))
+    if (period_id, task_key) in seen:
+      continue
+    seen.add((period_id, task_key))
+    row = db.execute('SELECT * FROM portal_work_periods WHERE portal_id=? AND id=? AND status != ?',
+                     (portal_id, period_id, 'archived')).fetchone()
+    if not row:
+      raise ValueError("work_period_not_found")
+    plan = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
+    item = next((t for t in plan if t["key"] == task_key), None)
+    if not item:
+      raise ValueError("work_period_task_not_found")
+    if item["status"] == "excluded":
+      raise ValueError("work_period_task_excluded")
+    at = utc_now().isoformat()
+    ids = work_period_task_link_ids(batch_id, work_types)
+    item.update(linkedTaskIds=clean_work_period_links([*item.get("linkedTaskIds", []), *ids]),
+                linkedBatchIds=clean_work_period_links([*item.get("linkedBatchIds", []), batch_id]),
+                status="in_progress" if item["status"] == "planned" else item["status"],
+                statusUpdatedAt=at, statusUpdatedBy=user_login_value(user))
+    item["history"] = clean_work_period_history([*item.get("history", []),
+        {"action": "linked_task", "at": at, "by": user_login_value(user), "comment": title, "reason": ", ".join(ids)}])
+    db.execute("UPDATE portal_work_periods SET tasks_json=?, report_json='{}', status=?, updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE portal_id=? AND id=?",
+        (json.dumps(plan, ensure_ascii=False), "active" if row["status"] == "reported" else row["status"], user_login_value(user), portal_id, period_id))
+    output.append(public_portal_work_period(db.execute('SELECT * FROM portal_work_periods WHERE portal_id=? AND id=?', (portal_id, period_id)).fetchone()))
+  return output
 
 
 def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, batch_options=None):
@@ -5318,7 +5417,79 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
   return payload
 
 
+def wb_automatic_task_scope(portal_id, user):
+  if not user_can_access_portal(user, portal_id):
+    raise PermissionError('forbidden')
+  row = get_portal_row(portal_id, user)
+  if not row or not row['is_active']:
+    raise ValueError('portal_not_found')
+  if audit_normalized(row['marketplace']) not in {'wildberries', 'wb'}:
+    raise ValueError('wb_portal_required')
+  return int(row['id'])
+
+
+def list_wb_automatic_tasks(portal_id, user):
+  portal = wb_automatic_task_scope(portal_id, user)
+  with connect_db() as db:
+    rows = db.execute('SELECT * FROM automatic_seo_tasks WHERE portal_id=? ORDER BY id', (portal,)).fetchall()
+  return {'portalId': str(portal), 'tasks': [dict(json.loads(r['payload_json']), status=r['status'],
+          updatedAt=r['updated_at'], updatedBy=r['updated_by']) for r in rows]}
+
+
+def create_wb_automatic_tasks(portal_id, raw_cards, user, options):
+  portal = wb_automatic_task_scope(portal_id, user)
+  team = portal_team_roles(portal)
+  if not (user_can_manage_portals(user) or team.get('tech') == user_login_value(user)):
+    raise PermissionError('forbidden')
+  if not isinstance(raw_cards, list) or not 1 <= len(raw_cards) <= 200:
+    raise ValueError('seo_invalid_task_scope')
+  cards = [normalize_workset_card(c) for c in raw_cards]
+  if len({c['nmID'] for c in cards}) != len(cards) or not all(re.fullmatch(r'[1-9]\d{2,19}', c['nmID']) for c in cards):
+    raise ValueError('seo_invalid_task_scope')
+  batch = 'wb-auto-' + secrets.token_hex(12)
+  title = clean_report_text(options.get('title') or f'Автоматическая оптимизация WB: {len(cards)} карточек', 180)
+  links = options.get('workPeriodLinks') or []
+  if not links and (options.get('workPeriodId') or options.get('periodId')):
+    links = [{'periodId': options.get('workPeriodId') or options.get('periodId'),
+              'taskKey': options.get('workPeriodTaskKey') or options.get('taskKey')}]
+  with connect_db() as db:
+    db.execute('BEGIN IMMEDIATE')
+    existing = db.execute('SELECT sku FROM automatic_seo_tasks WHERE portal_id=? AND status NOT IN (?,?,?)',
+                          (portal, 'approved', 'done', 'skipped')).fetchall()
+    if len(existing) + len(cards) > 500:
+      raise ValueError('seo_task_limit')
+    if {r['sku'] for r in existing} & {c['nmID'] for c in cards}:
+      raise ValueError('seo_task_already_exists')
+    for position, card in enumerate(cards):
+      task = {'id': batch + '-' + str(position), 'cardKey': card['cardKey'], 'sku': card['nmID'],
+        'offerId': card['vendorCode'], 'title': card['title'], 'category': card['subjectName'], 'status': 'draft',
+        'workType': 'content', 'workTypes': ['content'], 'optimizationMode': 'automatic', 'batchId': batch,
+        'batchTitle': title, 'batchPosition': position, 'batchCreatedAt': utc_now().isoformat(),
+        'workComment': clean_work_period_note(options.get('comment'), 700)}
+      db.execute('INSERT INTO automatic_seo_tasks (portal_id,batch_id,task_id,card_key,sku,payload_json,created_by,updated_by) VALUES (?,?,?,?,?,?,?,?)',
+                 (portal, batch, task['id'], task['cardKey'], task['sku'], json.dumps(task, ensure_ascii=False), user['login'], user['login']))
+    periods = link_batch_to_work_periods_in_db(db, portal, batch, ['content'], links, user, title)
+  record_admin_event(user, 'automatic_seo_task_created', 'portal', portal, portal_id=portal,
+                     details={'batchId': batch, 'cardCount': len(cards), 'marketplace': 'Wildberries'})
+  return {'portalId': str(portal), 'batchId': batch, 'tasksCreated': len(cards), 'tasksUpdated': 0,
+          'workTypes': ['content'], 'workset': {'cards': cards}, 'automaticTasks': list_wb_automatic_tasks(portal, user)['tasks'],
+          'workPeriods': periods, 'workflow': approval_workflow(portal, user)}
+
+
+def delete_wb_automatic_batch(portal_id, batch, user):
+  portal = wb_automatic_task_scope(portal_id, user)
+  team = portal_team_roles(portal)
+  if not (user_can_manage_portals(user) or team.get('tech') == user_login_value(user)):
+    raise PermissionError('forbidden')
+  with connect_db() as db:
+    db.execute('DELETE FROM automatic_seo_tasks WHERE portal_id=? AND batch_id=?', (portal, batch))
+    unlink_work_period_task_links_in_db(db, portal, linked_task_ids=work_period_task_link_ids(batch, ['content']), linked_batch_ids=[batch], user=user)
+  return list_wb_automatic_tasks(portal, user)
+
+
 def create_workset_tasks(portal_id, raw_cards, user, options=None):
+  if isinstance(options, dict) and options.get("optimizationMode") == "automatic":
+    return create_wb_automatic_tasks(portal_id, raw_cards, user, options)
   try:
     numeric_portal_id = int(portal_id)
   except (TypeError, ValueError) as exc:
@@ -7412,6 +7583,18 @@ def aggregate_batch_work_period_status(db, portal_id, batch_id, work_type):
     (portal_id, clean_batch_id),
   ).fetchall()
   contexts = []
+  portal = db.execute('SELECT marketplace FROM portals WHERE id=?', (portal_id,)).fetchone()
+  if portal and audit_normalized(portal['marketplace']) == 'ozon':
+    rows = []
+    for row in db.execute('SELECT * FROM ozon_tasks WHERE portal_id=? AND json_extract(payload_json,\'$.batchId\')=?', (portal_id, clean_batch_id)):
+      payload = json.loads(row['payload_json'] or '{}')
+      if work_type in normalize_optional_work_types(payload.get('workTypes') or ['content']):
+        contexts.append({'status': work_period_status_for_task_work_status(work_type, row['status']),
+          'at': row['updated_at'], 'by': row['updated_by'] or '', 'reason': '', 'sourceStatus': row['status']})
+  elif work_type == 'content':
+    for row in db.execute('SELECT * FROM automatic_seo_tasks WHERE portal_id=? AND batch_id=?', (portal_id, clean_batch_id)):
+      contexts.append({'status': work_period_status_for_task_work_status(work_type, row['status']),
+        'at': row['updated_at'], 'by': row['updated_by'] or '', 'reason': '', 'sourceStatus': row['status']})
   for row in rows:
     try:
       payload = normalize_card_draft_payload(json.loads(row["payload_json"]))
@@ -7917,6 +8100,13 @@ def list_portal_work_periods(portal_id, user):
       """,
       (numeric_portal_id,),
     ).fetchall()
+    batches = {parse_work_period_task_link_id(link)[1] for row in rows
+               for task in normalize_work_period_tasks(parse_work_period_json(row['tasks_json'], []))
+               for link in task.get('linkedTaskIds', [])}
+    for batch in batches - {''}:
+      sync_work_period_task_statuses_for_batch_in_db(db, numeric_portal_id, batch, user)
+    if batches:
+      rows = db.execute('SELECT * FROM portal_work_periods WHERE portal_id=? ORDER BY period_start DESC,id DESC', (numeric_portal_id,)).fetchall()
   return {
     "portalId": str(numeric_portal_id),
     "periods": [public_portal_work_period(row) for row in rows],
@@ -10697,13 +10887,14 @@ def list_visible_users(user):
     return []
   init_db()
   with connect_db() as db:
-    if user_can_manage_portals(user):
+    if user_can_create_portals(user):
       return db.execute(
         """
         SELECT login, full_name, role, user_role, access_level, is_active
         FROM users
+        WHERE is_active = 1 OR ?
         ORDER BY id
-        """
+        """, (user_can_manage_portals(user),)
       ).fetchall()
     return db.execute(
       """
@@ -22546,6 +22737,28 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     return user
 
   def handle_automatic_seo(self, path, method):
+    task_match = re.fullmatch(r'/api/portals/([0-9]+)/automatic-seo-tasks', path)
+    if task_match:
+      user = self.require_user()
+      if not user:
+        return True
+      try:
+        if method == 'GET':
+          result = list_wb_automatic_tasks(task_match[1], user)
+        elif method == 'POST':
+          payload = self.read_json() or {}
+          if payload.get('action') != 'delete':
+            raise ValueError('invalid_action')
+          result = delete_wb_automatic_batch(task_match[1], str(payload.get('batchId') or ''), user)
+        else:
+          self.send_json(HTTPStatus.METHOD_NOT_ALLOWED, {'error': 'method_not_allowed'})
+          return True
+        self.send_json(HTTPStatus.OK, result)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {'error': 'forbidden'})
+      except ValueError as exc:
+        self.send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+      return True
     match = re.fullmatch(r"/api/portals/([0-9]+)/automatic-seo/([^/]+)(/file)?", path)
     if not match:
       return False
@@ -23351,6 +23564,9 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       payload = self.read_json() or {}
       mode = str(payload.get("mode", "manual")).strip()
       marketplace = str(payload.get("marketplace", "Wildberries")).strip() or "Wildberries"
+      if not user_can_create_portals(user, marketplace):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
       scope = str(payload.get("scope", "full")).strip()
       if scope not in ("full", "selected"):
         scope = "full"
@@ -24126,6 +24342,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           "title": payload.get("title"),
           "comment": payload.get("comment"),
           "assigneeLogin": payload.get("assigneeLogin"),
+          "optimizationMode": payload.get("optimizationMode"),
           "workPeriodLinks": payload.get("workPeriodLinks") or payload.get("workPeriodTargets"),
           "workPeriodId": payload.get("workPeriodId") or payload.get("periodId"),
           "workPeriodTaskKey": payload.get("workPeriodTaskKey") or payload.get("taskKey"),

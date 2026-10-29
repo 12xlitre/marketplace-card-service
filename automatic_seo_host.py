@@ -35,7 +35,7 @@ class OzonSeoHost:
         roles = h.portal_team_roles(portal)
         login = h.user_login_value(user)
         admin = h.user_is_admin(user)
-        return {'tasks': tasks, 'capabilities': {'prepare': admin or roles.get('tech') == login,
+        return {'tasks': tasks, 'marketplace': 'Ozon', 'capabilities': {'prepare': admin or roles.get('tech') == login,
                                                 'review': admin or roles.get('manager') == login}}
 
     def automatic_seo_set_task_status(self, portal, batch, tasks, status, user):
@@ -49,6 +49,7 @@ class OzonSeoHost:
                            (status, user['login'], int(portal), task['id']))
                 db.execute('INSERT INTO ozon_task_events (portal_id, task_id, card_key, action, label, actor_login, event_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
                            (int(portal), task['id'], task['cardKey'], status, 'SEO-файл: ' + h.OZON_TASK_STATUS_LABELS.get(status, status), user['login'], h.utc_now().isoformat()))
+            h.sync_work_period_task_statuses_for_batch_in_db(db, int(portal), batch, user)
 
     def credentials(self, portal):
         h = self.server
@@ -222,3 +223,185 @@ class OzonSeoHost:
             elif definition.get('type') in {'Integer', 'Decimal'}:
                 if any(not re.fullmatch(r'-?\d+(?:[.,]\d+)?', v) for v in values):
                     raise SeoError('seo_invalid_numeric_characteristic')
+
+
+class WbSeoHost(OzonSeoHost):
+    def automatic_seo_context(self, portal, batch, user, edit=False):
+        h = self.server
+        portal = h.wb_automatic_task_scope(portal, user)
+        tasks = [t for t in h.list_wb_automatic_tasks(portal, user)['tasks'] if t['batchId'] == batch]
+        if not tasks:
+            raise SeoError('seo_task_not_found', 404)
+        tasks.sort(key=lambda t: int(t['batchPosition']))
+        if len(tasks) > 200 or len({t['sku'] for t in tasks}) != len(tasks):
+            raise SeoError('seo_invalid_task_scope')
+        roles = h.portal_team_roles(portal)
+        login, admin = h.user_login_value(user), h.user_is_admin(user)
+        return {'marketplace': 'Wildberries', 'tasks': tasks,
+                'capabilities': {'prepare': admin or roles.get('tech') == login,
+                                 'review': admin or roles.get('manager') == login}}
+
+    def credentials(self, portal):
+        token, source = self.server.get_wb_token_for_portal(portal)
+        if not token or source != 'encrypted':
+            raise SeoError('seo_wb_api_not_connected')
+        return token
+
+    def automatic_seo_set_task_status(self, portal, batch, tasks, status, user):
+        current = self.automatic_seo_context(portal, batch, user, edit=True)
+        if [(t['id'], t['cardKey'], t['sku']) for t in current['tasks']] != [(t['id'], t['cardKey'], t['sku']) for t in tasks]:
+            raise SeoError('seo_task_scope_changed', 409)
+        with self.server.connect_db() as db:
+            db.execute('UPDATE automatic_seo_tasks SET status=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE portal_id=? AND batch_id=?',
+                       (status, user['login'], int(portal), batch))
+            self.server.sync_work_period_task_statuses_for_batch_in_db(db, int(portal), batch, user)
+
+    def automatic_seo_own_cards(self, portal, tasks, user):
+        h = self.server
+        h.wb_automatic_task_scope(portal, user)
+        cards = h.fetch_wb_content_cards_for_publication(self.credentials(portal))
+        by_id = {str(c['nmID']): c for c in cards}
+        if not {t['sku'] for t in tasks} <= set(by_id):
+            raise SeoError('seo_own_coverage_mismatch')
+        output = []
+        for task in tasks:
+            card = deepcopy(by_id[task['sku']])
+            card.update(sku=task['sku'], offerId=card.get('vendorCode', ''), marketplace='Wildberries')
+            for row in card.get('characteristics', []):
+                row['id'] = row.get('id') or row.get('charcID') or row.get('charcId')
+            output.append(card)
+        return output
+
+    def queries(self, sku, period, cache):
+        h = self.server
+        path = f'/analytics/v1/wb/items/{sku}/keywords'
+        key = 'wb-keywords:' + sku + ':' + json.dumps(period, sort_keys=True)
+        if key not in cache:
+            if cache.get('_readOnlyReplay'):
+                raise SeoError('seo_recheck_sources_missing')
+            output = []
+            for start in range(0, 10000, 500):
+                try:
+                    payload = h.mpstats_post_body_json(h.get_service_integration_secret(h.MPSTATS_PROVIDER), path,
+                        body={'startRow': start, 'endRow': start + 500, 'filterModel': {}, 'sortModel': []}, params=period, attempts=2)
+                except h.MpstatsApiError:
+                    raise SeoError('seo_mpstats_request_failed') from None
+                if isinstance(payload, dict) and payload.get('no_data'):
+                    break
+                rows = payload.get('data', {}).get('words') if isinstance(payload, dict) and isinstance(payload.get('data'), dict) else None
+                if rows is None:
+                    rows = payload.get('words') if isinstance(payload, dict) else None
+                if rows is None:
+                    rows = h.audit_extract_list(payload)
+                if not isinstance(rows, list):
+                    raise SeoError('seo_invalid_semantic_response')
+                output.extend(rows)
+                if len(rows) < 500:
+                    break
+            else:
+                raise SeoError('seo_semantic_response_too_large')
+            cache[key] = output
+        return deepcopy(cache[key])
+
+    def automatic_seo_sources(self, portal, card, mapping, period, cache, user):
+        h = self.server
+        h.wb_automatic_task_scope(portal, user)
+        comp = mapping['sku']
+        key = 'wb-competitor:' + comp
+        if key not in cache:
+            versions = h.mpstats_full_page_version_rows(self.mp(f'/wb/get/item/{comp}/full_page/versions', cache))
+            if not versions:
+                raise SeoError('seo_competitor_description_missing')
+            latest = max(versions, key=lambda r: str(r.get('changedAt', '')))
+            if not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', str(latest['version'])):
+                raise SeoError('seo_invalid_competitor_version')
+            full = self.mp(f'/wb/get/item/{comp}/full_page?{urlencode({"version": latest["version"]})}', cache)
+            if not isinstance(full, dict) or not plain(full.get('description')):
+                raise SeoError('seo_competitor_description_missing')
+            characteristics = {r['name']: r['value'] for r in h.mpstats_full_page_characteristics(full)}
+            if full.get('brand'):
+                characteristics['Бренд'] = full['brand']
+            cache[key] = {'sku': comp, 'title': full.get('full_name') or full.get('name', ''),
+                'description': plain(full['description']), 'versionDate': latest.get('changedAt', ''),
+                'characteristics': characteristics}
+        def_key = 'wb-definitions:' + str(card.get('subjectID'))
+        if def_key not in cache:
+            if cache.get('_readOnlyReplay'):
+                raise SeoError('seo_recheck_sources_missing')
+            cache[def_key] = h.fetch_wb_subject_characteristics(self.credentials(portal), card['subjectID'])['characteristics']
+        definitions = [dict(r, id=r['charcID'], max_value_count=r.get('maxCount'),
+            type='Decimal' if r.get('charcType') == 4 else 'String') for r in cache[def_key]
+            if r.get('charcID') and r.get('charcType') in {1, 4} and not r.get('existNamedField')]
+        if not definitions:
+            raise SeoError('seo_official_definitions_missing')
+        queries = {}
+        for sku in (card['sku'], comp):
+            for row in self.queries(sku, period, cache):
+                query = str(row.get('query') or row.get('keyword') or row.get('word') or '').strip()
+                if not query:
+                    continue
+                target = queries.setdefault(query, {'query': query, 'source': 'MPStats', 'position': None,
+                    'dynamics': 'нет наблюдения → нет наблюдения'})
+                if sku == card['sku'] or 'countSourceSku' not in target:
+                    target.update(count=row.get('count', row.get('query_count')), countSourceSku=sku)
+                target.setdefault('observations', []).append({'sku': sku, 'averagePosition': row.get('avg_position')})
+        # A period average is not a current rank. Fetch both boundary dates separately.
+        for date, field in ((period['d1'], 'start'), (period['d2'], 'end')):
+            for row in self.queries(card['sku'], {'d1': date, 'd2': date}, cache):
+                query = str(row.get('query') or row.get('keyword') or row.get('word') or '').strip()
+                if query in queries:
+                    queries[query][field] = row.get('position', row.get('avg_position'))
+        for row in queries.values():
+            left, right = row.get('start'), row.get('end')
+            row['position'] = right
+            row['dynamics'] = f'{left if left is not None else "нет наблюдения"} → {right if right is not None else "нет наблюдения"}'
+        return {'marketplace': 'Wildberries', 'competitor': dict(cache[key], reason=mapping['reason']),
+                'semantic': list(queries.values()), 'definitions': definitions, 'visibility': [], 'period': period,
+                'ownSource': 'WB Content API', 'ownCharacteristics': characteristic_rows(card)}
+
+    def automatic_seo_verify_characteristics(self, portal, card, result, cache, user):
+        self.server.wb_automatic_task_scope(portal, user)
+        definitions = {str(r['id']): r for r in result['sources']['definitions']}
+        seen = set()
+        for row in result['characteristics']:
+            aid, values = str(row.get('id', '')), row.get('values')
+            if aid not in definitions or aid in seen:
+                raise SeoError('seo_invalid_characteristic_id')
+            seen.add(aid)
+            if not isinstance(values, list) or not values or not all(isinstance(v, str) and v.strip() for v in values):
+                raise SeoError('seo_invalid_characteristic_values')
+            if len({normalized(v) for v in values}) != len(values):
+                raise SeoError('seo_duplicate_characteristic_values')
+            definition = definitions[aid]
+            maximum = definition.get('max_value_count') or (1 if definition.get('charcType') == 4 else 0)
+            if maximum and len(values) > int(maximum):
+                raise SeoError('seo_characteristic_value_limit')
+            if definition.get('charcType') == 4 and any(not re.fullmatch(r'-?\d+(?:[.,]\d+)?', v) for v in values):
+                raise SeoError('seo_invalid_numeric_characteristic')
+            if definition.get('strictValues'):
+                allowed = {normalized(v.get('value') or v.get('name')) if isinstance(v, dict) else normalized(v)
+                           for v in definition.get('valueOptions', [])}
+                if not allowed or any(normalized(v) not in allowed for v in values):
+                    raise SeoError('seo_dictionary_value_not_allowed')
+
+
+class MarketplaceSeoHost:
+    def __init__(self, server):
+        self.server = server
+        self.ozon, self.wb = OzonSeoHost(server), WbSeoHost(server)
+
+    def adapter(self, portal):
+        row = self.server.get_portal_row(portal)
+        if not row:
+            raise SeoError('seo_task_not_found', 404)
+        if normalized(row['marketplace']) in {'wildberries', 'wb'}:
+            return self.wb
+        if normalized(row['marketplace']) == 'ozon':
+            return self.ozon
+        raise SeoError('seo_unsupported_marketplace')
+
+    def __getattr__(self, name):
+        if name in {'automatic_seo_context', 'automatic_seo_set_task_status', 'automatic_seo_preflight',
+                    'automatic_seo_own_cards', 'automatic_seo_sources', 'automatic_seo_verify_characteristics'}:
+            return lambda portal, *args, **kwargs: getattr(self.adapter(portal), name)(portal, *args, **kwargs)
+        return getattr(self.ozon, name)

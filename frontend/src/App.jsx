@@ -856,7 +856,12 @@ function clientTaskCount(client, marketplaceKey = "") {
   return portals.reduce((sum, portal) => sum + portalActiveTaskCount(portal), 0);
 }
 
-function userCanSeeOzonBeta(user) {
+function userCanSeeOzon(user) {
+  return Boolean(user);
+}
+
+function userCanManageOzon(user) {
+  if (/руководитель\s+отдела/i.test(user?.role || "")) return true;
   const marker = `${user?.login || ""} ${user?.full_name || ""}`.toLowerCase();
   return marker.includes("dmitriy")
     || marker.includes("dmitry")
@@ -867,8 +872,9 @@ function userCanSeeOzonBeta(user) {
     || marker.includes("руднева");
 }
 
-function userCanManageOzonBeta(user) {
-  return userCanSeeOzonBeta(user);
+function userCanCreatePortals(user) {
+  if (!user) return false;
+  return user.canCreatePortals ?? (["admin", "manager"].includes(getUserRoleType(user)) || user.login === "anastasia.tech");
 }
 
 function uniqueLogins(logins) {
@@ -6238,14 +6244,18 @@ export default function App() {
 
   const displayUsers = users.length ? users : hardcodedDirectoryFallback;
   const canManagePortals = currentUser ? ["admin", "manager"].includes(getUserRoleType(currentUser)) : false;
-  const canManageOzonBeta = currentUser ? userCanManageOzonBeta(currentUser) : false;
+  const canManageOzon = currentUser ? userCanManageOzon(currentUser) : false;
   const canManageUsers = currentUser ? userCanManageUsers(currentUser) : false;
   const allPortals = userPortals.map(mergePortalWorkSummary);
   const activePortals = allPortals.filter((portal) => portal.isActive !== false);
   const allClients = buildClientWorkspaces(allPortals);
-  const currentClient = allClients.find((client) => client.id === selectedClientId) || allClients[0] || null;
+  const currentClient = selectedClientId
+    ? allClients.find((client) => client.id === selectedClientId) || null
+    : allClients[0] || null;
 
-  const currentPortal = allPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || allPortals[0] || null;
+  const currentPortal = selectedPortalId
+    ? allPortals.find((portal) => String(portal.id) === String(selectedPortalId)) || null
+    : allPortals[0] || null;
   const screenNeedsClient = screen === "client";
   const screenNeedsPortal = ["seller", "card", "ozon-card"].includes(screen);
   const displayScreen = (screenNeedsClient && !currentClient) || (screenNeedsPortal && !currentPortal) ? "cabinets" : screen;
@@ -7087,7 +7097,7 @@ export default function App() {
   async function createPortal(payload) {
     const response = await apiRequest("/api/portals", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, ...(displayScreen === "client" && currentClient ? { clientName: currentClient.name } : {}) }),
     });
     const portal = normalizePortal(response.portal);
     setUserPortals((items) => [...items, portal]);
@@ -7143,7 +7153,7 @@ export default function App() {
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
-      setNotice(useApi ? `Ozon-кабинет создан. Через Seller API загружено ${formatNumber(response.saved?.total || 0)} карточек.` : "Ozon beta-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
+      setNotice(useApi ? `Ozon-кабинет создан. Через Seller API загружено ${formatNumber(response.saved?.total || 0)} карточек.` : "Ozon-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
       if (useApi) throw error;
@@ -7449,7 +7459,7 @@ export default function App() {
             currentUser={currentUser}
             displayUsers={displayUsers}
             canManage={canManagePortals}
-            canManageOzonBeta={canManageOzonBeta}
+            canManageOzon={canManageOzon}
             findUser={findUser}
             onBack={() => setScreen("cabinets")}
             onOpenPortal={showSeller}
@@ -7477,7 +7487,7 @@ export default function App() {
             portal={currentPortal}
             displayUsers={displayUsers}
             findUser={findUser}
-            canManage={canManagePortals || canManageOzonBeta}
+            canManage={canManagePortals || canManageOzon}
             onBack={() => setScreen("client")}
             sellerTab={sellerTab}
             onSellerTabChange={setSellerTab}
@@ -7578,7 +7588,8 @@ export default function App() {
           <PortalModal
             mode={portalModalMode}
             users={displayUsers}
-            allowOzon={userCanSeeOzonBeta(currentUser)}
+            currentUser={currentUser}
+            allowOzon={userCanSeeOzon(currentUser)}
             targetPortal={portalModalTarget}
             onMode={setPortalModalMode}
             onClose={() => {
@@ -7728,7 +7739,7 @@ function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNa
 }
 
 function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onStatusFilter, onOpenClient, onOpenPortal, onOpenModal, helpEnabled = false }) {
-  const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
+  const canSeeOzon = userCanSeeOzon(currentUser);
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const searchedPortals = portals.filter((portal) => {
@@ -7758,10 +7769,10 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           <h1>Клиенты</h1>
           <p>Клиентские кабинеты с разделами Wildberries и Ozon.</p>
         </div>
-        <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
+        {userCanCreatePortals(currentUser) ? <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
           <Plus size={17} />
           Добавить клиента
-        </button>
+        </button> : null}
       </header>
 
       <div className="content">
@@ -7770,7 +7781,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           title="Как начать работу"
           items={[
             "Откройте клиента, чтобы увидеть общую информацию и перейти в раздел WB или Ozon.",
-            canSeeOzonBeta ? "При добавлении клиента выберите Wildberries или Ozon, затем способ подключения. Ozon Seller API работает только на чтение." : "Новый клиент создается через первый WB-кабинет.",
+            canSeeOzon ? "При добавлении клиента выберите Wildberries или Ozon, затем способ подключения. Ozon Seller API работает только на чтение." : "Новый клиент создается через первый WB-кабинет.",
             "Фильтр Активные / Неактивные помогает спрятать завершенные кабинеты без удаления истории.",
           ]}
         />
@@ -7778,7 +7789,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
           <Metric
             label="Клиенты"
             value={formatNumber(activeClients.length)}
-            hint={`${formatNumber(wbPortals.length)} WB${canSeeOzonBeta ? ` · ${formatNumber(ozonPortals.length)} Ozon` : ""}`}
+            hint={`${formatNumber(wbPortals.length)} WB${canSeeOzon ? ` · ${formatNumber(ozonPortals.length)} Ozon` : ""}`}
           />
           <Metric
             label="Карточки всего"
@@ -7821,7 +7832,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
             <ClientCard
               key={client.id}
               client={client}
-              canSeeOzonBeta={canSeeOzonBeta}
+              canSeeOzon={canSeeOzon}
               onOpen={() => onOpenClient(client)}
               onOpenMarketplace={(marketplaceKey) => {
                 const portals = clientMarketplacePortals(client, marketplaceKey).filter((portal) => portal.isActive !== false);
@@ -7842,11 +7853,11 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
               }}
             />
           ))}
-          {statusFilter !== "inactive" ? (
+          {statusFilter !== "inactive" && userCanCreatePortals(currentUser) ? (
             <article className="workspace-card add-card">
               <div className="seller-logo">+</div>
               <h2>Добавить клиента</h2>
-              <p>Создайте первый WB-кабинет, и клиент появится в списке.</p>
+              <p>Создайте первый {canSeeOzon ? "WB- или Ozon-кабинет" : "WB-кабинет"}, и клиент появится в списке.</p>
               <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
                 <Plus size={17} />
                 Добавить клиента
@@ -7859,7 +7870,7 @@ function CabinetsScreen({ portals, activePortals, currentUser, statusFilter, onS
   );
 }
 
-function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenTasks }) {
+function ClientCard({ client, canSeeOzon, onOpen, onOpenMarketplace, onOpenTasks }) {
   const wbCount = clientPortalCount(client, "wildberries");
   const ozonCount = clientPortalCount(client, "ozon");
   const cardCount = clientCardCount(client);
@@ -7887,7 +7898,7 @@ function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenT
       </div>
       <div className="client-marketplace-badges">
         <span className="client-marketplace-badge wb">Wildberries · {formatNumber(wbCount)}</span>
-        {canSeeOzonBeta ? <span className="client-marketplace-badge ozon">Ozon beta · {formatNumber(ozonCount)}</span> : null}
+        {canSeeOzon ? <span className="client-marketplace-badge ozon">Ozon · {formatNumber(ozonCount)}</span> : null}
       </div>
       <div className="client-quick-panel">
         <button type="button" onClick={() => onOpenMarketplace?.("wildberries")} disabled={!wbCount}>
@@ -7895,7 +7906,7 @@ function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenT
           <span>WB</span>
           <strong>{formatNumber(wbCount)}</strong>
         </button>
-        {canSeeOzonBeta ? (
+        {canSeeOzon ? (
           <button type="button" onClick={() => onOpenMarketplace?.("ozon")} disabled={!ozonCount}>
             <ShoppingBag size={15} />
             <span>Ozon</span>
@@ -7921,8 +7932,8 @@ function ClientCard({ client, canSeeOzonBeta, onOpen, onOpenMarketplace, onOpenT
   );
 }
 
-function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", currentUser, displayUsers, canManage, canManageOzonBeta = false, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
-  const canSeeOzonBeta = userCanSeeOzonBeta(currentUser);
+function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", currentUser, displayUsers, canManage, canManageOzon = false, findUser, onBack, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon, onUpdateName, onUpdateTeam, onUpdateContact, onArchiveClient, onRestoreClient, onDeleteClient, helpEnabled = false }) {
+  const canSeeOzon = userCanSeeOzon(currentUser);
   const [marketplaceTab, setMarketplaceTab] = useState(initialMarketplaceTab || "overview");
   const wbPortals = clientMarketplacePortals(client, "wildberries");
   const ozonPortals = clientMarketplacePortals(client, "ozon");
@@ -7950,10 +7961,10 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
   }, [client.id, initialMarketplaceTab]);
 
   useEffect(() => {
-    if (!canSeeOzonBeta && marketplaceTab === "ozon") {
+    if (!canSeeOzon && marketplaceTab === "ozon") {
       setMarketplaceTab("overview");
     }
-  }, [canSeeOzonBeta, marketplaceTab]);
+  }, [canSeeOzon, marketplaceTab]);
 
   useEffect(() => {
     if (!nameEditing) {
@@ -8045,6 +8056,9 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
           <p>Общая информация клиента и разделы маркетплейсов.</p>
         </div>
         <div className="toolbar">
+          {userCanCreatePortals(currentUser) ? <button className="btn primary" type="button" onClick={() => onOpenModal("api")}>
+            <Plus size={17} />Добавить кабинет
+          </button> : null}
           <button className="btn" type="button" onClick={onBack}>
             <ArrowLeft size={17} />
             Клиенты
@@ -8238,7 +8252,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
                 <span>Wildberries</span>
                 <strong>{formatNumber(wbPortals.length)} {pluralRu(wbPortals.length, "кабинет", "кабинета", "кабинетов")}</strong>
               </button>
-              {canSeeOzonBeta ? (
+              {canSeeOzon ? (
                 <button
                   className={`client-marketplace-button ozon ${marketplaceTab === "ozon" ? "active" : ""}`}
                   type="button"
@@ -8246,7 +8260,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
                 >
                   <ShoppingBag size={18} />
                   <span>Ozon</span>
-                  <strong>beta · {formatNumber(ozonPortals.length)}</strong>
+                  <strong>кабинетов · {formatNumber(ozonPortals.length)}</strong>
                 </button>
               ) : null}
             </div>
@@ -8258,7 +8272,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
             <LayoutDashboard size={20} />
             <div>
               <strong>Выберите маркетплейс клиента</strong>
-              <p>Wildberries откроет текущую работу сразу, если у клиента один WB-кабинет. Ozon пока доступен как beta-каркас.</p>
+              <p>Wildberries откроет текущую работу сразу, если у клиента один WB-кабинет. Ozon пока доступен для карточек, задач и планов работ.</p>
             </div>
           </div>
         ) : null}
@@ -8268,6 +8282,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
             client={client}
             marketplaceKey="wildberries"
             portals={wbPortals}
+            canCreate={userCanCreatePortals(currentUser)}
             canManage={canManage}
             findUser={findUser}
             onOpenPortal={onOpenPortal}
@@ -8278,12 +8293,13 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
           />
         ) : null}
 
-        {marketplaceTab === "ozon" && canSeeOzonBeta ? (
+        {marketplaceTab === "ozon" && canSeeOzon ? (
           <ClientMarketplaceSection
             client={client}
             marketplaceKey="ozon"
             portals={ozonPortals}
-            canManage={canManage || canManageOzonBeta}
+            canCreate={userCanCreatePortals(currentUser) || canManageOzon}
+            canManage={canManage || canManageOzon}
             findUser={findUser}
             onOpenPortal={onOpenPortal}
             onArchive={onArchive}
@@ -8297,7 +8313,7 @@ function ClientWorkspaceScreen({ client, initialMarketplaceTab = "overview", cur
   );
 }
 
-function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, findUser, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon }) {
+function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, canCreate = false, findUser, onOpenPortal, onArchive, onRestore, onDelete, onOpenModal, onAddOzon }) {
   const isOzon = marketplaceKey === "ozon";
   const label = marketplaceTitle(marketplaceKey);
   const hasPortals = portals.length > 0;
@@ -8310,11 +8326,11 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
           <h2>{isOzon && !hasPortals ? emptyOzonTitle : `${label}: кабинеты клиента`}</h2>
           <p>
             {isOzon && !hasPortals
-              ? "У клиента пока нет Ozon-контура. Создайте beta-кабинет, чтобы тестировать Ozon отдельно от других маркетплейсов."
+              ? "У клиента пока нет Ozon-контура. Создайте Ozon-кабинет для карточек, задач и плана работ."
               : `${label}: карточки, задачи и отчетные периоды внутри клиента.`}
           </p>
         </div>
-        {isOzon ? <Tag tone="amber">{hasPortals ? "beta" : "не создан"}</Tag> : <Tag tone="blue">рабочий поток</Tag>}
+        {isOzon ? <Tag tone="amber">{hasPortals ? "рабочий поток" : "не создан"}</Tag> : <Tag tone="blue">рабочий поток</Tag>}
       </div>
 
       <div className="workspace-grid">
@@ -8331,7 +8347,7 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
             onDelete={() => onDelete(portal)}
           />
         ))}
-        {isOzon && !hasPortals ? (
+        {canCreate ? (isOzon && !hasPortals ? (
           <OzonEmptyCard client={client} onAddOzon={onAddOzon} />
         ) : (
           <article className="workspace-card add-card">
@@ -8343,7 +8359,7 @@ function ClientMarketplaceSection({ client, marketplaceKey, portals, canManage, 
               {isOzon ? "Подключить Ozon" : `Добавить ${label}`}
             </button>
           </article>
-        )}
+        )) : null}
       </div>
     </section>
   );
@@ -8356,11 +8372,11 @@ function OzonEmptyCard({ client, onAddOzon }) {
         <div className="seller">
           <div className="seller-logo ozon-logo">OZ</div>
           <div>
-            <h2>Создать Ozon beta-кабинет</h2>
+            <h2>Создать Ozon-кабинет</h2>
             <p>{client.name} · отдельный тестовый контур</p>
           </div>
         </div>
-        <Tag tone="amber">beta</Tag>
+        <Tag tone="blue">рабочий поток</Tag>
       </div>
       <div className="ozon-empty-list">
         <span>Выберите Seller API с Client-Id и ключом или источник для MPStats.</span>
@@ -8368,7 +8384,7 @@ function OzonEmptyCard({ client, onAddOzon }) {
         <span>Карточки, задачи и периоды будут отдельными от других маркетплейсов.</span>
       </div>
       <div className="card-actions">
-        <Tag tone="amber">Ozon beta</Tag>
+        <Tag tone="amber">Ozon</Tag>
         <button className="btn primary" type="button" onClick={() => onAddOzon?.()}>
           <Plus size={17} />
           Подключить Ozon
@@ -8812,7 +8828,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
   }
 
   async function persistOzonWorkState(nextState, options = {}) {
-    const cached = writeOzonWorkState(portal.id, nextState);
+    const cached = options.requireSaved ? false : writeOzonWorkState(portal.id, nextState);
     if (!portal?.id || portal.isDemo) {
       setOzonWorkStatus(cached ? "local" : "unsaved");
       return nextState;
@@ -8821,7 +8837,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     try {
       const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-tasks`, {
         method: "POST",
-        body: JSON.stringify({ tasks: nextState.tasks || [] }),
+        body: JSON.stringify({ tasks: nextState.tasks || [], linkBatchId: options.linkBatchId, workPeriodLinks: options.workPeriodLinks }),
       });
       const savedState = {
         selectedKeys: nextState.selectedKeys || [],
@@ -8829,7 +8845,9 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         recentEvents: Array.isArray(payload.recentEvents) ? payload.recentEvents : nextState.recentEvents || [],
       };
       setOzonWorkState(savedState);
+      writeOzonWorkState(portal.id, savedState);
       setOzonWorkStatus("saved");
+      (payload.workPeriods || []).forEach(replaceOzonWorkPeriod);
       return savedState;
     } catch (error) {
       setOzonWorkStatus(cached ? "local-fallback" : "unsaved");
@@ -8906,6 +8924,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
       onNotice?.(nextTargets.length ? "Ozon-задача привязана к плану." : "Ozon-задача отвязана от плана.");
     } catch {
       onNotice?.("Не удалось обновить привязку Ozon-задачи к отчетному периоду.");
+      throw new Error("Не удалось сохранить привязку задачи к плану. Повторите выбор пунктов плана.");
     } finally {
       setTaskActionStatus("");
     }
@@ -9123,7 +9142,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         ...current,
         tasks: (current.tasks || []).filter((task) => task.id !== taskId),
         recentEvents: [
-          { id: `event-${Date.now()}`, action: "deleted", label: "Ozon-задача удалена из beta-набора", at: new Date().toISOString() },
+          { id: `event-${Date.now()}`, action: "deleted", label: "Ozon-задача удалена из рабочего набора", at: new Date().toISOString() },
           ...(current.recentEvents || []),
         ].slice(0, 30),
       };
@@ -9201,7 +9220,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
         <div className="seller-layout">
           <div className="seller-main">
             <WorkspaceTabs items={sellerWorkspaceTabs} active={activeSellerTab} onChange={setSellerTab} ariaLabel="Разделы Ozon-кабинета" />
-            <HelpHint enabled={helpEnabled} title="Ozon beta">
+            <HelpHint enabled={helpEnabled} title="Ozon">
               Кабинет работает на данных Ozon Seller API или MPStats. Карточки, задачи и отчетные периоды хранятся в отдельном Ozon-контуре, а семантика честно помечает источник keyword-базы.
             </HelpHint>
 
@@ -9314,7 +9333,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                       <h2>Обзор кабинета</h2>
                       <p>Фактическое состояние источника данных, карточек и задач.</p>
                     </div>
-                    <Tag tone="amber">beta</Tag>
+                    <Tag tone="blue">рабочий поток</Tag>
                   </div>
                   <div className="summary-grid">
                     <Metric label="Карточек в кабинете" value={formatNumber(portal.cardCount)} />
@@ -9550,7 +9569,7 @@ function OzonPlaceholderPanel({ title, copy, tag, steps = [] }) {
         <Tag tone="amber">{tag}</Tag>
       </div>
       <div className="empty-state">
-        <strong>Ozon beta</strong>
+        <strong>Ozon</strong>
         <span>{copy}</span>
         {steps.length ? (
           <div className="empty-state-steps">
@@ -10422,7 +10441,7 @@ function ozonReportProposal(card) {
 function ozonReportInstructionRows() {
   return [
     ["АВТОМАТИЗАЦИЯ OZON - ПОРЯДОК ОБНОВЛЕНИЯ"],
-    ["Файл формируется из Ozon beta snapshot/MPStats. После подключения Ozon Seller API эти же вкладки будут заполняться API-выгрузками без изменения основного клиентского формата."],
+    ["Файл формируется из сохранённого снимка Ozon/API/MPStats. После подключения Ozon Seller API эти же вкладки будут заполняться API-выгрузками без изменения основного клиентского формата."],
     [],
     reportHeaderRow(["Шаг", "Что обновляется", "Вкладка", "Результат"]),
     [1, "Карточки и ассортимент Ozon", "OZON_ТОВАРЫ_ЗАГРУЗКА", "SKU, offer ID, название и продажи товара"],
@@ -10438,7 +10457,7 @@ function ozonReportInstructionRows() {
     [11, "Автоматический контроль", "OZON_СВОД_ПО_SKU", "Расход, выручка, ДРР, маржа и оборачиваемость"],
     [],
     ["ВАЖНО", "Offer ID - основной ключ сопоставления. Он должен совпадать с колонкой C недельного листа.", "", ""],
-    ["ВАЖНО", "В текущем beta-режиме Ozon Seller API еще не подключен, поэтому часть коммерческих колонок может быть пустой.", "", ""],
+    ["ВАЖНО", "Коммерческие колонки заполняются только при наличии соответствующих данных источника.", "", ""],
   ];
 }
 
@@ -10781,7 +10800,7 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
             <h2>Нужен отчет</h2>
             <p>{portal ? `Ozon-кабинет: ${portalDisplayName(portal)} · выберите отчет и период.` : "Кабинет не выбран."}</p>
           </div>
-          <Tag tone="amber">Ozon beta</Tag>
+          <Tag tone="amber">Ozon</Tag>
         </div>
         <HelpList
           enabled={helpEnabled}
@@ -10847,7 +10866,7 @@ function OzonReportsPanel({ portal, cards, onNotice, helpEnabled = false }) {
             <Metric label="Ждет API" value={formatNumber(apiPendingCount)} hint="будущие блоки" />
           </div>
           <HelpHint enabled={helpEnabled} title="Что означает доступность данных">
-            В Ozon beta отчет собирается из сохраненного snapshot/MPStats. Полная таблица покрытия добавляется в XLSX отдельной вкладкой.
+            В Ozon отчет собирается из сохраненного snapshot/MPStats. Полная таблица покрытия добавляется в XLSX отдельной вкладкой.
           </HelpHint>
           <div className="report-availability">
             {coveragePreviewItems.map((item) => (
@@ -11042,7 +11061,7 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
             batchTitle,
             batchCreatedAt: now,
             batchPosition: index,
-            workComment: options.comment || (automatic ? "Подготовка SEO-файла для проверки специалистом и согласования аккаунтом" : "Ozon beta: СЯ, заголовки, описание и характеристики"),
+            workComment: options.comment || (automatic ? "Подготовка SEO-файла для проверки специалистом и согласования аккаунтом" : "Ozon: СЯ, заголовки, описание и характеристики"),
             createdAt: now,
             updatedAt: now,
           };
@@ -11056,10 +11075,7 @@ function OzonCardsPanel({ cards, portalId, hasSellerApi = false, workState, work
         { id: `event-${Date.now()}`, action: "created", label: `Создана Ozon-задача: ${selectedCards.length} карточек`, at: now },
         ...(workState?.recentEvents || []),
       ],
-    }, { requireSaved: true });
-      if (options.workPeriodLinks?.length) {
-        await onLinkTaskGroup?.({ batchId, batchTitle, key: `${automatic ? "content" : options.workTypes[0]}:${batchId}`, tasks: nextTasks.filter((t) => t.batchId === batchId) }, options.workPeriodLinks);
-      }
+    }, { requireSaved: true, linkBatchId: batchId, workPeriodLinks: parseWorkPeriodTaskLinkValues(options.workPeriodLinks || []) });
       setPackageForm(null);
       onOpenTasks?.();
     } catch { setPackageError("Не удалось сохранить задачу на сервере. Проверьте соединение и повторите."); }
@@ -11322,7 +11338,7 @@ function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, w
       <div className="strip-head">
         <div>
           <h2>Задачи Ozon</h2>
-          <p>Beta-набор задач по Ozon-карточкам. Статусы читают сохраненное итоговое СЯ и итоговый контент из Ozon-таблиц.</p>
+          <p>Задачи по Ozon-карточкам. Статусы читают сохраненное итоговое СЯ и итоговый контент из Ozon-таблиц.</p>
         </div>
         <Tag tone={["local-fallback", "unsaved"].includes(workStatus) ? "amber" : "blue"}>{workStatus === "saving" ? "сохраняем" : workStatus === "unsaved" ? "не сохранено" : workStatus === "local-fallback" ? "локально" : `${formatNumber(tasks.length)} задач`}</Tag>
       </div>
@@ -11502,7 +11518,7 @@ function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, w
       </div>
 
       <details className="task-batch-log">
-        <summary>Журнал Ozon beta</summary>
+        <summary>Журнал Ozon</summary>
         {events.length ? (
           <div className="task-batch-event-list">
             {events.slice(0, 12).map((event) => (
@@ -12578,6 +12594,40 @@ function OzonCompetitorAuditPanel({ card, portal, draft, status = "idle" }) {
   );
 }
 
+function WbAutomaticTasksPanel({ portalId, tasks, status, onReload, workPeriods, workPeriodsStatus, onLink, onCreate }) {
+  const [linking, setLinking] = useState(null);
+  const [error, setError] = useState("");
+  const groups = buildOzonTaskGroups(tasks).content || [];
+  async function remove(group) {
+    if (!window.confirm("Удалить эту автоматическую задачу? Ручные черновики карточек сохранятся.")) return;
+    try {
+      await apiRequest(`/api/portals/${encodeURIComponent(portalId)}/automatic-seo-tasks`, {
+        method: "POST", body: JSON.stringify({ action: "delete", batchId: group.batchId }),
+      });
+      await onReload();
+    } catch { setError("Не удалось удалить автоматическую задачу."); }
+  }
+  return <section className="workspace-strip" aria-label="Автоматические задачи WB">
+    <div className="strip-head"><div><h2>Автоматическая оптимизация WB</h2><p>Конкурент, итоговый Excel и согласование файла.</p></div>
+      <button className="btn primary" type="button" onClick={onCreate}>Создать задачу</button></div>
+    {status === "error" ? <p role="alert">Не удалось загрузить автоматические задачи. <button className="btn" type="button" onClick={() => onReload()}>Повторить</button></p> : null}
+    {status === "loading" ? <p role="status">Загружаем задачи…</p> : null}
+    {error ? <p role="alert">{error}</p> : null}
+    {!groups.length && status === "loaded" ? <p>Автоматических задач пока нет. Выберите карточки и возьмите их в работу.</p> : null}
+    {groups.map((group) => <article className="task-batch" key={group.key}>
+      <h3>{group.batchTitle || "Автоматическая оптимизация WB"}</h3>
+      <p>{group.tasks.length} карточек · План: {workPeriodLinksForGroup(workPeriods, group).map((link) => link.task.label).join(", ") || "не привязано"}</p>
+      <AutomaticSeoTask portalId={portalId} group={group} apiRequest={apiRequest} marketplace="Wildberries" onTasksUpdated={() => onReload()} />
+      <div className="task-batch-actions">
+        <button className="btn" type="button" onClick={() => setLinking(group)}>Привязать к плану</button>
+        <button className="btn danger" type="button" onClick={() => remove(group)}>Удалить задачу</button>
+      </div>
+    </article>)}
+    {linking ? <WorkPeriodTaskLinkModal group={linking} workType="content" workPeriods={workPeriods} workPeriodsStatus={workPeriodsStatus}
+      onClose={() => setLinking(null)} onSubmit={async (targets) => { await onLink(linking, "content", targets); setLinking(null); await onReload(); }} /> : null}
+  </section>;
+}
+
 function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration = null, currentUser, displayUsers, findUser, canManage = false, onBack, onOpenCard, sellerTab = "cabinet", onSellerTabChange, onOpenModal, onRefreshCards, onResetWork, onUpdateTeam, onUpdateName, onPortalUpdated, onNotice, helpEnabled = false }) {
   const owner = findUser(portal.ownerLogin);
   const displayName = portalDisplayName(portal);
@@ -12593,6 +12643,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [teamDraft, setTeamDraft] = useState(team);
   const [approvalWorkflow, setApprovalWorkflow] = useState(defaultApprovalWorkflow());
   const [approvalWorkflowStatus, setApprovalWorkflowStatus] = useState("idle");
+  const [automaticTasks, setAutomaticTasks] = useState([]);
+  const [automaticTaskStatus, setAutomaticTaskStatus] = useState("idle");
   const [workPeriods, setWorkPeriods] = useState([]);
   const [workPeriodsStatus, setWorkPeriodsStatus] = useState("idle");
   const activeSellerTab = normalizeSellerTab(sellerTab);
@@ -12611,6 +12663,28 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const [semanticImportError, setSemanticImportError] = useState("");
   const [semanticImportPreview, setSemanticImportPreview] = useState(null);
   const [semanticImportFile, setSemanticImportFile] = useState(null);
+
+  async function loadAutomaticTasks({ isCurrent = () => true } = {}) {
+    if (!portal?.id || portal.isDemo) return;
+    setAutomaticTaskStatus("loading");
+    try {
+      const [tasks, periods] = await Promise.all([
+        apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/automatic-seo-tasks`),
+        apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}`),
+      ]);
+      if (!isCurrent()) return;
+      setAutomaticTasks(tasks.tasks || []);
+      setWorkPeriods(normalizeWorkPeriods(periods.periods));
+      setAutomaticTaskStatus("loaded");
+    } catch { if (isCurrent()) setAutomaticTaskStatus("error"); }
+  }
+
+  useEffect(() => {
+    let active = true;
+    setAutomaticTasks([]);
+    loadAutomaticTasks({ isCurrent: () => active });
+    return () => { active = false; };
+  }, [portal.id, activeSellerTab]);
 
   useEffect(() => {
     if (!teamEditing) {
@@ -12866,6 +12940,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
       onNotice?.(nextTargets.length ? "Привязка к плану обновлена." : "Задача отвязана от плана.");
     } catch {
       onNotice?.("Не удалось обновить привязку к отчетному периоду.");
+      throw new Error("Привязка задачи к плану не сохранена. Повторите выбор пунктов.");
     } finally {
       setTaskActionStatus("");
     }
@@ -13193,10 +13268,8 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
   const importMessage = ["error", "paused"].includes(importJob?.status) && importJob?.error
     ? `${importJob.message || "Загрузка карточек прервалась"}: ${importJob.error}`
     : importJob?.message || (importRunning ? "MPStats добирает карточки пачками." : "");
-  const sellerActiveTaskCount = (Array.isArray(approvalWorkflow.tasks) && approvalWorkflow.tasks.length)
-    ? approvalWorkflow.tasks.length
-    : portalActiveTaskCount(portal);
-  const sellerSubmittedTaskCount = Number(approvalWorkflow.analytics?.pendingCount || portal.draftSummary?.approvalPendingCount || 0);
+  const sellerActiveTaskCount = (approvalWorkflow.tasks?.length || 0) + automaticTasks.filter((task) => !["approved", "done", "skipped"].includes(task.status)).length;
+  const sellerSubmittedTaskCount = Number(approvalWorkflow.analytics?.pendingCount || 0) + automaticTasks.filter((task) => task.status === "submitted").length;
   const contentPublicationLoading = ["api-loading", "table-loading"].includes(contentPublicationStatus);
   const wbApiPublicationAvailable = Boolean(portal.apiConnected || portal.mode === "api" || portal.syncStatus === "stored-token" || portal.syncStatus === "loaded");
   const contentPublicationSummary = contentPublicationPreview?.summary || null;
@@ -13460,6 +13533,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                onOpenCard={(card) => onOpenCard(card, { sellerTab: "cabinet", backLabel: "Карточки" })}
 	                onWorkflowChange={replaceApprovalWorkflow}
 	                onWorkPeriodChange={replaceSellerWorkPeriod}
+	                onAutomaticTasksCreated={(tasks) => { setAutomaticTasks(tasks); setSellerTab("tasks"); }}
 	              />
             </section>
             <details className="cabinet-route">
@@ -13488,6 +13562,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               </>
             ) : null}
             {activeSellerTab === "tasks" ? (
+              <>
+              <WbAutomaticTasksPanel portalId={portal.id} tasks={automaticTasks} status={automaticTaskStatus}
+                onReload={loadAutomaticTasks} workPeriods={workPeriods} workPeriodsStatus={workPeriodsStatus}
+                onLink={linkApprovalTaskGroupToWorkPeriod} onCreate={() => { setSellerTab("cabinet"); onNotice?.("Выберите карточки, нажмите «Взять в работу» и выберите «Автоматическая оптимизация»."); }} />
               <ApprovalWorkflowPanel
                 portalId={portal.id}
                 workflow={approvalWorkflow}
@@ -13506,6 +13584,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	                workPeriodsStatus={workPeriodsStatus}
 	                helpEnabled={helpEnabled}
 	              />
+              </>
             ) : null}
             {activeSellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
@@ -14613,7 +14692,7 @@ function defaultWorkPackageForm() {
   return { workTypes: ["content"], title: "", comment: "", workPeriodLink: "", workPeriodLinks: [] };
 }
 
-function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workPeriods = [], workPeriodsStatus = "idle", onOpenCard, onWorkflowChange, onWorkPeriodChange }) {
+function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workPeriods = [], workPeriodsStatus = "idle", onOpenCard, onWorkflowChange, onWorkPeriodChange, onAutomaticTasksCreated }) {
   const storageKey = `opticards-workset:${portal?.id || "portal"}`;
   const [query, setQuery] = useState("");
   const [bulkFilterText, setBulkFilterText] = useState("");
@@ -14857,6 +14936,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
 	          portalId: portal.id,
 	          cards: selectedCards.map(cardWorksetPayload),
 	          workTypes,
+	          optimizationMode: options.optimizationMode || "manual",
 	          title: String(options.title || "").trim(),
 	          comment: String(options.comment || "").trim(),
 	          workPeriodLinks: linkTargets,
@@ -14876,6 +14956,7 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
 	      }
 	      setWorkPackageOpen(false);
 	      setWorkPackageForm(defaultWorkPackageForm());
+      if (Array.isArray(payload.automaticTasks)) onAutomaticTasksCreated?.(payload.automaticTasks);
       setBatchStatus("created");
     } catch {
       setBatchStatus("error");
@@ -15030,6 +15111,10 @@ function CardsTable({ cards, portal, workflow = defaultApprovalWorkflow(), workP
           onChange={setWorkPackageForm}
           onClose={() => setWorkPackageOpen(false)}
           onSubmit={(nextValue) => createWorkPackage(nextValue)}
+          allowAutomatic
+          automaticAvailable={Boolean(portal.apiConnected)}
+          apiSourceName="WB API"
+          error={batchStatus === "error" ? "Не удалось создать задачу и привязать её к плану. Проверьте выбранные пункты и повторите." : ""}
         />
       ) : null}
 
@@ -15147,7 +15232,7 @@ function WorkPeriodTaskLinkPicker({ options = [], value = "", values = [], multi
   );
 }
 
-function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit, allowAutomatic = false, automaticAvailable = true, error = "" }) {
+function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsStatus = "idle", loading, onChange, onClose, onSubmit, allowAutomatic = false, automaticAvailable = true, apiSourceName = "Ozon Seller API", error = "" }) {
   const workTypes = normalizeWorkTypes(value.workTypes);
   const title = value.title || "";
   const comment = value.comment || "";
@@ -15192,7 +15277,7 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
               <option value="manual">Ручная работа</option><option value="automatic" disabled={!automaticAvailable}>Автоматическая оптимизация</option>
             </select>
           </label> : null}
-          {allowAutomatic && !automaticAvailable ? <p className="status-note">Для автоматической оптимизации подключите Ozon Seller API в настройках кабинета.</p> : null}
+          {allowAutomatic && !automaticAvailable ? <p className="status-note">Для автоматической оптимизации подключите {apiSourceName} в настройках кабинета.</p> : null}
           {error ? <p role="alert" className="status-note error">{error}</p> : null}
           <div className="work-type-picker">
             {workTypeOptions.map((option) => (
@@ -15238,6 +15323,8 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
 }
 
 function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriodsStatus = "idle", loading, onClose, onSubmit }) {
+  const [saveError, setSaveError] = useState("");
+  const [saving, setSaving] = useState(false);
   const periodTaskOptions = workPeriodTaskLinkOptions(workPeriods);
   const groupTaskIds = [group?.key].filter(Boolean);
   const groupBatchIds = groupTaskIds.length ? [] : [group?.batchId].filter(Boolean);
@@ -15250,9 +15337,12 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
     const availableValues = new Set(periodTaskOptions.map((option) => option.value));
     setSelectedValues((current) => current.filter((item) => availableValues.has(item)));
   }, [optionSignature]);
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    onSubmit(parseWorkPeriodTaskLinkValues(selectedValues));
+    setSaveError(""); setSaving(true);
+    try { await onSubmit(parseWorkPeriodTaskLinkValues(selectedValues)); }
+    catch { setSaveError("Не удалось сохранить привязку. Выбранные пункты сохранены в окне; повторите попытку."); }
+    finally { setSaving(false); }
   };
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
@@ -15275,8 +15365,9 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
               emptyLabel="Снять привязку"
               emptyDescription="Задача останется в кабинете, но исчезнет из пунктов плана."
               onChange={setSelectedValues}
-              disabled={loading || workPeriodsStatus === "loading" || !periodTaskOptions.length}
+              disabled={loading || saving || workPeriodsStatus === "loading" || !periodTaskOptions.length}
             />
+            {saveError ? <p role="alert">{saveError}</p> : null}
           </div>
           {!periodTaskOptions.length ? (
             <p className="status-note">{workPeriodsStatus === "loading" ? "Загружаем отчетные периоды..." : "Нет активного отчетного периода с пунктами плана."}</p>
@@ -15284,8 +15375,8 @@ function WorkPeriodTaskLinkModal({ group, workType, workPeriods = [], workPeriod
         </div>
         <div className="modal-actions">
           <button className="btn ghost" type="button" onClick={onClose} disabled={loading}>Отмена</button>
-          <button className={loadingButtonClass("btn primary", loading)} type="submit" disabled={loading || !periodTaskOptions.length} aria-busy={loading || undefined}>
-            {loading ? "Сохраняем" : (selectedValues.length ? "Сохранить" : "Снять привязку")}
+          <button className={loadingButtonClass("btn primary", loading || saving)} type="submit" disabled={loading || saving || !periodTaskOptions.length} aria-busy={loading || saving || undefined}>
+            {loading || saving ? "Сохраняем" : (selectedValues.length ? "Сохранить" : "Снять привязку")}
           </button>
         </div>
       </form>
@@ -22300,15 +22391,16 @@ function ozonPortalErrorText(errorObject) {
   return "Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.";
 }
 
-function PortalModal({ mode, users, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
+function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
   const isReplacement = Boolean(targetPortal);
+  const initialTeam = currentUser?.login === "anastasia.tech" ? { ...defaultTeamFromUsers(users), tech: currentUser.login } : {};
   const [form, setForm] = useState({
     name: "",
     marketplace: "",
     scope: "",
-    lead: "",
-    tech: "",
-    manager: "",
+    lead: initialTeam.lead || "",
+    tech: initialTeam.tech || "",
+    manager: initialTeam.manager || "",
     apiKey: "",
     clientId: "",
     testSkus: "",
@@ -22547,7 +22639,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
       <form className="modal ozon-connect-modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
-            <h2>Подключить Ozon beta</h2>
+            <h2>Подключить Ozon</h2>
             <p>{client.name}: выберите подключение через Seller API или источник для MPStats.</p>
           </div>
           <IconButton icon={X} label="Закрыть" onClick={onClose} disabled={loading} />
