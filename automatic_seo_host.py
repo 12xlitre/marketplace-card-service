@@ -546,7 +546,7 @@ class BitrixSeoNotifications:
             return bool(db.execute("SELECT 1 FROM users WHERE login='anastasia.tech' AND is_active=1").fetchone())
 
     def enqueue(self, portal, batch, version):
-        if version.get('status') not in {'review', 'partial', 'failed', 'interrupted'} or not self.configured() or not self.assigned(portal):
+        if version.get('status') not in {'review', 'partial', 'failed', 'interrupted'} or (not self.configured() and not version.get('_resumeIntentId')) or not self.assigned(portal):
             return
         row = self.server.get_portal_row(portal)
         if row is None:

@@ -97,6 +97,19 @@ class SeoNotificationsTest(unittest.TestCase):
             self.assertEqual(host.bitrix_notification_request(HOOK,'im.notify.system.add',{'USER_ID':91}),123)
         sleep.assert_called_once_with(2)
 
+    def test_authorized_handoff_can_queue_until_connection_is_configured(self):
+        self.ready();self.notifier.disconnect()
+        self.notifier.enqueue(self.portal,'batch',{**self.version,'_resumeIntentId':123})
+        path=self.notifier.service.directory(self.portal,'batch')/'bitrix-notification-v2.json'
+        self.assertEqual(json.loads(path.read_text())['status'],'pending')
+        with patch.object(host,'bitrix_notification_request') as send:
+            self.notifier.process();send.assert_not_called()
+        with patch.object(host,'bitrix_notification_request',return_value=['im']):
+            self.notifier.configure(HOOK,self.admin)
+        with patch.object(host,'bitrix_notification_request',return_value=12) as send:
+            self.notifier.process();self.assertEqual(send.call_count,1)
+        self.assertEqual(json.loads(path.read_text())['status'],'sent')
+
 
 class CompletionHookIsolationTest(unittest.TestCase):
     def test_notification_failure_cannot_change_completed_seo_or_lose_file(self):
