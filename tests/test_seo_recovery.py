@@ -347,7 +347,7 @@ class AdditionalContextTest(unittest.TestCase):
                                         'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
                     calls.append(deepcopy(data))
                     self.assertEqual('Предыдущий ответ содержал' in messages[0]['content'], len(calls)%2==0)
-                    return payload(invalid if len(calls)%2 else {'additionalKeywords':[good]})
+                    return payload(invalid if len(calls)%2 else {'additionalDecision':{k:v for k,v in good.items() if k != 'sourcePhrase'}})
                 with patch.object(self.host, 'audit_llm_chat_completion', side_effect=model):
                     first = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
                     second = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
@@ -356,10 +356,98 @@ class AdditionalContextTest(unittest.TestCase):
                     self.assertEqual(first['additionalKeywords'], [good])
                     responses = {k:v for k,v in cache.items() if k.startswith('response:additional-plan:')}
                     self.assertEqual(len(responses), 2)
-                    self.assertTrue(all(bool(v.get('validated'))==k.endswith(':repair-v1') for k,v in responses.items()))
+                    self.assertTrue(all(bool(v.get('validated'))==k.endswith(':repair-single-v2') for k,v in responses.items()))
                     changed = deepcopy(evidence);changed['ownEvidence']['title'] = 'Другой товар'
                     self.service.plan_in_parts('План', changed, {'sku':'1001'}, cache)
                     self.assertEqual(len(calls), 4)
+
+    def test_single_additional_repair_uses_one_model_decision_and_trusted_candidate(self):
+        for decision in ('адаптировать', 'исключить'):
+            with self.subTest(decision=decision):
+                evidence = self.evidence(1);evidence['keywordIds'] = {}
+                good = {'outputPhrase':'новый смысл' if decision != 'исключить' else '',
+                        'decision':decision, 'reason':'Назначение проверено по собственным фактам.'}
+                calls, cache = [], {}
+                def model(messages, schema):
+                    data = json.loads(messages[1]['content'])
+                    if 'semanticCandidates' not in data:
+                        return payload({'compatibility':{'comparable':True,'reason':'Назначение'},
+                                        'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
+                    calls.append((data, deepcopy(schema)))
+                    if len(calls) == 1:
+                        return payload({'additionalKeywords':[dict(good, sourcePhrase='запрос 0', outputPhrase=p)
+                                                              for p in ('вариант 1','вариант 2')]})
+                    self.assertEqual(schema, automatic_seo.schema_object({'additionalDecision':automatic_seo.KEYWORD_DECISION_SCHEMA}))
+                    self.assertIn('ровно одно окончательное решение', messages[0]['content'])
+                    return payload({'additionalDecision':good})
+                with patch.object(self.host, 'automatic_seo_chat_completion', side_effect=model, create=True):
+                    result = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+                    replay = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(result, replay)
+                self.assertEqual(result['additionalKeywords'], [] if decision == 'исключить' else [dict(good, sourcePhrase='запрос 0')])
+                self.assertEqual(calls[0][0]['ownEvidence'], calls[1][0]['ownEvidence'])
+                self.assertEqual(calls[0][0]['semanticCandidates'], calls[1][0]['semanticCandidates'])
+                self.assertEqual(calls[0][0]['selectedKeywords'], calls[1][0]['selectedKeywords'])
+
+    def test_single_additional_repair_rejects_alternatives_bad_fields_and_duplicate_json_keys(self):
+        good = {'outputPhrase':'дополнение','decision':'адаптировать','reason':'Факт подтверждён.'}
+        invalid = [
+            {'additionalKeywords':[dict(good,sourcePhrase='запрос 0')]},
+            {'additionalDecision':[good,dict(good,outputPhrase='другая версия')]},
+            {'additionalDecision':dict(good,sourcePhrase='чужой запрос')},
+            {'additionalDecision':dict(good,reason='')},
+            {'additionalDecision':dict(good,outputPhrase='')},
+            '{"additionalDecision":{"outputPhrase":"первая","outputPhrase":"вторая","decision":"адаптировать","reason":"Факт"}}',
+            '{"additionalDecision":'+json.dumps(good)+',"additionalDecision":'+json.dumps(dict(good,decision='исключить'))+'}',
+        ]
+        for bad in invalid:
+            with self.subTest(bad=bad):
+                evidence = self.evidence(1);evidence['keywordIds'] = {}
+                calls, cache = [], {}
+                def model(messages):
+                    data = json.loads(messages[1]['content'])
+                    if 'semanticCandidates' not in data:
+                        return payload({'compatibility':{'comparable':True,'reason':'Назначение'},
+                                        'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
+                    calls.append(data)
+                    if len(calls)==1:
+                        return payload({'additionalKeywords':[dict(good,sourcePhrase='запрос 0',outputPhrase=p) for p in ('один','два')]})
+                    if isinstance(bad,str):
+                        return {'choices':[{'message':{'content':bad},'finish_reason':'stop'}]},'fake','fake'
+                    return payload(bad)
+                with patch.object(self.host, 'audit_llm_chat_completion', side_effect=model):
+                    with self.assertRaisesRegex(SeoError, 'seo_keyword_decisions_incomplete') as caught:
+                        self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+                self.assertEqual(len(calls),2)
+                self.assertTrue(caught.exception.details['additionalRepairAttempted'])
+                self.assertFalse(any(v.get('validated') for k,v in cache.items() if k.startswith('response:additional-plan:')))
+
+    def test_single_additional_repair_resumes_marker_without_replaying_prior_list_repair(self):
+        evidence = self.evidence(1);evidence['keywordIds'] = {}
+        good = {'outputPhrase':'дополнение','decision':'адаптировать','reason':'Свой факт.'}
+        bad = {'additionalKeywords':[dict(good,sourcePhrase='запрос 0',outputPhrase=p) for p in ('один','два')]}
+        cache, calls, fail = {}, [], [True]
+        def model(messages):
+            data = json.loads(messages[1]['content'])
+            if 'semanticCandidates' not in data:
+                return payload({'compatibility':{'comparable':True,'reason':'Назначение'},
+                                'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
+            calls.append(data)
+            return payload(bad if fail[0] else {'additionalDecision':good})
+        with patch.object(self.host,'audit_llm_chat_completion',side_effect=model):
+            with self.assertRaises(SeoError):
+                self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+            single_key = next(k for k in cache if k.startswith('response:additional-plan:') and k.endswith(':repair-single-v2'))
+            prior_key = single_key.replace(':repair-single-v2',':repair-v1')
+            cache[prior_key] = cache.pop(single_key)
+            fail[0] = False
+            result = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(sum('previousProblem' not in data for data in calls),1)
+        self.assertFalse(cache[prior_key].get('validated'))
+        self.assertTrue(cache[single_key]['validated'])
+        self.assertEqual(result['additionalKeywords'],[dict(good,sourcePhrase='запрос 0')])
 
     def test_additional_correction_cannot_replay_unvalidated_or_pay_during_offline_recheck(self):
         evidence = self.evidence(1);evidence['keywordIds'] = {}

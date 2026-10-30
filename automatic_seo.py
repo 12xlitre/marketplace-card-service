@@ -1262,13 +1262,52 @@ class AutomaticSeoService:
                 correction = cache.get(repair_marker)
                 correcting = isinstance(correction, dict) and correction.get('code') in {'seo_keyword_source_missing', 'seo_keyword_decisions_incomplete'}
                 for _ in range(1 if correcting else 2):
-                    response_key = key + ':repair-v1' if correcting else key
+                    single = correcting and len(candidates) == 1
+                    response_key = key + (':repair-single-v2' if single else ':repair-v1') if correcting else key
                     request_data = dict(data, previousProblem=correction['code'], invalidAdditionalKeywords=correction['rows']) if correcting else data
-                    response = self.chat(repair_instruction if correcting else instruction,
-                        request_data, journal=cache, journal_key=response_key, response_schema=schema,
+                    request_instruction = repair_instruction if correcting else instruction
+                    request_schema = schema
+                    if single:
+                        request_schema = schema_object({'additionalDecision': KEYWORD_DECISION_SCHEMA})
+                        request_instruction = ('Предыдущий ответ содержал неполные или противоречивые решения. '
+                            'Сейчас semanticCandidates содержит ровно один запрос. Проверь его только по ownEvidence: '
+                            'даёт ли он дополнительный подтверждённый смысл, которого ещё нет в selectedKeywords. '
+                            'Не добавляй чужие свойства и перестановки уже выбранных слов. '
+                            'invalidAdditionalKeywords — ошибочные варианты прежнего ответа, а не подтверждённые факты. '
+                            'Верни один объект additionalDecision с decision, outputPhrase и непустым reason по нашим фактам. '
+                            'Дай ровно одно окончательное решение, без списков или альтернатив. '
+                            'Если запрос не добавляет подтверждённого смысла, decision: исключить, outputPhrase: пустая строка; '
+                            'в reason объясни причину. Иначе outputPhrase должна быть непустой. '
+                            'Исходную фразу возьмём из единственного semanticCandidates; не создавай sourcePhrase.')
+                    response = self.chat(request_instruction,
+                        request_data, journal=cache, journal_key=response_key, response_schema=request_schema,
                         retry_truncated=False, before_request=repair_progress if correcting else before_request)
                     try:
+                        if single:
+                            # A single object cannot represent competing rows. Reject duplicate
+                            # JSON keys too, rather than letting a parser silently pick one.
+                            saved = cache.get(response_key)
+                            if isinstance(saved, dict) and isinstance(saved.get('content'), str):
+                                def unique_object(pairs):
+                                    value = {}
+                                    for name, item in pairs:
+                                        if name in value:
+                                            raise ValueError('duplicate_key')
+                                        value[name] = item
+                                    return value
+                                try:
+                                    response = json.loads(saved['content'], object_pairs_hook=unique_object)
+                                except (ValueError, TypeError):
+                                    raise SeoError('seo_keyword_decisions_incomplete', details={'singleAdditionalDecisionInvalid': True}) from None
+                            row = response.get('additionalDecision') if isinstance(response, dict) else None
+                            if (not isinstance(response, dict) or set(response) != {'additionalDecision'}
+                                    or not isinstance(row, dict) or set(row) != set(KEYWORD_DECISION_SCHEMA['properties'])
+                                    or (row.get('decision') != 'исключить' and not str(row.get('outputPhrase') or '').strip())):
+                                raise SeoError('seo_keyword_decisions_incomplete', details={'singleAdditionalDecisionInvalid': True})
+                            response = {'additionalKeywords': [dict(row, sourcePhrase=candidates[0]['query'])]}
                         extra = checked(response)
+                        if single and extra[0]['decision'] == 'исключить':
+                            extra = []
                     except SeoError as exc:
                         if correcting:
                             exc.details['additionalRepairAttempted'] = True
