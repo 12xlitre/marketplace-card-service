@@ -34,6 +34,14 @@ test('46 prepared cards out of 58 cannot show 100 percent readiness', () => {
   assert.equal(p.complete, false);
   assert.equal(p.remaining, null);
 });
+test('preserved results do not count as observations for retry ETA', () => {
+  const version = { ...base, done: 46, completedCount: 46,
+    continuation: { preservedCount: 46, startedAt: started } };
+  assert.equal(seoProgress(version, now).remaining, null);
+  assert.equal(seoProgress({ ...version, done: 47 }, now).remaining, null);
+  const p = seoProgress({ ...version, done: 48 }, now);
+  assert.deepEqual(p.remaining, [1950, 4500]);
+});
 test('bad counters and impossible query numbers cannot overflow progress', () => {
   const p = seoProgress({ ...base, done: 1000, stage: 'Проверка запросов 999–1000 из 245: 123' }, now);
   assert.equal(p.done, 58); assert.equal(p.percentage, 99); assert.equal(p.query.done, 245);

@@ -34,7 +34,7 @@ export default function SeoGenerationProgress({ version }) {
         {elapsedSeconds !== null ? <span>{running ? "Прошло" : "Затрачено"}: {formatSeoDuration(elapsedSeconds)}</span> : null}
         {running ? <span>{assembling ? "Осталась подготовка файла" : remaining
           ? `Осталось примерно ${formatSeoDuration(remaining[0])} – ${formatSeoDuration(remaining[1])}`
-          : "Оценим оставшееся время после первых двух карточек"}</span> : null}
+          : "Оценим оставшееся время после первых двух карточек этого запуска"}</span> : null}
       </div>
       {running ? <p className="status-note">Можно перейти в другой раздел или закрыть страницу — подготовка продолжится на сервере. Оценка времени уточняется по скорости обработки.</p> : null}
     </div>

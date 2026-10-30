@@ -5296,16 +5296,25 @@ def automatic_seo_handoff_report(portal, batch, user):
   with service.lock(directory):
     version = service.load(directory)['versions'][-1]
   from automatic_seo import fingerprint
+  paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
+  latest_checkpoint = json.loads(paths[-1].read_text()) if paths else None
   preservation = version.get('_preservation')
   if preservation:
     manifest = {'preservedResults': preservation['resultHashes'], 'savedAt': preservation['savedAt']}
   else:
-    paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
-    if not paths:
+    if not latest_checkpoint:
       raise ValueError("seo_checkpoint_missing")
-    manifest = json.loads(paths[-1].read_text())
+    manifest = latest_checkpoint
   preserved = manifest['preservedResults']
   unchanged = [sku for sku,digest in preserved.items() if sku in version['results'] and fingerprint(version['results'][sku])==digest]
+  checkpoint_report = {}
+  if latest_checkpoint and latest_checkpoint.get('version') == version['number']:
+    checkpoint_hashes = latest_checkpoint['preservedResults']
+    unchanged_checkpoint = sum(sku in version['results'] and fingerprint(version['results'][sku]) == digest
+                               for sku, digest in checkpoint_hashes.items())
+    checkpoint_report = {'latestHandoff': {'preservedCount':len(checkpoint_hashes),
+        'unchangedCount':unchanged_checkpoint,'allPreserved':unchanged_checkpoint==len(checkpoint_hashes),
+        'doneAtCheckpoint':latest_checkpoint['done'],'savedAt':latest_checkpoint['savedAt']}}
   return {"version":version['number'],"status":version['status'],"done":version['done'],"total":version['total'],
           "completedCount":len(version['results']),"workers":version.get('workers',1),"maxConcurrentRequests":LLM_CONCURRENT_REQUESTS,
           "preservedSkus":list(preserved),"unchangedCount":len(unchanged),"allPreserved":len(unchanged)==len(preserved),
@@ -5314,6 +5323,7 @@ def automatic_seo_handoff_report(portal, batch, user):
           "preservedFromVersion":preservation['fromVersion'] if preservation else version['number'],
           **({"sourcePreserved":version.get('sourceCapturedAt')==preservation['sourceCapturedAt']
                                   and fingerprint(version.get('cards'))==preservation['cardsHash']} if preservation else {}),
+          **checkpoint_report,
           "errors":[{"sku":e['sku'],"code":e['code']} for e in version.get('errors',[])]}
 
 

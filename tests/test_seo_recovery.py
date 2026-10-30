@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 
 import server
 import automatic_seo
-from automatic_seo import AutomaticSeoService, SeoError, card_budget_seconds, remember_valid_response, fingerprint
+from automatic_seo import AutomaticSeoService, CardCache, SeoError, card_budget_seconds, remember_valid_response, fingerprint
 import test_automatic_seo as fixtures
 
 
@@ -44,15 +44,18 @@ class SeoRecoveryTest(unittest.TestCase):
             return payload({k: {'destination': 'не добавлять', 'outputPhrase': '',
                                'reason': 'Запрос дублирует уже объяснённое назначение товара в описании.'} for k in queries})
         cache = {}
+        progress = []
         with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
-            assessments = self.service.assess_semantics(own, src, cache)
+            assessments = self.service.assess_semantics(own, src, cache, progress.append)
             result = fixtures.generated()
             result.update(sources=src, semanticDecisions=[dict(r, destination='не добавлять') for r in assessments])
-            self.service.explain_unplaced_semantics(own, result, cache)
+            self.service.explain_unplaced_semantics(own, result, cache, progress.append)
             before = len(calls)
-            self.assertEqual(assessments, self.service.assess_semantics(own, src, cache))
-            self.service.explain_unplaced_semantics(own, result, cache)
+            progress.clear()
+            self.assertEqual(assessments, self.service.assess_semantics(own, src, cache, progress.append))
+            self.service.explain_unplaced_semantics(own, result, cache, progress.append)
             self.assertEqual(before, len(calls))
+            self.assertEqual(progress, [], 'Cached reads must not rewrite the large private snapshot')
         self.assertEqual([r['query'] for r in assessments], [r['query'] for r in src['semantic']])
         self.assertEqual(len(result['semanticDecisions']), 1001)
         self.assertTrue(all(r['placementReviewed'] for r in result['semanticDecisions']))
@@ -181,6 +184,87 @@ class ProviderCooldownTest(unittest.TestCase):
         self.assertEqual(card_budget_seconds(0), 3600)
         self.assertGreater(card_budget_seconds(961), 3600)
         self.assertEqual(card_budget_seconds(100000), 14400)
+
+
+class CacheAndPollingTest(unittest.TestCase):
+    def test_handoff_report_checks_both_original_retry_and_latest_saved_checkpoint(self):
+        case = fixtures.AutomaticSeoTest()
+        case.setUp()
+        try:
+            case.host.fail_sku = '1002'
+            case.action()
+            case.finish()
+            case.host.fail_sku = None
+            case.action(version=1)
+            case.finish()
+            directory = case.service.directory(1, 'batch')
+            version = case.service.load(directory)['versions'][-1]
+            checkpoint = directory / 'checkpoints' / 'handoff-test'
+            checkpoint.mkdir(parents=True)
+            (checkpoint / 'manifest.json').write_text(json.dumps({'version':2,'done':2,'savedAt':version['finishedAt'],
+                'preservedResults':{sku:fingerprint(result) for sku,result in version['results'].items()}}))
+            with patch.object(server, 'automatic_seo_service', return_value=case.service), patch.object(server, 'user_is_admin', return_value=True):
+                report = server.automatic_seo_handoff_report(1, 'batch', case.tech)
+            self.assertEqual(report['unchangedCount'], 1)
+            self.assertEqual(report['latestHandoff']['unchangedCount'], 2)
+            self.assertTrue(report['latestHandoff']['allPreserved'])
+            with patch.object(server, 'user_is_admin', return_value=False):
+                with self.assertRaises(PermissionError):
+                    server.automatic_seo_handoff_report(1, 'batch', case.tech)
+        finally:
+            case.tearDown()
+
+    def test_card_cache_copies_only_used_entries_and_isolates_nested_writes(self):
+        class Unrelated:
+            def __deepcopy__(self, memo):
+                raise AssertionError('Another card\'s data must not be copied')
+        source = {'other-card': Unrelated(), 'own-card': {'rows': [1]}}
+        first, second = CardCache(source), CardCache(source)
+        self.assertIn('other-card', first)
+        self.assertEqual(len(list(first.materialized_items())), 0)
+        first['own-card']['rows'].append(2)
+        self.assertEqual(source['own-card']['rows'], [1])
+        self.assertEqual(second['own-card']['rows'], [1])
+        self.assertEqual(first.baseline_hashes['own-card'], fingerprint({'rows': [1]}))
+        source['own-card'] = {'rows': [9]}
+        self.assertEqual(first['own-card']['rows'], [1, 2])
+        first['new'] = {'rows': []}
+        self.assertEqual({key for key, _ in first.materialized_items()}, {'own-card', 'new'})
+        del first['other-card']
+        self.assertNotIn('other-card', first)
+        self.assertEqual(len(first), 2)
+
+    def test_live_metadata_read_does_not_wait_for_private_state_writer(self):
+        case = fixtures.AutomaticSeoTest()
+        case.setUp()
+        release, locked, read = threading.Event(), threading.Event(), threading.Event()
+        case.host.gate = threading.Event()
+        threads = []
+        try:
+            case.action()
+            directory = case.service.directory(1, 'batch')
+            def writer():
+                with case.service.lock(directory):
+                    locked.set()
+                    release.wait(5)
+            def reader():
+                result = case.service.view(1, 'batch', case.tech)
+                self.assertEqual(result['versions'][-1]['status'], 'running')
+                read.set()
+            threads.append(threading.Thread(target=writer))
+            threads[0].start()
+            self.assertTrue(locked.wait(2))
+            threads.append(threading.Thread(target=reader))
+            threads[1].start()
+            self.assertTrue(read.wait(1), 'Progress read was blocked by private state persistence')
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(5)
+            case.host.gate.set()
+            if (case.service.directory(1, 'batch') / 'state.json').exists():
+                case.finish()
+            case.tearDown()
 
 
 class LargeBatchRecoveryTest(unittest.TestCase):

@@ -24,11 +24,15 @@ export function seoProgress(version, now = Date.now()) {
   const finished = Date.parse(version.finishedAt);
   const elapsedSeconds = Number.isFinite(started) ? Math.max(0, ((Number.isFinite(finished) ? finished : now) - started) / 1000) : null;
   const timings = (version.cardDurations || []).map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  const preserved = Math.min(total, count(version.continuation?.preservedCount));
+  const completedThisRun = Math.max(0, done - preserved);
+  const continued = Date.parse(version.continuation?.startedAt);
+  const observedElapsed = Number.isFinite(continued) ? Math.max(0, (now - continued) / 1000) : elapsedSeconds;
   let remaining = null;
-  if (running && done >= 2 && done < total && elapsedSeconds > 0) {
+  if (running && completedThisRun >= 2 && done < total && observedElapsed > 0) {
     const average = timings.length >= 2
       ? timings.slice(-8).reduce((sum, value) => sum + value, 0) / Math.min(timings.length, 8)
-      : elapsedSeconds / done;
+      : observedElapsed / completedThisRun;
     const lanes = timings.length >= 2 ? Math.max(1, Math.min(4, count(version.workers) || 1)) : 1;
     const estimate = average * (total - done) / lanes;
     remaining = [Math.max(60, estimate * 0.65), Math.max(120, estimate * 1.5)];

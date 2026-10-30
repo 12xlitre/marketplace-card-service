@@ -1,5 +1,6 @@
 """Versioned, read-only Ozon SEO reports. Marketplace writes are never performed."""
 from collections import Counter
+from collections.abc import MutableMapping
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -72,6 +73,46 @@ def remember_valid_response(cache, key):
     saved = cache.get(key)
     if isinstance(saved, dict) and saved.get('requestHash'):
         saved['validated'] = True
+
+
+class CardCache(MutableMapping):
+    """A stable shallow snapshot; isolate only entries actually used by this card."""
+    def __init__(self, source):
+        self._source = dict(source)
+        self._values, self.baseline_hashes, self._deleted = {}, {}, set()
+
+    def __getitem__(self, key):
+        if key in self._deleted:
+            raise KeyError(key)
+        if key not in self._values:
+            value = self._source[key]
+            self.baseline_hashes[key] = fingerprint(value)
+            self._values[key] = deepcopy(value)
+        return self._values[key]
+
+    def __setitem__(self, key, value):
+        if key in self._source and key not in self.baseline_hashes:
+            self.baseline_hashes[key] = fingerprint(self._source[key])
+        self._deleted.discard(key)
+        self._values[key] = value
+
+    def __delitem__(self, key):
+        if key not in self:
+            raise KeyError(key)
+        self._values.pop(key, None)
+        self._deleted.add(key)
+
+    def __contains__(self, key):
+        return key not in self._deleted and (key in self._values or key in self._source)
+
+    def __iter__(self):
+        return iter((self._source.keys() | self._values.keys()) - self._deleted)
+
+    def __len__(self):
+        return len((self._source.keys() | self._values.keys()) - self._deleted)
+
+    def materialized_items(self):
+        return self._values.items()
 
 
 def normalized(value):
@@ -260,19 +301,20 @@ class AutomaticSeoService:
     def view(self, portal, batch, user):
         context = self.context(portal, batch, user)
         directory = self.directory(portal, batch)
-        with self.lock(directory):
-            state = self.metadata(directory)
-            if state['versions'] and state['versions'][-1]['status'] == 'running':
-                try:
-                    with self.lock(directory, 'run.lock', blocking=False):
+        # Metadata is atomically replaced. Live polling never needs the large private-state writer lock.
+        state = self.metadata(directory)
+        if state['versions'] and state['versions'][-1]['status'] == 'running':
+            try:
+                with self.lock(directory, 'run.lock', blocking=False):
+                    with self.lock(directory):
                         state = self.load(directory)
                         if state['versions'][-1]['status'] == 'running':
                             state['versions'][-1]['status'] = 'interrupted'
                             state['versions'][-1]['stage'] = 'Подготовка прервана; можно продолжить'
                         self.save(directory, state)
-                except BlockingIOError:
-                    pass
-            return self.public(state, context)
+            except BlockingIOError:
+                pass
+        return self.public(state, context)
 
     def action(self, portal, batch, user, payload):
         context = self.context(portal, batch, user, edit=True)
@@ -546,7 +588,7 @@ class AutomaticSeoService:
             self.update(directory, version, portal, batch, user)
 
             def merge_cache(local_cache, baseline_hashes):
-                for key, value in local_cache.items():
+                for key, value in local_cache.materialized_items():
                     if baseline_hashes.get(key) == fingerprint(value):
                         continue
                     if key.startswith('envelopes:') and isinstance(value, list):
@@ -564,8 +606,8 @@ class AutomaticSeoService:
                 initial_queue_time = queue_time()
                 card_budget = card_budget_seconds(0)
                 with writer:
-                    local_cache = deepcopy(cache)
-                baseline_hashes = {key: fingerprint(value) for key, value in local_cache.items()}
+                    local_cache = CardCache(cache)
+                baseline_hashes = local_cache.baseline_hashes
                 try:
                     trace_start = getattr(self.host, 'mpstats_call_context_start', None)
                     if trace_start:
@@ -687,7 +729,7 @@ class AutomaticSeoService:
         }, ensure_ascii=False))
         return record
 
-    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True):
+    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True, before_request=None):
         request_hash = fingerprint({'instruction': instruction, 'evidence': evidence,
                                     'schema': response_schema, 'rawText': raw_text})
         if not reuse_response and journal is not None and journal_key:
@@ -709,6 +751,8 @@ class AutomaticSeoService:
             retryable.discard('seo_llm_response_truncated')
         for attempt in range(2):
             try:
+                if before_request and not reuse_response:
+                    before_request()
                 prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
                 result = self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text)
                 if not reuse_response and journal is not None and journal_key and journal_key in journal:
@@ -736,8 +780,6 @@ class AutomaticSeoService:
                 cache[key] = True
         middle = len(items) // 2
         left = self.split_model_batch(items[:middle], call, merge, progress, cache, scope)
-        if progress:
-            progress('Сохранение проверенной части запросов')
         right = self.split_model_batch(items[middle:], call, merge, progress, cache, scope)
         return merge(left, right)
 
@@ -856,6 +898,7 @@ class AutomaticSeoService:
 
     def assess_semantics(self, card, sources, cache, progress=None, reuse_responses=False):
         queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
+        positions = {query: i for i, query in enumerate(queries)}
         def assess(batch):
             key = 'semantic-relevance-v3:' + fingerprint({'facts': factual_evidence(card), 'queries': batch})
             if key not in cache:
@@ -866,7 +909,8 @@ class AutomaticSeoService:
                     'Нельзя пропускать идентификаторы. Не переписывай запросы: они уже сопоставлены с идентификаторами. '
                     'Не выбирай по частотности. Не приписывай товару чужой цвет, размер, модель, комплектацию. Не генерируй описание.',
                     {'ownFacts': factual_evidence(card), 'semanticBatch': labeled}, journal=cache, journal_key='response:' + key,
-                    reuse_response=reuse_responses, retry_truncated=False)
+                    reuse_response=reuse_responses, retry_truncated=False,
+                    before_request=(lambda: progress(f'Проверка запросов {positions[batch[0]] + 1}–{positions[batch[0]] + len(batch)} из {len(queries)}')) if progress else None)
                 if set(response) != set(labeled):
                     raise SeoError('seo_semantic_decisions_incomplete', details={
                         'expectedQueries': len(batch), 'receivedQueries': len(set(response) & set(labeled)),
@@ -883,8 +927,6 @@ class AutomaticSeoService:
             return deepcopy(cache[key])
         decisions = []
         for offset in range(0, len(queries), 32):
-            if progress:
-                progress(f'Проверка запросов {offset + 1}–{min(offset + 32, len(queries))} из {len(queries)}')
             decisions.extend(self.split_model_batch(queries[offset:offset + 32], assess, lambda a, b: a + b, progress,
                 cache, {'stage': 'relevance-v3', 'facts': factual_evidence(card)}))
         return decisions
@@ -926,6 +968,7 @@ class AutomaticSeoService:
         """Review omissions against final text; never invent a witness or an exclusion reason."""
         result['issues'] = [i for i in result['issues'] if i.get('code') != 'semantic_placement_unresolved']
         pending = [r for r in result['semanticDecisions'] if r['relevance'] == 'релевантен' and r['destination'] in {'не добавлять', 'требует решения'}]
+        positions = {row['query']: i for i, row in enumerate(pending)}
         texts = {'заголовок': result['title']['value'], 'описание': result['description']['value']}
         characteristics = {str(r['id']): r['values'] for r in result['sources'].get('ownCharacteristics', [])}
         characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
@@ -949,7 +992,8 @@ class AutomaticSeoService:
                 'Если причины нет, верни reason="" — запрос требует доработки. '
                 'Фразы «релевантен», «не предложено», «не использован» не являются объяснением. '
                 'Не меняй готовые тексты. Верни объект по всем идентификаторам q0/q1/… с destination, outputPhrase, reason.',
-                evidence, journal=cache, journal_key=key, reuse_response=reuse_responses, response_schema=schema, retry_truncated=False))
+                evidence, journal=cache, journal_key=key, reuse_response=reuse_responses, response_schema=schema, retry_truncated=False,
+                before_request=(lambda: progress(f'Проверка неприменённых запросов {positions[batch[0]] + 1}–{positions[batch[0]] + len(batch)} из {len(pending)}')) if progress else None))
             if response and set(response) != set(evidence['semanticReviewBatch']):
                 raise SeoError('seo_semantic_decisions_incomplete')
             if response:
@@ -958,8 +1002,6 @@ class AutomaticSeoService:
             return [response.get(f'q{i}', {}) for i in range(len(batch))]
         for offset in range(0, len(pending), 24):
             batch = pending[offset:offset + 24]
-            if progress:
-                progress(f'Проверка неприменённых запросов {offset + 1}–{min(offset + 24, len(pending))} из {len(pending)}')
             decisions = self.split_model_batch([row['query'] for row in batch], review, lambda a, b: a + b, progress,
                 cache, {'stage': 'placement-v1', 'facts': factual_evidence(card), 'texts': texts})
             for i, row in enumerate(batch):
@@ -1070,6 +1112,7 @@ class AutomaticSeoService:
                            core, journal=cache, journal_key='response:draft-core:' + str(card['sku']), retry_truncated=False)
         result['keywords'], result['additionalKeywords'] = {}, []
         keyword_items = list(evidence['keywordIds'].items()) if 'keywords' in evidence.get('planFields', []) else []
+        keyword_positions = {label: i for i, (label, _) in enumerate(keyword_items)}
 
         def choose(items):
             labeled = dict(items)
@@ -1081,7 +1124,8 @@ class AutomaticSeoService:
             response = self.chat('Для каждого k-идентификатора выбери использовать/адаптировать/объединить/исключить, '
                     'естественное outputPhrase и конкретную причину. Не пропускай ID. Только собственные подтверждённые факты. '
                     'Сохраняй релевантные фразы конкурента; не добавляй чужие свойства. Сейчас только keywords для переданных ID.',
-                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False)
+                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False,
+                    before_request=(lambda: progress(f'Решения по ключам {keyword_positions[items[0][0]] + 1}–{keyword_positions[items[0][0]] + len(items)} из {len(keyword_items)}')) if progress else None)
             rows = response.get('keywords')
             if not isinstance(rows, dict) or set(rows) != set(labeled):
                 raise SeoError('seo_keyword_decisions_incomplete')
@@ -1092,12 +1136,11 @@ class AutomaticSeoService:
             return rows
 
         for offset in range(0, len(keyword_items), 12):
-            if progress:
-                progress(f'Решения по ключам {offset + 1}–{min(offset + 12, len(keyword_items))} из {len(keyword_items)}')
             result['keywords'].update(self.split_model_batch(keyword_items[offset:offset + 12], choose,
                 lambda a, b: {**a, **b}, progress, cache, {'stage': 'keyword-plan-v1', 'evidence': evidence}))
         # Additional meanings remain optional, but every relevant candidate is considered.
         if 'keywords' in evidence.get('planFields', []):
+            candidate_positions = {row['query']: i for i, row in enumerate(evidence['semantic'])}
             def additional(candidates):
                 data = {'ownEvidence': evidence['ownEvidence'], 'semanticCandidates': candidates,
                         'competitorStructure': evidence['competitorProfile']['structure'],
@@ -1108,7 +1151,8 @@ class AutomaticSeoService:
                 response = self.chat('Выбери только дополнительные подтверждённые смыслы из semanticCandidates, '
                     'которых ещё нет в selectedKeywords. Не перечисляй перестановки одинаковых слов. Без квот по числу ключей. '
                     'Для каждого выбранного запроса дай точный sourcePhrase, outputPhrase, decision и reason. Если дополнений нет, additionalKeywords: [].',
-                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False)
+                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False,
+                    before_request=(lambda: progress(f'Дополнительные смыслы {candidate_positions[candidates[0]["query"]] + 1}–{candidate_positions[candidates[0]["query"]] + len(candidates)} из {len(evidence["semantic"])}')) if progress else None)
                 extra = response.get('additionalKeywords')
                 if not isinstance(extra, list) or not all(isinstance(row, dict) and row.get('sourcePhrase') in {r['query'] for r in candidates} for row in extra):
                     raise SeoError('seo_keyword_source_missing')
@@ -1118,8 +1162,6 @@ class AutomaticSeoService:
                     remember_valid_response(cache, key)
                 return extra
             for offset in range(0, len(evidence['semantic']), 24):
-                if progress:
-                    progress(f'Дополнительные смыслы {offset + 1}–{min(offset + 24, len(evidence["semantic"]))} из {len(evidence["semantic"])}')
                 extra = self.split_model_batch(evidence['semantic'][offset:offset + 24], additional,
                     lambda a, b: a + b, progress, cache, {'stage': 'additional-plan-v1',
                     'facts': evidence['ownEvidence'], 'structure': evidence['competitorProfile']['structure'],
