@@ -186,6 +186,96 @@ class ProviderCooldownTest(unittest.TestCase):
         self.assertEqual(card_budget_seconds(100000), 14400)
 
 
+class CharacteristicRepairTest(unittest.TestCase):
+    setUp = SeoRecoveryTest.setUp
+    tearDown = SeoRecoveryTest.tearDown
+
+    def inputs(self):
+        own = fixtures.card('1001')
+        return own, fixtures.sources(own, self.case.mapping['1001']), {'id':'100','values':[], 'reason':'Неполный ответ', 'evidence':[]}
+
+    def test_keep_original_is_explicit_and_valid_repair_is_cached(self):
+        own, src, invalid = self.inputs()
+        response = {'action':'оставить исходное','values':[], 'reason':'Материал уже подтверждён собственными данными.', 'evidence':[]}
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', return_value=payload(response)) as call:
+            repaired, issue = self.service.repair_characteristic(invalid, own, src, [], cache)
+            self.service.repair_characteristic(invalid, own, src, [], cache)
+        self.assertIsNone(repaired)
+        self.assertIn('латунь', issue['detail'])
+        self.assertFalse(issue['blocking'])
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(own['characteristics'][1]['values'], ['латунь'])
+
+    def test_decorative_field50_preserves_confirmed_facets(self):
+        own, src, _ = self.inputs()
+        own['characteristics'].append({'id':50,'name':'Декоративные элементы','values':['Рельефные грани']})
+        src['definitions'].append({'id':50,'name':'Декоративные элементы'})
+        before = deepcopy(own)
+        response = {'action':'оставить исходное','values':[], 'reason':'Рельефные грани подтверждены собственной характеристикой.', 'evidence':[]}
+        with patch.object(self.service, 'chat', return_value=response):
+            repaired, issue = self.service.repair_characteristic({'id':'50','values':[]}, own, src, [], {})
+        self.assertIsNone(repaired)
+        self.assertIn('Рельефные грани', issue['detail'])
+        self.assertEqual(own, before)
+
+    def test_new_values_require_literal_own_evidence_and_cannot_change_id(self):
+        own, src, invalid = self.inputs()
+        response = {'id':'foreign-id','action':'предложить значения','values':['латунь'], 'reason':'Собственное описание подтверждает материал.',
+                    'evidence':[{'source':'description','quote':'латунь'}]}
+        with patch.object(self.service, 'chat', return_value=response) as call:
+            repaired, issue = self.service.repair_characteristic(invalid, own, src, [], {})
+        self.assertEqual(repaired['id'], '100')
+        self.assertEqual(repaired['values'], ['латунь'])
+        self.assertEqual(repaired['evidence'][0]['quote'], 'латунь')
+        self.assertIsNone(issue)
+        self.assertEqual(call.call_count, 1)
+        response['values'] = ['пластик']
+        with patch.object(self.service, 'chat', return_value=response):
+            with self.assertRaisesRegex(SeoError, 'seo_characteristic_evidence_missing'):
+                self.service.repair_characteristic(invalid, own, src, [], {})
+        response['values'] = ['латунь']
+        response['evidence'][0]['quote'] = 'пластик'
+        with patch.object(self.service, 'chat', return_value=response):
+            with self.assertRaisesRegex(SeoError, 'seo_characteristic_evidence_missing'):
+                self.service.repair_characteristic(invalid, own, src, [], {})
+
+    def test_second_malformed_value_stays_an_error_and_offline_recheck_never_pays(self):
+        own, src, invalid = self.inputs()
+        bad = {'action':'предложить значения','values':[], 'reason':'Пустое значение', 'evidence':[]}
+        with patch.object(self.service, 'chat', return_value=bad) as call:
+            with self.assertRaisesRegex(SeoError, 'seo_invalid_characteristic_values'):
+                self.service.repair_characteristic(invalid, own, src, [], {})
+        self.assertEqual(call.call_count, 1)
+        with patch.object(self.service, 'chat', side_effect=AssertionError('Offline must not request generation')) as call:
+            with self.assertRaisesRegex(SeoError, 'seo_invalid_characteristic_values'):
+                self.service.repair_characteristic(invalid, own, src, [], {}, reuse_responses=True)
+        call.assert_not_called()
+
+    def test_full_generation_preserves_characteristics_after_format_repair(self):
+        original = self.host.audit_llm_chat_completion
+        def answer(messages):
+            data = json.loads(messages[1]['content'])
+            if data.get('repairCharacteristic'):
+                return payload({'action':'оставить исходное','values':[],
+                                'reason':'Собственный материал уже подтверждён, правка не нужна.','evidence':[]})
+            result = original(messages)
+            if 'ownEvidence' in data and data.get('card'):
+                plan = json.loads(result[0]['choices'][0]['message']['content'])
+                plan['characteristics'] = [{'id':'100','values':[], 'reason':'Модель оставила неверный формат','evidence':[]}]
+                return payload(plan)
+            return result
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
+            self.case.action()
+            finished = self.case.finish()
+        self.assertEqual(finished['status'], 'review', finished)
+        self.assertEqual(finished['completedCount'], 2)
+        version = self.service.load(self.service.directory(1, 'batch'))['versions'][-1]
+        for result in version['results'].values():
+            self.assertEqual(result['characteristics'], [])
+            self.assertTrue(any(i.get('code')=='characteristic_format_repaired' for i in result['issues']))
+
+
 class CacheAndPollingTest(unittest.TestCase):
     def test_handoff_report_checks_both_original_retry_and_latest_saved_checkpoint(self):
         case = fixtures.AutomaticSeoTest()

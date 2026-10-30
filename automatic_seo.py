@@ -41,7 +41,8 @@ DRAFT_SCHEMA = schema_object({
     'compatibility': schema_object({'comparable': {'type': 'boolean'}, 'reason': TEXT}),
     'title': schema_object({'value': TEXT, 'reason': TEXT}), 'draftDescription': TEXT,
     'description': schema_object({'value': TEXT, 'reason': TEXT, 'editorChanges': {'type': 'array', 'items': TEXT}}),
-    'characteristics': schema_rows({'id': TEXT, 'values': {'type': 'array', 'items': TEXT}, 'reason': TEXT,
+    'characteristics': schema_rows({'id': TEXT, 'values': {'type': 'array', 'items': TEXT,
+        'description': 'Непустой список непустых значений для реальной правки. Если правки нет, не добавляй характеристику в список.'}, 'reason': TEXT,
                                     'evidence': schema_rows({'source': TEXT, 'quote': TEXT}),
                                     'removedValues': schema_rows({'value': TEXT, 'reason': TEXT})}),
     'keywords': schema_rows({'sourcePhrase': TEXT, 'outputPhrase': TEXT, 'reason': TEXT,
@@ -1053,6 +1054,59 @@ class AutomaticSeoService:
                 self.explain_unplaced_semantics(card, result, cache, reuse_responses=reuse_responses)
                 self.verify_keywords(result, result['sources'])
 
+    def repair_characteristic(self, row, card, sources, remarks, cache, progress=None, reuse_responses=False):
+        aid = str(row.get('id', ''))
+        definition = next((d for d in sources['definitions'] if str(d.get('id')) == aid), None)
+        if not definition:
+            raise SeoError('seo_invalid_characteristic_values', details={'field': aid[:30], 'unknownId': True})
+        current = next((r['values'] for r in characteristic_rows(card) if r['id'] == aid), [])
+        facts = factual_evidence(card)
+        evidence = {'repairCharacteristic': True, 'sku': str(card['sku']), 'attributeId': aid,
+                    'definition': definition, 'currentValues': current, 'ownFacts': facts,
+                    'invalidProposal': row, 'remarks': remarks}
+        key = 'response:characteristic-repair-v1:' + fingerprint(evidence)
+        if reuse_responses and key not in cache:
+            raise SeoError('seo_invalid_characteristic_values', details={'field': aid[:30], 'repairRequiresGeneration': True})
+        schema = schema_object({'action': {'type': 'string', 'enum': ['оставить исходное', 'предложить значения']},
+            'values': {'type': 'array', 'items': TEXT}, 'reason': TEXT,
+            'evidence': schema_rows({'source': TEXT, 'quote': TEXT})})
+        response = self.chat('Исправь решение только по одной характеристике: прежний ответ имеет неверный формат values. '
+            'Используй только ownFacts и официальный definition. Нельзя удалять существующее значение пустым списком. '
+            'Если доказанной точечной правки нет, верни action="оставить исходное", values:[], evidence:[] '
+            'и конкретную reason; исходные значения приложение сохранит само. '
+            'Если правка нужна, верни action="предложить значения", непустой список непустых строк values, '
+            'reason и evidence с дословными цитатами ownFacts. Каждое предлагаемое значение должно дословно '
+            'встречаться в цитате; если требуется неподтверждённая переформулировка, оставь исходное. '
+            'Не придумывай значения и не меняй ID.',
+            evidence, journal=cache, journal_key=key, response_schema=schema, reuse_response=reuse_responses,
+            retry_truncated=False, before_request=(lambda: progress('Уточнение характеристики ' + aid)) if progress else None)
+        reason = response.get('reason')
+        if not isinstance(reason, str) or not reason.strip():
+            raise SeoError('seo_invalid_characteristic_values', details={'field': aid[:30], 'repairAttempted': True})
+        if response.get('action') == 'оставить исходное' and response.get('values') == []:
+            remember_valid_response(cache, key)
+            name = str(definition.get('name') or definition.get('charcName') or '')
+            return None, {'code': 'characteristic_format_repaired', 'field': 'Характеристика ' + aid + (' · ' + name if name else ''),
+                'detail': 'Некорректное предложение уточнено; исходное значение сохранено: '
+                          + ('; '.join(current) if current else 'не заполнено') + '. ' + reason.strip(),
+                'question': 'Проверить сохранение исходной характеристики при согласовании.', 'blocking': False}
+        values, proofs = response.get('values'), response.get('evidence')
+        if (response.get('action') != 'предложить значения' or not isinstance(values, list) or not values
+                or not all(isinstance(v, str) and v.strip() for v in values)
+                or not isinstance(proofs, list) or not proofs):
+            raise SeoError('seo_invalid_characteristic_values', details={'field': aid[:30], 'repairAttempted': True})
+        for proof in proofs:
+            if not isinstance(proof, dict) or not isinstance(proof.get('source'), str):
+                raise SeoError('seo_characteristic_evidence_missing', details={'field': aid[:30]})
+            quote = source_phrase(proof.get('quote'), facts.get(proof['source'], ''))
+            if not quote:
+                raise SeoError('seo_characteristic_evidence_missing', details={'field': aid[:30]})
+            proof['quote'] = quote
+        if not all(any(source_phrase(value, proof['quote']) for proof in proofs) for value in values):
+            raise SeoError('seo_characteristic_evidence_missing', details={'field': aid[:30], 'valueWitnessMissing': True})
+        remember_valid_response(cache, key)
+        return dict(row, id=aid, values=values, reason=reason.strip(), evidence=proofs), None
+
     def write_description(self, card, sources, profile, plan, remarks, cache, progress=None, reuse_responses=False):
         key = 'response:description:' + str(card['sku'])
         if reuse_responses and key not in cache and isinstance(plan.get('description'), dict):
@@ -1245,6 +1299,7 @@ class AutomaticSeoService:
 Для КАЖДОГО идентификатора k0/k1/… из keywordIds укажи в объекте keywords решение использовать/адаптировать/объединить/исключить, outputPhrase и причину. Не пропускай идентификаторы, текст sourcePhrase уже известен приложению. Из semantic можно выбрать подходящее написание outputPhrase для того же смысла; не возвращай отдельный список всех запросов. outputPhrase — выбранная естественная формулировка для будущего описания.
 Не предлагай все перестановки одних слов из semantic. Ориентир — уникальные смыслы и структура текста конкурента; дополнительный ключ нужен, только если добавляет подтверждённый смысл. Не переносить чужие бренды, модели, материалы, размеры, цвета, гарантии, эффекты. Не обещать медицинский/гарантированный результат.
 Характеристики: только точечные правки по ID из официальных definitions, прочие сохраняются. Для #Хештеги сохранить все подходящие свои и расширить релевантными запросами конкурента до допустимого max_value_count, удаляя точные дубли. Для удаления существующего тега добавь removedValues:[{"value":"#тег","reason":"почему нерелевантен"}]. Не сокращать до четырёх тегов. Не менять rich/видео/объединение без доказанной фактической ошибки.
+Если характеристику менять не нужно, НЕ добавляй её в characteristics. У каждой предложенной правки values — непустой список непустых строк; values:[] не означает «сохранить» и не используется для удаления исходных значений.
 Каждая правка характеристики содержит evidence — точную цитату из ownEvidence и её source (description/title/attribute:ID). Противоречия — в issues, спорные факты нейтрализовать до решения, не угадывать.
 Замечания специалиста относятся к указанным SKU/полям, не добавляют доказательств факта сами по себе.
 JSON: {"compatibility":{"comparable":true,"reason":"подтверждённые совпадения и различия"},"title":{"value":"...","reason":"..."},"characteristics":[],"keywords":{"k0":{"outputPhrase":"...","decision":"использовать","reason":"..."}},"issues":[{"field":"...","detail":"...","question":"...","blocking":false}]}.
@@ -1391,7 +1446,11 @@ blocking=true, если неподтверждённое свойство ост
             if card.get('marketplace') != 'Wildberries' and aid in {'4180', '4191', '11254'}:
                 continue  # Separate title/description fields and unchanged rich content.
             if not isinstance(row.get('values'), list) or not row['values'] or not all(isinstance(v, str) and v.strip() for v in row['values']):
-                raise SeoError('seo_invalid_characteristic_values', details={'field': str(row.get('id', ''))[:30]})
+                row, issue = self.repair_characteristic(row, card, sources, remarks, cache, progress, reuse_responses)
+                if issue:
+                    result['issues'].append(issue)
+                if row is None:
+                    continue
             if card.get('marketplace') != 'Wildberries' and aid == '23171' and re.fullmatch(r'(?:#\w+[\s,;]*)+', ' '.join(row['values'])):
                 tags, seen_tags = [], set()
                 for tag in re.findall(r'#\w+', ' '.join(row['values'])):
