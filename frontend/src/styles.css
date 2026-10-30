@@ -8005,6 +8005,8 @@ tr:last-child td {
 }
 .automatic-seo-task {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 12px;
   margin: 16px 0;
   padding: 18px;
@@ -8023,6 +8025,7 @@ tr:last-child td {
   resize: vertical;
 }
 .automatic-seo-task details > summary { cursor: pointer; }
+.automatic-seo-task .btn { max-width: 100%; white-space: normal; }
 .automatic-seo-task li { margin: 8px 0; overflow-wrap: anywhere; }
 .automatic-seo-remark { display: grid; gap: 10px; }
 .automatic-seo-task .field-label { min-width: 180px; }

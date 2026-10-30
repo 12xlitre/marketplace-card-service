@@ -26,6 +26,14 @@ test('Excel assembly is not reported as file ready', () => {
   assert.equal(ready.percentage, 100); assert.equal(ready.elapsedSeconds, 300); assert.equal(ready.complete, true);
   assert.equal(seoProgress({ ...base, done: 58, status: 'partial' }, now).complete, false);
 });
+test('46 prepared cards out of 58 cannot show 100 percent readiness', () => {
+  const p = seoProgress({ ...base, done: 58, completedCount: 46, status: 'partial' }, now);
+  assert.equal(p.percentage, 79);
+  assert.equal(p.prepared, 46);
+  assert.equal(p.partial, true);
+  assert.equal(p.complete, false);
+  assert.equal(p.remaining, null);
+});
 test('bad counters and impossible query numbers cannot overflow progress', () => {
   const p = seoProgress({ ...base, done: 1000, stage: 'Проверка запросов 999–1000 из 245: 123' }, now);
   assert.equal(p.done, 58); assert.equal(p.percentage, 99); assert.equal(p.query.done, 245);

@@ -134,6 +134,9 @@ def llm_request_capacity(provider, scope):
 
 LLM_CONCURRENT_REQUESTS = llm_request_capacity(OPTICARDS_LLM_PROVIDER, GIGACHAT_SCOPE)
 LLM_REQUEST_SLOTS = threading.BoundedSemaphore(LLM_CONCURRENT_REQUESTS)
+LLM_COOLDOWN_LOCK = threading.Lock()
+LLM_COOLDOWN_UNTIL = 0.0
+LLM_QUEUE_METRICS = threading.local()
 MPSTATS_REQUEST_SLOTS = threading.BoundedSemaphore(2)
 
 
@@ -5290,19 +5293,27 @@ def automatic_seo_handoff_report(portal, batch, user):
   service = automatic_seo_service()
   service.context(portal,batch,user,edit=True)
   directory = service.directory(portal,batch)
-  paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
-  if not paths:
-    raise ValueError("seo_checkpoint_missing")
-  manifest = json.loads(paths[-1].read_text())
   with service.lock(directory):
     version = service.load(directory)['versions'][-1]
   from automatic_seo import fingerprint
+  preservation = version.get('_preservation')
+  if preservation:
+    manifest = {'preservedResults': preservation['resultHashes'], 'savedAt': preservation['savedAt']}
+  else:
+    paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
+    if not paths:
+      raise ValueError("seo_checkpoint_missing")
+    manifest = json.loads(paths[-1].read_text())
   preserved = manifest['preservedResults']
   unchanged = [sku for sku,digest in preserved.items() if sku in version['results'] and fingerprint(version['results'][sku])==digest]
   return {"version":version['number'],"status":version['status'],"done":version['done'],"total":version['total'],
           "completedCount":len(version['results']),"workers":version.get('workers',1),"maxConcurrentRequests":LLM_CONCURRENT_REQUESTS,
           "preservedSkus":list(preserved),"unchangedCount":len(unchanged),"allPreserved":len(unchanged)==len(preserved),
           "checkpointAt":manifest['savedAt'],"activeCards":version.get('activeCards',{}),
+          "preservationKind":"previous-version" if preservation else "handoff-checkpoint",
+          "preservedFromVersion":preservation['fromVersion'] if preservation else version['number'],
+          **({"sourcePreserved":version.get('sourceCapturedAt')==preservation['sourceCapturedAt']
+                                  and fingerprint(version.get('cards'))==preservation['cardsHash']} if preservation else {}),
           "errors":[{"sku":e['sku'],"code":e['code']} for e in version.get('errors',[])]}
 
 
@@ -19144,17 +19155,39 @@ def _gigachat_access_token():
   return access_token
 
 
+def automatic_seo_queue_seconds():
+  return getattr(LLM_QUEUE_METRICS, 'seconds', 0.0)
+
+
 def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):
+  global LLM_COOLDOWN_UNTIL
   for attempt in range(3):
     try:
+      queued_at = time.monotonic()
       with LLM_REQUEST_SLOTS:
-        return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens)
+        with LLM_COOLDOWN_LOCK:
+          delay = max(0, LLM_COOLDOWN_UNTIL - time.monotonic())
+        if delay > 60:
+          raise urlerror.HTTPError('', 429, 'provider_cooldown', {'Retry-After': str(int(delay) + 1)}, None)
+        if delay:
+          time.sleep(delay)
+        LLM_QUEUE_METRICS.seconds = automatic_seo_queue_seconds() + time.monotonic() - queued_at
+        try:
+          return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens)
+        except urlerror.HTTPError as exc:
+          # Publish the pause before releasing the slot to another card worker.
+          if exc.code in {429, 500, 502, 503, 504}:
+            retry_after = parse_retry_after(exc.headers.get('Retry-After')) if exc.headers else None
+            delay = retry_after if retry_after is not None else 2 ** (attempt + 1)
+            with LLM_COOLDOWN_LOCK:
+              LLM_COOLDOWN_UNTIL = max(LLM_COOLDOWN_UNTIL, time.monotonic() + delay)
+          raise
     except urlerror.HTTPError as exc:
       delay = parse_retry_after(exc.headers.get("Retry-After")) if exc.headers else None
       if exc.code not in {429, 500, 502, 503, 504} or attempt == 2 or (delay is not None and delay > 60):
         raise
       exc.close()
-      time.sleep(delay if delay is not None else 1 * 2 ** attempt)
+      # All workers observe the same cooldown on their next acquired slot.
 
 
 def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):

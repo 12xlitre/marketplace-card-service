@@ -88,6 +88,12 @@ class FakeHost:
             answer = {label: {'destination': 'не добавлять', 'outputPhrase': '',
                 'reason': 'Тестовый запрос не добавляет подтверждённых сведений о назначении смесителя.'}
                 for label in evidence['semanticReviewBatch']}
+        elif 'semanticCandidates' in evidence:
+            answer = {'additionalKeywords': []}
+        elif evidence.get('keywordIds') and 'card' not in evidence:
+            answer = {'keywords': {label: {'decision': 'использовать', 'outputPhrase': phrase,
+                                           'reason': 'Подтверждено назначение.'}
+                                   for label, phrase in evidence['keywordIds'].items()}}
         elif 'ownEvidence' not in evidence:
             self.profile_calls += 1
             answer = {'structure': ['Назначение', 'Материал'], 'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]}
@@ -420,10 +426,13 @@ class AutomaticSeoTest(unittest.TestCase):
     def test_missing_semantic_decision_names_the_actual_query(self):
         own = card('1001'); src = sources(own, self.mapping['1001'])
         src['semantic'].append({'query': 'смеситель из латуни'})
-        with patch.object(self.service, 'chat', return_value=assessment()):
+        def omit_query(instruction, evidence, **kwargs):
+            return {label: assessment()['q0'] for label, query in evidence['semanticBatch'].items()
+                    if query != 'смеситель из латуни'}
+        with patch.object(self.service, 'chat', side_effect=omit_query):
             with self.assertRaises(SeoError) as caught:
                 self.service.assess_semantics(own, src, {})
-        self.assertEqual(caught.exception.details, {'expectedQueries': 2, 'receivedQueries': 1,
+        self.assertEqual(caught.exception.details, {'expectedQueries': 1, 'receivedQueries': 0,
                                                    'missingQueries': ['смеситель из латуни']})
 
     def test_florrey_title_keyword_is_required_even_when_missing_from_competitor_description(self):

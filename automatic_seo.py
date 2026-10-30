@@ -62,6 +62,18 @@ class SeoError(ValueError):
         self.details = details or {}
 
 
+def card_budget_seconds(query_count):
+    # Three model passes over large semantic sets; queue time is accounted separately.
+    return min(14400, max(3600, 900 + 8 * query_count))
+
+
+def remember_valid_response(cache, key):
+    """Only the stage validator may authorize automatic reuse of its response."""
+    saved = cache.get(key)
+    if isinstance(saved, dict) and saved.get('requestHash'):
+        saved['validated'] = True
+
+
 def normalized(value):
     return re.sub(r'\s+', ' ', str(value or '').casefold().replace('ё', 'е')).strip()
 
@@ -308,6 +320,20 @@ class AutomaticSeoService:
                            'refreshSources': bool(payload.get('refreshSources')),
                            'reuseResponses': action == 'recheck',
                            'period': previous['period'] if previous and not payload.get('refreshSources') else closed_period(), 'method': METHOD}
+                if (action == 'generate' and previous and previous['status'] in {'partial', 'failed', 'interrupted'}
+                        and previous.get('method') == METHOD and not version['refreshSources'] and not remarks):
+                    # Seed successes before starting workers: only failed cards enter the queue.
+                    preserved = {sku: deepcopy(result) for sku, result in previous.get('results', {}).items()
+                                 if previous.get('competitors', {}).get(sku) == mappings.get(sku)}
+                    if preserved:
+                        version['results'] = preserved
+                        version['done'] = version['completedCount'] = len(preserved)
+                        version['sourceCapturedAt'] = previous.get('sourceCapturedAt', previous['createdAt'])
+                        version['continuation'] = {'startedAt': now(), 'preservedCount': len(preserved),
+                            'retryCount': version['total'] - len(preserved), 'previousVersion': previous['number']}
+                        version['_preservation'] = {'fromVersion': previous['number'], 'savedAt': now(),
+                            'sourceCapturedAt': version['sourceCapturedAt'], 'cardsHash': fingerprint(previous.get('cards')),
+                            'resultHashes': {sku: fingerprint(result) for sku, result in preserved.items()}}
                 # Reserve the run lock before persisting/returning the running state.
                 run_handle = (directory / 'run.lock').open('a')
                 try:
@@ -534,6 +560,9 @@ class AutomaticSeoService:
                 sku = task['sku']
                 token = None
                 started = time.monotonic()
+                queue_time = getattr(self.host, 'automatic_seo_queue_seconds', lambda: 0)
+                initial_queue_time = queue_time()
+                card_budget = card_budget_seconds(0)
                 with writer:
                     local_cache = deepcopy(cache)
                 baseline_hashes = {key: fingerprint(value) for key, value in local_cache.items()}
@@ -559,7 +588,8 @@ class AutomaticSeoService:
                         result = deepcopy(old)
                     else:
                         def progress(stage):
-                            if time.monotonic() > deadline or time.monotonic() - started > 3600:
+                            elapsed = time.monotonic() - started - max(0, queue_time() - initial_queue_time)
+                            if time.monotonic() > deadline or elapsed > card_budget:
                                 raise SeoError('seo_run_deadline')
                             with writer:
                                 merge_cache(local_cache, baseline_hashes)
@@ -568,9 +598,13 @@ class AutomaticSeoService:
                                 self.update(directory, version, portal, batch, user)
                         progress('Источники и текст')
                         sources = self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], local_cache, user)
-                        result = self.generate(card, sources, remarks, old, local_cache, progress=progress, reuse_responses=bool(version.get('reuseResponses')))
+                        card_budget = card_budget_seconds(len(sources.get('semantic', [])))
+                        result = self.generate(card, sources, remarks, old, local_cache, progress=progress,
+                            reuse_responses=bool(version.get('reuseResponses')),
+                            verify_characteristics=lambda candidate: self.verify_characteristic_proposals(
+                                portal, card, candidate, local_cache, user,
+                                reuse_responses=bool(version.get('reuseResponses')), recheck=False))
                         self.verify_final_facts(result, card)
-                        self.verify_characteristic_proposals(portal, card, result, local_cache, user, reuse_responses=bool(version.get('reuseResponses')))
                     with writer:
                         version['results'][sku] = result
                         repaired = [e for e in version['errors'] if e['sku'] == sku]
@@ -654,6 +688,19 @@ class AutomaticSeoService:
         return record
 
     def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True):
+        request_hash = fingerprint({'instruction': instruction, 'evidence': evidence,
+                                    'schema': response_schema, 'rawText': raw_text})
+        if not reuse_response and journal is not None and journal_key:
+            saved = journal.get(journal_key)
+            if (isinstance(saved, dict) and saved.get('validated') and saved.get('requestHash') == request_hash
+                    and saved.get('finishReason') not in {'length', 'max_tokens', 'blacklist', 'error'}
+                    and isinstance(saved.get('content'), str) and saved.get('contentLength') == len(saved['content'])):
+                try:
+                    parsed = self.host.parse_llm_json_content(saved['content'])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except (ValueError, TypeError):
+                    pass
         if journal is not None and journal_key and not reuse_response:
             journal.pop('envelopes:' + journal_key, None)
         retryable = {'seo_invalid_model_response', 'seo_llm_invalid_arguments',
@@ -663,7 +710,10 @@ class AutomaticSeoService:
         for attempt in range(2):
             try:
                 prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
-                return self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text)
+                result = self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text)
+                if not reuse_response and journal is not None and journal_key and journal_key in journal:
+                    journal[journal_key]['requestHash'] = request_hash
+                return result
             except SeoError as exc:
                 if reuse_response or attempt or str(exc) not in retryable:
                     raise
@@ -671,6 +721,25 @@ class AutomaticSeoService:
                     'event': 'automatic_seo_model_retry', 'stageHash': fingerprint(journal_key),
                     'code': str(exc), 'attempt': attempt + 2,
                 }))
+
+    def split_model_batch(self, items, call, merge, progress=None, cache=None, scope=None):
+        """Reduce oversized/incomplete model work, with a finite binary split tree."""
+        key = 'split-work-v1:' + fingerprint({'items': items, 'scope': scope})
+        if cache is None or not cache.get(key):
+            try:
+                return call(items)
+            except SeoError as exc:
+                if str(exc) not in {'seo_llm_response_truncated', 'seo_llm_timeout',
+                                    'seo_semantic_decisions_incomplete', 'seo_keyword_decisions_incomplete'} or len(items) < 2:
+                    raise
+            if cache is not None:
+                cache[key] = True
+        middle = len(items) // 2
+        left = self.split_model_batch(items[:middle], call, merge, progress, cache, scope)
+        if progress:
+            progress('Сохранение проверенной части запросов')
+        right = self.split_model_batch(items[middle:], call, merge, progress, cache, scope)
+        return merge(left, right)
 
     def _chat_once(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False):
         if reuse_response:
@@ -787,20 +856,17 @@ class AutomaticSeoService:
 
     def assess_semantics(self, card, sources, cache, progress=None, reuse_responses=False):
         queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
-        decisions = []
-        for offset in range(0, len(queries), 32):
-            batch = queries[offset:offset + 32]
+        def assess(batch):
             key = 'semantic-relevance-v3:' + fingerprint({'facts': factual_evidence(card), 'queries': batch})
             if key not in cache:
-                if progress:
-                    progress(f'Проверка запросов {offset + 1}–{min(offset + 32, len(queries))} из {len(queries)}')
                 labeled = {f'q{i}': query for i, query in enumerate(batch)}
                 response = self.chat('Оцени соответствие КАЖДОГО поискового запроса конкретному товару по его подтверждённым данным. '
                     'Для КАЖДОГО идентификатора q0, q1 и так далее из semanticBatch верни отдельное поле объекта: '
                     '{"q0":{"relevance":"релевантен/нерелевантен/недостаточно данных","reason":"одна короткая конкретная причина"},"q1":{...},...}. '
                     'Нельзя пропускать идентификаторы. Не переписывай запросы: они уже сопоставлены с идентификаторами. '
                     'Не выбирай по частотности. Не приписывай товару чужой цвет, размер, модель, комплектацию. Не генерируй описание.',
-                    {'ownFacts': factual_evidence(card), 'semanticBatch': labeled}, journal=cache, journal_key='response:' + key, reuse_response=reuse_responses)
+                    {'ownFacts': factual_evidence(card), 'semanticBatch': labeled}, journal=cache, journal_key='response:' + key,
+                    reuse_response=reuse_responses, retry_truncated=False)
                 if set(response) != set(labeled):
                     raise SeoError('seo_semantic_decisions_incomplete', details={
                         'expectedQueries': len(batch), 'receivedQueries': len(set(response) & set(labeled)),
@@ -813,7 +879,14 @@ class AutomaticSeoService:
                 if len(rows) != len(batch) or {r['query'] for r in rows} != set(batch):
                     raise SeoError('seo_semantic_decisions_incomplete')
                 cache[key] = rows
-            decisions.extend(deepcopy(cache[key]))
+                remember_valid_response(cache, 'response:' + key)
+            return deepcopy(cache[key])
+        decisions = []
+        for offset in range(0, len(queries), 32):
+            if progress:
+                progress(f'Проверка запросов {offset + 1}–{min(offset + 32, len(queries))} из {len(queries)}')
+            decisions.extend(self.split_model_batch(queries[offset:offset + 32], assess, lambda a, b: a + b, progress,
+                cache, {'stage': 'relevance-v3', 'facts': factual_evidence(card)}))
         return decisions
 
     def semantic_placements(self, result, assessments, sources):
@@ -857,17 +930,14 @@ class AutomaticSeoService:
         characteristics = {str(r['id']): r['values'] for r in result['sources'].get('ownCharacteristics', [])}
         characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
         texts['характеристика'] = ' '.join(' '.join(v) for v in characteristics.values())
-        for offset in range(0, len(pending), 24):
-            batch = pending[offset:offset + 24]
-            evidence = {'semanticReviewBatch': {f'q{i}': r['query'] for i, r in enumerate(batch)},
+        def review(batch):
+            evidence = {'semanticReviewBatch': {f'q{i}': query for i, query in enumerate(batch)},
                         'ownFacts': factual_evidence(card), 'finalTexts': texts}
             cache_key = 'semantic-placement-v1:' + fingerprint(evidence)
             key = 'response:' + cache_key
             schema = schema_object({label: schema_object({
                 'destination': {'type': 'string', 'enum': list(texts) + ['не добавлять']},
                 'outputPhrase': TEXT, 'reason': TEXT}) for label in evidence['semanticReviewBatch']})
-            if progress:
-                progress(f'Проверка неприменённых запросов {offset + 1}–{min(offset + 24, len(pending))} из {len(pending)}')
             # A legacy offline recheck must never trigger a new paid request.
             response = deepcopy(cache[cache_key]) if cache_key in cache else ({} if reuse_responses and key not in cache else self.chat(
                 'Для каждого запроса semanticReviewBatch объясни применение в ГОТОВОМ тексте. '
@@ -879,13 +949,21 @@ class AutomaticSeoService:
                 'Если причины нет, верни reason="" — запрос требует доработки. '
                 'Фразы «релевантен», «не предложено», «не использован» не являются объяснением. '
                 'Не меняй готовые тексты. Верни объект по всем идентификаторам q0/q1/… с destination, outputPhrase, reason.',
-                evidence, journal=cache, journal_key=key, reuse_response=reuse_responses, response_schema=schema))
+                evidence, journal=cache, journal_key=key, reuse_response=reuse_responses, response_schema=schema, retry_truncated=False))
             if response and set(response) != set(evidence['semanticReviewBatch']):
                 raise SeoError('seo_semantic_decisions_incomplete')
             if response:
                 cache[cache_key] = deepcopy(response)
+                remember_valid_response(cache, key)
+            return [response.get(f'q{i}', {}) for i in range(len(batch))]
+        for offset in range(0, len(pending), 24):
+            batch = pending[offset:offset + 24]
+            if progress:
+                progress(f'Проверка неприменённых запросов {offset + 1}–{min(offset + 24, len(pending))} из {len(pending)}')
+            decisions = self.split_model_batch([row['query'] for row in batch], review, lambda a, b: a + b, progress,
+                cache, {'stage': 'placement-v1', 'facts': factual_evidence(card), 'texts': texts})
             for i, row in enumerate(batch):
-                decision = response.get(f'q{i}', {})
+                decision = decisions[i]
                 destination = decision.get('destination') if isinstance(decision, dict) else None
                 reason = str(decision.get('reason') or '').strip() if isinstance(decision, dict) else ''
                 witness = source_phrase(decision.get('outputPhrase'), texts.get(destination, '')) if isinstance(decision, dict) else ''
@@ -902,7 +980,7 @@ class AutomaticSeoService:
                         'detail': '«' + row['query'] + '»: релевантность подтверждена, но нет проверяемого применения или конкретной причины пропуска.',
                         'question': 'Применить запрос в подходящем поле, указать покрывающую его формулировку либо обосновать пропуск.', 'blocking': True})
 
-    def verify_characteristic_proposals(self, portal, card, result, cache, user, reuse_responses=False):
+    def verify_characteristic_proposals(self, portal, card, result, cache, user, reuse_responses=False, recheck=True):
         reasons = {
             'seo_invalid_characteristic_id': 'ID отсутствует в официальных определениях или поле не предназначено для этой правки',
             'seo_duplicate_characteristic_values': 'значения повторяются', 'seo_duplicate_hashtags': 'хештеги повторяются',
@@ -928,9 +1006,10 @@ class AutomaticSeoService:
                 accepted.append(proposal)
         if len(accepted) != len(result['characteristics']):
             result['characteristics'] = accepted
-            result['semanticDecisions'] = self.semantic_placements(result, result['semanticDecisions'], result['sources'])
-            self.explain_unplaced_semantics(card, result, cache, reuse_responses=reuse_responses)
-            self.verify_keywords(result, result['sources'])
+            if recheck:
+                result['semanticDecisions'] = self.semantic_placements(result, result['semanticDecisions'], result['sources'])
+                self.explain_unplaced_semantics(card, result, cache, reuse_responses=reuse_responses)
+                self.verify_keywords(result, result['sources'])
 
     def write_description(self, card, sources, profile, plan, remarks, cache, progress=None, reuse_responses=False):
         key = 'response:description:' + str(card['sku'])
@@ -999,59 +1078,65 @@ class AutomaticSeoService:
                     'keywordIds': labeled, 'semantic': evidence['semantic'], 'remarks': evidence['remarks']}
             schema = schema_object({'keywords': schema_object({label: KEYWORD_DECISION_SCHEMA for label in labeled})})
             key = 'response:keyword-plan:' + fingerprint(data)
-            try:
-                response = self.chat('Для каждого k-идентификатора выбери использовать/адаптировать/объединить/исключить, '
+            response = self.chat('Для каждого k-идентификатора выбери использовать/адаптировать/объединить/исключить, '
                     'естественное outputPhrase и конкретную причину. Не пропускай ID. Только собственные подтверждённые факты. '
                     'Сохраняй релевантные фразы конкурента; не добавляй чужие свойства. Сейчас только keywords для переданных ID.',
                     data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False)
-            except SeoError as exc:
-                if str(exc) != 'seo_llm_response_truncated' or len(items) < 2:
-                    raise
-                middle = len(items) // 2
-                return {**choose(items[:middle]), **choose(items[middle:])}
             rows = response.get('keywords')
             if not isinstance(rows, dict) or set(rows) != set(labeled):
                 raise SeoError('seo_keyword_decisions_incomplete')
+            if all(isinstance(row, dict) and row.get('decision') in {'использовать', 'адаптировать', 'объединить', 'исключить'}
+                   and isinstance(row.get('outputPhrase'), str) and isinstance(row.get('reason'), str) and row['reason'].strip()
+                   for row in rows.values()):
+                remember_valid_response(cache, key)
             return rows
 
         for offset in range(0, len(keyword_items), 12):
             if progress:
                 progress(f'Решения по ключам {offset + 1}–{min(offset + 12, len(keyword_items))} из {len(keyword_items)}')
-            result['keywords'].update(choose(keyword_items[offset:offset + 12]))
+            result['keywords'].update(self.split_model_batch(keyword_items[offset:offset + 12], choose,
+                lambda a, b: {**a, **b}, progress, cache, {'stage': 'keyword-plan-v1', 'evidence': evidence}))
         # Additional meanings remain optional, but every relevant candidate is considered.
         if 'keywords' in evidence.get('planFields', []):
-            for offset in range(0, len(evidence['semantic']), 24):
-                candidates = evidence['semantic'][offset:offset + 24]
+            def additional(candidates):
                 data = {'ownEvidence': evidence['ownEvidence'], 'semanticCandidates': candidates,
                         'competitorStructure': evidence['competitorProfile']['structure'],
                         'selectedKeywords': list(result['keywords'].values()) + result['additionalKeywords']}
                 props = {'sourcePhrase': {'type': 'string', 'enum': [r['query'] for r in candidates]}, **KEYWORD_DECISION_SCHEMA['properties']}
                 schema = schema_object({'additionalKeywords': schema_rows(props)})
-                if progress:
-                    progress(f'Дополнительные смыслы {offset + 1}–{min(offset + 24, len(evidence["semantic"]))} из {len(evidence["semantic"])}')
+                key = 'response:additional-plan:' + fingerprint(data)
                 response = self.chat('Выбери только дополнительные подтверждённые смыслы из semanticCandidates, '
                     'которых ещё нет в selectedKeywords. Не перечисляй перестановки одинаковых слов. Без квот по числу ключей. '
                     'Для каждого выбранного запроса дай точный sourcePhrase, outputPhrase, decision и reason. Если дополнений нет, additionalKeywords: [].',
-                    data, journal=cache, journal_key='response:additional-plan:' + fingerprint(data), response_schema=schema, retry_truncated=False)
+                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False)
                 extra = response.get('additionalKeywords')
                 if not isinstance(extra, list) or not all(isinstance(row, dict) and row.get('sourcePhrase') in {r['query'] for r in candidates} for row in extra):
                     raise SeoError('seo_keyword_source_missing')
+                if all(row.get('decision') in {'использовать', 'адаптировать', 'объединить', 'исключить'}
+                       and isinstance(row.get('outputPhrase'), str) and isinstance(row.get('reason'), str) and row['reason'].strip()
+                       for row in extra):
+                    remember_valid_response(cache, key)
+                return extra
+            for offset in range(0, len(evidence['semantic']), 24):
+                if progress:
+                    progress(f'Дополнительные смыслы {offset + 1}–{min(offset + 24, len(evidence["semantic"]))} из {len(evidence["semantic"])}')
+                extra = self.split_model_batch(evidence['semantic'][offset:offset + 24], additional,
+                    lambda a, b: a + b, progress, cache, {'stage': 'additional-plan-v1',
+                    'facts': evidence['ownEvidence'], 'structure': evidence['competitorProfile']['structure'],
+                    'selected': list(result['keywords'].values()) + result['additionalKeywords']})
                 result['additionalKeywords'].extend(extra)
         return result
 
-    def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False):
-        competitor = sources['competitor']
-        legacy_profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
-        profile_key = 'profile:title-description-v2:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
-        if reuse_responses and profile_key not in cache and legacy_profile_key in cache:
-            cache[profile_key] = deepcopy(cache[legacy_profile_key])
-        if profile_key not in cache:
+    def competitor_profile(self, competitor, cache, profile_key, reuse_responses=False):
+        for attempt in range(2):
+            correction = (' Все фразы прошлого ответа отсутствуют в источнике. Выдели короткие ДОСЛОВНЫЕ '
+                          'цитаты из переданных title/description, без перестановки или добавления слов.' if attempt else '')
             profile = self.chat(
                 'Разбери заголовок И описание прямого конкурента. Выдели последовательность смысловых блоков описания и реально употреблённые поисковые формулировки из ОБОИХ полей. '
                 'Не генерируй новые запросы. Копируй phrase непосредственно из заголовка или описания, сохраняя падеж и порядок слов: не приводи слова к начальной форме. '
                 'Верни {"structure":["..."],"phrases":[{"phrase":"точная цитата запроса","quote":"точный фрагмент описания"}]}. '
-                'Различай вложенные фразы и независимые смыслы, не добавляй рекламные обещания в ключи.', competitor,
-                journal=cache, journal_key='response:' + profile_key, reuse_response=reuse_responses)
+                'Различай вложенные фразы и независимые смыслы, не добавляй рекламные обещания в ключи.' + correction, competitor,
+                journal=cache, journal_key='response:' + profile_key + (':repair' if attempt else ''), reuse_response=reuse_responses)
             if not isinstance(profile.get('structure'), list) or not isinstance(profile.get('phrases'), list):
                 raise SeoError('seo_invalid_competitor_analysis')
             verified, rejected, seen = [], [], set()
@@ -1069,9 +1154,24 @@ class AutomaticSeoService:
                     verified.append({'phrase': actual, 'quote': actual, **({'source': 'title'} if title_actual else {})})
                     seen.add(normalized(actual))
             if profile['phrases'] and not verified:
+                if not attempt and not reuse_responses:
+                    continue
                 raise SeoError('seo_competitor_witness_missing', details={'phrases': rejected[:30], 'competitorSku': competitor['sku']})
+            if attempt and not verified:
+                raise SeoError('seo_competitor_witness_missing', details={'competitorSku': competitor['sku']})
             profile['phrases'], profile['rejectedPhrases'] = verified, rejected
             cache[profile_key] = profile
+            remember_valid_response(cache, 'response:' + profile_key + (':repair' if attempt else ''))
+            return
+
+    def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False, verify_characteristics=None):
+        competitor = sources['competitor']
+        legacy_profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
+        profile_key = 'profile:title-description-v2:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})
+        if reuse_responses and profile_key not in cache and legacy_profile_key in cache:
+            cache[profile_key] = deepcopy(cache[legacy_profile_key])
+        if profile_key not in cache:
+            self.competitor_profile(competitor, cache, profile_key, reuse_responses)
         profile = cache[profile_key]
         assessments = self.assess_semantics(card, sources, cache, progress, reuse_responses=reuse_responses)
         relevant_queries = {a['query'] for a in assessments if a['relevance'] == 'релевантен'}
@@ -1127,11 +1227,11 @@ blocking=true, если неподтверждённое свойство ост
         if progress:
             progress('План заголовка, характеристик и ключей')
         try:
-            if len(keyword_ids) > 18 and not reuse_responses:
+            if (len(keyword_ids) > 18 or len(evidence['semantic']) > 48) and not reuse_responses:
                 raise SeoError('seo_llm_response_truncated')
             result = self.chat(instruction, evidence, journal=cache, journal_key='response:draft:' + str(card['sku']), reuse_response=reuse_responses, retry_truncated=False)
         except SeoError as exc:
-            if str(exc) != 'seo_llm_response_truncated' or reuse_responses:
+            if str(exc) not in {'seo_llm_response_truncated', 'seo_llm_timeout', 'seo_keyword_decisions_incomplete'} or reuse_responses:
                 raise
             if progress:
                 progress('Разделяем длинный план на проверяемые части')
@@ -1290,6 +1390,8 @@ blocking=true, если неподтверждённое свойство ост
                                  'question': 'Проверить требования категории перед переносом.', 'blocking': False})
         result['sources'] = sources
         result['competitorProfile'] = profile
+        if verify_characteristics:
+            verify_characteristics(result)
         result['semanticDecisions'] = self.semantic_placements(result, assessments, sources)
         self.explain_unplaced_semantics(card, result, cache, progress, reuse_responses)
         keyword_rows = {row['sourcePhrase']: row for row in result['keywords']}
@@ -1307,6 +1409,8 @@ blocking=true, если неподтверждённое свойство ост
                     keyword_rows[query] = row
         self.verify_final_facts(result, card)
         self.verify_keywords(result, sources)
+        for key in ('response:draft:', 'response:draft-core:', 'response:description:'):
+            remember_valid_response(cache, key + str(card['sku']))
         return result
 
     def verify_final_facts(self, result, card):

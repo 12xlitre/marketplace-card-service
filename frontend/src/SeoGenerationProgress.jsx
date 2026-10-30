@@ -15,11 +15,12 @@ export default function SeoGenerationProgress({ version }) {
   return (
     <div className="seo-generation-progress">
       <div className="seo-progress-heading">
-        <strong>{progress.complete ? "Файл готов к проверке" : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
+        <strong>{progress.complete ? "Файл готов к проверке" : progress.partial ? `Подготовлено ${progress.prepared} из ${total} карточек` : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
         <span>{percentage}%</span>
       </div>
       {version.continuation ? <p className="status-note">Обработка продолжена с сохранённых результатов: {version.continuation.preservedCount} готовых карточек.</p> : null}
       {Number.isFinite(version.completedCount) ? <span className="status-note">Успешно подготовлено: {version.completedCount} из {total}</span> : null}
+      {progress.partial ? <p className="status-note">Обработка завершена с ошибками. Осталось подготовить: {total - progress.prepared}. Готовые результаты сохранены для повторного запуска.</p> : null}
       <progress aria-label="Прогресс обработки карточек" max="100" value={percentage} />
       {query ? <div className="seo-query-progress">
         <span>{query.label}: проверено {query.done} из {query.total}, сейчас {query.from}–{query.to}</span>

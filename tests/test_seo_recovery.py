@@ -1,0 +1,249 @@
+"""Regressions for the 46/58 JEWEL run: bounded work and resumable model stages."""
+from collections import Counter
+from copy import deepcopy
+import json
+import threading
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
+
+import server
+import automatic_seo
+from automatic_seo import AutomaticSeoService, SeoError, card_budget_seconds, remember_valid_response, fingerprint
+import test_automatic_seo as fixtures
+
+
+def payload(value, finish='stop'):
+    return {'choices': [{'message': {'content': json.dumps(value, ensure_ascii=False)}, 'finish_reason': finish}]}, 'fake', 'fake'
+
+
+class SeoRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.case = fixtures.AutomaticSeoTest()
+        self.case.setUp()
+        self.service, self.host = self.case.service, self.case.host
+
+    def tearDown(self):
+        self.case.tearDown()
+
+    def test_thousand_queries_split_without_loss_and_reuse_validated_parts(self):
+        own = fixtures.card('1001')
+        src = fixtures.sources(own, self.case.mapping['1001'])
+        src['semantic'] = [{'query': f'запрос {i}'} for i in range(1001)]
+        calls = []
+        def answer(messages):
+            evidence = json.loads(messages[1]['content'])
+            queries = evidence.get('semanticBatch', evidence.get('semanticReviewBatch'))
+            calls.append(tuple(queries.values()))
+            if len(queries) > 6:
+                return payload({}, 'length')
+            if 'semanticBatch' in evidence:
+                return payload({k: {'relevance': 'релевантен', 'reason': 'Назначение подтверждено.'} for k in queries})
+            return payload({k: {'destination': 'не добавлять', 'outputPhrase': '',
+                               'reason': 'Запрос дублирует уже объяснённое назначение товара в описании.'} for k in queries})
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
+            assessments = self.service.assess_semantics(own, src, cache)
+            result = fixtures.generated()
+            result.update(sources=src, semanticDecisions=[dict(r, destination='не добавлять') for r in assessments])
+            self.service.explain_unplaced_semantics(own, result, cache)
+            before = len(calls)
+            self.assertEqual(assessments, self.service.assess_semantics(own, src, cache))
+            self.service.explain_unplaced_semantics(own, result, cache)
+            self.assertEqual(before, len(calls))
+        self.assertEqual([r['query'] for r in assessments], [r['query'] for r in src['semantic']])
+        self.assertEqual(len(result['semanticDecisions']), 1001)
+        self.assertTrue(all(r['placementReviewed'] for r in result['semanticDecisions']))
+
+    def test_failed_additional_plan_resumes_completed_parts_without_paid_repetition(self):
+        evidence = {'ownEvidence': {'title': 'Товар'}, 'marketplace': 'Wildberries',
+                    'card': {'sku': '1001'}, 'competitor': {}, 'definitions': [],
+                    'competitorProfile': {'structure': ['Назначение'], 'phrases': []},
+                    'keywordIds': {}, 'semantic': [{'query': f'запрос {i}'} for i in range(101)],
+                    'remarks': [], 'planFields': ['title', 'characteristics', 'keywords']}
+        completed, fail = Counter(), [True]
+        def answer(messages):
+            data = json.loads(messages[1]['content'])
+            if 'semanticCandidates' not in data:
+                return payload({'compatibility': {'comparable': True, 'reason': 'Назначение'},
+                                'title': {'value': 'Товар', 'reason': 'Факты'}, 'characteristics': [], 'issues': []})
+            queries = tuple(r['query'] for r in data['semanticCandidates'])
+            if queries[0] == 'запрос 48' and fail[0]:
+                fail[0] = False
+                raise RuntimeError('simulated interruption')
+            if len(queries) > 6:
+                return payload({}, 'length')
+            completed[queries] += 1
+            return payload({'additionalKeywords': []})
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=answer):
+            with self.assertRaisesRegex(RuntimeError, 'interruption'):
+                self.service.plan_in_parts('План', evidence, {'sku': '1001'}, cache)
+            result = self.service.plan_in_parts('План', evidence, {'sku': '1001'}, cache)
+        self.assertEqual(result['additionalKeywords'], [])
+        self.assertTrue(all(count == 1 for count in completed.values()))
+        self.assertEqual({q for batch in completed for q in batch}, {r['query'] for r in evidence['semantic']})
+
+    def test_stage_cache_requires_exact_input_schema_instruction_and_complete_response(self):
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', return_value=payload({'ok': True})) as call:
+            for kwargs in [{}, {}, {'evidence': {'changed': True}}, {'instruction': 'changed'},
+                           {'response_schema': {'type': 'object'}}, {'raw_text': True}]:
+                data = {'instruction': 'test', 'evidence': {}}
+                data.update(kwargs)
+                self.service.chat(**data, journal=cache, journal_key='stage')
+                remember_valid_response(cache, 'stage')
+            self.assertEqual(call.call_count, 5)
+            cache['stage']['contentLength'] += 1
+            self.service.chat('test', {}, journal=cache, journal_key='stage', raw_text=True)
+            self.assertEqual(call.call_count, 6)
+
+    def test_syntactically_valid_but_incomplete_answer_is_not_reused_on_retry(self):
+        own = fixtures.card('1001')
+        src = fixtures.sources(own, self.case.mapping['1001'])
+        cache = {}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=[payload({}), payload(fixtures.assessment())]) as call:
+            with self.assertRaisesRegex(SeoError, 'seo_semantic_decisions_incomplete'):
+                self.service.assess_semantics(own, src, cache)
+            rows = self.service.assess_semantics(own, src, cache)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(rows[0]['query'], src['semantic'][0]['query'])
+
+    def test_competitor_hallucination_gets_one_repair_with_literal_witness(self):
+        competitor = {'sku': '9001', 'title': 'Кран для умывальника', 'description': 'Корпус из латуни.'}
+        cache = {}
+        with patch.object(self.service, 'chat', side_effect=[
+            {'structure': ['Назначение'], 'phrases': [{'phrase': 'выдуманный запрос'}]},
+            {'structure': ['Назначение'], 'phrases': [{'phrase': 'Кран для умывальника', 'quote': 'чужая цитата'}]},
+        ]) as call:
+            self.service.competitor_profile(competitor, cache, 'profile')
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(cache['profile']['phrases'][0]['quote'], 'Кран для умывальника')
+
+    def test_official_characteristics_are_checked_before_single_placement_pass(self):
+        own = fixtures.card('1001')
+        src = fixtures.sources(own, self.case.mapping['1001'])
+        events = []
+        original = self.service.explain_unplaced_semantics
+        def review(*args, **kwargs):
+            events.append('placement')
+            return original(*args, **kwargs)
+        with patch.object(self.service, 'explain_unplaced_semantics', side_effect=review):
+            self.service.generate(own, src, [], None, {}, verify_characteristics=lambda result: events.append('official'))
+        self.assertEqual(events, ['official', 'placement'])
+
+    def test_worker_does_not_charge_an_hour_waiting_for_model_to_card_budget(self):
+        for sku in ('1003', '1004', '1005'):
+            self.host.tasks.append({'id': 'task-' + sku, 'cardKey': sku, 'sku': sku, 'offerId': sku, 'status': 'draft'})
+            self.case.mapping[sku] = deepcopy(self.case.mapping['1001'])
+        elapsed, queued = [0], [0]
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + elapsed[0])
+        self.host.automatic_seo_queue_seconds = lambda: queued[0]
+        original = self.service.generate
+        def generate(*args, **kwargs):
+            if not queued[0]:
+                elapsed[0] = queued[0] = 3700
+            return original(*args, **kwargs)
+        with patch.object(automatic_seo, 'time', clock), patch.object(self.service, 'generate', side_effect=generate):
+            self.case.action()
+            result = self.case.finish()
+        self.assertEqual(result['status'], 'review', result)
+        self.assertEqual(result['completedCount'], 5)
+
+
+class ProviderCooldownTest(unittest.TestCase):
+    def test_429_cooldown_is_visible_before_another_worker_enters(self):
+        ticks, calls = [100.0], []
+        fake_time = SimpleNamespace(monotonic=lambda: ticks[0], sleep=lambda seconds: ticks.__setitem__(0, ticks[0] + seconds))
+        def request(*args):
+            calls.append(ticks[0])
+            if len(calls) == 1:
+                raise HTTPError('', 429, 'limit', {'Retry-After': '7'}, None)
+            return {}, 'fake', 'fake'
+        with patch.object(server, 'time', fake_time), patch.object(server, 'LLM_COOLDOWN_UNTIL', 0), \
+             patch.object(server, 'LLM_QUEUE_METRICS', threading.local()), \
+             patch.object(server, '_audit_llm_chat_completion', side_effect=request):
+            server.audit_llm_chat_completion([])
+            self.assertEqual(calls, [100, 107])
+            self.assertEqual(server.automatic_seo_queue_seconds(), 7)
+
+    def test_long_retry_after_stops_other_requests_without_contacting_provider(self):
+        with patch.object(server, 'LLM_COOLDOWN_UNTIL', 0), \
+             patch.object(server, '_audit_llm_chat_completion', side_effect=HTTPError('', 429, 'limit', {'Retry-After': '600'}, None)) as call:
+            for _ in range(2):
+                with self.assertRaises(HTTPError):
+                    server.audit_llm_chat_completion([])
+            self.assertEqual(call.call_count, 1)
+
+    def test_budget_scales_for_real_incident_and_has_finite_upper_bound(self):
+        self.assertEqual(card_budget_seconds(0), 3600)
+        self.assertGreater(card_budget_seconds(961), 3600)
+        self.assertEqual(card_budget_seconds(100000), 14400)
+
+
+class LargeBatchRecoveryTest(unittest.TestCase):
+    def test_110_card_batch_retries_only_failure_after_service_recreation_and_exports_every_sku(self):
+        case = fixtures.AutomaticSeoTest()
+        case.setUp()
+        try:
+            skus = [str(1000 + i) for i in range(110)]
+            case.host.tasks = [{'id': 'task-' + sku, 'cardKey': sku, 'sku': sku,
+                                'offerId': sku, 'status': 'draft'} for sku in skus]
+            case.mapping = {sku: {'sku': '9001', 'reason': 'Сопоставимое назначение.'} for sku in skus}
+            case.host.automatic_seo_parallelism = lambda: 4
+            case.host.fail_sku = skus[87]
+            def finish():
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    version = case.service.view(1, 'batch', case.tech)['versions'][-1]
+                    if version['status'] != 'running':
+                        return version
+                    time.sleep(.05)
+                self.fail('110-card batch exceeded the offline test budget')
+            case.action()
+            first = finish()
+            self.assertEqual(first['status'], 'partial', first)
+            self.assertEqual((first['done'], first['total'], first['completedCount']), (110, 110, 109))
+            self.assertEqual([e['sku'] for e in first['errors']], [skus[87]])
+            directory = case.service.directory(1, 'batch')
+            saved = case.service.load(directory)['versions'][-1]
+            hashes = {sku: fingerprint(result) for sku, result in saved['results'].items()}
+            own_fetches = case.host.own_fetches
+            case.host.fail_sku = None
+            case.host.calls.clear()
+            case.service = AutomaticSeoService(case.host, case.tmp.name)
+            resumed = case.action(version=1)['versions'][-1]
+            self.assertEqual((resumed['done'], resumed['completedCount']), (109, 109))
+            self.assertEqual(resumed['continuation']['preservedCount'], 109)
+            self.assertNotIn('_preservation', resumed)
+            second = finish()
+            self.assertEqual(second['status'], 'review', second)
+            self.assertEqual((second['done'], second['total'], second['completedCount']), (110, 110, 110))
+            self.assertEqual(case.host.calls, [skus[87]])
+            self.assertEqual(case.host.own_fetches, own_fetches)
+            final = case.service.load(directory)['versions'][-1]
+            self.assertEqual(list(final['results']), skus)
+            self.assertEqual(final['sourceCapturedAt'], saved['sourceCapturedAt'])
+            self.assertTrue(all(fingerprint(final['results'][sku]) == digest for sku, digest in hashes.items()))
+            with patch.object(server, 'automatic_seo_service', return_value=case.service), \
+                 patch.object(server, 'user_is_admin', return_value=True):
+                report = server.automatic_seo_handoff_report(1, 'batch', case.tech)
+            self.assertEqual(report['unchangedCount'], 109)
+            self.assertTrue(report['allPreserved'] and report['sourcePreserved'])
+            self.assertEqual(report['preservedFromVersion'], 1)
+            from io import BytesIO
+            from openpyxl import load_workbook
+            book = load_workbook(BytesIO(case.service.download(1, 'batch', case.tech, 2)))
+            try:
+                self.assertEqual(len(book.sheetnames), 8)
+                self.assertEqual([str(book['Итог'].cell(i + 5, 1).value) for i in range(110)], skus)
+            finally:
+                book.close()
+        finally:
+            case.tearDown()
+
+
+if __name__ == '__main__':
+    unittest.main()

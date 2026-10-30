@@ -16,8 +16,10 @@ export function seoProgress(version, now = Date.now()) {
   const total = count(version.total);
   const done = Math.min(total, count(version.done));
   const running = version.status === "running";
+  const partial = version.status === "partial" && Number.isFinite(version.completedCount);
+  const prepared = Math.min(total, count(version.completedCount));
   const complete = ["review", "submitted", "approved", "returned"].includes(version.status) && Boolean(version.sha256);
-  const percentage = total ? Math.min(running ? 99 : 100, Math.floor(done / total * 100)) : 0;
+  const percentage = total ? Math.min(running ? 99 : 100, Math.floor((partial ? prepared : done) / total * 100)) : 0;
   const started = Date.parse(version.createdAt);
   const finished = Date.parse(version.finishedAt);
   const elapsedSeconds = Number.isFinite(started) ? Math.max(0, ((Number.isFinite(finished) ? finished : now) - started) / 1000) : null;
@@ -37,5 +39,5 @@ export function seoProgress(version, now = Date.now()) {
     total: count(match[4]), from: count(match[2]), to: Math.min(count(match[3]), count(match[4])),
   } : null;
   return { done, total, percentage: complete ? 100 : percentage, elapsedSeconds, remaining, query,
-    running, complete, assembling: running && total > 0 && done === total };
+    running, complete, partial, prepared, assembling: running && total > 0 && done === total };
 }
