@@ -322,9 +322,66 @@ class AdditionalContextTest(unittest.TestCase):
                                               for phrase in ['первая версия','другая версия']]}
             return {'compatibility':{'comparable':True,'reason':'Назначение'},
                     'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]}
-        with patch.object(self.service, 'chat', side_effect=chat):
-            with self.assertRaisesRegex(SeoError, 'seo_keyword_decisions_incomplete'):
+        with patch.object(self.service, 'chat', side_effect=chat) as calls:
+            with self.assertRaisesRegex(SeoError, 'seo_keyword_decisions_incomplete') as caught:
                 self.service.plan_in_parts('План', evidence, {'sku':'1001'}, {})
+        self.assertTrue(caught.exception.details['additionalRepairAttempted'])
+        self.assertEqual(sum('semanticCandidates' in call.args[1] for call in calls.call_args_list), 2)
+
+    def test_additional_semantic_repair_is_bounded_validated_and_reused_only_for_exact_facts(self):
+        good = {'sourcePhrase':'запрос 0','outputPhrase':'дополнение','decision':'адаптировать','reason':'Подтверждено назначение.'}
+        invalid_answers = [
+            {'additionalKeywords':[good, dict(good,outputPhrase='другая формулировка')]},
+            {'additionalKeywords':[dict(good,reason='')]},
+            {'additionalKeywords':[dict(good,sourcePhrase='чужой запрос')]},
+            {'additionalKeywords':None},
+        ]
+        for invalid in invalid_answers:
+            with self.subTest(invalid=invalid):
+                evidence = self.evidence(1);evidence['keywordIds'] = {}
+                cache, calls = {}, []
+                def model(messages):
+                    data = json.loads(messages[1]['content'])
+                    if 'semanticCandidates' not in data:
+                        return payload({'compatibility':{'comparable':True,'reason':'Назначение'},
+                                        'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
+                    calls.append(deepcopy(data))
+                    self.assertEqual('Предыдущий ответ содержал' in messages[0]['content'], len(calls)%2==0)
+                    return payload(invalid if len(calls)%2 else {'additionalKeywords':[good]})
+                with patch.object(self.host, 'audit_llm_chat_completion', side_effect=model):
+                    first = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+                    second = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+                    self.assertEqual(first, second)
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(first['additionalKeywords'], [good])
+                    responses = {k:v for k,v in cache.items() if k.startswith('response:additional-plan:')}
+                    self.assertEqual(len(responses), 2)
+                    self.assertTrue(all(bool(v.get('validated'))==k.endswith(':repair-v1') for k,v in responses.items()))
+                    changed = deepcopy(evidence);changed['ownEvidence']['title'] = 'Другой товар'
+                    self.service.plan_in_parts('План', changed, {'sku':'1001'}, cache)
+                    self.assertEqual(len(calls), 4)
+
+    def test_additional_correction_cannot_replay_unvalidated_or_pay_during_offline_recheck(self):
+        evidence = self.evidence(1);evidence['keywordIds'] = {}
+        cache = {}
+        def model(messages):
+            data = json.loads(messages[1]['content'])
+            if 'semanticCandidates' not in data:
+                return payload({'compatibility':{'comparable':True,'reason':'Назначение'},
+                                'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]})
+            if 'Предыдущий ответ содержал' in messages[0]['content']:
+                raise TimeoutError()
+            return payload({'additionalKeywords':[{'sourcePhrase':'запрос 0','outputPhrase':value,'decision':'адаптировать','reason':'Факт'}
+                                                   for value in ['первая версия','другая версия']]})
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=model):
+            with self.assertRaisesRegex(SeoError, 'seo_llm_timeout'):
+                self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+        remember_valid_response(cache, 'response:draft-core:1001')
+        cache['_readOnlyReplay'] = True
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('offline must not pay')) as paid:
+            with self.assertRaisesRegex(SeoError, 'seo_recheck_response_missing'):
+                self.service.plan_in_parts('План', evidence, {'sku':'1001'}, cache)
+        paid.assert_not_called()
 
     def test_timeout_reports_only_sizes_counts_and_measured_queue_time(self):
         ticks, queue = [100.0], [10.0]

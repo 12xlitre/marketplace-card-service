@@ -744,6 +744,8 @@ class AutomaticSeoService:
                         return parsed
                 except (ValueError, TypeError):
                     pass
+        if not reuse_response and journal is not None and journal.get('_readOnlyReplay'):
+            raise SeoError('seo_recheck_response_missing')
         if journal is not None and journal_key and not reuse_response:
             journal.pop('envelopes:' + journal_key, None)
         retryable = {'seo_invalid_model_response', 'seo_llm_invalid_arguments',
@@ -1223,29 +1225,64 @@ class AutomaticSeoService:
                 props = {'sourcePhrase': {'type': 'string', 'enum': [r['query'] for r in candidates]}, **KEYWORD_DECISION_SCHEMA['properties']}
                 schema = schema_object({'additionalKeywords': schema_rows(props)})
                 key = 'response:additional-plan:' + fingerprint(data)
-                response = self.chat('Выбери только дополнительные подтверждённые смыслы из semanticCandidates, '
+                instruction = ('Выбери только дополнительные подтверждённые смыслы из semanticCandidates, '
                     'которых ещё нет в selectedKeywords. Не перечисляй перестановки одинаковых слов. Без квот по числу ключей. '
                     'Для каждого выбранного запроса дай точный sourcePhrase, outputPhrase, decision и reason. '
                     'Не повторяй sourcePhrase в ответе: одна строка на выбранного кандидата. '
                     'selectedKeywords содержит исходные/выбранные формулировки и решения; их обоснования уже сохранены. '
-                    'Если дополнений нет, additionalKeywords: [].',
-                    data, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False,
-                    before_request=(lambda: progress(f'Дополнительные смыслы {candidate_positions[candidates[0]["query"]] + 1}–{candidate_positions[candidates[0]["query"]] + len(candidates)} из {len(evidence["semantic"])}')) if progress else None)
-                extra = response.get('additionalKeywords')
-                if not isinstance(extra, list) or not all(isinstance(row, dict) and row.get('sourcePhrase') in {r['query'] for r in candidates} for row in extra):
-                    raise SeoError('seo_keyword_source_missing')
-                if not all(row.get('decision') in {'использовать', 'адаптировать', 'объединить', 'исключить'}
-                           and isinstance(row.get('outputPhrase'), str) and isinstance(row.get('reason'), str) and row['reason'].strip()
-                           for row in extra):
-                    raise SeoError('seo_keyword_decisions_incomplete')
-                unique = {}
-                for row in extra:
-                    previous = unique.get(row['sourcePhrase'])
-                    if previous and (previous['decision'] != row['decision'] or normalized(previous['outputPhrase']) != normalized(row['outputPhrase'])):
-                        raise SeoError('seo_keyword_decisions_incomplete', details={'conflictingAdditionalDecisions': True})
-                    unique.setdefault(row['sourcePhrase'], row)
-                remember_valid_response(cache, key)
-                return list(unique.values())
+                    'Если дополнений нет, additionalKeywords: [].')
+                repair_instruction = instruction + ('\nПредыдущий ответ содержал неполные или противоречивые решения. '
+                    'Верни исправленный additionalKeywords: для каждой выбранной sourcePhrase ровно одно окончательное '
+                    'решение, одну outputPhrase и непустое обоснование reason по нашим фактам. '
+                    'invalidAdditionalKeywords показывает ошибочные варианты, а не подтверждённые факты. '
+                    'Не перечисляй альтернативные решения или варианты формулировки отдельными строками. '
+                    'Бери sourcePhrase только из текущего semanticCandidates. Для каждого нового решения reason обязателен. '
+                    'Если ни одного дополнительного смысла нет, верни пустой массив.')
+                repair_marker = 'additional-repair-v1:' + fingerprint(data)
+                batch_label = f'{candidate_positions[candidates[0]["query"]] + 1}–{candidate_positions[candidates[0]["query"]] + len(candidates)} из {len(evidence["semantic"])}'
+                before_request = (lambda: progress('Дополнительные смыслы ' + batch_label)) if progress else None
+                repair_progress = (lambda: progress('Уточнение дополнительных смыслов ' + batch_label)) if progress else None
+
+                def checked(response):
+                    extra = response.get('additionalKeywords')
+                    if not isinstance(extra, list) or not all(isinstance(row, dict) and row.get('sourcePhrase') in {r['query'] for r in candidates} for row in extra):
+                        raise SeoError('seo_keyword_source_missing')
+                    if not all(row.get('decision') in {'использовать', 'адаптировать', 'объединить', 'исключить'}
+                               and isinstance(row.get('outputPhrase'), str) and isinstance(row.get('reason'), str) and row['reason'].strip()
+                               for row in extra):
+                        raise SeoError('seo_keyword_decisions_incomplete')
+                    unique = {}
+                    for row in extra:
+                        previous = unique.get(row['sourcePhrase'])
+                        if previous and (previous['decision'] != row['decision'] or normalized(previous['outputPhrase']) != normalized(row['outputPhrase'])):
+                            raise SeoError('seo_keyword_decisions_incomplete', details={'conflictingAdditionalDecisions': True})
+                        unique.setdefault(row['sourcePhrase'], row)
+                    return list(unique.values())
+
+                correction = cache.get(repair_marker)
+                correcting = isinstance(correction, dict) and correction.get('code') in {'seo_keyword_source_missing', 'seo_keyword_decisions_incomplete'}
+                for _ in range(1 if correcting else 2):
+                    response_key = key + ':repair-v1' if correcting else key
+                    request_data = dict(data, previousProblem=correction['code'], invalidAdditionalKeywords=correction['rows']) if correcting else data
+                    response = self.chat(repair_instruction if correcting else instruction,
+                        request_data, journal=cache, journal_key=response_key, response_schema=schema,
+                        retry_truncated=False, before_request=repair_progress if correcting else before_request)
+                    try:
+                        extra = checked(response)
+                    except SeoError as exc:
+                        if correcting:
+                            exc.details['additionalRepairAttempted'] = True
+                            raise
+                        if str(exc) not in {'seo_keyword_source_missing', 'seo_keyword_decisions_incomplete'}:
+                            raise
+                        # Marker records the need for correction, never validates a malformed response.
+                        invalid = response.get('additionalKeywords')
+                        correction = {'code': str(exc), 'rows': [{k: row.get(k) for k in ('sourcePhrase', 'outputPhrase', 'decision')}
+                                      for row in invalid if isinstance(row, dict)] if isinstance(invalid, list) else []}
+                        cache[repair_marker], correcting = correction, True
+                        continue
+                    remember_valid_response(cache, response_key)
+                    return extra
             for offset in range(0, len(evidence['semantic']), 24):
                 extra = self.split_model_batch(evidence['semantic'][offset:offset + 24], additional,
                     lambda a, b: a + b, progress, cache, {'stage': 'additional-plan-v1',
