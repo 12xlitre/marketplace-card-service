@@ -2,6 +2,14 @@
 
 Обновлено: 2026-10-30. Текущий статус здесь; постоянные правила — в [памяти проекта](docs/memory/INDEX.md).
 
+## Устранение тяжёлой WB scope-проверки — 30.10.2026 (локально, проверяется)
+
+37c874f выложен с explicit intent157, та жеv3 продолжена в10:44:33UTC (13:44:33МСК), checkpoint handoff-1793357071831790968. Обе проверки preservation и latestHandoff подтвердили46/46, sourcePreserved=true. V3 остаётсяrunning, четырекарточки проходят этапы дальше прежнегоcached-relevance. Браузерная приёмка37c874f pass:html/API/права/мобильный390px/JSerrors0. UI-скорость ещё нельзя считать исправленной: metadata после patch~6с, RSS~1.15ГБ против1.23ГБ ранее; поэтому не обещать многократное уменьшение памяти.
+
+Дополнительное профилирование выявило wb_automatic_task_scope→get_portal_row, который при каждом контексте читает31поле портала и агрегирует153МБJSON card_drafts всех кабинетов. Production read-only SQL:0.715951/0.679077с против0.001895/0.000059с дляid/marketplace/is_active. Один progress вызывает контекст неоднократно; это реальная лишняя работа даже после снятия metadata-lock. Подготовлен scope_only=True в существующем get_portal_row: точно тот жеSQLmembership-filter/active/marketplace, безsnapshot/секретов/агрегатов. Остальные вызовы полногоget_portal_row сохраняют контракт. Тест с SQLite authorizer запрещает чтение payload_json и cards_snapshot_json и подтверждает работуscope/listtasks и запретчужогокабинета.8WB-тестов pass; общийпрогон189Python tests pass за205.005с (scope-release-all-tests.log).
+
+После тестов выпустить эту завершающую SQL-дельту штатно с сохранениемv3. Уже действующий intent157 имеет phase running/attempts1 и сам восстановитv3 при следующем контролируемом рестарте; новый дублирующий intent не создавать, attempts не сбрасывать. Перед переключением freshbackup иscope/no-other-running guard, после —latestHandoff/allPreserved/sourcePreserved и естественнаяприёмка. Источники и46готовых неизменны; завершение оставшихся12 не заявлено. TelegramOFF, внешних ручных сообщений не отправляли.
+
 ## Ускорение больших пачек и перенос v3 — 30.10.2026 (подготовлено, в работе)
 
 Релиз74129f7 выложен штатным opticards-deploy после fresh SQLite backup `/opt/opticards/var/backups/seo-recovery-110-20261030T101924Z/opticards.sqlite3` (quick_check ok, других running0). В13:27:51МСК (10:27:51UTC) одним POST запущена JEWEL v3:46готовых сразу, только12ошибочных в worker-очереди. Admin `/handoff`:46/46 SHA unchanged, allPreserved/sourcePreserved=true, fromVersion2; исходный sourceCapturedAt29.10 13:30:35UTC. Версии1/2 сохранены. Production API/health/HTML/private paths/401/403 pass. Браузер Насти: v3/46готовых, JSerrors0,390px безoverflow, все мутации блокировались; первые короткие ожидания UI оказались недостаточными, приёмка успешно повторена с150с. Не объявлять это исправленной скоростью сайта.

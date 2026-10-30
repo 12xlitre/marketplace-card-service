@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
@@ -110,6 +111,27 @@ class MarketplaceAutomaticSeoTest(unittest.TestCase):
         for bad in ['https://ozon.ru/product/9001/','https://www.wildberries.ru.evil.test/catalog/9001/detail.aspx',
                     'https://user@wildberries.ru/catalog/9001/detail.aspx']:
             with self.assertRaises(SeoError): competitor_sku(bad,'Wildberries')
+
+    def test_task_scope_reads_no_heavy_snapshots_or_draft_payloads_and_keeps_membership_filter(self):
+        self.create()
+        original = server.connect_db
+        def connection():
+            db = original()
+            def guard(action, table, column, database, source):
+                heavy = (table == 'card_drafts' and column == 'payload_json') or (table == 'portals' and column == 'cards_snapshot_json')
+                return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and heavy else sqlite3.SQLITE_OK
+            db.set_authorizer(guard)
+            return db
+        with patch.object(server, 'connect_db', side_effect=connection):
+            self.assertEqual(server.wb_automatic_task_scope(self.wb, self.tech), int(self.wb))
+            self.assertEqual(len(server.list_wb_automatic_tasks(self.wb, self.tech)['tasks']), 1)
+            row = server.get_portal_row(self.wb, self.tech, scope_only=True)
+            self.assertEqual(set(row.keys()), {'id', 'marketplace', 'is_active'})
+            self.assertIsNone(server.get_portal_row(self.other, self.tech, scope_only=True))
+            with self.assertRaises(PermissionError):
+                server.wb_automatic_task_scope(self.other, self.tech)
+            with self.assertRaises(sqlite3.DatabaseError):
+                server.get_portal_row(self.wb, self.tech)
 
     def test_wb_generation_download_and_approval_update_plan_without_marketplace_writes(self):
         created = self.create(); batch = created['batchId']

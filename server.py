@@ -1998,7 +1998,7 @@ def public_portal_from_row(row, task_summary=None, include_cards=True):
   }
 
 
-def get_portal_row(portal_id, user=None):
+def get_portal_row(portal_id, user=None, scope_only=False):
   init_db()
   params = [portal_id]
   access_filter = ""
@@ -2016,6 +2016,10 @@ def get_portal_row(portal_id, user=None):
     """
     params.extend([user["login"], user["login"]])
   with connect_db() as db:
+    if scope_only:
+      # Permission/category checks do not need snapshots, integration secrets or draft aggregates.
+      return db.execute(f'SELECT portals.id,portals.marketplace,portals.is_active FROM portals '
+                        f'WHERE portals.id=? {access_filter}', params).fetchone()
     return db.execute(
       f"""
       SELECT
@@ -5629,7 +5633,7 @@ def workset_batch_draft_payload(card, user, batch_id, existing_payload=None, bat
 def wb_automatic_task_scope(portal_id, user):
   if not user_can_access_portal(user, portal_id):
     raise PermissionError('forbidden')
-  row = get_portal_row(portal_id, user)
+  row = get_portal_row(portal_id, user, scope_only=True)
   if not row or not row['is_active']:
     raise ValueError('portal_not_found')
   if audit_normalized(row['marketplace']) not in {'wildberries', 'wb'}:
