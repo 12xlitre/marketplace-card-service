@@ -276,6 +276,81 @@ class CharacteristicRepairTest(unittest.TestCase):
             self.assertTrue(any(i.get('code')=='characteristic_format_repaired' for i in result['issues']))
 
 
+class AdditionalContextTest(unittest.TestCase):
+    setUp = SeoRecoveryTest.setUp
+    tearDown = SeoRecoveryTest.tearDown
+
+    def evidence(self, queries=50):
+        return {'ownEvidence':{'title':'Товар'}, 'marketplace':'Wildberries','competitor':{},
+                'competitorProfile':{'structure':['Назначение'],'phrases':[]},
+                'keywordIds':{f'k{i}':f'ключ {i}' for i in range(3)},
+                'semantic':[{'query':f'запрос {i}'} for i in range(queries)],
+                'remarks':[], 'planFields':['title','characteristics','keywords']}
+
+    def test_all_candidates_and_source_phrases_remain_but_long_reasons_are_not_repeated(self):
+        evidence = self.evidence()
+        seen, contexts = [], []
+        long_reason = 'Подробное обоснование. ' * 1000
+        def chat(instruction, data, **kwargs):
+            if 'semanticCandidates' in data:
+                seen.extend(row['query'] for row in data['semanticCandidates'])
+                contexts.append(deepcopy(data['selectedKeywords']))
+                self.assertLess(len(json.dumps(data['selectedKeywords'], ensure_ascii=False)), 3000)
+                row = {'sourcePhrase':'запрос 0','outputPhrase':'дополнение','decision':'адаптировать','reason':long_reason}
+                return {'additionalKeywords':[row, deepcopy(row)] if len(contexts)==1 else []}
+            if data.get('keywordIds'):
+                return {'keywords':{key:{'outputPhrase':value,'decision':'использовать','reason':long_reason}
+                                    for key,value in data['keywordIds'].items()}}
+            return {'compatibility':{'comparable':True,'reason':'Назначение'},
+                    'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]}
+        with patch.object(self.service, 'chat', side_effect=chat):
+            result = self.service.plan_in_parts('План', evidence, {'sku':'1001'}, {})
+        self.assertEqual(seen, [row['query'] for row in evidence['semantic']])
+        self.assertEqual({row['sourcePhrase'] for row in contexts[0]}, set(evidence['keywordIds'].values()))
+        self.assertIn('запрос 0', {row['sourcePhrase'] for row in contexts[1]})
+        self.assertTrue(all('reason' not in row for context in contexts for row in context))
+        self.assertEqual(len(result['additionalKeywords']), 1)
+        self.assertEqual(result['additionalKeywords'][0]['reason'], long_reason)
+        self.assertTrue(all(row['reason']==long_reason for row in result['keywords'].values()))
+
+    def test_conflicting_duplicate_additional_decisions_are_not_silently_selected(self):
+        evidence = self.evidence(1)
+        evidence['keywordIds'] = {}
+        def chat(instruction, data, **kwargs):
+            if 'semanticCandidates' in data:
+                return {'additionalKeywords':[{'sourcePhrase':'запрос 0','outputPhrase':phrase,'decision':'адаптировать','reason':'Подтверждено назначение.'}
+                                              for phrase in ['первая версия','другая версия']]}
+            return {'compatibility':{'comparable':True,'reason':'Назначение'},
+                    'title':{'value':'Товар','reason':'Факты'},'characteristics':[],'issues':[]}
+        with patch.object(self.service, 'chat', side_effect=chat):
+            with self.assertRaisesRegex(SeoError, 'seo_keyword_decisions_incomplete'):
+                self.service.plan_in_parts('План', evidence, {'sku':'1001'}, {})
+
+    def test_timeout_reports_only_sizes_counts_and_measured_queue_time(self):
+        ticks, queue = [100.0], [10.0]
+        clock = SimpleNamespace(monotonic=lambda:ticks[0])
+        def timeout(messages, schema):
+            ticks[0] += 12
+            queue[0] += 7
+            raise TimeoutError('PRIVATE_NETWORK_DETAILS')
+        evidence = {'ownFacts':{'title':'PRIVATE_PRODUCT_FACT'},
+                    'semanticCandidates':[{'query':'первый'},{'query':'второй'}],
+                    'selectedKeywords':[{'outputPhrase':'первый'}]}
+        with patch.object(automatic_seo, 'time', clock), \
+             patch.object(self.host, 'automatic_seo_queue_seconds', side_effect=lambda:queue[0], create=True), \
+             patch.object(self.host, 'automatic_seo_chat_completion', side_effect=timeout, create=True):
+            with self.assertRaises(SeoError) as caught:
+                self.service.chat('test', evidence, response_schema={'type':'object'})
+        details = caught.exception.details
+        self.assertEqual(details['semanticItems'], 2)
+        self.assertEqual(details['selectedItems'], 1)
+        self.assertEqual(details['elapsedSeconds'], 12)
+        self.assertEqual(details['queueSeconds'], 7)
+        self.assertGreater(details['inputCharacters'], 0)
+        self.assertNotIn('PRIVATE_PRODUCT_FACT', json.dumps(details))
+        self.assertNotIn('PRIVATE_NETWORK_DETAILS', json.dumps(details))
+
+
 class CacheAndPollingTest(unittest.TestCase):
     def test_handoff_report_checks_both_original_retry_and_latest_saved_checkpoint(self):
         case = fixtures.AutomaticSeoTest()
