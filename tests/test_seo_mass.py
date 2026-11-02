@@ -22,6 +22,10 @@ class MassComparisonTest(unittest.TestCase):
 
     def answer(self,messages):
         data=json.loads(messages[1]['content']);self.calls.append(data)
+        if 'sourceQuestionsToCheck' in data:
+            return response({'questions':{key:{'decision':'keep','duplicateOf':'NONE',
+                'reason':'Собственные источники содержат разные значения одного параметра товара.'}
+                for key in data['sourceQuestionsToCheck']}})
         if data.get('sku')==self.sources['competitor']['sku']:
             return response(self.profile)
         if 'keywordIds' in data:
@@ -190,6 +194,44 @@ class MassComparisonTest(unittest.TestCase):
             problems,_=self.service.audit_ready_text(card,result,{})
         self.assertFalse(problems)
 
+    def test_source_question_refresh_preserves_checked_text_and_every_measurement(self):
+        with patch.object(self.host,'audit_llm_chat_completion',side_effect=self.answer):
+            previous=self.service.generate_mass(self.card,self.sources,[],None,self.cache)
+        previous['issues']=[{'field':'Размер','detail':'19 см и 19,3 см одной тарелки.',
+            'question':'Каков диаметр: 19 или 19,3 см?','blocking':False},
+            {'field':'Разные размеры','detail':'Высота бортика 3 см, диаметр тарелки 27 см.',
+            'question':'Высота бортика: 3 или 27 см?','blocking':False}]
+        previous['quality'].pop('sourceQuestionsReviewed');previous['quality'].pop('sourceQuestionsHash')
+        previous['quality']['outputHash']=self.service.mass_output_hash(previous)
+        with self.assertRaisesRegex(SeoError,'seo_content_repair_incomplete'):
+            self.service.verify_mass_result(self.card,previous)
+        reply={'questions':{'C0':{'decision':'keep','duplicateOf':'NONE',
+            'reason':'Оба источника называют один диаметр одной и той же тарелки.'},
+            'C1':{'decision':'drop','duplicateOf':'NONE',
+            'reason':'Сравниваются разные параметры: высота бортика и диаметр тарелки.'}}}
+        with patch.object(self.host,'audit_llm_chat_completion',return_value=response(reply)) as model:
+            result=self.service.generate_mass(self.card,self.sources,[],previous,self.cache)
+        self.assertEqual(model.call_count,1)
+        self.assertEqual(result['issues'],previous['issues'][:1])
+        for field in ('title','description','characteristics','keywords','semanticDecisions'):
+            self.assertEqual(result[field],previous[field],field)
+        self.service.verify_mass_result(self.card,result)
+        changed=deepcopy(result);changed['issues'].clear()
+        self.assertNotEqual(changed['quality']['outputHash'],self.service.mass_output_hash(changed))
+
+    def test_source_question_review_rejects_missing_ids_bad_duplicates_and_blocking_removal(self):
+        issues=[{'field':'Количество','detail':'11 или 12 предметов.',
+                 'question':'11 или 12 предметов?','blocking':False}]
+        for reply in [{'questions':{}},{'questions':{'C0':{'decision':'duplicate','duplicateOf':'C0',
+            'reason':'Один и тот же вопрос повторён в исходных данных товара.'}}}]:
+            with patch.object(self.host,'audit_llm_chat_completion',return_value=response(reply)):
+                with self.assertRaisesRegex(SeoError,'seo_invalid_content_audit'):
+                    self.service.review_source_questions(self.card,issues,{})
+        with patch.object(self.host,'audit_llm_chat_completion') as model:
+            with self.assertRaisesRegex(SeoError,'seo_content_repair_incomplete'):
+                self.service.review_source_questions(self.card,[dict(issues[0],blocking=True)],{})
+            model.assert_not_called()
+
     def test_new_mass_repair_rewrites_old_ready_results_and_preserves_all_frozen_sources(self):
         self.case.action();self.case.finish()
         directory=self.service.directory(1,'batch');state=self.service.load(directory)
@@ -211,5 +253,20 @@ class MassComparisonTest(unittest.TestCase):
         self.assertTrue(all(row['quality']['revision']==4 for row in after['versions'][-1]['results'].values()))
         self.assertEqual(fingerprint(after['versions'][0]['results']),original_hash)
         self.assertLess(len(self.calls),12)
+        latest=after['versions'][-1];ready=latest['results']['1001'];text=deepcopy(ready['description'])
+        ready['issues']=[{'field':'Размер','detail':'Высота 3 см и диаметр 27 см.',
+            'question':'Какой размер: 3 или 27 см?','blocking':False}]
+        ready['quality'].pop('sourceQuestionsReviewed');ready['quality'].pop('sourceQuestionsHash')
+        ready['quality']['outputHash']=self.service.mass_output_hash(ready)
+        self.service.save(directory,after)
+        with patch.object(self.host,'audit_llm_chat_completion',side_effect=self.answer), \
+             patch.object(self.host,'automatic_seo_sources',side_effect=AssertionError('keep frozen sources')):
+            launched=self.case.action(action='repair',version=latest['number'],refreshSources=False)
+            checked=self.case.finish()
+        self.assertEqual(checked['status'],'review',checked)
+        self.assertEqual(checked['continuation']['preservedCount'],1)
+        refreshed=self.service.load(directory)['versions'][-1]['results']['1001']
+        self.assertEqual(refreshed['description'],text)
+        self.assertTrue(refreshed['quality']['sourceQuestionsReviewed'])
 
 if __name__=='__main__':unittest.main()

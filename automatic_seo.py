@@ -827,7 +827,9 @@ class AutomaticSeoService:
                     preserved = {sku: deepcopy(result) for sku, result in previous.get('results', {}).items()
                                  if previous.get('competitors', {}).get(sku) == mappings.get(sku)
                                  and (not version.get('workflowRevision') or result.get('quality', {}).get('state') == 'ready')
-                                 and (not mass_workflow or result.get('quality', {}).get('revision') == 4)}
+                                 and (not mass_workflow or result.get('quality', {}).get('revision') == 4
+                                      and (not result.get('issues') or result['quality'].get('sourceQuestionsReviewed')
+                                           and result['quality'].get('sourceQuestionsHash') == fingerprint(result['issues'])))}
                     if preserved or action == 'repair':
                         version['results'] = preserved
                         version['done'] = version['completedCount'] = len(preserved)
@@ -1154,9 +1156,15 @@ class AutomaticSeoService:
                     old = previous.get('results', {}).get(sku) if previous and not version['refreshSources'] else None
                     same_competitor = previous and previous['competitors'][sku] == version['competitors'][sku]
                     same_retry = previous and previous['status'] in {'partial', 'failed', 'interrupted'} and sku in previous.get('_completedSkus', []) and [r for r in previous.get('remarks', []) if r['sku'] in {'*', sku}] == remarks
-                    if (old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses')
+                    reuse_old = (old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses')
                             and (not remarks or same_retry) and (not version.get('workflowRevision') or old.get('quality', {}).get('state') == 'ready')
-                            and (version.get('workflowRevision') != 4 or old.get('quality', {}).get('revision') == 4)):
+                            and (version.get('workflowRevision') != 4 or old.get('quality', {}).get('revision') == 4))
+                    if reuse_old and version.get('workflowRevision'):
+                        try:
+                            self.verify_ready_result(card, deepcopy(old))
+                        except SeoError:
+                            reuse_old = False
+                    if reuse_old:
                         result = deepcopy(old)
                     else:
                         def progress(stage):
@@ -2065,7 +2073,64 @@ class AutomaticSeoService:
                         'detail': left['field'] + ': «' + left['quote'] + '». ' + right['field'] + ': «' + right['quote'] + '».',
                         'question': row['question'], 'blocking': False}})
             remember_valid_response(cache, key)
+            if cache.get('_massComparisonWorkflow') and output:
+                kept = self.review_source_questions(card, [row['issue'] for row in output], cache, progress)
+                output = [row for row in output if row['issue'] in kept]
             return output
+
+    def review_source_questions(self, card, issues, cache, progress=None):
+        if not issues:
+            return []
+        if any(row.get('blocking') for row in issues):
+            raise SeoError('seo_content_repair_incomplete')
+        _, _, facts = self.ready_fact_catalog(card)
+        questions = {'C' + str(index): {key: row.get(key, '') for key in ('field', 'detail', 'question')}
+                     for index, row in enumerate(issues)}
+        data = {'ownFacts': facts, 'sourceQuestionsToCheck': questions}
+        row_schema = schema_object({'decision': {'type': 'string', 'enum': ['keep', 'drop', 'duplicate']},
+            'duplicateOf': {'type': 'string', 'enum': ['NONE', *questions]}, 'reason': TEXT})
+        schema = schema_object({'questions': schema_object({key: row_schema for key in questions})})
+        correction = None
+        for attempt in range(2):
+            key = 'response:source-question-review-v1:' + fingerprint(data) + (':repair' if correction else '')
+            reply = self.chat('Проверь обоснованность вопросов к СОБСТВЕННЫМ источникам товара. '
+                'Это не поиск новых проблем и не проверка нового описания. Для каждого C верни keep/drop/duplicate '
+                'и конкретную причину по-русски. KEEP только если источники дают разные значения ОДНОГО параметра '
+                'ОДНОГО и того же элемента набора. DROP если сравниваются разные элементы или параметры. '
+                'Примеры ложных вопросов: диаметр обеденной тарелки против десертной; высота бортика против диаметра; '
+                'ширина ободка против диаметра; размер дополнительно рекомендуемого блюда, НЕ входящего в набор, '
+                'против размеров тарелок комплекта; объем кружки против объема салатника. '
+                'Перечень комплектации может содержать несколько разных размеров: сопоставь конкретные предметы, '
+                'не объявляй все числа в общей строке альтернативами одного параметра. '
+                'Разные размеры разных элементов — нормальная комплектация. '
+                'Сохрани настоящее расхождение, например 19см и19,3см одной десертной тарелки. '
+                'Если два вопроса повторяют одно расхождение, оставь первый keep, второй duplicate с его C в duplicateOf. '
+                'Для keep/drop duplicateOf=NONE. Не выбирай спорное значение за специалиста. '
+                'Ответ questions содержит ровно все исходные C, не добавляй вопросов или цитат.',
+                dict(data, previousProblem=correction) if correction else data, journal=cache, journal_key=key,
+                response_schema=schema, before_request=(lambda: progress('Проверка обоснованности вопросов к исходным данным')) if progress else None)
+            rows = reply.get('questions')
+            valid = isinstance(rows, dict) and set(rows) == set(questions)
+            if valid:
+                for identifier, row in rows.items():
+                    if (not isinstance(row, dict) or set(row) != {'decision', 'duplicateOf', 'reason'}
+                            or row.get('decision') not in {'keep', 'drop', 'duplicate'} or not concrete_reason(row.get('reason'))):
+                        valid = False; break
+                    duplicate = row['duplicateOf']
+                    if row['decision'] == 'duplicate':
+                        if (not isinstance(duplicate, str) or duplicate not in questions
+                                or int(duplicate[1:]) >= int(identifier[1:]) or not isinstance(rows.get(duplicate), dict)
+                                or rows[duplicate].get('decision') != 'keep'
+                                or not numeric_values(questions[identifier]['question'])
+                                or numeric_values(questions[identifier]['question']) != numeric_values(questions[duplicate]['question'])):
+                            valid = False; break
+                    elif duplicate != 'NONE':
+                        valid = False; break
+            if valid:
+                remember_valid_response(cache, key)
+                return [row for index, row in enumerate(issues) if rows['C' + str(index)]['decision'] == 'keep']
+            correction = {'code': 'invalid_question_review', 'requiredQuestionIds': list(questions)}
+        raise SeoError('seo_invalid_content_audit', details={'sourceQuestionReviewInvalid': True})
 
     @staticmethod
     def neutral_ready_facts(text, conflicts):
@@ -3328,6 +3393,17 @@ class AutomaticSeoService:
         budget_key = 'mass-request-budget:' + str(cache.get('_readyRunId', 'pilot')) + ':' + str(card['sku'])
         cache.setdefault(budget_key, {'used': 0, 'limit': 32})
         cache['_readyRequestBudget'] = budget_key
+        if (previous and previous.get('quality', {}).get('revision') == 4 and not remarks
+                and previous['quality'].get('factsHash') == fingerprint(factual_evidence(card))
+                and fingerprint(previous.get('sources')) == fingerprint(sources)):
+            self.verify_mass_result(card, previous, allow_unreviewed_questions=True)
+            result = deepcopy(previous)
+            result['issues'] = self.review_source_questions(card, result['issues'], cache, progress)
+            result['_sourceConflicts'] = [row for row in result.get('_sourceConflicts', []) if row['issue'] in result['issues']]
+            result['quality'].update(sourceQuestionsReviewed=True, sourceQuestionsHash=fingerprint(result['issues']),
+                outputHash=self.mass_output_hash(result), modelRequests=previous['quality']['modelRequests'] + cache[budget_key]['used'])
+            self.verify_mass_result(card, result)
+            return result
         profile_key = 'profile:ready-title-description-v3:' + fingerprint({k: v for k, v in sources['competitor'].items() if k != 'reason'})
         if profile_key not in cache:
             if progress:
@@ -3439,6 +3515,8 @@ class AutomaticSeoService:
         if verify_characteristics:
             verify_characteristics(result)
         result['issues'] = [row['issue'] for row in result['_sourceConflicts']] + source_issues
+        result['issues'] = self.review_source_questions(card, result['issues'], cache, progress)
+        result['_sourceConflicts'] = [row for row in result['_sourceConflicts'] if row['issue'] in result['issues']]
         result['comparison'] = self.mass_comparison(card, result)
         own_attributes = {normalized(row['name']): (row['name'], '; '.join(row['values'])) for row in characteristic_rows(card)}
         other_attributes = {normalized(name): (name, '; '.join(map(str, value)) if isinstance(value, list) else str(value))
@@ -3453,14 +3531,17 @@ class AutomaticSeoService:
             'selectedMeanings': len(selected), 'factsHash': fingerprint(factual_evidence(card)),
             'sourcesHash': fingerprint(sources), 'outputHash': self.mass_output_hash(result),
             'factsAudited': True, 'fullRewrite': True,
+            'sourceQuestionsReviewed': True, 'sourceQuestionsHash': fingerprint(result['issues']),
             'modelRequests': cache[budget_key]['used'], 'elapsedSeconds': round(time.monotonic() - started, 3)}
         self.verify_mass_result(card, result)
         return result
 
-    def verify_mass_result(self, card, result):
+    def verify_mass_result(self, card, result, allow_unreviewed_questions=False):
         quality = result.get('quality', {})
         queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
         if (quality.get('state') != 'ready' or quality.get('revision') != 4 or not quality.get('factsAudited')
+                or result.get('issues') and not allow_unreviewed_questions and
+                    (not quality.get('sourceQuestionsReviewed') or quality.get('sourceQuestionsHash') != fingerprint(result['issues']))
                 or not quality.get('fullRewrite') or quality.get('unresolvedAutomaticCount') != 0
                 or quality.get('factsHash') != fingerprint(factual_evidence(card))
                 or quality.get('sourcesHash') != fingerprint(result['sources'])
