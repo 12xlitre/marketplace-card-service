@@ -65,6 +65,31 @@ class SeoHandoffTest(unittest.TestCase):
         self.assertEqual(manifests[0].stat().st_mode & 0o777,0o600)
         self.assertTrue(self.service.download(1,'batch',self.case.tech,2))
 
+    def test_repair_resume_uses_frozen_previous_sources_without_source_api(self):
+        directory=self.service.directory(1,'batch'); state=self.service.load(directory)
+        original=state['versions'][0]; version=state['versions'][-1]
+        # Extend the baseline fixture to the same frozen scope as the interrupted repair.
+        original['cards']=deepcopy(version['cards']); original['taskHash']=version['taskHash']
+        original['competitors']=deepcopy(version['competitors'])
+        for card in original['cards']:
+            sku=card['sku']
+            if sku not in original['results']:
+                original['results'][sku]=deepcopy(original['results']['1001'])
+        version['repairReady']=True; version['_repairBaseline']={'number':1}
+        self.service.save(directory,state)
+        finished=threading.Event(); observed=[]
+        def worker(portal,batch,user,context,current,previous,handle,resuming=False):
+            try:
+                observed.append((previous['number'], fingerprint(previous['cards']),
+                                 fingerprint(previous['results']['1003']['sources']), resuming))
+            finally:
+                handle.close(); self.service.slots.release(); finished.set()
+        with patch.object(self.host,'automatic_seo_sources',side_effect=AssertionError('must preserve frozen sources')), \
+             patch.object(self.service,'worker',side_effect=worker):
+            self.service.resume(1,'batch',self.case.tech,2,version['taskHash'])
+            self.assertTrue(finished.wait(5))
+        self.assertEqual(observed,[(1,fingerprint(original['cards']),fingerprint(original['results']['1003']['sources']),True)])
+
     def test_wrong_scope_or_second_live_resume_does_not_start_duplicate_work(self):
         with self.assertRaisesRegex(SeoError,'scope_changed'):
             self.service.resume(1,'batch',self.case.tech,2,'wrong')

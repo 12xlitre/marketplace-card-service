@@ -320,8 +320,9 @@ def russian_explanation(value):
 
 
 def numeric_unit_claims(text):
-    return [(next(iter(numeric_values(match.group(1)))), match.group(2).casefold(), match.group())
-            for match in re.finditer(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(мм|см|мл|кг|л|г|м|шт)\b', str(text), re.I)]
+    return [(next(iter(numeric_values(match.group(1)))),
+             'предметов' if match.group(2).casefold().startswith('предмет') else match.group(2).casefold(), match.group())
+            for match in re.finditer(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(мм|см|мл|кг|л|г|м|шт|предмет(?:ов|а)?)\b', str(text), re.I)]
 
 
 @lru_cache(maxsize=512)
@@ -976,8 +977,17 @@ class AutomaticSeoService:
                 version['_resumeIntentId'] = intent_id
                 version['status'], version['stage'] = 'running', 'Продолжаем обработку оставшихся карточек'
                 version.pop('finishedAt', None)
+                baseline = None
+                if version.get('repairReady'):
+                    origin_number = version.get('_repairBaseline', {}).get('number', version.get('_preservation', {}).get('fromVersion'))
+                    baseline = next((row for row in state['versions'] if row['number'] == origin_number), None)
+                    if (not baseline or baseline.get('taskHash') != version['taskHash']
+                            or baseline.get('sourceCapturedAt') != version.get('sourceCapturedAt')
+                            or fingerprint(baseline.get('cards')) != fingerprint(version['cards'])):
+                        raise SeoError('seo_resume_sources_missing')
+                    baseline = deepcopy(baseline)
                 self.save(directory, state)
-                thread = threading.Thread(target=self.worker, args=(portal, batch, user, context, deepcopy(version), None, run_handle),
+                thread = threading.Thread(target=self.worker, args=(portal, batch, user, context, deepcopy(version), baseline, run_handle),
                                           kwargs={'resuming': True}, daemon=True)
                 thread.start()
                 return self.public(state, context)
@@ -1208,7 +1218,8 @@ class AutomaticSeoService:
                     and isinstance(saved.get('content'), str) and saved.get('contentLength') == len(saved['content'])):
                 try:
                     parsed = self.parse_response_json(saved['content'])
-                    if isinstance(parsed, dict):
+                    if (isinstance(parsed, dict) and (not response_schema or not journal.get('_readyWorkflowV2')
+                            or set(response_schema.get('required', [])) <= set(parsed))):
                         return parsed
                 except (ValueError, TypeError):
                     pass
@@ -1387,6 +1398,10 @@ class AutomaticSeoService:
             raise SeoError('seo_llm_invalid_json', details={'responseCharacters': len(content)}) from None
         if not isinstance(parsed, dict):
             raise SeoError('seo_invalid_model_response')
+        if (response_schema and journal is not None and journal.get('_readyWorkflowV2')
+                and not set(response_schema.get('required', [])) <= set(parsed)):
+            raise SeoError('seo_invalid_model_response', details={'missingRequiredFields':
+                sorted(set(response_schema['required']) - set(parsed))})
         return parsed
 
     def assess_semantics(self, card, sources, cache, progress=None, reuse_responses=False):
@@ -1884,6 +1899,12 @@ class AutomaticSeoService:
         # the contextual fact audit still receives their complete original text.
         claims = [(key, number, unit, quote) for key, row in facts.items()
                   for number, unit, quote in numeric_unit_claims(row['quote']) if unit != 'шт']
+        # Only the explicitly named total-item attribute counts the whole set.
+        # Never compare the count of a component or a shipping pack with it.
+        for key, row in facts.items():
+            if 'количество предметов' in normalized(row['field']):
+                for number in numeric_values(row['quote']):
+                    claims.append((key, number, 'предметов', row['quote'] if numeric_unit_claims(row['quote']) else number + ' предметов'))
         pairs = []
         for index, left in enumerate(claims):
             for right in claims[index + 1:]:
@@ -1924,7 +1945,7 @@ class AutomaticSeoService:
             output, seen = [], set()
             for row in rows:
                 pair = candidates[row['pairId']]
-                identity = (pair['leftValue'], pair['rightValue'], pair['leftFact'], pair['rightFact'])
+                identity = tuple(sorted((pair['leftValue'], pair['rightValue'])))
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -1944,8 +1965,10 @@ class AutomaticSeoService:
         def replace(match):
             claim = numeric_unit_claims(match.group())
             return '' if claim and claim[0][:2] in blocked else match.group()
-        result = re.sub(r'(?<![\w.,])\d+(?:[.,]\d+)?\s*(?:мм|см|мл|кг|л|г|м|шт)\b', replace, str(text), flags=re.I)
-        return re.sub(r'[ \t]+(?=[,;:.])', '', re.sub(r'[ \t]+', ' ', result))
+        result = re.sub(r'(?<![\w.,])\d+(?:[.,]\d+)?\s*(?:мм|см|мл|кг|л|г|м|шт|предмет(?:ов|а)?)\b', replace, str(text), flags=re.I)
+        result = re.sub(r'[ \t]+(?=[,;:.])', '', re.sub(r'[ \t]+', ' ', result))
+        result = re.sub(r'[,;:]\s*([.!?])', r'\1', result)
+        return result if re.search(r'\w', result) else ''
 
     def resolve_query_groups(self, card, result, cache, progress=None, allow_additions=True):
         """Explicit per-query codes, then an independent full-scope semantic review."""
@@ -2508,6 +2531,11 @@ class AutomaticSeoService:
                                     phrase = self.neutral_ready_facts(proof['quote'], result.get('_sourceConflicts', [])).strip()
                                     decision = 'адаптировать' if phrase else 'исключить'
                                     reason += ' Сохранена собственная формулировка: «' + phrase + '».'
+                            neutral = self.neutral_ready_facts(phrase, result.get('_sourceConflicts', [])).strip()
+                            if neutral != phrase:
+                                phrase = neutral
+                                decision = 'адаптировать' if phrase else 'исключить'
+                                reason += ' Спорное значение не перенесено до уточнения собственных источников.'
                             if numeric_values(phrase) - numeric_values(' '.join(facts.values())):
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'unconfirmedCoreNumber': True})
                             if {word.casefold() for word in re.findall(r'[A-Za-z][A-Za-z0-9-]*', phrase)} - own_latin:
@@ -2561,7 +2589,11 @@ class AutomaticSeoService:
         if not bad:
             return
         _, facts = self.ready_facts(card)
-        data = {'ownFacts': facts, 'currentTitle': card['title'], 'proposedTitle': result['title']['value'], 'problems': bad}
+        for row in facts:
+            row['value'] = self.neutral_ready_facts(row['value'], result.get('_sourceConflicts', []))
+        data = {'ownFacts': facts, 'currentTitle': self.neutral_ready_facts(card['title'], result.get('_sourceConflicts', [])),
+                'proposedTitle': result['title']['value'], 'problems': bad,
+                'sourceQuestions': [row['issue']['question'] for row in result.get('_sourceConflicts', [])]}
         key = 'response:ready-title-repair:' + fingerprint(data)
         title = self.chat('Исправь только фактические ошибки в предлагаемом заголовке по ownFacts. '
             'Сохрани полезный смысл текущего названия, не сокращай ради краткости. Не переноси чужие свойства. '
@@ -2916,6 +2948,10 @@ class AutomaticSeoService:
         result['_remarks'] = deepcopy(remarks)
         result['_sourceConflicts'] = (deepcopy(previous.get('_sourceConflicts', [])) if scoped else
                                      self.ready_source_conflicts(card, cache, progress))
+        neutral_title = self.neutral_ready_facts(result['title']['value'], result['_sourceConflicts']).strip()
+        if neutral_title != result['title']['value']:
+            result['title'] = {'value': neutral_title, 'reason':
+                'Спорное значение исключено из предложения до уточнения собственных источников; исходное название сохранено в файле.'}
         facts, _ = self.ready_facts(card)
         current = {row['id']: row for row in characteristic_rows(card)}
         definitions = {str(row['id']) for row in sources['definitions']}

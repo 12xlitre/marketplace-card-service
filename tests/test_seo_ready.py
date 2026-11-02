@@ -170,6 +170,46 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertIn('19 предметов', neutral)
         self.assertIn('630 мл', neutral)
 
+    def test_total_item_conflict_is_not_repaired_by_alternating_source_values(self):
+        card = deepcopy(self.card)
+        card['title'] = 'Набор посуды 18 предметов'
+        card['description'] = 'Набор на 6 персон, 18 предметов.'
+        card['characteristics'] = [{'id': 101, 'name': 'Количество предметов в упаковке', 'values': ['16 шт.']},
+                                   {'id': 102, 'name': 'Комплектация', 'values': ['Тарелки 6 шт; салатники 6 шт; чашки 6 шт']}]
+        def answer(instruction, data, **kwargs):
+            matches = [key for key, row in data['candidatePairs'].items()
+                       if row['leftValue']=='18 предметов' and row['rightValue']=='16 шт.']
+            self.assertTrue(matches)
+            return {'conflicts': [{'pairId': key, 'question': 'Сколько предметов в наборе: 18 или 16?'} for key in matches]}
+        with patch.object(self.service, 'chat', side_effect=answer):
+            conflicts = self.service.ready_source_conflicts(card, {})
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(self.service.neutral_ready_facts(card['description'], conflicts), 'Набор на 6 персон.')
+        self.assertEqual(self.service.neutral_ready_facts('16 шт.', conflicts), '')
+        self.assertIn('Тарелки 6 шт', self.service.neutral_ready_facts(card['characteristics'][1]['values'][0], conflicts))
+
+    def test_keyword_cannot_require_reintroducing_a_known_disputed_total(self):
+        card=deepcopy(self.card); card['title']='Набор 18 предметов'
+        result=deepcopy(self.result)
+        result['competitorProfile']['phrases']=[{'phrase':'Набор 18 предметов'}]
+        result['_sourceConflicts']=[{'claims':['18 предметов','16 шт.']}]
+        with patch.object(self.service,'chat',return_value={'keywords':{'K0':{
+            'outputPhrase':'Набор 18 предметов','decision':'использовать',
+            'reason':'Название собственного товара подтверждает назначение столового набора.', 'factIds':['F0']}}}):
+            self.service.ready_keywords(card,result,{})
+        self.assertEqual(result['keywords'][0]['outputPhrase'],'Набор')
+        self.assertEqual(result['keywords'][0]['decision'],'адаптировать')
+        self.assertIn('Спорное значение',result['keywords'][0]['reason'])
+
+    def test_empty_model_object_retries_before_semantic_processing(self):
+        schema = {'type': 'object', 'required': ['groups', 'corrections']}
+        good = {'groups': [], 'corrections': {}}
+        cache = {'_readyWorkflowV2': True}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=[response({}), response(good)]) as call:
+            self.assertEqual(self.service.chat('review', {}, journal=cache, journal_key='empty', response_schema=schema), good)
+        self.assertEqual(call.call_count, 2)
+        self.assertNotIn('validated', cache['empty'])
+
     def test_paragraph_edits_preserve_untouched_text_and_repair_missing_phrase_once(self):
         value = deepcopy(self.result)
         value['description'] = {'value': 'Смеситель для раковины.\nМатериал: латунь.'}
