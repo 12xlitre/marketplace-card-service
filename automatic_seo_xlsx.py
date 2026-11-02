@@ -135,14 +135,17 @@ def build_workbook(path, version, previous=None):
             or any(result.get('quality', {}).get('state') != 'ready' or any(i.get('blocking') for i in result.get('issues', []))
                    for result in version['results'].values())):
         raise SeoError('seo_content_repair_incomplete')
+    mass = version.get('workflowRevision') == 4
     wb = Workbook(); wb.remove(wb.active)
     note = f"Версия {version['number']}; методика {version['method']}; данные MPStats {version['period']['d1']} — {version['period']['d2']}; свои данные {version.get('sourceCapturedAt', 'см. запуск')} ."
+    if mass:
+        note += ' Полное сравнение и рерайт. Семантика показывает измеренные точные вхождения и исходные показатели; решения по выбранным формулировкам приведены отдельно.'
     summary = sheet(wb, 'Итог', ['SKU', 'Артикул', 'Товар', 'Основные проблемы', 'Приоритет', 'Изменений', 'Заголовок', 'Характеристики', 'Описание', 'Вопросов', 'Видимость: начало → конец', 'Дней с наблюдением'], [17,17,40,60,20,12,16,18,16,12,35,24], note)
-    sem = sheet(wb, 'Семантика', ['SKU','Запрос','count MPStats','Позиция','Динамика','Релевантность','Куда добавить','Комментарий','Источник','Решение по описанию','У конкурента','В нашем тексте','Реальное вхождение'], [17,38,15,14,30,22,22,65,25,25,65,65,45], note + ' count не объявляется месячной частотой без подтверждения единиц; отсутствие наблюдения — пустая ячейка.')
+    sem = sheet(wb, 'Семантика', ['SKU','Запрос','count MPStats','Позиция','Динамика','Проверка вхождения' if mass else 'Релевантность','Размещение в новом тексте' if mass else 'Куда добавить','Комментарий','Источник','Решение по описанию','У конкурента','В нашем тексте','Реальное вхождение'], [17,38,15,14,30,22,22,65,25,25,65,65,45], note + ' count не объявляется месячной частотой без подтверждения единиц; отсутствие наблюдения — пустая ячейка.')
     titles = sheet(wb, 'Заголовки', ['SKU','Артикул','Текущий заголовок','Знаков','Предлагаемый заголовок','Знаков','Добавленные ключи и слова — полный состав','Удалённые слова — полный состав','Обоснование'], [17,17,60,10,70,10,55,55,65], note)
     chars = sheet(wb, 'Характеристики', ['SKU','Артикул','ID','Характеристика','Текущее значение','Предлагаемое значение','Действие','Обоснование','Источник подтверждения'], [17,17,14,32,55,55,17,65,65], note + ' Фильтр «Действие» сначала показывает правки; сохранённые значения доступны при снятии фильтра. Название/аннотация — на профильных листах.')
-    descriptions = sheet(wb, 'Описания', ['SKU','Артикул','Существующее описание','Дополненное описание','Добавленные ключи','Комментарий по изменениям'], [17,17,95,95,45,70], note + ' Новые вхождения ключей выделены настоящим жирным шрифтом.')
-    comps = sheet(wb, 'Конкуренты', ['SKU','SKU конкурента','Товар','Дата версии','Почему сопоставим','Исходное описание','Структура','Ключи и решения'], [17,17,55,23,60,95,60,95], note + ' Текст из сохранённой версии MPStats, не гарантированная текущая витрина.')
+    descriptions = sheet(wb, 'Описания', ['SKU','Артикул','Существующее описание','Полный рерайт описания' if mass else 'Дополненное описание','Добавленные ключи','Комментарий по изменениям'], [17,17,95,95,45,70], note + ' Новые вхождения ключей выделены настоящим жирным шрифтом.')
+    comps = sheet(wb, 'Конкуренты', ['SKU','SKU конкурента','Товар','Дата версии','Почему сопоставим','Исходное описание','Структура','Ключи и решения'] + (['Сравнение нашей карточки с конкурентом и основания MPStats', 'Характеристики: наша карточка и конкурент'] if mass else []), [17,17,55,23,60,95,60,95] + ([100, 95] if mass else []), note + ' Текст из сохранённой версии MPStats, не гарантированная текущая витрина.')
     issues = sheet(wb, 'Противоречия', ['SKU','Поле','Расхождение','Вопрос / решение','Блокирует принятие'], [17,35,80,80,22], note)
     changes = sheet(wb, 'Изменения версии', ['SKU','Раздел','Поле','Прежнее предложение','Новое предложение','Основание'], [17,22,32,75,75,65], 'Сравнение с предыдущим файлом. Первая версия содержит только исходные предложения на профильных листах.')
     bold_expected, counts = {}, {}
@@ -192,7 +195,7 @@ def build_workbook(path, version, previous=None):
         source = result['sources']
         comp = source['competitor']
         append(comps, [sku, comp['sku'], comp.get('title', ''), comp.get('versionDate', ''), comp.get('reason', '') + '\n' + result.get('compatibility', {}).get('reason', ''), comp['description'], '\n'.join(result['competitorProfile']['structure']),
-                       '\n'.join(f"{r['sourcePhrase']} → {r.get('outputPhrase', '')}: {r['decision']}; {r['reason']}" for r in result['keywords'])])
+                       '\n'.join(f"{r['sourcePhrase']} → {r.get('outputPhrase', '')}: {r['decision']}; {r['reason']}" for r in result['keywords'])] + (['\n\n'.join('У конкурента: «' + row['competitorPhrase'] + '». У нас до рерайта: ' + row['before'] + '.\nРешение: ' + row['action'] + '; ' + row['reason'] + '\nВ новом описании: «' + row['after'] + '».\nОснования MPStats: ' + row['mpstats'] for row in result.get('comparison', [])), '\n'.join(row['name'] + ': у нас — ' + row['own'] + '; у конкурента — ' + row['competitor'] for row in result.get('attributeComparison', []))] if mass else []))
         decisions = {r['query']: r for r in result['semanticDecisions']}
         keyword_map = {r['sourcePhrase']: r for r in result['keywords']}
         competitor_phrases = {normalized(r['phrase']): r for r in result['competitorProfile'].get('phrases', [])}
@@ -210,7 +213,7 @@ def build_workbook(path, version, previous=None):
             elif not q.get('source'):
                 origin_text = 'Текст конкурента'
             source_text = '; '.join(part for part in [q.get('source', ''), f"count SKU {q['countSourceSku']}" if q.get('countSourceSku') else '', origin_text] if part)
-            append(sem, [sku, query, q.get('count'), q.get('position'), q.get('dynamics'), decision.get('relevance', 'По решению из текста конкурента'), decision.get('destination', 'описание' if keyword.get('decision') != 'исключить' else 'не добавлять'), decision.get('reason', keyword.get('reason', '')), source_text, keyword.get('decision', ''), keyword.get('sourcePhrase', ''), keyword.get('outputPhrase', ''), decision.get('witness', '')])
+            append(sem, [sku, query, q.get('count'), q.get('position'), q.get('dynamics'), decision.get('relevance', 'По решению из текста конкурента'), ('Нет точного вхождения' if mass and decision.get('measurementOnly') and decision.get('destination') == 'не добавлять' else decision.get('destination', 'описание' if keyword.get('decision') != 'исключить' else 'не добавлять')), decision.get('reason', keyword.get('reason', '')), source_text, keyword.get('decision', ''), keyword.get('sourcePhrase', ''), keyword.get('outputPhrase', ''), decision.get('witness', '')])
         first_issue = None
         for issue in result['issues']:
             ir = append(issues, [sku, issue.get('field', ''), issue.get('detail', ''), issue.get('question', ''), 'Да' if issue.get('blocking') else 'Нет'])

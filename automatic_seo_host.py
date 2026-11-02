@@ -72,6 +72,9 @@ class OzonSeoHost:
     def automatic_seo_ready_workflow(self):
         return self.server.OPTICARDS_LLM_PROVIDER == 'gigachat'
 
+    def automatic_seo_mass_workflow(self):
+        return True
+
     def automatic_seo_chat_completion(self, messages, schema):
         if self.server.OPTICARDS_LLM_PROVIDER == 'gigachat':
             return self.server.audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192,

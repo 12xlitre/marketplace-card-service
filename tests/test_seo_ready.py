@@ -456,6 +456,32 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertTrue(all(r['placementReviewed'] for r in self.result['semanticDecisions']))
         self.assertTrue(all(r['outputPhrase'] == fixtures.generated()['description']['value'] for r in self.result['semanticDecisions']))
 
+    def test_unusable_optional_codebook_does_not_skip_query_assignment_or_review(self):
+        result=deepcopy(self.result);result['sources']['semantic']=[{'query':'смеситель для умывальника'}]
+        calls=[]
+        def answer(instruction,data,**kwargs):
+            calls.append(data)
+            if 'sampleQueries' in data:raise SeoError('seo_invalid_model_response')
+            if 'newCodes' in data:return {'groups':[],'corrections':{}}
+            return {'assignments':{'Q0':'T0'}}
+        with patch.object(self.service,'chat',side_effect=answer):
+            self.service.resolve_query_groups(self.card,result,{})
+        self.assertEqual(len(calls),3)
+        self.assertTrue(result['semanticDecisions'][0]['placementReviewed'])
+        self.assertEqual(result['semanticDecisions'][0]['witness'] if 'witness' in result['semanticDecisions'][0] else result['semanticDecisions'][0]['outputPhrase'],result['title']['value'])
+
+    def test_fact_retained_in_characteristics_need_not_be_repeated_in_description(self):
+        result=deepcopy(self.result);result['description']['value']='Смеситель для раковины.'
+        _,facts,_=self.service.ready_fact_catalog(self.card)
+        material=next(key for key,row in facts.items() if row['source']=='attribute:100')
+        audit={'ready':False,'problems':[{'kind':'missing','textId':'T1','factIds':[material],
+                'reason':'Не указан материал латунь в готовом описании нашего смесителя.'}],'sourceQuestions':[]}
+        with patch.object(self.service,'chat',return_value=audit):
+            self.assertEqual(self.service.audit_ready_text(self.card,result,{})[0],[])
+        result['characteristics']=[{'id':'100','values':['титан']}]
+        with patch.object(self.service,'chat',return_value=audit):
+            self.assertEqual(len(self.service.audit_ready_text(self.card,result,{})[0]),1)
+
     def test_bad_optional_seed_is_unused_and_duplicate_of_real_text_stays_applied(self):
         result = deepcopy(self.result)
         result['sources']['semantic'] = [{'query': 'смеситель для умывальника'}]
