@@ -689,6 +689,41 @@ class AutomaticSeoTest(unittest.TestCase):
 
 
 class ExportTest(unittest.TestCase):
+    def test_long_source_and_keyword_decisions_continue_without_loss_on_same_sku_row(self):
+        own = card('1001')
+        result = generated()
+        result['sources'] = sources(own, {'sku': '9001', 'reason': 'Тест.'})
+        original_description = '=Исходное описание с переносом\n' * 4000
+        result['sources']['competitor']['description'] = original_description
+        result['competitorProfile'] = {'structure': ['Назначение']}
+        result['keywords'] = [{'sourcePhrase': f'запрос {i}', 'outputPhrase': '', 'decision': 'исключить',
+                               'reason': 'Полное объяснение исключения без потери исходного текста.'} for i in range(1500)]
+        expected_decisions = '\n'.join(f"{r['sourcePhrase']} → {r['outputPhrase']}: {r['decision']}; {r['reason']}" for r in result['keywords'])
+        version = {'number': 1, 'method': METHOD, 'period': closed_period(), 'cards': [own],
+                   'results': {'1001': result}, 'remarks': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'long.xlsx'
+            build_workbook(path, version)
+            book = load_workbook(path, rich_text=True)
+            try:
+                self.assertEqual(len(book.sheetnames), 8)
+                sheet = book['Конкуренты']
+                self.assertEqual(sheet.max_row, 5)
+                self.assertEqual(sheet.cell(5, 1).value, '1001')
+                for col, expected in [(6, original_description), (8, expected_decisions)]:
+                    header = sheet.cell(4, col).value
+                    extensions = sorted((int(str(cell.value).rsplit(' ', 1)[1]), cell.column)
+                        for cell in sheet[4] if str(cell.value).startswith(header + ' · продолжение '))
+                    full = str(sheet.cell(5, col).value) + ''.join(str(sheet.cell(5, index).value) for _, index in extensions)
+                    self.assertEqual(full, expected)
+                for ws in book:
+                    for row in ws:
+                        for cell in row:
+                            self.assertNotEqual(cell.data_type, 'f')
+                            if isinstance(cell.value, str): self.assertLessEqual(len(cell.value), 32767)
+            finally:
+                book.close()
+
     def test_title_evidence_and_unresolved_placement_are_visible_in_workbook(self):
         own = card('1354236110')
         query = 'флористический краситель для цветов'

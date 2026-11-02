@@ -50,7 +50,8 @@ def rich_description(before, after, phrases):
 
 def write(cell, value):
     if isinstance(value, (str, CellRichText)) and len(str(value)) > 32767:
-        raise SeoError('seo_excel_cell_too_long')
+        raise SeoError('seo_excel_cell_too_long', details={
+            'sheet': cell.parent.title, 'cell': cell.coordinate, 'characters': len(str(value))})
     cell.value = value
     # External/user/model strings are always text, never executable formulas.
     if isinstance(value, str):
@@ -64,6 +65,30 @@ def append(sheet, values):
     if row is None:
         row = sheet.max_row + 1
     for col, value in enumerate(values, 1):
+        if isinstance(value, str) and len(value) > 32767:
+            parts = [value[start:start + 32767] for start in range(0, len(value), 32767)]
+            columns = getattr(sheet, '_seo_continuation_columns', {})
+            checks = getattr(sheet, '_seo_continuation_checks', [])
+            extra_columns = []
+            for part_number, part in enumerate(parts[1:], 2):
+                key = (col, part_number)
+                if key not in columns:
+                    target = getattr(sheet, '_seo_base_columns', len(values)) + len(columns) + 1
+                    columns[key] = target
+                    header = sheet.cell(4, target)
+                    original = sheet.cell(4, col)
+                    write(header, f'{original.value} · продолжение {part_number}')
+                    header.font, header.fill = copy(original.font), copy(original.fill)
+                    header.alignment = copy(original.alignment)
+                    sheet.column_dimensions[get_column_letter(target)].width = 65
+                target = columns[key]
+                write(sheet.cell(row, target), part)
+                sheet.cell(row, target).alignment = Alignment(wrap_text=True, vertical='top')
+                extra_columns.append(target)
+            checks.append((row, [col] + extra_columns, value))
+            sheet._seo_continuation_columns = columns
+            sheet._seo_continuation_checks = checks
+            value = parts[0]
         cell = sheet.cell(row, col)
         write(cell, value)
         cell.alignment = Alignment(wrap_text=True, vertical='top')
@@ -73,6 +98,7 @@ def append(sheet, values):
 
 def sheet(wb, name, headers, widths, note):
     ws = wb.create_sheet(name)
+    ws._seo_base_columns = len(headers)
     ws.append([name]); ws.append([note]); ws.append([]); ws.append(headers)
     for r in (1, 2):
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(headers))
@@ -233,6 +259,10 @@ def build_workbook(path, version, previous=None):
     wb.active = 0
     wb.save(path)
     check = load_workbook(path, rich_text=True)
+    for original in wb:
+        for row, columns, expected_text in getattr(original, '_seo_continuation_checks', []):
+            if ''.join(str(check[original.title].cell(row, col).value or '') for col in columns) != expected_text:
+                raise SeoError('seo_export_continuation_mismatch')
     expected = [str(c['sku']) for c in version['cards']]
     if [str(check['Итог'].cell(r, 1).value) for r in range(5, 5 + len(expected))] != expected or len(set(expected)) != len(expected):
         raise SeoError('seo_export_coverage_mismatch')
