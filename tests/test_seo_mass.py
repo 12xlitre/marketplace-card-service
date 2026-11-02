@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import test_automatic_seo as fixtures
 from test_seo_ready import response
-from automatic_seo import SeoError, fingerprint, unsupported_text_properties, unsupported_numeric_values
+from automatic_seo import SeoError, fingerprint, unsupported_text_properties, unsupported_numeric_values, source_question_mismatch
 
 
 class MassComparisonTest(unittest.TestCase):
@@ -231,6 +231,22 @@ class MassComparisonTest(unittest.TestCase):
             with self.assertRaisesRegex(SeoError,'seo_content_repair_incomplete'):
                 self.service.review_source_questions(self.card,[dict(issues[0],blocking=True)],{})
             model.assert_not_called()
+
+    def test_question_quantities_must_belong_to_the_same_component(self):
+        cases=[('Высота бортика: 2,7 или 14 см?',
+            'Описание: «Плоские тарелки имеют бортики 2.7 см.». Комплектация: «Салатник 14 см / 600 мл».',True),
+            ('Высота тарелки: 2,7 или 26,3 см?',
+            'Описание: «Высота тарелки 2,7 см.». Комплектация: «Тарелка 26,3 см».',True),
+            ('Объем салатника: 410 или 750 мл?',
+            'Описание: «4 салатника 4 кружки 410 мл.». Комплектация: «Салатник 15,4 см / 750 мл; кружка 400 мл».',True),
+            ('Диаметр блюда: 31 или 27 см?',
+            'Описание: «Дополнительно можно купить овальное блюдо 31 см.». Комплектация: «Тарелка 27 см - 6 шт».',True),
+            ('Диаметр десертной тарелки: 19 или 19,3 см?',
+            'Описание: «Десертная тарелка 19 см.». Комплектация: «Тарелка плоская 19,3 см - 6 шт».',False),
+            ('Объем кружки: 410 или 400 мл?',
+            'Описание: «4 салатника 4 кружки 410 мл.». Комплектация: «Салатник 750 мл; кружка 400 мл».',False)]
+        for question,detail,expected in cases:
+            self.assertEqual(source_question_mismatch({'question':question,'detail':detail}),expected,question)
 
     def test_new_mass_repair_rewrites_old_ready_results_and_preserves_all_frozen_sources(self):
         self.case.action();self.case.finish()

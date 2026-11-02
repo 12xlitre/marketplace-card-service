@@ -335,6 +335,42 @@ def disputed_numeric_claims(conflicts):
     return blocked
 
 
+def source_question_mismatch(issue):
+    """Reject a comparison whose literal quantities belong to different objects."""
+    detail, question = str(issue.get('detail', '')), str(issue.get('question', ''))
+    parts = re.split(r'»[.;]\s+[^«»]{1,120}:\s+«', detail, maxsplit=1)
+    if len(parts) != 2 or '«' not in parts[0]:
+        return False
+    components = {'тарелка', 'салатник', 'кружка', 'чашка', 'блюдо', 'блюдце',
+                  'бортик', 'ободок', 'сушилка', 'ячейка', 'подставка'}
+    targets = {token[2] for token in text_word_forms(question)} & components
+    values = numeric_values(question)
+    if not values:
+        return False
+    sources = [parts[0].replace('«', '', 1), parts[1].rsplit('»', 1)[0]]
+    objects = []
+    height_question = bool(re.search(r'\bвысот', question, re.I))
+    for source in sources:
+        tokens = text_word_forms(source)
+        found = set()
+        matched_quantity, height_supported = False, False
+        for match in re.finditer(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(см|мм|мл|л)\b', source, re.I):
+            if not numeric_values(match.group(1)) & values:
+                continue
+            preceding = [token for token in tokens if token[1] <= match.start()][-8:]
+            matched_quantity = True
+            height_supported = height_supported or any(token[2] in {'высота', 'высокий', 'бортик'} for token in preceding)
+            nearest = next((token[2] for token in reversed(preceding) if token[2] in components), None)
+            if nearest:
+                found.add(nearest)
+        if height_question and matched_quantity and not height_supported:
+            return True
+        if targets and found and not found & targets:
+            return True
+        objects.append(found)
+    return bool(all(objects) and not objects[0] & objects[1])
+
+
 @lru_cache(maxsize=512)
 def composition_counts(rows):
     counts, totals = Counter(), []
@@ -829,7 +865,8 @@ class AutomaticSeoService:
                                  and (not version.get('workflowRevision') or result.get('quality', {}).get('state') == 'ready')
                                  and (not mass_workflow or result.get('quality', {}).get('revision') == 4
                                       and (not result.get('issues') or result['quality'].get('sourceQuestionsReviewed')
-                                           and result['quality'].get('sourceQuestionsHash') == fingerprint(result['issues'])))}
+                                           and result['quality'].get('sourceQuestionsHash') == fingerprint(result['issues'])
+                                           and not any(source_question_mismatch(issue) for issue in result['issues'])))}
                     if preserved or action == 'repair':
                         version['results'] = preserved
                         version['done'] = version['completedCount'] = len(preserved)
@@ -2083,6 +2120,9 @@ class AutomaticSeoService:
             return []
         if any(row.get('blocking') for row in issues):
             raise SeoError('seo_content_repair_incomplete')
+        issues = [row for row in issues if not source_question_mismatch(row)]
+        if not issues:
+            return []
         _, _, facts = self.ready_fact_catalog(card)
         questions = {'C' + str(index): {key: row.get(key, '') for key in ('field', 'detail', 'question')}
                      for index, row in enumerate(issues)}
@@ -3541,7 +3581,8 @@ class AutomaticSeoService:
         queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
         if (quality.get('state') != 'ready' or quality.get('revision') != 4 or not quality.get('factsAudited')
                 or result.get('issues') and not allow_unreviewed_questions and
-                    (not quality.get('sourceQuestionsReviewed') or quality.get('sourceQuestionsHash') != fingerprint(result['issues']))
+                    (not quality.get('sourceQuestionsReviewed') or quality.get('sourceQuestionsHash') != fingerprint(result['issues'])
+                     or any(source_question_mismatch(issue) for issue in result['issues']))
                 or not quality.get('fullRewrite') or quality.get('unresolvedAutomaticCount') != 0
                 or quality.get('factsHash') != fingerprint(factual_evidence(card))
                 or quality.get('sourcesHash') != fingerprint(result['sources'])
