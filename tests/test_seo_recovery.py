@@ -498,6 +498,25 @@ class AdditionalContextTest(unittest.TestCase):
 
 
 class CacheAndPollingTest(unittest.TestCase):
+    def test_large_excel_append_does_not_rescan_existing_cells(self):
+        from openpyxl import Workbook
+        from openpyxl.worksheet.worksheet import Worksheet
+        from automatic_seo_xlsx import append
+        book = Workbook()
+        sheet = book.active
+        sheet.append(['Header'])
+        self.assertEqual(append(sheet, ['first']), 2)
+        def repeated_scan(_):
+            raise AssertionError('Repeated max_row scans make large exports quadratic')
+        with patch.object(Worksheet, 'max_row', property(repeated_scan)):
+            for index in range(3000):
+                self.assertEqual(append(sheet, [str(index), '=unsafe', 'Русский текст']), index + 3)
+        self.assertEqual(sheet.max_row, 3002)
+        self.assertEqual(sheet.cell(3002, 1).value, '2999')
+        self.assertEqual(sheet.cell(3002, 2).data_type, 's')
+        self.assertEqual(sheet.cell(3002, 3).value, 'Русский текст')
+        book.close()
+
     def test_large_private_snapshot_save_has_bounded_extra_memory(self):
         case = fixtures.AutomaticSeoTest()
         case.setUp()

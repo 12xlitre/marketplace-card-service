@@ -58,11 +58,16 @@ def write(cell, value):
 
 
 def append(sheet, values):
-    row = sheet.max_row + 1
+    # max_row scans every existing cell; doing it for every semantic row
+    # makes a large export quadratic. These sheets are written sequentially.
+    row = getattr(sheet, '_seo_next_row', None)
+    if row is None:
+        row = sheet.max_row + 1
     for col, value in enumerate(values, 1):
         cell = sheet.cell(row, col)
         write(cell, value)
         cell.alignment = Alignment(wrap_text=True, vertical='top')
+    sheet._seo_next_row = row + 1
     return row
 
 
