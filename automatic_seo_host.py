@@ -69,11 +69,23 @@ class OzonSeoHost:
             raise SeoError('seo_mpstats_not_connected')
         self.credentials(portal)
 
+    def automatic_seo_ready_workflow(self):
+        return self.server.OPTICARDS_LLM_PROVIDER == 'gigachat'
+
     def automatic_seo_chat_completion(self, messages, schema):
+        if self.server.OPTICARDS_LLM_PROVIDER == 'gigachat':
+            return self.server.audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192,
+                model_override=self.server.OPTICARDS_SEO_GIGACHAT_MODEL, native_functions=False)
         return self.server.audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192)
 
     def automatic_seo_chat_text(self, messages):
+        if self.server.OPTICARDS_LLM_PROVIDER == 'gigachat':
+            return self.server.audit_llm_chat_completion(messages, plain_text=True, max_output_tokens=4096,
+                model_override=self.server.OPTICARDS_SEO_GIGACHAT_MODEL)
         return self.server.audit_llm_chat_completion(messages, plain_text=True, max_output_tokens=4096)
+
+    def automatic_seo_classify_completion(self, messages, schema):
+        return self.automatic_seo_chat_completion(messages, schema)
 
     def automatic_seo_own_cards(self, portal, tasks, user):
         h = self.server

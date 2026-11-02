@@ -98,6 +98,14 @@ class SeoHandoffTest(unittest.TestCase):
 
 
 class LlmConcurrencyTest(unittest.TestCase):
+    def test_ready_workflow_is_enabled_for_the_configured_gigachat_provider(self):
+        from automatic_seo_host import MarketplaceSeoHost
+        host=MarketplaceSeoHost(server)
+        with patch.object(server,'OPTICARDS_LLM_PROVIDER','gigachat'):
+            self.assertTrue(host.automatic_seo_ready_workflow())
+        with patch.object(server,'OPTICARDS_LLM_PROVIDER','openai'):
+            self.assertFalse(host.automatic_seo_ready_workflow())
+
     def test_one_request_gate_is_shared_across_card_threads(self):
         active=0;peak=0;lock=threading.Lock()
         def request(*args):
@@ -115,6 +123,25 @@ class LlmConcurrencyTest(unittest.TestCase):
         with patch.object(server,'OPTICARDS_LLM_PROVIDER','gigachat'),patch.object(server,'gigachat_access_token',return_value='test-only'),patch.object(server,'gigachat_urlopen',return_value=response) as call:
             server.audit_llm_chat_completion([],response_schema={'type':'object'},max_output_tokens=8192)
         self.assertEqual(json.loads(call.call_args.args[0].data)['max_tokens'],8192)
+
+    def test_seo_model_and_json_transport_are_local_to_request_and_share_standard_client(self):
+        response=unittest.mock.MagicMock();response.__enter__.return_value.read.return_value=b'{"choices":[]}'
+        messages=[{'role':'system','content':'Return JSON'},{'role':'user','content':'product'}]
+        schema={'type':'object','properties':{'value':{'type':'string'}}}
+        with patch.object(server,'OPTICARDS_LLM_PROVIDER','gigachat'),patch.object(server,'GIGACHAT_MODEL','GigaChat'),patch.object(server,'gigachat_access_token',return_value='test-only'),patch.object(server,'gigachat_urlopen',return_value=response) as call:
+            _,model,_=server.audit_llm_chat_completion(messages,response_schema=schema,max_output_tokens=8192,
+                model_override='GigaChat-2-Max',native_functions=False)
+            body=json.loads(call.call_args.args[0].data)
+            self.assertEqual(model, 'GigaChat-2-Max')
+            self.assertEqual(body['model'],model)
+            self.assertNotIn('functions',body)
+            self.assertIn('Точная JSON-схема',body['messages'][0]['content'])
+            self.assertEqual(messages[0]['content'],'Return JSON')
+            self.assertEqual(call.call_args.kwargs['timeout'],120)
+            server.audit_llm_chat_completion(messages,response_schema=schema)
+            body=json.loads(call.call_args.args[0].data)
+            self.assertEqual(body['model'],'GigaChat')
+            self.assertIn('functions',body)
 
     def test_capacity_respects_personal_business_and_unknown_scopes(self):
         self.assertEqual(server.llm_request_capacity('gigachat','GIGACHAT_API_PERS'),1)

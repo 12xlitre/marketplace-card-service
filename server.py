@@ -114,6 +114,7 @@ GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip() o
 GIGACHAT_OAUTH_URL = os.environ.get("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
 GIGACHAT_API_BASE = os.environ.get("GIGACHAT_API_BASE", "https://gigachat.devices.sberbank.ru/api/v1")
 GIGACHAT_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat")
+OPTICARDS_SEO_GIGACHAT_MODEL = os.environ.get("OPTICARDS_SEO_GIGACHAT_MODEL", "GigaChat-2-Max")
 GIGACHAT_VERIFY_SSL = os.environ.get("GIGACHAT_VERIFY_SSL", "0").strip().lower() in {"1", "true", "yes", "on"}
 OPTICARDS_LLM_PROVIDER = os.environ.get("OPTICARDS_LLM_PROVIDER", "gigachat" if GIGACHAT_AUTH_KEY else "openai").strip().lower()
 WB_MAX_CARDS_PER_SYNC = 1000
@@ -19182,7 +19183,8 @@ def automatic_seo_queue_seconds():
   return getattr(LLM_QUEUE_METRICS, 'seconds', 0.0)
 
 
-def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):
+def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
+                              model_override=None, native_functions=True):
   global LLM_COOLDOWN_UNTIL
   for attempt in range(3):
     try:
@@ -19196,7 +19198,12 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
           time.sleep(delay)
         LLM_QUEUE_METRICS.seconds = automatic_seo_queue_seconds() + time.monotonic() - queued_at
         try:
-          return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens)
+          options = {}
+          if model_override is not None:
+            options['model_override'] = model_override
+          if not native_functions:
+            options['native_functions'] = False
+          return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens, **options)
         except urlerror.HTTPError as exc:
           # Publish the pause before releasing the slot to another card worker.
           if exc.code in {429, 500, 502, 503, 504}:
@@ -19213,22 +19220,27 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
       # All workers observe the same cooldown on their next acquired slot.
 
 
-def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None):
+def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
+                               model_override=None, native_functions=True):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
     url = f"{GIGACHAT_API_BASE.rstrip('/')}/chat/completions"
+    selected_model = model_override or GIGACHAT_MODEL
     body = {
-      "model": GIGACHAT_MODEL,
+      "model": selected_model,
       "temperature": 0.2,
       "messages": messages,
     }
     if max_output_tokens is not None:
       body["max_tokens"] = max(512, min(8192, int(max_output_tokens)))
     if response_schema is not None and not plain_text:
-      # Native function arguments work on the configured legacy v1 endpoint too.
-      body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
-      body["function_call"] = {"name": "prepare_seo_data"}
+      if native_functions:
+        body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
+        body["function_call"] = {"name": "prepare_seo_data"}
+      else:
+        body["messages"] = [dict(row) for row in messages]
+        body["messages"][0]['content'] += '\nТочная JSON-схема результата: ' + json.dumps(response_schema, ensure_ascii=False)
     request = urlrequest.Request(
       url,
       data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -19241,7 +19253,7 @@ def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False,
       method="POST",
     )
     with gigachat_urlopen(request, timeout=120 if response_schema is not None else 60) as response:
-      return json.loads(response.read().decode("utf-8")), GIGACHAT_MODEL, "gigachat"
+      return json.loads(response.read().decode("utf-8")), selected_model, "gigachat"
 
   token = audit_str(OPTICARDS_LLM_API_KEY)
   if not token:

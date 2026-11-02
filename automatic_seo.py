@@ -4,6 +4,7 @@ from collections.abc import MutableMapping
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
+from functools import lru_cache
 import fcntl
 import hashlib
 import json
@@ -304,6 +305,156 @@ def concrete_reason(value):
     return (len(reason) >= 25 and not re.search(r'\b[qkft]\d+\b|attribute:\d+|finalTexts|ownFacts|outputPhrase|keywordIds|factIds|textId', reason, re.I)
             and normalized(reason).rstrip('.') not in {'дублирование смысла', 'не применимо',
                 'смысл покрыт адаптацией', 'не предложено в тексте'})
+
+
+def russian_explanation(value):
+    text = str(value or '')
+    for pattern, replacement in [(r'\bв\s+ownFacts\b', 'в собственных источниках товара'),
+                                 (r'\bиз\s+ownFacts\b', 'из собственных источников товара'),
+                                 (r'\bпо\s+ownFacts\b', 'по собственным данным товара')]:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    labels = {'ownFacts': 'собственные данные товара', 'finalTexts': 'готовые тексты товара',
+              'outputPhrase': 'формулировка', 'keywordIds': 'выбранные ключевые фразы',
+              'factIds': 'ссылки на собственные факты', 'textId': 'ссылка на готовый текст'}
+    return re.sub(r'\b(?:' + '|'.join(labels) + r')\b', lambda match: labels.get(match.group(), match.group()), text)
+
+
+def numeric_unit_claims(text):
+    return [(next(iter(numeric_values(match.group(1)))), match.group(2).casefold(), match.group())
+            for match in re.finditer(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(мм|см|мл|кг|л|г|м|шт)\b', str(text), re.I)]
+
+
+@lru_cache(maxsize=512)
+def composition_counts(rows):
+    counts, totals = Counter(), []
+    for name, values in rows:
+        if 'количество предметов' in normalized(name):
+            totals += [int(match.group()) for value in values for match in re.finditer(r'\b\d+\b', value)]
+        if 'комплектация' not in normalized(name):
+            continue
+        for value in values:
+            for part in re.split(r'[;\n]+', value):
+                quantity = list(re.finditer(r'\b(\d+)\s*шт\b', part, re.I))
+                if len(quantity) != 1:
+                    return ()
+                head = next((word_form(match.group())[0] for match in re.finditer(r'[^\W\d_]+', part[:quantity[0].start()])
+                             if word_form(match.group())[1] == 'NOUN'), '')
+                if not head or head in {'набор', 'комплект', 'упаковка'}:
+                    return ()
+                counts[head] += int(quantity[0].group(1))
+    return tuple(sorted(counts.items())) if len(totals) == 1 and sum(counts.values()) == totals[0] else ()
+
+
+def confirmed_composition(card):
+    rows = tuple((row['name'], tuple(row['values'])) for row in characteristic_rows(card)
+                 if 'комплектация' in normalized(row['name']) or 'количество предметов' in normalized(row['name']))
+    return dict(composition_counts(rows))
+
+
+def unsupported_text_properties(text, own_text, card=None):
+    rules = [(r'\bоднотон\w*', r'\bоднотон\w*|без\s+рисунк\w*'),
+             (r'\bцарап\w*', r'\bцарап\w*')]
+    # A knife's handles/material do not establish handles or metal on its stand.
+    for part in (r'ручк\w*', r'металл\w*'):
+        forward = r'\bподставк\w*(?:(?!\bнож\w*\b)[^.!?\n,;:]){0,100}\b' + part
+        inverse = r'\b' + part + r'\s+подставк\w*'
+        pattern = forward + '|' + inverse
+        rules.append((pattern, pattern))
+    rejected = [match.group() for pattern, evidence in rules if not re.search(evidence, own_text, re.I)
+                for match in re.finditer(pattern, text, re.I)]
+    number_words = dict(zip(['один','два','три','четыре','пять','шесть','семь','восемь','девять','десять',
+        'одиннадцать','двенадцать','тринадцать','четырнадцать','пятнадцать','шестнадцать','семнадцать',
+        'восемнадцать','девятнадцать','двадцать'], map(str, range(1,21))))
+    count_pattern = r'\b(\d+|' + '|'.join(number_words) + r')\s+(?:[^\W\d_]+\s+){0,2}инструмент\w*\b'
+    count_value = lambda match: (str(int(match.group(1))) if match.group(1).isdigit()
+                                 else number_words.get(match.group(1).casefold(), match.group(1).casefold()))
+    confirmed = {count_value(match) for match in re.finditer(count_pattern, own_text, re.I)}
+    rejected.extend(match.group() for match in re.finditer(count_pattern, text, re.I) if count_value(match) not in confirmed)
+    all_steel = (r'\b(\d+|все|каждый|' + '|'.join(number_words) + r')\s+(?:[^\W\d_]+\s+){0,2}(?:предмет|инструмент)\w*'
+        r'(?:(?!\b(?:лезви|нож)\w*\b)[^.!?\n]){0,120}\b(?:изготовлен|выполнен|сделан)\w*[^.!?\n]{0,80}\bстал\w*')
+    confirmed_steel = {count_value(match) for match in re.finditer(all_steel, own_text, re.I)}
+    rejected.extend(match.group() for match in re.finditer(all_steel, text, re.I) if count_value(match) not in confirmed_steel)
+    counts = confirmed_composition(card) if card else {}
+    if counts:
+        def claims(value):
+            tokens = text_word_forms(value)
+            for index, token in enumerate(tokens):
+                raw = token[2]
+                number = int(raw) if raw.isdigit() else int(number_words[raw]) if raw in number_words else None
+                if number is None:
+                    continue
+                end = index + 1
+                while end < len(tokens) and tokens[end][3] in {'ADJF', 'ADJS'} and end - index <= 3:
+                    end += 1
+                if end < len(tokens) and tokens[end][2] in counts:
+                    yield number, tokens[end][2], value[token[0]:tokens[end][1]]
+        explicit = {(number, noun) for number, noun, _ in claims(own_text)}
+        rejected.extend(quote for number, noun, quote in claims(text)
+                        if number > counts[noun] and (number, noun) not in explicit)
+    return rejected
+
+
+def editorial_text_problems(text):
+    return [{'kind': 'grammar', 'quote': match.group(),
+             'reason': 'Убрать служебный комментарий о ключевых словах из покупательского описания; сохранить факты о товаре и комплектации.'}
+            for match in re.finditer(r'\b(?:хотя\s+)?в\s+ключевых\s+словах\s+указан\w*[^.!?\n]*', text, re.I)]
+
+
+def unconfirmed_origin_mentions(text, own_text):
+    patterns = [r'\bяпон\w*', r'\bкита\w*', r'\b(?:герман|немец)\w*',
+                r'\bросси\w*', r'\bфранц\w*', r'\bитал\w*', r'\bтурец\w*|\bтурци\w*',
+                r'\b(?:южно)?корейск\w*|\bкоре[яиюе]\b', r'\bамериканск\w*|\bсша\b', r'\bбритан\w*|\bанглийск\w*']
+    return [match.group() for pattern in patterns if not re.search(pattern, own_text, re.I)
+            for match in re.finditer(pattern, text, re.I)]
+
+
+@lru_cache(maxsize=1)
+def russian_morphology():
+    import pymorphy3
+    return pymorphy3.MorphAnalyzer()
+
+
+@lru_cache(maxsize=50000)
+def word_form(word):
+    if re.fullmatch(r'\d+(?:[.,]\d+)?', word):
+        return next(iter(numeric_values(word))), 'NUMB'
+    parsed = russian_morphology().parse(word.casefold().replace('ё', 'е'))[0]
+    return parsed.normal_form, parsed.tag.POS
+
+
+@lru_cache(maxsize=512)
+def text_word_forms(text):
+    return tuple((match.start(), match.end(), *word_form(match.group()))
+                 for match in re.finditer(r'\d+(?:[.,]\d+)?|[^\W\d_]+', text))
+
+
+def grammatical_phrase(phrase, text, adjective_gaps=False):
+    """Bind an actual contiguous grammatical variant; do not infer synonyms or facts."""
+    if re.search(r'\b(?:не|нет|без)\b', phrase, re.I):
+        return ''
+    pattern = r'\d+(?:[.,]\d+)?|[^\W\d_]+'
+    wanted = [word_form(match.group())[0] for match in re.finditer(pattern, phrase)]
+    tokens = text_word_forms(text)
+    if not wanted:
+        return ''
+    for start in range(len(tokens)):
+        position, skipped = start, 0
+        for word in wanted:
+            while (position < len(tokens) and tokens[position][2] != word and adjective_gaps
+                    and position > start and tokens[position][3] in {'ADJF', 'ADJS'} and skipped < 2):
+                position += 1; skipped += 1
+            if position >= len(tokens) or tokens[position][2] != word:
+                break
+            position += 1
+        else:
+            actual = text[tokens[start][0]:tokens[position - 1][1]]
+            prefix = re.split(r'[,;:.!?()\n]', text[:tokens[start][0]])[-1]
+            if any(word.casefold() in {'не', 'нет', 'без'} for word in re.findall(pattern, prefix)[-3:]):
+                continue
+            punctuation_check = re.sub(r'(?<=\d)[.,](?=\d)', '', actual)
+            if not re.search(r'[,;:.!?()\n]', punctuation_check):
+                return actual
+    return ''
 
 
 def plain(value):
@@ -872,7 +1023,7 @@ class AutomaticSeoService:
             version['done'] = len(processed)
             version.setdefault('cardDurations', [])
             # Large semantic sets take longer than three minutes per card. Requests stay bounded.
-            budget = max(600, min(3600, len(cards) * 60)) if version.get('workflowRevision') else max(3600, len(cards) * 900)
+            budget = max(900, min(7200, len(cards) * 120)) if version.get('workflowRevision') else max(3600, len(cards) * 900)
             deadline = time.monotonic() + budget
             version['runBudgetSeconds'] = budget
             self.update(directory, version, portal, batch, user)
@@ -1032,16 +1183,31 @@ class AutomaticSeoService:
         }, ensure_ascii=False))
         return record
 
-    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True, before_request=None):
-        request_hash = fingerprint({'instruction': instruction, 'evidence': evidence,
-                                    'schema': response_schema, 'rawText': raw_text})
+    def parse_response_json(self, content):
+        try:
+            return self.host.parse_llm_json_content(content)
+        except json.JSONDecodeError:
+            # GigaChat sometimes closes an already complete object once more.
+            # Keep every original value; accept only this extra delimiter, never
+            # another object, prose, an unfinished string or missing data.
+            stripped = content.strip()
+            parsed, end = json.JSONDecoder().raw_decode(stripped)
+            if isinstance(parsed, dict) and stripped[end:].strip() == '}':
+                return parsed
+            raise
+
+    def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True, before_request=None, fast=False, read_candidate=False):
+        request = {'instruction': instruction, 'evidence': evidence, 'schema': response_schema, 'rawText': raw_text}
+        if fast:
+            request['fastClassifier'] = True
+        request_hash = fingerprint(request)
         if not reuse_response and journal is not None and journal_key:
             saved = journal.get(journal_key)
-            if (isinstance(saved, dict) and saved.get('validated') and saved.get('requestHash') == request_hash
+            if (isinstance(saved, dict) and (saved.get('validated') or read_candidate) and saved.get('requestHash') == request_hash
                     and saved.get('finishReason') not in {'length', 'max_tokens', 'blacklist', 'error'}
                     and isinstance(saved.get('content'), str) and saved.get('contentLength') == len(saved['content'])):
                 try:
-                    parsed = self.host.parse_llm_json_content(saved['content'])
+                    parsed = self.parse_response_json(saved['content'])
                     if isinstance(parsed, dict):
                         return parsed
                 except (ValueError, TypeError):
@@ -1066,7 +1232,7 @@ class AutomaticSeoService:
                 if before_request and not reuse_response:
                     before_request()
                 prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
-                result = self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text)
+                result = self._chat_once(prompt, evidence, journal, journal_key, reuse_response, response_schema, raw_text, fast)
                 if not reuse_response and journal is not None and journal_key and journal_key in journal:
                     journal[journal_key]['requestHash'] = request_hash
                 return result
@@ -1095,13 +1261,13 @@ class AutomaticSeoService:
         right = self.split_model_batch(items[middle:], call, merge, progress, cache, scope)
         return merge(left, right)
 
-    def _chat_once(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False):
+    def _chat_once(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, fast=False):
         if reuse_response:
             saved = journal.get(journal_key) if journal is not None else None
             if not saved or not isinstance(saved.get('content'), str) or saved.get('contentLength') != len(saved['content']) or saved.get('finishReason') in {'length', 'max_tokens'}:
                 raise SeoError('seo_recheck_response_missing')
             try:
-                parsed = self.host.parse_llm_json_content(saved['content'])
+                parsed = self.parse_response_json(saved['content'])
             except (json.JSONDecodeError, ValueError):
                 raise SeoError('seo_llm_invalid_json') from None
             if not isinstance(parsed, dict):
@@ -1127,6 +1293,8 @@ class AutomaticSeoService:
                 {'role': 'user', 'content': json.dumps(evidence, ensure_ascii=False)},
             ]
             structured = getattr(self.host, 'automatic_seo_chat_completion', None)
+            if fast:
+                structured = getattr(self.host, 'automatic_seo_classify_completion', structured)
             text_completion = getattr(self.host, 'automatic_seo_chat_text', None)
             if raw_text:
                 structured = None
@@ -1212,7 +1380,7 @@ class AutomaticSeoService:
         if choice.get('finish_reason') in {'length', 'max_tokens'}:
             raise SeoError('seo_llm_response_truncated', details={'responseCharacters': len(content)})
         try:
-            parsed = self.host.parse_llm_json_content(content)
+            parsed = self.parse_response_json(content)
         except json.JSONDecodeError as exc:
             raise SeoError('seo_llm_invalid_json', details={'responseCharacters': len(content), 'line': exc.lineno, 'column': exc.colno}) from None
         except ValueError:
@@ -1260,7 +1428,7 @@ class AutomaticSeoService:
         characteristics = {str(r['id']): r['values'] for r in sources.get('ownCharacteristics', [])}
         characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
         texts = {'заголовок': result['title']['value'], 'описание': result['description']['value'],
-                 'характеристика': ' '.join(' '.join(v) for v in characteristics.values())}
+                 'характеристика': ' '.join('; '.join(v) for v in characteristics.values())}
         adapted = {row.get('sourcePhrase'): row.get('outputPhrase') for row in result['keywords']
                    if row.get('decision') in {'использовать', 'адаптировать', 'объединить'}}
         decisions = []
@@ -1706,155 +1874,541 @@ class AutomaticSeoService:
         for row in values.values():
             text = '; '.join(row['values'])
             if text:
-                catalog['T' + str(len(catalog))] = {'field': 'характеристика', 'quote': text}
-        return catalog, {key: row['field'] + ': ' + row['quote'] for key, row in catalog.items()}
+                catalog['T' + str(len(catalog))] = {'field': 'характеристика', 'quote': text, 'name': row.get('name', '')}
+        return catalog, {key: row['field'] + (' / ' + row['name'] if row.get('name') else '') + ': ' + row['quote'] for key, row in catalog.items()}
+
+    def ready_source_conflicts(self, card, cache, progress=None):
+        _, facts, labeled = self.ready_fact_catalog(card)
+        # A pack, its total items and each component can all use "шт".
+        # Bare numeric pairs cannot establish that they count the same entity;
+        # the contextual fact audit still receives their complete original text.
+        claims = [(key, number, unit, quote) for key, row in facts.items()
+                  for number, unit, quote in numeric_unit_claims(row['quote']) if unit != 'шт']
+        pairs = []
+        for index, left in enumerate(claims):
+            for right in claims[index + 1:]:
+                if (facts[left[0]]['source'] == facts[right[0]]['source'] or left[2] != right[2]
+                        or left[1] == right[1]):
+                    continue
+                left_claims = {(number, unit) for number, unit, _ in numeric_unit_claims(facts[left[0]]['quote'])}
+                right_claims = {(number, unit) for number, unit, _ in numeric_unit_claims(facts[right[0]]['quote'])}
+                if left[1:3] in right_claims or right[1:3] in left_claims:
+                    continue
+                pairs.append((abs(float(left[1])-float(right[1])) / max(float(left[1]), float(right[1]), 1), left, right))
+        if not pairs:
+            return []
+        pairs.sort(key=lambda value: value[0])
+        candidates = {'C' + str(index): {'leftFact': left[0], 'leftValue': left[3],
+            'rightFact': right[0], 'rightValue': right[3]} for index, (_, left, right) in enumerate(pairs[:120])}
+        schema = schema_object({'conflicts': schema_rows({'pairId': {'type': 'string', 'enum': list(candidates)}, 'question': TEXT})})
+        data = {'ownFacts': labeled, 'candidatePairs': candidates}
+        for attempt in range(2):
+            key = 'response:ready-source-conflicts:' + fingerprint(data) + (':repair' if attempt else '')
+            response = self.chat('Сверь числа в собственных источниках ДО написания нового текста. '
+                'candidatePairs — лишь возможные пары, большинство НЕ являются противоречиями. '
+                'Выбери только пары, где источники дают РАЗНЫЕ значения ОДНОГО параметра ОДНОГО элемента комплекта. '
+                'Разные размеры обеденной/десертной тарелки/салатника, длина и ширина, количество разных элементов не противоречат друг другу. '
+                'В составной комплектации установи соответствие элементов по названию и порядку. '
+                'Например: десертная тарелка19см в описании и та же тарелка19,3см в комплектации — расхождение, которое нельзя разрешать догадкой. '
+                'Если описание говорит салатник15,8см, а соответствующая строка комплектации16см, уточни точный размер. '
+                'Не выбирай одно значение за специалиста. Для каждого настоящего расхождения верни pairId и короткий конкретный вопрос по-русски '
+                'с обоими значениями и названием элемента. Без технических ID. Если противоречий нет, conflicts:[]. '
+                'Ответ строго по JSON-схеме.', data, journal=cache, journal_key=key, response_schema=schema,
+                before_request=(lambda: progress('Сверка числовых фактов собственных источников')) if progress else None)
+            rows = response.get('conflicts')
+            if (not isinstance(rows, list) or any(not isinstance(row, dict) or set(row) != {'pairId', 'question'}
+                    or row.get('pairId') not in candidates or not concrete_reason(row.get('question')) for row in rows)):
+                if not attempt:
+                    continue
+                raise SeoError('seo_invalid_content_audit')
+            output, seen = [], set()
+            for row in rows:
+                pair = candidates[row['pairId']]
+                identity = (pair['leftValue'], pair['rightValue'], pair['leftFact'], pair['rightFact'])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                left, right = facts[pair['leftFact']], facts[pair['rightFact']]
+                output.append({'claims': [pair['leftValue'], pair['rightValue']],
+                    'factIds': [pair['leftFact'], pair['rightFact']],
+                    'issue': {'field': left['field'] + ' / ' + right['field'],
+                        'detail': left['field'] + ': «' + left['quote'] + '». ' + right['field'] + ': «' + right['quote'] + '».',
+                        'question': row['question'], 'blocking': False}})
+            remember_valid_response(cache, key)
+            return output
+
+    @staticmethod
+    def neutral_ready_facts(text, conflicts):
+        blocked = {(number, unit) for conflict in conflicts for claim in conflict['claims']
+                   for number, unit, _ in numeric_unit_claims(claim)}
+        def replace(match):
+            claim = numeric_unit_claims(match.group())
+            return '' if claim and claim[0][:2] in blocked else match.group()
+        result = re.sub(r'(?<![\w.,])\d+(?:[.,]\d+)?\s*(?:мм|см|мл|кг|л|г|м|шт)\b', replace, str(text), flags=re.I)
+        return re.sub(r'[ \t]+(?=[,;:.])', '', re.sub(r'[ \t]+', ' ', result))
 
     def resolve_query_groups(self, card, result, cache, progress=None, allow_additions=True):
-        """One bounded pass over all queries, with complete ID coverage and actual witnesses."""
-        facts, fact_catalog, labeled_facts = self.ready_fact_catalog(card)
-        text_catalog, labeled_texts = self.ready_text_catalog(card, result)
-        texts = {'заголовок': result['title']['value'], 'описание': result['description']['value']}
-        values = {r['id']: r['values'] for r in characteristic_rows(card)}
-        values.update({str(r['id']): r['values'] for r in result['characteristics']})
-        texts['характеристика'] = ' '.join('; '.join(value) for value in values.values())
-        queries = list(dict.fromkeys(r['query'] for r in result['sources']['semantic']))
-        own_text = ' '.join(facts.values())
+        """Explicit per-query codes, then an independent full-scope semantic review."""
+        facts, fact_catalog, labeled = self.ready_fact_catalog(card)
+        conflicts = result.get('_sourceConflicts', [])
+        labeled = {key: self.neutral_ready_facts(value, conflicts) for key, value in labeled.items()}
+        texts, labeled_texts = self.ready_text_catalog(card, result)
+        proof_texts = list(texts.values())
+        attributes = [row for row in texts.values() if row['field'] == 'характеристика']
+        texts = {'T0': texts['T0']}
+        for paragraph in re.split(r'\n\s*\n|\n', result['description']['value']):
+            if paragraph.strip():
+                texts['T' + str(len(texts))] = {'field': 'описание', 'quote': paragraph.strip()}
+        for row in attributes:
+            texts['T' + str(len(texts))] = row
+        labeled_texts = {key: row['field'] + (' / ' + row['name'] if row.get('name') else '') + ': ' + row['quote'] for key, row in texts.items()}
+        own_text = '\n'.join(facts.values())
         own_numbers, own_latin = numeric_values(own_text), set(re.findall(r'[a-z]+', own_text.casefold()))
         own_colors = set(query_modifiers(own_text)[3])
-        groups = []
-        instruction = ('Проверь поисковые запросы по НАШЕМУ товару и готовым текстам. Обработай каждый ID ровно один раз. '
-            'Объединяй только смысловые варианты одного запроса; разные числа, комплекты, материалы, цвета, '
-            'бренды, латинские слова и отрицания не объединять. Если сомневаешься, оставь отдельную группу. Не требуй вставлять все перестановки слов. '
-            'Для каждой группы верни ids (числа из queries), relevance и одно решение kind: '
-            'quote — смысл уже покрыт: textId указывает существующий фрагмент finalTexts (T0,T1,...), phrase="NONE"; '
-            'add — есть дополнительный подтверждённый смысл, отсутствующий в тексте: textId="NONE", '
-            'phrase — одна естественная фраза для добавления, без чужих свойств и брендов; '
-            'skip — запрос не подходит нашему товару либо есть конкретная причина пропуска: textId="NONE", phrase="NONE". '
-            'Для каждого решения reason объясняет смысловую связь или конкретное несоответствие/пропуск. '
-            'Объяснения пиши обычным русским языком, без ID/имён полей JSON. '
-            'Фразы «дублирование смысла», «не применимо», «покрыт адаптацией», «не предложено» без объяснения не принимаются. '
-            'factIds — один или несколько существующих ID из ownFacts (F0,F1,...), подтверждающих решение. '
-            'Не сочиняй цитату: приложение само возьмёт текст выбранного ID. Не возвращай названия полей вместо ID. '
-            'Бренд конкурента не является нашим брендом. Количество предметов, персон, материал и назначение '
-            'нельзя переносить с похожего товара. Предпочитай quote подходящего смысла в названии/характеристиках/описании '
-            'вместо повторения вариантов. add нужен только для НОВОГО подтверждённого смысла, не для каждого варианта. '
-            'Если allowAdditions=false, решение add запрещено: объясни применение/пропуск в существующем окончательном тексте. '
-            'Верни только groups по схеме; не выдумывай цитаты и не пропускай запросы.')
-        row_schema = {'ids': {'type': 'array', 'items': {'type': 'integer'}},
-            'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']},
-            'kind': {'type': 'string', 'enum': ['quote', 'add', 'skip']},
-            'textId': {'type': 'string', 'enum': ['NONE', *text_catalog]}, 'phrase': TEXT,
-            'reason': {'type': 'string', 'description': 'Одно конкретное предложение от25символов: объясни смысловую связь либо несоответствие по фактам товара.'},
-            'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(fact_catalog)}}}
-        schema = schema_object({'groups': schema_rows(row_schema)})
-        def check(response, ids):
-            rows = response.get('groups') if isinstance(response, dict) else None
-            if not isinstance(rows, list) or not rows:
-                raise SeoError('seo_semantic_decisions_incomplete', details={'emptyGroups': True})
-            seen, checked = [], []
-            for row in rows:
-                if not isinstance(row, dict) or set(row) != set(row_schema):
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'invalidGroupShape': True})
-                members = row['ids']
-                if (not isinstance(members, list) or not members or
-                        any(type(index) is not int or index not in ids for index in members)):
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'unknownQueryId': True})
-                seen.extend(members)
-                reason = str(row['reason'] or '').strip()
-                if row['relevance'] not in row_schema['relevance']['enum'] or not concrete_reason(reason):
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'unexplainedGroup': True})
-                fact_ids = row['factIds']
-                if not isinstance(fact_ids, list) or not fact_ids or any(key not in fact_catalog for key in fact_ids):
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'factWitnessMissing': True})
-                fact = fact_catalog[fact_ids[0]]
-                proof = fact['quote']
-                signatures = {query_modifiers(queries[index]) for index in members}
-                if len(signatures) != 1:
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'mixedQueryModifiers': True, 'invalidIds': members})
-                quote, field, kind = row['phrase'], '', row['kind']
-                if not isinstance(quote, str):
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'invalidQuote': True})
-                if kind == 'quote':
-                    target = text_catalog.get(row['textId'])
-                    if not target or row['relevance'] != 'релевантен':
-                        raise SeoError('seo_semantic_decisions_incomplete', details={'textWitnessMissing': True})
-                    field, quote = target['field'], target['quote']
-                elif kind == 'add':
-                    if not allow_additions or row['textId'] != 'NONE' or not quote.strip() or quote == 'NONE' or row['relevance'] != 'релевантен':
-                        raise SeoError('seo_semantic_decisions_incomplete', details={'invalidAddition': True})
-                    field = 'описание'
-                    if numeric_values(quote) - numeric_values(' '.join(facts.values())):
-                        raise SeoError('seo_semantic_decisions_incomplete', details={'unconfirmedAdditionNumber': True})
-                elif kind != 'skip' or row['textId'] != 'NONE':
-                    raise SeoError('seo_semantic_decisions_incomplete', details={'invalidSkip': True})
-                else:
-                    quote = ''
-                if kind != 'skip':
-                    for index in members:
-                        numbers, latin, _, colors = query_modifiers(queries[index])
-                        if set(numbers) - own_numbers or set(latin) - own_latin or set(colors) - own_colors:
-                            raise SeoError('seo_semantic_decisions_incomplete',
-                                details={'unconfirmedQueryModifier': True, 'invalidIds': members})
-                checked.append(dict(row, field=field, quote=quote, reason=reason,
-                                    factSource=fact['source'], factQuote=proof))
-            if len(seen) != len(set(seen)) or set(seen) != set(ids):
-                raise SeoError('seo_semantic_decisions_incomplete', details={'queryCoverageMismatch': True})
-            return checked
-
-        def review(ids, depth=0):
-            data = {'queries': {str(i): queries[i] for i in ids}, 'ownFacts': labeled_facts,
-                    'finalTexts': labeled_texts, 'selectedPhrases': [r['outputPhrase'] for r in result['keywords']
-                        if r['decision'] != 'исключить' and r.get('outputPhrase')], 'allowAdditions': allow_additions}
-            scope = fingerprint(data)
-            marker = 'ready-groups-repair:' + scope
-            correction = cache.get(marker)
-            for attempt in range(1 if correction else 2):
-                key = 'response:ready-query-groups:' + scope + (':repair' if correction else '')
-                evidence = dict(data, previousProblem=correction) if correction else data
-                try:
-                    response = self.chat(instruction + (' Исправь previousProblem; сохрани полный набор ID.' if correction else ''),
-                        evidence, journal=cache, journal_key=key, response_schema=schema, retry_truncated=False,
-                        before_request=(lambda: progress(f'Проверка смысловых групп запросов {ids[0] + 1}–{ids[-1] + 1} из {len(queries)}')) if progress else None)
-                    checked = check(response, ids)
-                    remember_valid_response(cache, key)
-                    return checked
-                except SeoError as exc:
-                    if str(exc) not in {'seo_semantic_decisions_incomplete', 'seo_llm_response_truncated', 'seo_llm_timeout'}:
-                        raise
-                    if correction:
-                        if depth or len(ids) < 2:
-                            raise SeoError('seo_semantic_review_incomplete', details={'queryCount': len(ids), **exc.details}) from None
-                        middle = len(ids) // 2
-                        return review(ids[:middle], 1) + review(ids[middle:], 1)
-                    correction = {'code': str(exc), **exc.details}
-                    cache[marker] = correction
-            raise SeoError('seo_semantic_review_incomplete')
-
-        ids, chars = [], 0
+        blocked = {(number, unit) for conflict in conflicts for claim in conflict['claims']
+                   for number, unit, _ in numeric_unit_claims(claim)}
+        queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
+        local_rows, local_bank = [], {}
+        remaining = []
         for index, query in enumerate(queries):
-            if ids and (len(ids) >= 240 or chars + len(query) > 18000):
-                groups.extend(review(ids)); ids, chars = [], 0
-            ids.append(index); chars += len(query)
-        if ids:
-            groups.extend(review(ids))
-        result['_queryGroups'] = groups
-        result['semanticDecisions'] = []
-        additions = []
-        for group in groups:
-            if group['kind'] == 'add' and group['quote'] not in additions:
-                additions.append(group['quote'])
-            for index in group['ids']:
-                result['semanticDecisions'].append({'query': queries[index], 'relevance': group['relevance'],
-                    'destination': group['field'] if group['kind'] == 'quote' else 'не добавлять',
-                    'outputPhrase': group['quote'] if group['kind'] == 'quote' else '',
-                    'reason': group['reason'], 'placementReviewed': True,
-                    'groupProof': {'source': group['factSource'], 'quote': group['factQuote']}})
-        positions = {query: index for index, query in enumerate(queries)}
-        result['semanticDecisions'].sort(key=lambda row: positions[row['query']])
-        return additions
+            numbers, latin, _, colors = query_modifiers(query)
+            missing = []
+            negative_conditions = re.findall(r'\b(?:без|не|нет)\s+[^\W\d_]+', query, re.I)
+            if negative_conditions and not all(source_phrase(condition, own_text) for condition in negative_conditions):
+                missing.append('отрицательное условие «' + '», «'.join(negative_conditions) + '», которое явно не указано в собственных источниках')
+            if set(numbers) - own_numbers:
+                missing.append('числа ' + ', '.join(sorted(set(numbers) - own_numbers)))
+            if set(latin) - own_latin:
+                missing.append('латинские наименования «' + '», «'.join(sorted(set(latin) - own_latin)) + '»')
+            if set(colors) - own_colors:
+                missing.append('запрошенный цвет')
+            if unsupported_text_properties(query, own_text, card):
+                missing.append('неподтверждённые свойства «' + '», «'.join(unsupported_text_properties(query, own_text, card)) + '»')
+            if unconfirmed_origin_mentions(query, own_text):
+                missing.append('неподтверждённое упоминание страны или национального стиля «'
+                    + '», «'.join(unconfirmed_origin_mentions(query, own_text)) + '»')
+            if any((number, unit) in blocked for number, unit, _ in numeric_unit_claims(query)):
+                missing.append('спорный параметр, по которому собственные источники расходятся')
+            if not missing:
+                proven = next(((row, grammatical_phrase(query, row['quote'], adjective_gaps=True))
+                    for row in proof_texts if grammatical_phrase(query, row['quote'], adjective_gaps=True)), None)
+                if proven:
+                    row, actual = proven; code = 'L' + str(index)
+                    reason = 'Запрос «' + query + '» совпадает с реальным фрагментом «' + actual + '» с учётом словоформ; смысл и порядок слов сохранены.'
+                    local_bank[code] = {'kind': 'quote', 'field': row['field'], 'quote': actual, 'relevance': 'релевантен',
+                        'reason': reason, 'factSource': 'final:' + row['field'], 'factQuote': actual}
+                    local_rows.append({'query': query, 'relevance': 'релевантен', 'destination': row['field'],
+                        'outputPhrase': actual, 'reason': reason, 'placementReviewed': True,
+                        'groupProof': {'source': 'final:' + row['field'], 'quote': actual}, '_code': code, '_index': index})
+                    continue
+                remaining.append(index); continue
+            code = 'X' + str(index)
+            reason = 'В запросе «' + query + '» указаны ' + '; '.join(missing) + '. Собственные источники нашего товара их не подтверждают; эти свойства в текст не перенесены.'
+            proof = fact_catalog[next(iter(fact_catalog))]
+            local_bank[code] = {'kind': 'skip', 'field': '', 'quote': '', 'relevance': 'недостаточно данных',
+                'reason': reason, 'factSource': proof['source'], 'factQuote': proof['quote']}
+            local_rows.append({'query': query, 'relevance': 'недостаточно данных', 'destination': 'не добавлять',
+                'outputPhrase': '', 'reason': reason, 'placementReviewed': True,
+                'groupProof': {'source': proof['source'], 'quote': proof['quote'], 'evidencePacketHash': fingerprint(facts)},
+                '_code': code, '_index': index})
+        bank = {key: {'kind': 'quote', 'field': row['field'], 'name': row.get('name', ''), 'quote': row['quote'], 'relevance': 'релевантен',
+            'reason': '', 'factSource': 'final:' + row['field'], 'factQuote': row['quote']} for key, row in texts.items()}
+        group_schema = {'code': TEXT, 'kind': {'type': 'string', 'enum': ['quote', 'skip', 'add']},
+            'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']},
+            'phrase': {'type': 'string', 'enum': [*texts, 'NONE']}, 'reason': TEXT,
+            'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(fact_catalog)}}}
+
+        def add_groups(rows):
+            if not isinstance(rows, list):
+                raise SeoError('seo_semantic_review_incomplete')
+            for row in rows:
+                absence_proof = False
+                if not isinstance(row, dict) or not isinstance(row.get('code'), str):
+                    raise SeoError('seo_semantic_review_incomplete', details={'invalidDecisionCode': True})
+                if isinstance(row, dict) and isinstance(row.get('reason'), str):
+                    row = dict(row, reason=russian_explanation(row['reason']))
+                if (isinstance(row, dict) and row.get('code') in bank and row.get('kind') == 'quote'
+                        and bank[row['code']]['kind'] == 'quote'
+                        and row.get('field', bank[row['code']]['field']) == bank[row['code']]['field']
+                        and (row.get('phrase') == row['code']
+                             or source_phrase(row.get('phrase'), bank[row['code']]['quote']))):
+                    continue  # A literal subquote cannot redefine the immutable source code.
+                if isinstance(row, dict) and row.get('kind') == 'skip':
+                    duplicate = re.search(r'\b([TD]\d+)\b', str(row.get('reason', '')))
+                    if (duplicate and duplicate.group(1) in bank
+                            and re.search(r'повтор|дублир|уже (?:передан|раскрыт|содерж)', row['reason'], re.I)):
+                        row = dict(row, kind='quote', relevance='релевантен', phrase=duplicate.group(1), factIds=[])
+                    elif concrete_reason(row.get('reason')):
+                        identifiers = row.get('factIds')
+                        identifiers = ([identifier for identifier in identifiers if isinstance(identifier, str) and identifier in fact_catalog]
+                                       if isinstance(identifiers, list) else [])
+                        row = dict(row, phrase='NONE',
+                            relevance=row.get('relevance') if row.get('relevance') in {'нерелевантен', 'недостаточно данных'} else 'недостаточно данных',
+                            factIds=identifiers or [next(iter(fact_catalog))])
+                        absence_proof = True
+                if isinstance(row, dict) and set(row) == set(group_schema) and row.get('kind') == 'quote':
+                    target = bank.get(str(row.get('phrase', '')).strip())
+                    if not target or target['kind'] != 'quote':
+                        for item in texts.values():
+                            actual = source_phrase(row.get('phrase'), item['quote'])
+                            if actual:
+                                target = {'kind': 'quote', 'field': item['field'], 'quote': actual,
+                                    'relevance': 'релевантен', 'reason': '',
+                                    'factSource': 'final:' + item['field'], 'factQuote': actual}
+                                break
+                    if not target or target['kind'] != 'quote':
+                        identifiers = row.get('factIds')
+                        if isinstance(identifiers, list) and identifiers and all(identifier in fact_catalog for identifier in identifiers):
+                            for identifier in identifiers:
+                                proof_fact = fact_catalog[identifier]
+                                value = self.neutral_ready_facts(proof_fact['quote'], conflicts).strip()
+                                ordered = sorted(texts.values(), key=lambda item: item.get('name') != proof_fact['field'])
+                                found = next(((item, source_phrase(value, item['quote'])) for item in ordered if source_phrase(value, item['quote'])), None)
+                                if found:
+                                    item, actual = found
+                                    target = {'kind': 'quote', 'field': item['field'], 'quote': actual,
+                                        'relevance': 'релевантен', 'reason': '',
+                                        'factSource': proof_fact['source'], 'factQuote': proof_fact['quote']}
+                                    break
+                    if target and target['kind'] == 'quote' and re.fullmatch(r'S\d+', row['code']) and row['code'] not in bank:
+                        bank[row['code']] = dict(target, code=row['code'])
+                        continue
+                if isinstance(row, dict) and row.get('kind') == 'add' and row.get('relevance') in {'нерелевантен', 'недостаточно данных'}:
+                    row = dict(row, kind='skip', phrase='NONE')
+                if (isinstance(row, dict) and row.get('kind') == 'skip' and isinstance(row.get('reason'), str)
+                        and not concrete_reason(row['reason'])
+                        and re.fullmatch(r'не указан\w* среди повод\w*\.?', normalized(row['reason']))):
+                    row = dict(row, reason='Запрошенный повод не указан среди подтверждённых поводов использования нашего товара.')
+                if (isinstance(row, dict) and set(row) == set(group_schema) and row.get('factIds') == []
+                        and row.get('kind') == 'skip' and concrete_reason(row.get('reason'))):
+                    # An absent foreign property has no positive source quote.
+                    # Bind the explicit refusal to this actual product and the
+                    # complete evidence packet, never invent a supporting fact.
+                    row = dict(row, kind='skip', relevance='недостаточно данных', phrase='NONE', factIds=[next(iter(fact_catalog))])
+                    absence_proof = True
+                if (isinstance(row, dict) and row.get('code') in bank and row.get('kind') == bank[row['code']]['kind'] == 'skip'
+                        and normalized(row.get('reason')) == normalized(bank[row['code']]['reason'])):
+                    continue
+                if (not isinstance(row, dict) or set(row) != set(group_schema) or not re.fullmatch(r'S\d+', str(row.get('code', '')))
+                        or row['code'] in bank or row['kind'] not in {'skip', 'add'}
+                        or row['relevance'] not in group_schema['relevance']['enum'] or not concrete_reason(row['reason'])
+                        or not isinstance(row['factIds'], list) or not row['factIds']
+                        or any(key not in fact_catalog for key in row['factIds'])):
+                    raise SeoError('seo_semantic_review_incomplete', details={'invalidDecisionCode': True,
+                        'code': row.get('code') if isinstance(row, dict) else None,
+                        'kind': row.get('kind') if isinstance(row, dict) else None})
+                proof = fact_catalog[row['factIds'][0]]
+                if row['kind'] == 'add':
+                    # New prose may use only the selected actual own fact.
+                    # A free-form suggested phrase is never treated as evidence.
+                    phrase = self.neutral_ready_facts(proof['quote'], conflicts).strip()
+                    existing = next((value for value in texts.values() if source_phrase(phrase, value['quote'])), None)
+                    if existing:
+                        bank[row['code']] = dict(row, kind='quote', field=existing['field'], quote=phrase,
+                            factSource=proof['source'], factQuote=proof['quote'])
+                        continue
+                    if not allow_additions or row['relevance'] != 'релевантен' or not phrase:
+                        raise SeoError('seo_semantic_review_incomplete', details={'invalidAddition': True,
+                            'code': row['code'], 'allowAdditions': allow_additions})
+                    row = dict(row, phrase=phrase)
+                bank[row['code']] = dict(row, field='описание' if row['kind'] == 'add' else '',
+                    quote=row['phrase'] if row['kind'] == 'add' else '', factSource=proof['source'], factQuote=proof['quote'])
+                if absence_proof:
+                    bank[row['code']]['evidencePacketHash'] = fingerprint(facts)
+
+        def codes():
+            return {key: {'kind': row['kind'], 'field': row['field'], 'name': row.get('name', ''), 'phrase': row['quote'],
+                          'reason': row['reason']} for key, row in bank.items()}
+
+        def definition_schema(identifiers):
+            definition = schema_object({key: value for key, value in group_schema.items() if key != 'code'})
+            return schema_object({'groups': schema_object({code: definition for code in identifiers})})
+
+        def definition_rows(response):
+            rows = response.get('groups')
+            if isinstance(rows, dict):
+                return [dict(row, code=code) if isinstance(row, dict) else row for code, row in rows.items()]
+            return rows
+
+        def checked_definitions(rows, data, key):
+            if not isinstance(rows, list):
+                raise SeoError('seo_semantic_review_incomplete')
+            invalid = []
+            for row in rows:
+                try:
+                    add_groups([row])
+                except SeoError as exc:
+                    invalid.append({'definition': row, 'problem': exc.details})
+            if not invalid:
+                return
+            wanted = [item['definition'].get('code') for item in invalid if isinstance(item['definition'], dict)]
+            if len(wanted) != len(invalid) or any(not isinstance(code, str) for code in wanted):
+                raise SeoError('seo_semantic_review_incomplete')
+            repair_data = dict(data, invalidDefinitions=invalid, decisionCodes=codes(),
+                undefinedCodes={code: data.get('undefinedCodes', {}).get(code, []) for code in wanted})
+            repaired = self.chat('Исправь только invalidDefinitions. Это ошибочные предложения модели, НЕ факты о товаре. '
+                'Доказательства — только ownFacts и реально существующие decisionCodes. '
+                'Для КАЖДОГО undefinedCodes верни одно определение с тем же кодом. '
+                'Синоним или общая поисковая фраза о товаре НЕ является новым фактом: если смысл уже передан, '
+                'выбери kind=quote, phrase=ТОЧНЫЙ существующий код T из decisionCodes, factIds:[]. '
+                'Неподтверждённое свойство: kind=skip с конкретной причиной по ownFacts. '
+                'Общий заголовок T0 не доказывает чужую страну, материал, назначение, принадлежность к другой категории. '
+                'Не предлагай add без factIds: это ошибка, а не основание изменять текст. '
+                'Проверь реальную связь каждого запроса с выбранным фрагментом. '
+                'Верни groups ОБЪЕКТОМ: каждый исходный код — обязательный ключ, значение — его определение без поля code.',
+                repair_data, journal=cache, journal_key=key + ':invalid-definitions:' + fingerprint(repair_data),
+                response_schema=definition_schema(wanted), read_candidate=True,
+                before_request=(lambda: progress('Исправление неполного обоснования смыслового решения')) if progress else None)
+            fixed = definition_rows(repaired)
+            if (not isinstance(fixed, list) or len(fixed) != len(wanted)
+                    or {row.get('code') for row in fixed if isinstance(row, dict)} != set(wanted)):
+                raise SeoError('seo_semantic_review_incomplete', details={'invalidDefinitionRepair': True})
+            add_groups(fixed)
+            remember_valid_response(cache, key + ':invalid-definitions:' + fingerprint(repair_data))
+
+        guide = ('Непрерывные коды T0,T1,... указывают РЕАЛЬНЫЕ фрагменты готового текста; поле field задаёт его раздел. '
+            'Для подходящих запросов используй T по смыслу, не требуй дословного совпадения или вставки всех перестановок. '
+            'Коды S — обоснованный пропуск либо новый подтверждённый смысл. '
+            'Подходящему запросу назначай существующий T напрямую. НЕ создавай новый S-псевдоним для уже покрытого смысла. '
+            'У каждого S конкретная русская reason и существующие factIds F собственных данных. '
+            'Чужие бренд/модель, материал, назначение, количество, размер и цвет не переносить. '
+            'Разные элементы комплекта и число персон не путать. Учитывай sourceQuestions: спорные размеры не подтверждены. '
+            'Объяснения без технических ID. phrase — ТОЛЬКО существующий код T; для skip/add phrase="NONE". '
+            'Никаких выдуманных цитат. Для add полезный собственный факт выбирается через factIds, relevance=релевантен. '
+            'Если allowAdditions=false, add запрещён. Не создавай пропуски только потому, что нет дословного ключа. ')
+        plan_data = {'ownFacts': labeled, 'finalTexts': labeled_texts, 'sampleQueries': [queries[index] for index in remaining[:64]],
+                     'sourceQuestions': [row['issue']['question'] for row in conflicts], 'allowAdditions': allow_additions}
+        key = 'response:ready-codebook:' + fingerprint(plan_data)
+        plan = self.chat(guide + 'Составь короткий каталог дополнительных решений S0,S1,... для этих запросов. '
+            'Не назначай запросам номера и не перечисляй queryID. Не создавай S для смыслов, уже покрытых T. '
+            'Верни groups, можно пустой список. Позже каталог можно дополнить для новых смыслов.',
+            plan_data, journal=cache, journal_key=key, response_schema=schema_object({'groups': schema_rows(dict(group_schema,
+                kind={'type': 'string', 'enum': ['skip', 'add']}, phrase={'type': 'string', 'enum': ['NONE']}))}), read_candidate=True,
+            before_request=(lambda: progress('Подготовка проверяемых смысловых решений')) if progress else None) if remaining else {'groups': []}
+        seed_rows = plan.get('groups', [])
+        invalid_seeds = 0
+        for row in seed_rows if isinstance(seed_rows, list) else []:
+            try:
+                add_groups([row])
+            except SeoError:
+                # This optional catalogue has not assigned a single query yet.
+                # Reject its unproved suggestion; every query below still needs
+                # a complete independently checked assignment to a valid code.
+                invalid_seeds += 1
+        if invalid_seeds or not isinstance(seed_rows, list):
+            cache['ready-rejected-optional-codes:' + fingerprint(plan_data)] = invalid_seeds or 1
+        else:
+            remember_valid_response(cache, key)
+        decisions = local_rows
+        for offset in range(0, len(remaining), 64):
+            original_indices = {'Q' + str(position): index for position, index in enumerate(remaining[offset:offset + 64])}
+            batch = {query_id: queries[index] for query_id, index in original_indices.items()}
+            data = {'queries': batch, 'decisionCodes': codes(), 'ownFacts': labeled}
+            schema = schema_object({'assignments': schema_object({key: {'type': 'string', 'enum': [*bank, 'NEW']} for key in batch})})
+            key = 'response:ready-code-assignment:verified-model-v2:' + fingerprint(data)
+            for attempt in range(2):
+                answer = self.chat('Для КАЖДОГО ключа Q из queries выбери один код decisionCodes по смыслу НАШЕГО товара. '
+                    'T — смысл уже раскрыт фрагментом текста; S — указанная конкретная причина/добавление. '
+                    'Для общих запросов о товаре предпочитай T0 или подходящий текст из decisionCodes. Характеристику выбирай только для конкретного параметра. '
+                    'Проверь бренд, назначение, материал, цвет, комплект и числа. Если ни один код не подходит, NEW. '
+                    'Верни assignments: объект со ВСЕМИ исходными ключами Q, значения — только коды. '
+                    'Не добавляй пояснения, списки queryID и новые коды.',
+                    dict(data, requiredKeys=list(batch)) if attempt else data,
+                    journal=cache, journal_key=key + (':repair' if attempt else ''), response_schema=schema, fast=True,
+                    before_request=(lambda: progress(f'Проверка смысловых групп запросов {offset + 1}–{offset + len(batch)} из {len(queries)}')) if progress else None)
+                proposed = answer.get('assignments')
+                if isinstance(proposed, dict):
+                    assignments = {query_id: proposed.get(query_id) if isinstance(proposed.get(query_id), str)
+                        and proposed.get(query_id) in bank else 'NEW' for query_id in batch}
+                    # NEW is unresolved and cannot leave the independent reviewer.
+                    # Never repeat a complete classification just to fill a few IDs.
+                    remember_valid_response(cache, key + (':repair' if attempt else '')); break
+                if attempt:
+                    raise SeoError('seo_semantic_review_incomplete', details={'queryCoverageMismatch': True})
+
+            review_batch = batch
+            for attempt in range(2):
+                review_data = {'queries': review_batch, 'assignments': {key: assignments[key] for key in review_batch}, 'decisionCodes': codes(), 'ownFacts': labeled,
+                    'sourceQuestions': plan_data['sourceQuestions'], 'allowAdditions': allow_additions,
+                    'requiredDecisions': [key for key in review_batch if assignments[key] == 'NEW' or assignments[key] not in bank],
+                    'newCodes': ['S' + str(index) for index in range(10000) if 'S' + str(index) not in bank][:20]}
+                review_schema = schema_object({'groups': schema_rows(dict(group_schema,
+                    code={'type': 'string', 'enum': review_data['newCodes']},
+                    kind={'type': 'string', 'enum': ['skip', 'add']}, phrase={'type': 'string', 'enum': ['NONE']})),
+                    'corrections': {'type': 'object', 'properties': {key: TEXT for key in review_batch},
+                        'required': review_data['requiredDecisions'], 'additionalProperties': False}})
+                review_key = 'response:ready-code-review:' + fingerprint(review_data)
+                review_instruction = (guide + 'НЕЗАВИСИМО проверь КАЖДЫЙ запрос и назначенный ему код. '
+                    'Особенно ищи нерелевантное назначение, чужую марку/модель/свойство, неподтверждённые числа и ложное покрытие. '
+                    'Если решение верное — не возвращай его. Ошибочное/NEW обязательно исправь в corrections. '
+                    'Для нового случая добавь обоснованный S из newCodes в groups и назначь его в corrections. '
+                    'Все NEW должны получить решение. groups/corrections могут быть пустыми. Не группируй queryID в списки. '
+                    'requiredDecisions — обязательная часть работы: для КАЖДОГО такого Q верни corrections[Q]. '
+                    'NEW означает отсутствие решения, а не корректный отказ. Для неподтверждённого или чужого свойства '
+                    'создай S с kind=skip и конкретной причиной по собственным данным и назначь его всем соответствующим Q. '
+                    'corrections — короткий ОБЪЕКТ {"Q0":"T1","Q7":"S0"} только с исправлениями, без queryId/code объектов. '
+                    'В groups допустимы ТОЛЬКО новые S из newCodes: существующие T/S не повторяй и не переопределяй. '
+                    'Для положительного решения corrections[Q] = существующий T. Не создавай S с kind=quote: это лишняя копия. '
+                    'Не копируй абзацы: для ссылки на существующий текст используй его короткий код в corrections. '
+                    'Не подтверждай весь список автоматически: проверь семантическую связь каждого запроса.')
+                answer = None
+                saved = cache.get(review_key)
+                expected_hash = fingerprint({'instruction': review_instruction, 'evidence': review_data,
+                    'schema': review_schema, 'rawText': False})
+                if (isinstance(saved, dict) and saved.get('requestHash') == expected_hash
+                        and saved.get('finishReason') not in {'length', 'max_tokens', 'blacklist', 'error'}
+                        and isinstance(saved.get('content'), str) and len(saved['content']) == saved.get('contentLength')):
+                    try:
+                        candidate = self.parse_response_json(saved['content'])
+                        if isinstance(candidate, dict):
+                            answer = candidate  # Still untrusted: every validation below remains mandatory.
+                    except (ValueError, TypeError):
+                        pass
+                if answer is None:
+                    answer = self.chat(review_instruction, review_data, journal=cache, journal_key=review_key, response_schema=review_schema,
+                        before_request=(lambda: progress(f'Независимая проверка решений {offset + 1}–{offset + len(batch)} из {len(queries)}')) if progress else None)
+                corrections = answer.get('corrections')
+                if isinstance(corrections, dict):
+                    corrections = [{'queryId': key, 'code': value} for key, value in corrections.items()]
+                if (not isinstance(corrections, list) or any(not isinstance(row, dict) or set(row) != {'queryId', 'code'}
+                        or row['queryId'] not in review_batch or not isinstance(row['code'], str) for row in corrections)
+                        or len({row['queryId'] for row in corrections}) != len(corrections)):
+                    raise SeoError('seo_semantic_review_incomplete', details={'invalidCorrection': True})
+                teacher_groups = answer.get('groups')
+                renamed, normalized_groups = {}, []
+                reserved = set(bank) | {row['code'] for row in teacher_groups or []
+                    if isinstance(row, dict) and isinstance(row.get('code'), str)}
+                def fresh_label():
+                    fresh = next('S' + str(index) for index in range(10000) if 'S' + str(index) not in reserved)
+                    reserved.add(fresh)
+                    return fresh
+                for row in teacher_groups if isinstance(teacher_groups, list) else []:
+                    code = row.get('code') if isinstance(row, dict) and isinstance(row.get('code'), str) else None
+                    if code in bank:
+                        existing = bank[code]
+                        if (row.get('kind') == existing['kind'] == 'quote'
+                                and (row.get('phrase') == code or source_phrase(row.get('phrase'), existing['quote']))):
+                            continue
+                        if row.get('kind') == existing['kind'] == 'skip' and normalized(russian_explanation(row.get('reason'))) == normalized(existing['reason']):
+                            continue
+                        # Model-local labels cannot overwrite a code already used
+                        # by another query/batch. Bind the new definition to a
+                        # fresh application-owned label and its explicit changes.
+                        fresh = fresh_label(); renamed[code] = fresh
+                        row = dict(row, code=fresh)
+                    elif isinstance(code, str) and not re.fullmatch(r'S\d+', code):
+                        fresh = fresh_label(); renamed[code] = fresh
+                        row = dict(row, code=fresh)
+                    normalized_groups.append(row)
+                for correction in corrections:
+                    code = correction['code']
+                    if code not in bank and code not in renamed and not re.fullmatch(r'S\d+', code):
+                        renamed[code] = fresh_label()
+                if renamed:
+                    explicit = {row['queryId'] for row in corrections}
+                    corrections = [dict(row, code=renamed.get(row['code'], row['code'])) for row in corrections]
+                    for query_id in review_batch:
+                        if query_id not in explicit and assignments.get(query_id) in renamed:
+                            assignments[query_id] = 'NEW'  # An implicit redefinition needs an explicit decision.
+                if isinstance(teacher_groups, list):
+                    answer = dict(answer, groups=normalized_groups)
+                definition_context = {'undefinedCodes': {row.get('code'): [review_batch[item['queryId']] for item in corrections if item['code'] == row.get('code')]
+                    for row in answer.get('groups', []) if isinstance(row, dict)}, 'decisionCodes': codes(),
+                    'ownFacts': labeled, 'allowAdditions': allow_additions, 'sourceQuestions': plan_data['sourceQuestions']}
+                checked_definitions(answer.get('groups'), definition_context, review_key)
+                undefined = {row['code'] for row in corrections if row['code'] not in bank}
+                if undefined:
+                    definition_data = {'undefinedCodes': {code: [review_batch[row['queryId']] for row in corrections if row['code']==code]
+                        for code in sorted(undefined)}, 'decisionCodes': codes(), 'ownFacts': labeled,
+                        'allowAdditions': allow_additions, 'sourceQuestions': plan_data['sourceQuestions']}
+                    definitions = self.chat(guide + 'Ты назначил запросам undefinedCodes, но не определил эти коды. '
+                        'Дай ровно одно определение КАЖДОГО кода. Для общих подходящих запросов выбери kind=quote, '
+                        'phrase=существующий код T и factIds:[]. Не сочиняй новые факты. '
+                        'Для неподходящего свойства kind=skip с конкретной причиной. '
+                        'Верни groups ОБЪЕКТОМ: каждый исходный код — обязательный ключ, значение — определение без code.',
+                        definition_data, journal=cache, journal_key=review_key + ':definitions:' + fingerprint(definition_data),
+                        response_schema=definition_schema(sorted(undefined)), read_candidate=True,
+                        before_request=(lambda: progress('Проверка определений смысловых решений')) if progress else None)
+                    defined_rows = definition_rows(definitions)
+                    if (not isinstance(defined_rows, list) or any(not isinstance(row, dict) or row.get('code') not in undefined for row in defined_rows)
+                            or len({row['code'] for row in defined_rows}) != len(defined_rows)):
+                        raise SeoError('seo_semantic_review_incomplete', details={'undefinedDecisionCodes': sorted(undefined)})
+                    checked_definitions(defined_rows, definition_data, review_key)
+                    missing_codes = undefined - set(bank)
+                    if missing_codes:
+                        missing_data = dict(definition_data, undefinedCodes={code: definition_data['undefinedCodes'][code] for code in sorted(missing_codes)})
+                        fixed = self.chat(guide + 'Верни определения только оставшихся undefinedCodes. Все эти коды обязательны. '
+                            'Если запрос о нашем товаре уже покрыт, kind=quote, phrase=T0 либо подходящий T-код. '
+                            'Верни groups ОБЪЕКТОМ с обязательными ключами-кодами, без поля code внутри определения.',
+                            missing_data, journal=cache, journal_key=review_key + ':missing-definitions:' + fingerprint(missing_data),
+                            response_schema=definition_schema(sorted(missing_codes)), read_candidate=True,
+                            before_request=(lambda: progress('Уточнение недостающих определений')) if progress else None)
+                        checked_definitions(definition_rows(fixed), missing_data, review_key)
+                        if missing_codes - set(bank):
+                            raise SeoError('seo_semantic_review_incomplete', details={'undefinedDecisionCodes': sorted(missing_codes - set(bank))})
+                assignments.update({row['queryId']: row['code'] for row in corrections})
+                invalid = []
+                for query_id, code in assignments.items():
+                    if code not in bank:
+                        invalid.append(query_id); continue
+                    if bank[code]['kind'] == 'skip':
+                        continue
+                    numbers, latin, _, colors = query_modifiers(batch[query_id])
+                    if (set(numbers) - own_numbers or set(latin) - own_latin or set(colors) - own_colors
+                            or any((number, unit) in blocked for number, unit, _ in numeric_unit_claims(batch[query_id]))):
+                        assignments[query_id] = 'NEW'; invalid.append(query_id)
+                if not invalid:
+                    remember_valid_response(cache, review_key); break
+                review_batch = {key: batch[key] for key in invalid}
+                if attempt:
+                    raise SeoError('seo_semantic_review_incomplete', details={'unconfirmedQueries': invalid})
+            for query_id in batch:
+                index = original_indices[query_id]; row = bank[assignments[query_id]]
+                reason = (f'Смысл запроса «{queries[index]}» передан формулировкой «{row["quote"]}» в поле «{row["field"]}».'
+                          if row['kind'] == 'quote' else row['reason'])
+                decisions.append({'query': queries[index], 'relevance': row['relevance'],
+                    'destination': row['field'] if row['kind'] == 'quote' else 'не добавлять',
+                    'outputPhrase': row['quote'] if row['kind'] == 'quote' else '', 'reason': reason,
+                    'placementReviewed': True, 'groupProof': {'source': row['factSource'], 'quote': row['factQuote'],
+                        **({'evidencePacketHash': row['evidencePacketHash']} if row.get('evidencePacketHash') else {})},
+                    '_code': assignments[query_id], '_index': index})
+        # A foreign brand cannot become relevant merely by changing word order.
+        # Reuse an independently reviewed explicit brand refusal consistently;
+        # take the name from its actual query and never manufacture an alias.
+        refused_brands = {}
+        for decision in decisions:
+            if decision['destination'] != 'не добавлять':
+                continue
+            query_words = {normalized(word) for word in re.findall(r'[^\W\d_]+', decision['query'])}
+            for match in re.finditer(r'\bбренд\w*\s+[«"\']?([^\W\d_]+)', decision['reason'], re.I):
+                name = normalized(match.group(1))
+                if name in query_words and not source_phrase(name, own_text):
+                    refused_brands[name] = decision['_code']
+        for decision in decisions:
+            if decision['destination'] == 'не добавлять':
+                continue
+            name = next((name for name in refused_brands if source_phrase(name, decision['query'])), None)
+            if name:
+                code = refused_brands[name]
+                proof = bank.get(code) or local_bank[code]
+                decision.update(relevance='недостаточно данных', destination='не добавлять', outputPhrase='',
+                    reason=f'Бренд «{name}» в запросе «{decision["query"]}» не подтверждён собственными источниками нашего товара; чужое наименование не перенесено.',
+                    groupProof={'source': proof['factSource'], 'quote': proof['factQuote'], 'evidencePacketHash': fingerprint(facts)},
+                    _code=code)
+        decisions.sort(key=lambda row: row.pop('_index'))
+        bank.update(local_bank)
+        groups = {}
+        for index, decision in enumerate(decisions):
+            code = decision.pop('_code')
+            if code not in groups:
+                groups[code] = dict(bank[code], ids=[])
+            groups[code]['ids'].append(index)
+        result['semanticDecisions'], result['_queryGroups'] = decisions, list(groups.values())
+        return list(dict.fromkeys(row['quote'] for row in groups.values() if row['kind'] == 'add'))
 
     def ready_keywords(self, card, result, cache, progress=None):
         facts, catalog, labeled = self.ready_fact_catalog(card)
+        labeled = {key: self.neutral_ready_facts(value, result.get('_sourceConflicts', [])) for key, value in labeled.items()}
         phrases = list(dict.fromkeys(p['phrase'] for p in result['competitorProfile']['phrases']))
         rows = []
         props = {**KEYWORD_DECISION_SCHEMA['properties'],
@@ -1891,11 +2445,44 @@ class AutomaticSeoService:
                     selected = response.get('keywords')
                     if not isinstance(selected, dict) or set(selected) != set(candidates):
                         raise SeoError('seo_keyword_decisions_incomplete', details={'expectedKeywordKeys': list(candidates)})
+                    missing_facts = {keyword_id: {'competitorPhrase': candidates[keyword_id],
+                        'proposedPhrase': row.get('outputPhrase'), 'decision': row.get('decision')}
+                        for keyword_id, row in selected.items() if isinstance(row, dict)
+                        and (not isinstance(row.get('factIds'), list) or not row['factIds']
+                             or any(not isinstance(identifier, str) or identifier not in catalog for identifier in row['factIds']))}
+                    if missing_facts:
+                        grounding_data = {'phrasesWithoutProof': missing_facts, 'ownFacts': labeled}
+                        grounding_key = key + ':grounding:' + fingerprint(grounding_data)
+                        grounding = self.chat('Для каждого ключа phrasesWithoutProof выбери ОДИН существующий F-факт, '
+                            'подтверждающий полезный смысл соответствующей формулировки конкурента для нашего товара. '
+                            'Приложение адаптирует фразу до точной собственной формулировки выбранного факта. '
+                            'Если подтверждения нет, верни EXCLUDE. Не подставляй общий заголовок вместо доказательства '
+                            'конкретного свойства. Рекомендация по уходу/безопасности конкурента не становится нашей '
+                            'инструкцией без собственного подтверждения. Не придумывай F-ID и не пиши пояснений. '
+                            'Ответ facts — объект со всеми исходными ключами K и значением F-ID либо EXCLUDE.',
+                            grounding_data, journal=cache, journal_key=grounding_key,
+                            response_schema=schema_object({'facts': schema_object({identifier:
+                                {'type': 'string', 'enum': [*catalog, 'EXCLUDE']} for identifier in missing_facts})}),
+                            before_request=(lambda: progress('Привязка формулировок к собственным фактам')) if progress else None)
+                        bindings = grounding.get('facts')
+                        if (not isinstance(bindings, dict) or set(bindings) != set(missing_facts)
+                                or any(not isinstance(value, str) or value not in {*catalog, 'EXCLUDE'} for value in bindings.values())):
+                            raise SeoError('seo_keyword_decisions_incomplete', details={'invalidFactBinding': True})
+                        for identifier, fact_id in bindings.items():
+                            if fact_id == 'EXCLUDE':
+                                selected[identifier] = dict(selected[identifier], decision='исключить', outputPhrase='NONE',
+                                    factIds=[next(iter(catalog))], reason='Формулировка конкурента «' + candidates[identifier]
+                                    + '» не подтверждена собственными источниками товара и не перенесена в описание.')
+                            else:
+                                actual = self.neutral_ready_facts(catalog[fact_id]['quote'], result.get('_sourceConflicts', []))
+                                selected[identifier] = dict(selected[identifier], decision='адаптировать', outputPhrase=actual,
+                                    factIds=[fact_id], reason='Полезный смысл формулировки конкурента адаптирован к собственному факту товара: «' + actual + '».')
+                        remember_valid_response(cache, grounding_key)
                     checked = []
                     for keyword_id, row in selected.items():
                         if not isinstance(row, dict) or set(row) != set(props):
                             raise SeoError('seo_keyword_decisions_incomplete', details={'invalidKeyword': keyword_id})
-                        phrase, reason = row.get('outputPhrase'), str(row.get('reason') or '').strip()
+                        phrase, reason = row.get('outputPhrase'), russian_explanation(row.get('reason')).strip()
                         decision = row.get('decision')
                         fact_ids = row.get('factIds')
                         proof = (catalog[fact_ids[0]] if isinstance(fact_ids, list) and fact_ids
@@ -1908,6 +2495,19 @@ class AutomaticSeoService:
                             raise SeoError('seo_keyword_decisions_incomplete', details={'invalidCoreDecision': True,
                                 'keyword': keyword_id, 'unknownFactIds': not bool(proof), 'explanationTooShortOrTechnical': not concrete_reason(reason)})
                         if decision != 'исключить':
+                            undocumented = unsupported_text_properties(phrase, '\n'.join(facts.values()), card)
+                            if undocumented:
+                                removed = '», «'.join(undocumented)
+                                reason = 'Свойство «' + removed + '» не подтверждено собственными источниками товара и не перенесено.'
+                                if any(re.search(r'царап', value, re.I) for value in undocumented):
+                                    decision, phrase = 'исключить', ''
+                                elif all(re.search(r'однотон', value, re.I) for value in undocumented):
+                                    phrase = re.sub(r'\bоднотон\w*', '', phrase, flags=re.I).strip(' ,;—-')
+                                    decision = 'адаптировать' if phrase else 'исключить'
+                                else:
+                                    phrase = self.neutral_ready_facts(proof['quote'], result.get('_sourceConflicts', [])).strip()
+                                    decision = 'адаптировать' if phrase else 'исключить'
+                                    reason += ' Сохранена собственная формулировка: «' + phrase + '».'
                             if numeric_values(phrase) - numeric_values(' '.join(facts.values())):
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'unconfirmedCoreNumber': True})
                             if {word.casefold() for word in re.findall(r'[A-Za-z][A-Za-z0-9-]*', phrase)} - own_latin:
@@ -1927,7 +2527,16 @@ class AutomaticSeoService:
     def ready_text_problems(self, card, result):
         facts, _ = self.ready_facts(card)
         text = result['description']['value']
-        problems = []
+        problems = editorial_text_problems(text)
+        for quote in unsupported_text_properties(result['title']['value'] + '\n' + text, '\n'.join(facts.values()), card):
+            problems.append({'kind': 'unsupported', 'quote': quote,
+                'reason': 'Это отдельное свойство не подтверждено собственными источниками товара; убрать либо заменить подтверждённым фактом.'})
+        blocked = {(number, unit) for conflict in result.get('_sourceConflicts', []) for claim in conflict['claims']
+                   for number, unit, _ in numeric_unit_claims(claim)}
+        for number, unit, quote in numeric_unit_claims(result['title']['value'] + ' ' + text):
+            if (number, unit) in blocked:
+                problems.append({'kind': 'conflicting_source', 'quote': quote,
+                    'reason': 'Собственные источники расходятся по этому параметру; убери спорное значение до уточнения.'})
         for row in result['keywords']:
             if row['decision'] != 'исключить' and not source_phrase(row['outputPhrase'], text):
                 problems.append({'kind': 'missing_keyword', 'quote': row['outputPhrase'],
@@ -1966,41 +2575,110 @@ class AutomaticSeoService:
         result['title'] = title
         remember_valid_response(cache, key)
 
+    def bind_ready_keyword_forms(self, result, text):
+        for row in result['keywords']:
+            if row['decision'] == 'исключить':
+                continue
+            phrase = row['outputPhrase']
+            actual = source_phrase(phrase, text) or grammatical_phrase(phrase, text)
+            if actual:
+                if normalized(actual) != normalized(phrase):
+                    row['decision'] = 'адаптировать'
+                    row['reason'] += ' В описании использована грамматическая форма «' + actual + '».'
+                row['outputPhrase'] = actual
+
     def write_ready_text(self, card, result, cache, progress=None, problems=None):
         facts, labeled = self.ready_facts(card)
+        conflicts = result.get('_sourceConflicts', [])
+        for row in labeled:
+            row['value'] = self.neutral_ready_facts(row['value'], conflicts)
+        base = self.neutral_ready_facts(result.get('description', {}).get('value') or plain(card.get('description', '')), conflicts)
+        problems = list(problems or []) + editorial_text_problems(base)
+        self.bind_ready_keyword_forms(result, base)
         phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
-        data = {'writeReadyDescription': True, 'ownFacts': labeled, 'ownTitle': card['title'],
-                'currentDescription': plain(card.get('description', '')),
-                'competitorStructure': result['competitorProfile']['structure'],
-                'requiredPhrases': phrases, 'previousText': result.get('description', {}).get('value', ''),
-                'problems': problems or [], 'remarks': result.get('_remarks', []), 'marketplace': card.get('marketplace', 'Ozon')}
-        key = 'response:ready-description:' + fingerprint(data)
-        response = self.chat('Подготовь готовое описание нашего товара для специалиста. '
-            'Напиши естественный русский текст по абзацам и структуре конкурента, опираясь ТОЛЬКО на ownFacts. '
-            'Сохрани важные подтверждённые свойства, состав, комплектацию, числа и применение нашего товара. '
-            'Не добавляй чужие бренды, модели, материалы, числа, обещания и свойства. '
-            'Если наши собственные источники противоречат по свойству, обойди спорную деталь нейтрально; не выбирай одну догадкой. '
-            'Каждую requiredPhrases включи дословно, можно менять регистр. Вложенные фразы могут встречаться внутри одной общей фразы. '
-            'Не превращай текст в перечисление запросов; не используй Markdown, хештеги или технические комментарии. '
-            'Исправь каждую problems и учти remarks в указанном разделе. Замечания не заменяют подтверждение факта. Перед ответом выполни редактуру. '
-            'Для WB ориентир2000символов, максимум5000; для Ozon максимум6000. '
-            'Верни только окончательный текст описания, без объяснений, заголовка ответа и JSON.',
-            data, journal=cache, journal_key=key, raw_text=True,
-            before_request=(lambda: progress('Редактура и проверка готового описания')) if progress else None)
-        text = output_text(response.get('value'))
-        text = re.sub(r'(?m)^\s*#{1,6}\s+', '', text)
-        text = re.sub(r'\*\*([^*\n]+)\*\*', lambda m: m.group(1), text).strip()
-        if not text:
-            raise SeoError('seo_empty_text')
-        result['description'] = {'value': text, 'reason': 'Описание подготовлено по собственным фактам и структуре конкурента; выбранные формулировки и факты перепроверены.', 'editorChanges': []}
+        missing = [phrase for phrase in phrases if not source_phrase(phrase, base)]
+        if not missing and not problems:
+            result['description'] = {'value': base, 'reason': 'Исходное описание и подтверждённые формулировки сохранены.', 'editorChanges': []}
+            return
+        paragraphs = {'P' + str(index): part for index, part in enumerate(re.split(r'\n+', base)) if part.strip()}
+        problem_paragraphs = {identifier: paragraph for identifier, paragraph in paragraphs.items()
+            if any(problem.get('quote') and source_phrase(problem['quote'], paragraph) for problem in problems or [])}
+        data = {'editReadyDescription': True, 'paragraphs': paragraphs, 'missingPhrases': missing,
+            'requiredPhrases': phrases, 'ownFacts': labeled, 'confirmedComposition': confirmed_composition(card), 'sourceQuestions': [row['issue']['question'] for row in conflicts],
+            'competitorStructure': result['competitorProfile']['structure'], 'remarks': result.get('_remarks', []),
+            'problems': problems or [], 'marketplace': card.get('marketplace', 'Ozon')}
+        data['problemParagraphs'] = list(problem_paragraphs)
+        schema = schema_object({'edits': schema_rows({'id': {'type': 'string', 'enum': list(paragraphs)}, 'text': TEXT}),
+            'appendParagraphs': {'type': 'array', 'items': TEXT}})
+        if problem_paragraphs:
+            schema['properties']['edits'] = schema_object({identifier: TEXT for identifier in problem_paragraphs})
+        key = 'response:ready-paragraph-edits:' + fingerprint(data)
+        response = self.chat('Точечно дополни исходное описание нашего товара для проверки специалистом. '
+            'Сохрани подтверждённые факты, числа, комплектацию, условия и смысл нетронутых абзацев. '
+            'Включи missingPhrases в естественные грамотные предложения. requiredPhrases нельзя терять по смыслу и словам. '
+            'Падеж и грамматическое согласование изменять МОЖНО: «изготовлено» → «изготовлены»; «белый цвет» → «белого цвета». '
+            'Не меняй числа и фактические свойства ради согласования. Правильные факты важнее сохранения ошибочной формы. '
+            'Меняй только нужные абзацы: edits содержит исходный id P и полный новый текст этого абзаца. '
+            'Можно добавить короткий осмысленный абзац в appendParagraphs. Не переписывай всё ради стиля. '
+            'Примеры согласования: «В наборе 19 предметов на 6 персон», «Белый цвет объединяет элементы»; '
+            'нельзя «Этот 19 предметов» или «в элегантном белый цвет». '
+            'Структура конкурента — ориентир подачи, факты брать только из ownFacts. '
+            'Не добавляй чужие марки, материалы, размеры, рисунки, функции, устойчивость к царапинам, долговечность или обещания без своих фактов. '
+            'Свойства разных элементов не смешивай: ручки ножей не являются ручками подставки, материал лезвий не доказывает материал подставки. '
+            'Общее число предметов набора не называй числом инструментов: подставка и другие принадлежности учитываются отдельно. '
+            'Спорные свойства из sourceQuestions обойди нейтрально. Исправь problems и учти remarks в нужном разделе. '
+            'Не возвращай служебные вставки, Markdown или комментарии. Перед ответом проверь язык. '
+            'Ответ JSON: только необходимые edits и appendParagraphs, можно пустые списки.',
+            data, journal=cache, journal_key=key, response_schema=schema,
+            before_request=(lambda: progress('Точечная редактура описания')) if progress else None)
+        edits, added = response.get('edits', []), response.get('appendParagraphs', [])
+        if isinstance(edits, dict):
+            edits = [{'id': identifier, 'text': value} for identifier, value in edits.items()]
+        if (not isinstance(edits, list) or not isinstance(added, list) or any(not isinstance(part, str) or not part.strip() for part in added)
+                or any(not isinstance(row, dict) or set(row) != {'id', 'text'} or row['id'] not in paragraphs
+                    or not isinstance(row['text'], str) or not row['text'].strip() for row in edits)
+                or len({row['id'] for row in edits}) != len(edits)):
+            raise SeoError('seo_invalid_model_response')
+        paragraphs.update({row['id']: row['text'].strip() for row in edits})
+        text = '\n'.join(paragraphs.values()) + ('\n\n' + '\n\n'.join(part.strip() for part in added) if added else '')
+        self.bind_ready_keyword_forms(result, text)
+        phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
+        missing = [phrase for phrase in phrases if not source_phrase(phrase, text)]
+        if missing:
+            repair_data = {'missingPhrases': missing, 'ownFacts': labeled, 'confirmedComposition': confirmed_composition(card), 'currentDescription': text}
+            repair_key = key + ':missing:' + fingerprint(repair_data)
+            extra = self.chat('Напиши один короткий грамотный абзац для дополнения описания товара. '
+                'Каждую missingPhrases включи в грамматически верной форме, построй вокруг неё естественное предложение. '
+                'Допускается изменить падеж/согласование («изготовлено» → «изготовлены»), сохраняя все слова, числа и свойства. '
+                'Только собственные факты, никаких новых обещаний. Не добавляй вводных утверждений о количестве или материалах. '
+                'Материал лезвий описывает только лезвия, а не ручки, подставку или все предметы набора. '
+                'Общее число предметов не называй числом инструментов: подставка учитывается отдельно. '
+                'Не приписывай подставке свойства ножей. Верни JSON paragraph.', repair_data,
+                journal=cache, journal_key=repair_key, response_schema=schema_object({'paragraph': TEXT}),
+                before_request=(lambda: progress('Включение недостающих подтверждённых формулировок')) if progress else None)
+            if not isinstance(extra.get('paragraph'), str) or not extra['paragraph'].strip():
+                raise SeoError('seo_invalid_model_response')
+            text += '\n\n' + extra['paragraph'].strip()
+            self.bind_ready_keyword_forms(result, text)
+            phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
+            if any(not source_phrase(phrase, text) for phrase in phrases):
+                raise SeoError('seo_keyword_lost_after_editing', details={'missingPhrases':
+                    [phrase for phrase in phrases if not source_phrase(phrase, text)]})
+            remember_valid_response(cache, repair_key)
+        text = output_text(text)
+        result['description'] = {'value': text, 'reason': 'Исходные абзацы сохранены; выполнены точечные дополнения по собственным фактам и проверенным ключам.',
+            'editorChanges': ['Изменён абзац ' + row['id'][1:] for row in edits] + (['Добавлены подтверждённые формулировки.'] if added else [])}
         remember_valid_response(cache, key)
 
     def audit_ready_text(self, card, result, cache, progress=None):
         _, facts, labeled = self.ready_fact_catalog(card)
+        conflicts = result.get('_sourceConflicts', [])
+        labeled = {key: self.neutral_ready_facts(value, conflicts) for key, value in labeled.items()}
         all_texts, _ = self.ready_text_catalog(card, result)
         texts = {key: value for key, value in all_texts.items() if value['field'] != 'характеристика'}
-        data = {'ownFacts': labeled, 'finalTexts': {key: row['field'] + ': ' + row['quote'] for key, row in texts.items()}}
-        problem_schema = {'kind': {'type': 'string', 'enum': ['unsupported', 'missing', 'conflicting']},
+        data = {'ownFacts': labeled, 'finalTexts': {key: row['field'] + ': ' + row['quote'] for key, row in texts.items()},
+                'knownSourceConflicts': result.get('_sourceConflicts', []), 'confirmedComposition': confirmed_composition(card)}
+        problem_schema = {'kind': {'type': 'string', 'enum': ['unsupported', 'missing', 'conflicting', 'grammar']},
                           'textId': {'type': 'string', 'enum': ['NONE', *texts]},
                           'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(facts)}}, 'reason': TEXT}
         question_schema = {'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(facts)}}, 'question': TEXT}
@@ -2010,7 +2688,13 @@ class AutomaticSeoService:
             'Найди добавленные неподтверждённые факты, чужие наименования, неверные количество/единицы, '
             'материал, применение, размеры и потерянные важные подтверждённые условия. '
             'Число персон не равно числу предметов; диаметр не равен объёму;2.7и2,7равны. '
+            'confirmedComposition — точные количества частей по полной собственной комплектации; не пересчитывай их приблизительно. '
+            'Не смешивай части: ножницы не являются ещё одним ножом, подставка — отдельный предмет, '
+            'сталь лезвий не доказывает стальные ручки или стальную подставку. '
+            'Утверждение о материале ВСЕХ предметов недопустимо по одному свойству лезвий. '
             'Общие нейтральные оценки не являются новыми техническими свойствами, но обещанные функции/результаты требуют фактов. '
+            'Отдельно проверь русский язык: согласование прилагательных, падежей, числительных и вставленных ключей. '
+            'Ошибки вроде «этот 19 предметов» и «в элегантном белый цвет» — grammar с textId проблемного предложения. '
             'Для unsupported/conflicting textId — существующий ID проблемного фрагмента готового текста (T0,T1,...), '
             'factIds — ID собственных данных, показывающих несоответствие. '
             'Для missing textId="NONE", factIds — ID потерянного важного факта (F0,F1,...). '
@@ -2042,10 +2726,17 @@ class AutomaticSeoService:
                     ids = row['factIds']
                     if not isinstance(ids, list) or any(not isinstance(i, str) or i not in facts for i in ids):
                         raise SeoError('seo_invalid_content_audit', details={'unknownFactIds': True})
+                    if (row['kind'] in {'missing', 'unsupported'} and row['textId'] in texts
+                            and re.search(r'отсутств|не указан|нет информац|неизвест', row['reason'], re.I)):
+                        actual = texts[row['textId']]['quote']
+                        related = {identifier for conflict in conflicts for identifier in conflict.get('factIds', [])}
+                        if any(source_phrase(actual, self.neutral_ready_facts(facts[identifier]['quote'], conflicts))
+                               for identifier in related if identifier in facts):
+                            continue  # A proven neutral copy must not reintroduce the known disputed value.
                     if row['kind'] == 'missing' and row['textId'] == 'NONE' and ids:
                         fact = facts[ids[0]]
                         checked.append({'kind': 'missing', 'quote': fact['quote'], 'source': fact['source'], 'reason': row['reason']})
-                    elif row['kind'] in {'unsupported', 'conflicting'} and row['textId'] in texts:
+                    elif row['kind'] in {'unsupported', 'conflicting', 'grammar'} and row['textId'] in texts:
                         checked.append({'kind': row['kind'], 'quote': texts[row['textId']]['quote'], 'source': '', 'reason': row['reason']})
                     else:
                         raise SeoError('seo_invalid_content_audit', details={'auditWitnessMissing': True})
@@ -2063,6 +2754,8 @@ class AutomaticSeoService:
                     if pair in seen or left['quote'] == right['quote']:
                         continue
                     seen.add(pair)
+                    if any(set(ids) == set(conflict.get('factIds', [])) for conflict in conflicts):
+                        continue
                     source_issues.append({'code': 'own_source_question', 'field': 'Уточнение исходных данных',
                         'detail': left['field'] + ': «' + left['quote'] + '»; ' + right['field'] + ': «' + right['quote'] + '».',
                         'question': row['question'], 'blocking': False})
@@ -2075,11 +2768,87 @@ class AutomaticSeoService:
                 cache[marker] = correction
         raise SeoError('seo_invalid_content_audit')
 
+    def ready_query_groups(self, card, result, previous, cache, progress=None):
+        if (not previous or previous.get('quality', {}).get('state') != 'ready'
+                or fingerprint(previous.get('sources')) != fingerprint(result['sources'])):
+            return self.resolve_query_groups(card, result, cache, progress), False
+        queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
+        old = {row.get('query'): row for row in previous.get('semanticDecisions', [])}
+        own, _ = self.ready_facts(card)
+        packet_hash = fingerprint(own)
+        own_text = '\n'.join(own.values())
+        own_numbers, own_latin, _, own_colors = query_modifiers(own_text)
+        blocked = {(number, unit) for conflict in result.get('_sourceConflicts', []) for claim in conflict['claims']
+                   for number, unit, _ in numeric_unit_claims(claim)}
+        characteristics = {row['id']: row['values'] for row in characteristic_rows(card)}
+        characteristics.update({str(row['id']): row['values'] for row in result['characteristics']})
+        fields = {'заголовок': result['title']['value'], 'описание': result['description']['value'],
+                  'характеристика': ' '.join('; '.join(values) for values in characteristics.values())}
+        proofs = dict(own, **{'final:' + field: value for field, value in fields.items()})
+        kept, pending = {}, set()
+        for query in queries:
+            row = deepcopy(old.get(query, {})); proof = row.get('groupProof', {})
+            destination = row.get('destination')
+            valid = (row.get('placementReviewed') and concrete_reason(row.get('reason'))
+                and proof.get('evidencePacketHash', packet_hash) == packet_hash
+                and source_phrase(proof.get('quote'), proofs.get(proof.get('source'), '')))
+            if destination in fields:
+                numbers, latin, _, colors = query_modifiers(query)
+                valid = valid and not (set(numbers) - set(own_numbers) or set(latin) - set(own_latin)
+                    or set(colors) - set(own_colors) or unsupported_text_properties(query, own_text, card)
+                    or unconfirmed_origin_mentions(query, own_text)
+                    or any((number, unit) in blocked for number, unit, _ in numeric_unit_claims(query)))
+                if destination == 'характеристика' and fingerprint(previous.get('characteristics')) != fingerprint(result.get('characteristics')):
+                    valid = False
+                actual = source_phrase(row.get('outputPhrase'), fields[destination])
+                valid = valid and bool(actual)
+                if actual:
+                    position = fields[destination].find(actual)
+                    prefix = re.split(r'[,;:.!?()\n]', fields[destination][:position])[-1]
+                    valid = valid and not re.search(r'\b(?:не|нет|без)\b', ' '.join(prefix.split()[-3:]), re.I)
+                    row['outputPhrase'] = row['witness'] = actual
+            elif destination == 'не добавлять':
+                valid = valid and not row.get('outputPhrase')
+            else:
+                valid = False
+            if valid:
+                kept[query] = row
+            else:
+                pending.add(query)
+        if not kept:
+            return self.resolve_query_groups(card, result, cache, progress), False
+        additions, changed_groups, changed_rows = [], [], {}
+        if pending:
+            subset = deepcopy(result)
+            subset['sources']['semantic'] = [row for row in result['sources']['semantic'] if row['query'] in pending]
+            additions = self.resolve_query_groups(card, subset, cache, progress)
+            changed_rows = {row['query']: row for row in subset['semanticDecisions']}
+            subset_queries = list(dict.fromkeys(row['query'] for row in subset['sources']['semantic']))
+            indices = {query: index for index, query in enumerate(queries)}
+            changed_groups = [dict(group, ids=[indices[subset_queries[index]] for index in group['ids']])
+                              for group in subset['_queryGroups']]
+        result['semanticDecisions'] = [kept.get(query) or changed_rows[query] for query in queries]
+        groups = {}
+        for index, query in enumerate(queries):
+            if query not in kept:
+                continue
+            row = kept[query]; proof = row['groupProof']; destination = row['destination']
+            signature = (destination, row.get('outputPhrase', ''), proof['source'], proof['quote'])
+            group = groups.setdefault(signature, {'kind': 'skip' if destination == 'не добавлять' else 'quote',
+                'field': '' if destination == 'не добавлять' else destination, 'quote': row.get('outputPhrase', ''),
+                'relevance': row['relevance'], 'reason': row['reason'], 'factSource': proof['source'],
+                'factQuote': proof['quote'], 'ids': []})
+            group['ids'].append(index)
+        result['_queryGroups'] = list(groups.values()) + changed_groups
+        if sorted(index for group in result['_queryGroups'] for index in group['ids']) != list(range(len(queries))):
+            raise SeoError('seo_semantic_review_incomplete', details={'queryCoverageMismatch': True})
+        return additions, not pending
+
     def generate_ready(self, card, sources, remarks, previous, cache, progress=None, verify_characteristics=None):
         started = time.monotonic()
         cache['_readyWorkflowV2'] = True
         budget_key = 'ready-request-budget:' + str(cache.get('_readyRunId', 'pilot')) + ':' + str(card['sku'])
-        cache.setdefault(budget_key, {'used': 0, 'limit': 16 + 6 * max(1, (len(sources['semantic']) + 239) // 240)})
+        cache.setdefault(budget_key, {'used': 0, 'limit': 16 + 6 * max(1, (len(sources['semantic']) + 63) // 64)})
         cache['_readyRequestBudget'] = budget_key
         same_sources = previous and fingerprint(previous.get('sources', {}).get('competitor')) == fingerprint(sources['competitor'])
         scoped = bool(same_sources and previous.get('quality', {}).get('state') == 'ready' and remarks
@@ -2087,13 +2856,18 @@ class AutomaticSeoService:
         targeted = {row['section'] for row in remarks} if scoped else {'title', 'description', 'characteristics'}
         core_targets = ({row['section'] for row in remarks} if same_sources and remarks
                         and not any(row['section'] in {'semantic', 'competitor'} for row in remarks) else targeted)
-        if same_sources and previous.get('competitorProfile'):
+        if (same_sources and previous.get('competitorProfile')
+                and (previous.get('quality', {}).get('state') == 'ready'
+                     or previous['competitorProfile'].get('readyRevision') == 3)):
             profile = deepcopy(previous['competitorProfile'])
         else:
-            key = 'profile:title-description-v2:' + fingerprint({k: v for k, v in sources['competitor'].items() if k != 'reason'})
+            key = 'profile:ready-title-description-v3:' + fingerprint({k: v for k, v in sources['competitor'].items() if k != 'reason'})
             if key not in cache:
+                if progress:
+                    progress('Повторный анализ структуры и поисковых формулировок конкурента')
                 self.competitor_profile(sources['competitor'], cache, key)
             profile = deepcopy(cache[key])
+            profile['readyRevision'] = 3
         if same_sources:
             result = {key: deepcopy(previous[key]) for key in ('title', 'characteristics', 'compatibility')}
         if not same_sources or remarks and core_targets & {'title', 'characteristics'}:
@@ -2128,9 +2902,20 @@ class AutomaticSeoService:
             raise SeoError('seo_invalid_model_response')
         if not result['compatibility']['comparable']:
             raise SeoError('seo_competitor_not_comparable')
+        original_words = set(re.findall(r'\w+', card['title'].casefold().replace('ё', 'е')))
+        proposed_words = set(re.findall(r'\w+', result['title']['value'].casefold().replace('ё', 'е')))
+        if original_words - proposed_words:
+            result['title'] = {'value': card['title'], 'reason': 'Сохранено исходное название: предыдущий вариант терял исходные слова товара.'}
+        if not concrete_reason(result['title'].get('reason')):
+            result['title']['reason'] = ('Исходное название товара сохранено без изменения фактов.'
+                if result['title']['value'] == card['title'] else
+                'Предложено название «' + result['title']['value'] + '». Исходное название: «' + card['title'] + '».')
         result.update(sources=deepcopy(sources), competitorProfile=profile, issues=[], keywords=[],
-                      description={'value': plain(card.get('description', ''))})
+                      description=(deepcopy(previous['description']) if same_sources and previous.get('quality', {}).get('state') == 'ready'
+                                   else {'value': plain(card.get('description', ''))}))
         result['_remarks'] = deepcopy(remarks)
+        result['_sourceConflicts'] = (deepcopy(previous.get('_sourceConflicts', [])) if scoped else
+                                     self.ready_source_conflicts(card, cache, progress))
         facts, _ = self.ready_facts(card)
         current = {row['id']: row for row in characteristic_rows(card)}
         definitions = {str(row['id']) for row in sources['definitions']}
@@ -2188,33 +2973,20 @@ class AutomaticSeoService:
                 raise SeoError('seo_content_repair_incomplete', details={'problemCount': len(problems)})
             self.repair_ready_title(card, result, problems, cache, progress)
             self.write_ready_text(card, result, cache, progress, problems)
-        reuse_groups = bool(previous and previous.get('quality', {}).get('state') == 'ready'
-            and fingerprint(previous.get('sources', {}).get('semantic')) == fingerprint(sources['semantic'])
-            and previous.get('_queryGroups'))
-        if reuse_groups:
-            candidate = deepcopy(result)
-            candidate['semanticDecisions'] = deepcopy(previous['semanticDecisions'])
-            try:
-                self.verify_keywords(candidate, sources)
-                if any(not row.get('placementReviewed') or not concrete_reason(row.get('reason'))
-                       or row.get('destination') == 'требует решения' for row in candidate['semanticDecisions']):
-                    reuse_groups = False
-            except SeoError:
-                reuse_groups = False
-        if reuse_groups:
-            result['semanticDecisions'] = candidate['semanticDecisions']
-            result['_queryGroups'] = deepcopy(previous['_queryGroups'])
-            additions = []
-        else:
-            additions = self.resolve_query_groups(card, result, cache, progress)
+        additions, reuse_groups = self.ready_query_groups(card, result, previous, cache, progress)
         source_queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
         for group in result['_queryGroups']:
             if group['kind'] == 'add' and not reuse_groups:
                 query = source_queries[group['ids'][0]]
                 result['keywords'].append({'sourcePhrase': query, 'outputPhrase': group['quote'], 'decision': 'использовать', 'reason': group['reason']})
         if additions:
-            self.write_ready_text(card, result, cache, progress,
-                [{'kind': 'additional_meaning', 'quote': phrase, 'reason': 'Добавить подтверждённый дополнительный смысл без повторов слов.'} for phrase in additions])
+            # These are literal, already bound own facts. Append them without
+            # rewriting checked paragraphs: their existing query witnesses must
+            # survive adding a new meaning at the end of the description.
+            for phrase in additions:
+                if not source_phrase(phrase, result['description']['value']):
+                    result['description']['value'] += '\n\n' + phrase
+                    result['description'].setdefault('editorChanges', []).append('Добавлен подтверждённый собственный факт.')
             for attempt in range(2):
                 automatic = self.ready_text_problems(card, result)
                 audit, source_issues = self.audit_ready_text(card, result, cache, progress)
@@ -2241,7 +3013,7 @@ class AutomaticSeoService:
                     if group['kind'] == 'add':
                         for index in group['ids']:
                             by_query[queries[index]].update(destination='описание', outputPhrase=group['quote'])
-        result['issues'] = source_issues
+        result['issues'] = [row['issue'] for row in result['_sourceConflicts']] + source_issues
         result['validationNotes'] = notes
         for row in result['keywords']:
             if row['decision'] != 'исключить':
@@ -2262,9 +3034,15 @@ class AutomaticSeoService:
         if not isinstance(result.get('sources'), dict) or not isinstance(result['sources'].get('semantic'), list):
             raise SeoError('seo_content_repair_incomplete')
         quality = result.get('quality', {})
+        if not concrete_reason(result.get('title', {}).get('reason')):
+            raise SeoError('seo_content_repair_incomplete', details={'unexplainedTitle': True})
         queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
         decisions = result.get('semanticDecisions', [])
         facts, _ = self.ready_facts(card)
+        evidence_packet_hash = fingerprint(facts)
+        facts.update({'final:заголовок': result['title']['value'], 'final:описание': result['description']['value'],
+            'final:характеристика': ' '.join('; '.join(row['values']) for row in characteristic_rows(card)) + ' ' +
+                                    ' '.join('; '.join(row['values']) for row in result['characteristics'])})
         if (quality.get('state') != 'ready' or quality.get('checkedQueries') != len(queries)
                 or quality.get('unresolvedAutomaticCount') != 0
                 or [row.get('query') for row in decisions] != queries):
@@ -2273,6 +3051,7 @@ class AutomaticSeoService:
             proof = row.get('groupProof', {})
             if (not row.get('placementReviewed') or not concrete_reason(row.get('reason'))
                     or row.get('destination') == 'требует решения'
+                    or proof.get('evidencePacketHash', evidence_packet_hash) != evidence_packet_hash
                     or not source_phrase(proof.get('quote'), facts.get(proof.get('source'), ''))):
                 raise SeoError('seo_content_repair_incomplete')
         candidate = deepcopy(result)
@@ -2563,8 +3342,11 @@ blocking=true, если неподтверждённое свойство ост
                 raise SeoError('seo_keyword_source_missing')
             if row.get('decision') not in {'использовать', 'адаптировать', 'объединить', 'исключить'} or not row.get('reason'):
                 raise SeoError('seo_keyword_reason_missing')
-            if row['decision'] != 'исключить' and not occurrence(row.get('outputPhrase', ''), result['description']['value']):
-                raise SeoError('seo_keyword_lost_after_editing')
+            if row['decision'] != 'исключить':
+                actual = source_phrase(row.get('outputPhrase', ''), result['description']['value'])
+                if not actual:
+                    raise SeoError('seo_keyword_lost_after_editing')
+                row['outputPhrase'] = actual
         if not isinstance(result.get('semanticDecisions'), list):
             raise SeoError('seo_semantic_decisions_missing')
         queries = {q['query'] for q in sources['semantic']}
@@ -2574,7 +3356,7 @@ blocking=true, если неподтверждённое свойство ост
         characteristics = {str(r['id']): r['values'] for r in sources.get('ownCharacteristics', [])}
         characteristics.update({str(r['id']): r['values'] for r in result['characteristics']})
         texts = {'заголовок': result['title']['value'], 'описание': result['description']['value'],
-                 'характеристика': ' '.join(' '.join(v) for v in characteristics.values())}
+                 'характеристика': ' '.join('; '.join(v) for v in characteristics.values())}
         for row in result['semanticDecisions']:
             destination = row.get('destination')
             if destination in {'не добавлять', 'требует решения'}:
@@ -2583,9 +3365,11 @@ blocking=true, если неподтверждённое свойство ост
                 row['witness'] = ''
             elif destination in texts:
                 witness = row.get('outputPhrase') or row.get('query', '')
-                if not occurrence(witness, texts[destination]):
-                    raise SeoError('seo_semantic_witness_missing')
-                row['witness'] = witness
+                actual = source_phrase(witness, texts[destination])
+                if not actual:
+                    raise SeoError('seo_semantic_witness_missing', details={'query': row.get('query'),
+                        'destination': destination, 'expectedWitness': witness})
+                row['outputPhrase'] = row['witness'] = actual
             else:
                 raise SeoError('seo_semantic_witness_missing')
 
