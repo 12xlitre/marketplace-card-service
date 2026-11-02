@@ -338,8 +338,8 @@ def disputed_numeric_claims(conflicts):
 def source_question_mismatch(issue):
     """Reject a comparison whose literal quantities belong to different objects."""
     detail, question = str(issue.get('detail', '')), str(issue.get('question', ''))
-    parts = re.split(r'»[.;]\s+[^«»]{1,120}:\s+«', detail, maxsplit=1)
-    if len(parts) != 2 or '«' not in parts[0]:
+    parts = re.split(r'»[.;]\s+([^«»]{1,120}):\s+«', detail, maxsplit=1)
+    if len(parts) != 3 or '«' not in parts[0]:
         return False
     components = {'тарелка', 'салатник', 'кружка', 'чашка', 'блюдо', 'блюдце',
                   'бортик', 'ободок', 'сушилка', 'ячейка', 'подставка'}
@@ -347,7 +347,7 @@ def source_question_mismatch(issue):
     values = numeric_values(question)
     if not values:
         return False
-    sources = [parts[0].replace('«', '', 1), parts[1].rsplit('»', 1)[0]]
+    sources = [parts[0].replace('«', '', 1), parts[1] + ': ' + parts[2].rsplit('»', 1)[0]]
     objects = []
     height_question = bool(re.search(r'\bвысот', question, re.I))
     for source in sources:
