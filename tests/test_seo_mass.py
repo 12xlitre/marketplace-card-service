@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import test_automatic_seo as fixtures
 from test_seo_ready import response
-from automatic_seo import SeoError, fingerprint, unsupported_text_properties
+from automatic_seo import SeoError, fingerprint, unsupported_text_properties, unsupported_numeric_values
 
 
 class MassComparisonTest(unittest.TestCase):
@@ -155,6 +155,40 @@ class MassComparisonTest(unittest.TestCase):
                 self.service.parse_response_json(json.dumps(prefix)+'\n'+json.dumps(answer),schema)
         with self.assertRaises(ValueError):
             self.service.parse_response_json(json.dumps(echo)+'\n'+json.dumps(answer)+'\n{}',schema)
+
+    def test_confirmed_component_sum_is_not_a_new_dimension_or_unproved_count(self):
+        card={'title':'Набор на 6 персон 24 предмета', 'description':'Керамическая посуда.',
+            'characteristics':[{'id':1,'name':'Количество предметов','values':['24']},
+                {'id':2,'name':'Комплектация','values':['Тарелка обеденная 27см - 6шт',
+                    'Тарелка десертная 21см - 6шт','Салатник 750мл - 6шт','Кружка 400мл - 6шт']}]}
+        self.assertEqual(unsupported_numeric_values('В наборе 12 тарелок и 6 кружек.',card),set())
+        self.assertEqual(unsupported_numeric_values('12 тарелок диаметром 12 см.',card),{'12'})
+        self.assertEqual(unsupported_numeric_values('В наборе 12 кружек.',card),{'12'})
+        card['characteristics'][0]['values']=['23']
+        self.assertEqual(unsupported_numeric_values('В наборе 12 тарелок.',card),{'12'})
+
+    def test_neutral_text_does_not_choose_between_disputed_counts(self):
+        card={'title':'Набор 12 предметов','description':'Набор из 11 предметов на подставке.',
+            'characteristics':[{'id':1,'name':'Количество предметов','values':['12 шт.']}]}
+        catalog=self.service.ready_fact_catalog(card)[1]
+        ids=[key for key,row in catalog.items() if row['source'] in {'description','attribute:1'}]
+        conflict={'claims':['11 предметов','12 шт.'],'factIds':ids,
+            'issue':{'question':'11 или 12 предметов?','blocking':False}}
+        for text,expected in [('Набор кухонных принадлежностей на подставке.',False),
+                              ('Набор из 12 предметов.',True),('Набор из двенадцати предметов.',True)]:
+            result={'title':{'value':'Кухонный набор'},'description':{'value':text},'characteristics':[],
+                '_sourceConflicts':[conflict],'issues':[]}
+            audit={'ready':False,'problems':[{'kind':'conflicting','textId':'T1','factIds':ids,
+                'reason':'Количество предметов расходится в собственных источниках товара.'}],'sourceQuestions':[]}
+            with patch.object(self.host,'audit_llm_chat_completion',return_value=response(audit)):
+                problems,_=self.service.audit_ready_text(card,result,{})
+            self.assertEqual(bool(problems),expected,text)
+        alternate=[key for key,row in catalog.items() if row['source'] in {'title','description'}]
+        audit['problems'][0]['factIds']=alternate
+        result['description']['value']='Кухонные принадлежности на подставке.'
+        with patch.object(self.host,'audit_llm_chat_completion',return_value=response(audit)):
+            problems,_=self.service.audit_ready_text(card,result,{})
+        self.assertFalse(problems)
 
     def test_new_mass_repair_rewrites_old_ready_results_and_preserves_all_frozen_sources(self):
         self.case.action();self.case.finish()

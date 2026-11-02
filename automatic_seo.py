@@ -362,6 +362,26 @@ def confirmed_composition(card):
     return dict(composition_counts(rows))
 
 
+def unsupported_numeric_values(text, card):
+    own = numeric_values(' '.join(factual_evidence(card).values()))
+    counts = confirmed_composition(card)
+    tokens = text_word_forms(text)
+    proven = []
+    for index, (start, end, lemma, _) in enumerate(tokens):
+        if not lemma.isdigit():
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and tokens[cursor][3] in {'ADJF', 'ADJS'} and cursor - index <= 3:
+            cursor += 1
+        if cursor < len(tokens) and counts.get(tokens[cursor][2]) == int(lemma):
+            between = text[start:tokens[cursor][1]]
+            if not re.search(r'[,;:.!?\n]', between):
+                proven.append((start, end))
+    return {next(iter(numeric_values(match.group()))) for match in re.finditer(r'\d+(?:[.,]\d+)?', text)
+            if next(iter(numeric_values(match.group()))) not in own
+            and not any(start <= match.start() and match.end() <= end for start, end in proven)}
+
+
 def unsupported_text_properties(text, own_text, card=None):
     rules = [(r'\bоднотон\w*', r'\bоднотон\w*|без\s+рисунк\w*'),
              (r'\bцарап\w*', r'\bцарап\w*')]
@@ -2669,7 +2689,7 @@ class AutomaticSeoService:
             if row['decision'] != 'исключить' and not source_phrase(row['outputPhrase'], target):
                 problems.append({'kind': 'missing_keyword', 'quote': row['outputPhrase'],
                                  'reason': 'Выбранная подтверждённая формулировка отсутствует в описании.'})
-        extra_numbers = numeric_values(result['title']['value'] + ' ' + text) - numeric_values(' '.join(facts.values()))
+        extra_numbers = unsupported_numeric_values(result['title']['value'] + ' ' + text, card)
         if extra_numbers:
             problems.append({'kind': 'unsupported_number', 'quote': ', '.join(sorted(extra_numbers)),
                              'reason': 'Эти числа отсутствуют в собственных фактических источниках.'})
@@ -2876,7 +2896,7 @@ class AutomaticSeoService:
         scope = fingerprint(data)
         marker = 'ready-audit-repair:' + scope
         correction = cache.get(marker)
-        for attempt in range(1 if correction else 2):
+        for attempt in range(2 if result.get('_massRewrite') or not correction else 1):
             key = 'response:ready-facts-audit-ids:' + scope + (':repair' if correction else '')
             response = self.chat(instruction + (' Исправь previousProblem.' if correction else ''),
                 dict(data, previousProblem=correction) if correction else data,
@@ -2894,6 +2914,21 @@ class AutomaticSeoService:
                     ids = row['factIds']
                     if not isinstance(ids, list) or any(not isinstance(i, str) or i not in facts for i in ids):
                         raise SeoError('seo_invalid_content_audit', details={'unknownFactIds': True})
+                    if row['kind'] == 'conflicting' and row['textId'] in texts:
+                        related = []
+                        for conflict in conflicts:
+                            disputed = disputed_numeric_claims([conflict])
+                            witnesses = [{(number, unit) for number, unit, _ in numeric_unit_claims(facts[i]['quote'])} & disputed for i in ids]
+                            if (set(ids) == set(conflict.get('factIds', [])) or len(witnesses) == 2
+                                    and all(witnesses) and any(a[0] != b[0] for a in witnesses[0] for b in witnesses[1])):
+                                related.append(conflict)
+                        actual = texts[row['textId']]['quote']
+                        words = dict(zip(['один','два','три','четыре','пять','шесть','семь','восемь','девять','десять',
+                            'одиннадцать','двенадцать','тринадцать','четырнадцать','пятнадцать','шестнадцать',
+                            'семнадцать','восемнадцать','девятнадцать','двадцать'], map(str, range(1,21))))
+                        mentioned = numeric_values(actual) | {words[token[2]] for token in text_word_forms(actual) if token[2] in words}
+                        if related and not (mentioned & {number for number, _ in disputed_numeric_claims(related)}):
+                            continue  # A neutral text does not choose either disputed source quantity.
                     if row['kind'] == 'unsupported' and row['textId'] in texts:
                         actual = texts[row['textId']]['quote']
                         # The source is the authority for existing facts. A model's
@@ -2943,7 +2978,9 @@ class AutomaticSeoService:
                                 result['keywords'][index]['reason'] = result['_massPlans'][index]['reason'] + \
                                     ' Смысл передан самостоятельной формулировкой рерайта; приведена её реальная цитата.'
                         else:
-                            raise SeoError('seo_invalid_content_audit', details={'unknownKeywordTextId': True})
+                            raise SeoError('seo_invalid_content_audit', details={'unknownKeywordTextId': True,
+                                'keyword': identifier, 'receivedTextId': text_id[:80] if isinstance(text_id, str) else type(text_id).__name__,
+                                'allowedTextIds': list(texts)})
                 source_issues = []
                 seen = set()
                 for row in questions:
@@ -2966,7 +3003,7 @@ class AutomaticSeoService:
                 remember_valid_response(cache, key)
                 return checked, source_issues
             except SeoError as exc:
-                if correction or attempt:
+                if attempt or correction and not result.get('_massRewrite'):
                     raise
                 correction = {'code': str(exc), **exc.details}
                 cache[marker] = correction
@@ -3348,6 +3385,8 @@ class AutomaticSeoService:
                 'спорного параметра, даже если один встречается в цитате, сравнении или характеристике. '
                 'Вместо спорного общего числа предметов перечисли подтверждённые виды комплектации без общего итога. '
                 'confirmedComposition задаёт реальные части набора: ножницы не являются ножом; сталь лезвий не доказывает стальную подставку. '
+                'Общее число предметов не называй числом инструментов: подставка и разделочная доска — отдельные принадлежности. '
+                'Для общего количества используй слово «предметов», инструменты перечисли отдельно. '
                 'Напиши естественный грамотный русский текст для покупателя, без Markdown, звёздочек выделения, '
                 'служебных комментариев, SEO-рассуждений и набивки ключами. '
                 'selectedMeanings — подтверждённые смыслы, включи их естественно, можно объединять и менять словоформы. '
@@ -3746,8 +3785,7 @@ blocking=true, если неподтверждённое свойство ост
 
     def verify_final_facts(self, result, card):
         result['issues'] = [i for i in result['issues'] if i.get('code') != 'numeric_claim']
-        own_numbers = numeric_values(' '.join(factual_evidence(card).values()))
-        new_numbers = numeric_values(result['title']['value'] + ' ' + result['description']['value']) - own_numbers
+        new_numbers = unsupported_numeric_values(result['title']['value'] + ' ' + result['description']['value'], card)
         if new_numbers:
             result['issues'].append({'code': 'numeric_claim', 'field': 'Числовые свойства', 'detail': ', '.join(sorted(new_numbers)),
                                      'question': 'Подтвердить числа в новом тексте собственными данными или убрать.', 'blocking': True})
