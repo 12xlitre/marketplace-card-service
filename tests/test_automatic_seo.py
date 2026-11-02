@@ -88,7 +88,10 @@ class FakeHost:
                 'description': {'value': text, 'reason': 'Описание переписано по структуре конкурента с собственными фактами товара.'},
                 'placements': {key: row['ownMeaning'] for key, row in evidence['selectedMeanings'].items()}}
         elif 'finalTexts' in evidence and 'selectedMeanings' in evidence:
-            answer = {'ready': True, 'problems': [], 'sourceQuestions': []}
+            answer = {'ready': True, 'problems': [], 'sourceQuestions': [],
+                'keywordBindings': {key: next(identifier for identifier, text in evidence['finalTexts'].items()
+                    if text.startswith('описание:') and row['ownMeaning'].casefold() in text.casefold())
+                    for key, row in evidence['selectedMeanings'].items()}}
         elif 'mpstatsEvidence' in evidence and 'keywordIds' in evidence:
             fact = 'F1' if 'F1' in evidence['ownFacts'] else next(iter(evidence['ownFacts']))
             answer = {'keywords': {key: {'decision': 'использовать', 'outputPhrase': phrase,

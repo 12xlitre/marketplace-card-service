@@ -325,6 +325,16 @@ def numeric_unit_claims(text):
             for match in re.finditer(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(мм|см|мл|кг|л|г|м|шт|предмет(?:ов|а)?)\b', str(text), re.I)]
 
 
+def disputed_numeric_claims(conflicts):
+    blocked = set()
+    for conflict in conflicts:
+        claims = {(number, unit) for value in conflict['claims'] for number, unit, _ in numeric_unit_claims(value)}
+        blocked.update(claims)
+        if any(unit == 'предметов' for _, unit in claims) and all(unit in {'предметов', 'шт'} for _, unit in claims):
+            blocked.update((number, unit) for number, _ in claims for unit in ('предметов', 'шт'))
+    return blocked
+
+
 @lru_cache(maxsize=512)
 def composition_counts(rows):
     counts, totals = Counter(), []
@@ -363,6 +373,34 @@ def unsupported_text_properties(text, own_text, card=None):
         rules.append((pattern, pattern))
     rejected = [match.group() for pattern, evidence in rules if not re.search(evidence, own_text, re.I)
                 for match in re.finditer(pattern, text, re.I)]
+    colors = {'белый', 'чёрный', 'черный', 'красный', 'синий', 'зелёный', 'зеленый', 'розовый', 'серый'}
+    own_forms = {token[2] for token in text_word_forms(own_text)}
+    rejected.extend(text[start:end] for start, end, lemma, pos in text_word_forms(text)
+                    if pos in {'ADJF', 'ADJS'} and lemma in colors and lemma not in own_forms)
+    # Match the shape to the plate itself, not to a nearby bowl in the set.
+    def plate_shapes(value):
+        tokens = text_word_forms(value)
+        for index, token in enumerate(tokens):
+            if token[2] != 'тарелка':
+                continue
+            for direction in (-1, 1):
+                for distance in range(1, 4):
+                    other_index = index + direction * distance
+                    if not 0 <= other_index < len(tokens):
+                        break
+                    other = tokens[other_index]
+                    start, end = min(token[0], other[0]), max(token[1], other[1])
+                    if re.search(r'[,;:.!?\n]', value[start:end]):
+                        break
+                    if other[3] not in {'ADJF', 'ADJS'}:
+                        break
+                    if other[2] in {'глубокий', 'плоский'}:
+                        prefix = re.split(r'[,;:.!?\n]', value[:start])[-1]
+                        if not re.search(r'\b(?:не|нет|без)\s*$', prefix, re.I):
+                            yield other[2], value[start:end]
+    own_shapes = {shape for shape, _ in plate_shapes(own_text)}
+    if len(own_shapes) == 1:
+        rejected.extend(quote for shape, quote in plate_shapes(text) if shape not in own_shapes)
     number_words = dict(zip(['один','два','три','четыре','пять','шесть','семь','восемь','девять','десять',
         'одиннадцать','двенадцать','тринадцать','четырнадцать','пятнадцать','шестнадцать','семнадцать',
         'восемнадцать','девятнадцать','двадцать'], map(str, range(1,21))))
@@ -1213,7 +1251,7 @@ class AutomaticSeoService:
         }, ensure_ascii=False))
         return record
 
-    def parse_response_json(self, content):
+    def parse_response_json(self, content, response_schema=None):
         try:
             return self.host.parse_llm_json_content(content)
         except json.JSONDecodeError:
@@ -1224,6 +1262,19 @@ class AutomaticSeoService:
             parsed, end = json.JSONDecoder().raw_decode(stripped)
             if isinstance(parsed, dict) and stripped[end:].strip() == '}':
                 return parsed
+            # Some plain-JSON responses echo the supplied schema before their
+            # answer. Discard only an exact schema projection (validation
+            # keywords may be omitted), never an arbitrary first answer or prose.
+            def schema_projection(value, expected):
+                if isinstance(value, dict) and isinstance(expected, dict):
+                    omitted = {'required', 'additionalProperties'} - set(value)
+                    return (set(value) == set(expected) - omitted
+                            and all(schema_projection(item, expected[key]) for key, item in value.items()))
+                return value == expected
+            if response_schema and schema_projection(parsed, response_schema):
+                answer = json.loads(stripped[end:].strip())
+                if isinstance(answer, dict):
+                    return answer
             raise
 
     def chat(self, instruction, evidence, journal=None, journal_key=None, reuse_response=False, response_schema=None, raw_text=False, retry_truncated=True, before_request=None, fast=False, read_candidate=False):
@@ -1237,7 +1288,7 @@ class AutomaticSeoService:
                     and saved.get('finishReason') not in {'length', 'max_tokens', 'blacklist', 'error'}
                     and isinstance(saved.get('content'), str) and saved.get('contentLength') == len(saved['content'])):
                 try:
-                    parsed = self.parse_response_json(saved['content'])
+                    parsed = self.parse_response_json(saved['content'], response_schema)
                     parsed = self.normalize_stage_response(parsed, response_schema)
                     if (isinstance(parsed, dict) and (not response_schema or not journal.get('_readyWorkflowV2')
                             or set(response_schema.get('required', [])) <= set(parsed))):
@@ -1299,7 +1350,7 @@ class AutomaticSeoService:
             if not saved or not isinstance(saved.get('content'), str) or saved.get('contentLength') != len(saved['content']) or saved.get('finishReason') in {'length', 'max_tokens'}:
                 raise SeoError('seo_recheck_response_missing')
             try:
-                parsed = self.parse_response_json(saved['content'])
+                parsed = self.parse_response_json(saved['content'], response_schema)
             except (json.JSONDecodeError, ValueError):
                 raise SeoError('seo_llm_invalid_json') from None
             if not isinstance(parsed, dict):
@@ -1412,7 +1463,7 @@ class AutomaticSeoService:
         if choice.get('finish_reason') in {'length', 'max_tokens'}:
             raise SeoError('seo_llm_response_truncated', details={'responseCharacters': len(content)})
         try:
-            parsed = self.parse_response_json(content)
+            parsed = self.parse_response_json(content, response_schema)
         except json.JSONDecodeError as exc:
             raise SeoError('seo_llm_invalid_json', details={'responseCharacters': len(content), 'line': exc.lineno, 'column': exc.colno}) from None
         except ValueError:
@@ -1998,8 +2049,7 @@ class AutomaticSeoService:
 
     @staticmethod
     def neutral_ready_facts(text, conflicts):
-        blocked = {(number, unit) for conflict in conflicts for claim in conflict['claims']
-                   for number, unit, _ in numeric_unit_claims(claim)}
+        blocked = disputed_numeric_claims(conflicts)
         def replace(match):
             claim = numeric_unit_claims(match.group())
             return '' if claim and claim[0][:2] in blocked else match.group()
@@ -2609,14 +2659,14 @@ class AutomaticSeoService:
         for quote in unsupported_text_properties(result['title']['value'] + '\n' + text, '\n'.join(facts.values()), card):
             problems.append({'kind': 'unsupported', 'quote': quote,
                 'reason': 'Это отдельное свойство не подтверждено собственными источниками товара; убрать либо заменить подтверждённым фактом.'})
-        blocked = {(number, unit) for conflict in result.get('_sourceConflicts', []) for claim in conflict['claims']
-                   for number, unit, _ in numeric_unit_claims(claim)}
+        blocked = disputed_numeric_claims(result.get('_sourceConflicts', []))
         for number, unit, quote in numeric_unit_claims(result['title']['value'] + ' ' + text):
             if (number, unit) in blocked:
                 problems.append({'kind': 'conflicting_source', 'quote': quote,
                     'reason': 'Собственные источники расходятся по этому параметру; убери спорное значение до уточнения.'})
         for row in result['keywords']:
-            if row['decision'] != 'исключить' and not source_phrase(row['outputPhrase'], text):
+            target = result['title']['value'] if result.get('_massRewrite') and row.get('destination') == 'заголовок' else text
+            if row['decision'] != 'исключить' and not source_phrase(row['outputPhrase'], target):
                 problems.append({'kind': 'missing_keyword', 'quote': row['outputPhrase'],
                                  'reason': 'Выбранная подтверждённая формулировка отсутствует в описании.'})
         extra_numbers = numeric_values(result['title']['value'] + ' ' + text) - numeric_values(' '.join(facts.values()))
@@ -2778,8 +2828,8 @@ class AutomaticSeoService:
         data = {'ownFacts': labeled, 'finalTexts': {key: row['field'] + ': ' + row['quote'] for key, row in texts.items()},
                 'knownSourceConflicts': result.get('_sourceConflicts', []), 'confirmedComposition': confirmed_composition(card)}
         if result.get('_massRewrite'):
-            data['selectedMeanings'] = {'K' + str(index): {'ownMeaning': row['outputPhrase'],
-                'ownEvidence': row['evidence'], 'actualQuote': result['keywords'][index]['outputPhrase']}
+            data['selectedMeanings'] = {'K' + str(index): {'ownMeaning': row['outputPhrase'], 'sourcePhrase': row['sourcePhrase'],
+                'ownEvidence': row['evidence']}
                 for index, row in enumerate(result['_massPlans']) if row['decision'] != 'исключить'}
             data['retainedCharacteristics'] = {row['name']: row['values'] for row in characteristic_rows(card)}
         problem_schema = {'kind': {'type': 'string', 'enum': ['unsupported', 'missing', 'conflicting', 'grammar']},
@@ -2788,6 +2838,12 @@ class AutomaticSeoService:
         question_schema = {'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(facts)}}, 'question': TEXT}
         schema = schema_object({'ready': {'type': 'boolean'}, 'problems': schema_rows(problem_schema),
                                 'sourceQuestions': schema_rows(question_schema)})
+        mass_keys = data.get('selectedMeanings', {})
+        if result.get('_massRewrite'):
+            description_ids = list(texts)
+            schema['properties']['keywordBindings'] = schema_object({key:
+                {'type': 'string', 'enum': [*description_ids, 'MISSING']} for key in mass_keys})
+            schema['required'].append('keywordBindings')
         instruction = ('Проверь готовый текст по собственным данным товара, без конкурентов и без домыслов. '
             'Найди добавленные неподтверждённые факты, чужие наименования, неверные количество/единицы, '
             'материал, применение, размеры и потерянные важные подтверждённые условия. '
@@ -2811,7 +2867,9 @@ class AutomaticSeoService:
             'Объяснения и вопросы пиши обычным русским языком, без ID и названий полей JSON.')
         if result.get('_massRewrite'):
             instruction += (' selectedMeanings связывает выбранный подтверждённый смысл с фактической цитатой нового текста: '
-                'проверь, что actualQuote передаёт ownMeaning, а не просто встречается в тексте. Допустимы рерайт, '
+                'для каждого K в keywordBindings выбери существующий T фрагмента заголовка или описания, '
+                'передающего полезный смысл sourcePhrase с нашими подтверждёнными свойствами. '
+                'Верни только ID, не придумывай цитаты. Если смысла нет — MISSING. Допустимы рерайт, '
                 'грамматические формы и объединение без потери смысла. Утраченный смысл — missing с factIds его ownEvidence. '
                 'Свойства из retainedCharacteristics сохранены в файле: не требуй дублировать каждую характеристику в описании. '
                 'Проверь полноценный рерайт и естественный русский язык, без рекламных придирок к нейтральным оценкам.')
@@ -2867,6 +2925,25 @@ class AutomaticSeoService:
                         checked.append({'kind': row['kind'], 'quote': texts[row['textId']]['quote'], 'source': '', 'reason': row['reason']})
                     else:
                         raise SeoError('seo_invalid_content_audit', details={'auditWitnessMissing': True})
+                if result.get('_massRewrite'):
+                    bindings = response.get('keywordBindings')
+                    if not isinstance(bindings, dict) or set(bindings) != set(mass_keys):
+                        raise SeoError('seo_invalid_content_audit', details={'keywordBindingsMissing': True})
+                    for identifier, text_id in bindings.items():
+                        meaning = mass_keys[identifier]
+                        if text_id == 'MISSING':
+                            checked.append({'kind': 'missing_keyword', 'quote': '', 'reason':
+                                'В описании не передан выбранный смысл «' + meaning['ownMeaning'] + '».'})
+                        elif isinstance(text_id, str) and text_id in texts:
+                            index = int(identifier[1:])
+                            result['keywords'][index]['outputPhrase'] = texts[text_id]['quote']
+                            result['keywords'][index]['destination'] = texts[text_id]['field']
+                            if not source_phrase(meaning['ownMeaning'], texts[text_id]['quote']):
+                                result['keywords'][index]['decision'] = 'адаптировать'
+                                result['keywords'][index]['reason'] = result['_massPlans'][index]['reason'] + \
+                                    ' Смысл передан самостоятельной формулировкой рерайта; приведена её реальная цитата.'
+                        else:
+                            raise SeoError('seo_invalid_content_audit', details={'unknownKeywordTextId': True})
                 source_issues = []
                 seen = set()
                 for row in questions:
@@ -3203,6 +3280,7 @@ class AutomaticSeoService:
             rows.append({'competitorPhrase': phrase,
                 'before': 'Есть точное вхождение' if source_phrase(phrase, original) else 'Нет точного вхождения',
                 'action': keyword['decision'], 'reason': keyword['reason'], 'after': keyword.get('outputPhrase', ''),
+                'destination': keyword.get('destination', 'описание'),
                 'mpstats': metrics or 'Для этой формулировки точного наблюдения MPStats нет; частотность не приписывается.'})
         return rows
 
@@ -3235,31 +3313,46 @@ class AutomaticSeoService:
         selected = {'K' + str(index): {'competitorPhrase': row['sourcePhrase'], 'ownMeaning': row['outputPhrase'],
                     'reason': row['reason'], 'ownEvidence': row['evidence']}
                     for index, row in enumerate(result['keywords']) if row['decision'] != 'исключить'}
+        def neutral_input(value):
+            if isinstance(value, str):
+                return self.neutral_ready_facts(value, result['_sourceConflicts'])
+            if isinstance(value, dict):
+                return {key: neutral_input(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [neutral_input(item) for item in value]
+            return value
+        selected = neutral_input(selected)
         problem = []
         source_issues = []
         for attempt in range(3):
             data = {'sku': str(card['sku']), 'ownFacts': own_facts, 'competitorTitle': sources['competitor'].get('title', ''),
-                'competitorDescription': sources['competitor']['description'], 'competitorStructure': profile['structure'],
-                'selectedMeanings': selected, 'comparison': self.mass_comparison(card, result),
+                'competitorDescription': sources['competitor']['description'] if not attempt else
+                    'Первый полный рерайт уже выполнен. Исправь только перечисленные проблемы previousProposal.',
+                'competitorStructure': profile['structure'],
+                'selectedMeanings': selected, 'comparison': neutral_input(self.mass_comparison(card, result)),
                 'confirmedComposition': confirmed_composition(card),
                 'sourceQuestions': [row['issue']['question'] for row in result['_sourceConflicts']],
+                'disputedClaims': [number + ' ' + unit for number, unit in sorted(disputed_numeric_claims(result['_sourceConflicts']))],
                 'remarks': remarks, 'problems': problem,
                 'previousProposal': {'title': result['title'], 'description': result['description']} if attempt else None}
             schema = schema_object({'title': schema_object({'value': TEXT, 'reason': TEXT}),
-                'description': schema_object({'value': TEXT, 'reason': TEXT}),
-                'placements': schema_object({identifier: TEXT for identifier in selected})})
-            key = 'response:mass-full-rewrite-v1:' + fingerprint(data)
+                'description': schema_object({'value': TEXT, 'reason': TEXT})})
+            key = 'response:mass-full-rewrite-v2:' + fingerprint(data)
             response = self.chat('Массовый разбор карточки: сравнение с назначенным прямым конкурентом и полный рерайт. '
                 'Перепиши ВСЁ описание конкурента заново для НАШЕГО товара по ownFacts. Сохрани полезные смысловые блоки '
                 'конкурента, но не его готовые предложения и не исходные абзацы нашей карточки. '
                 'Полностью замени чужие бренд, цвет, материал, размеры и комплект нашими подтверждёнными фактами. '
                 'Не добавляй свойства без собственных фактов. Важные условия ухода/применения из нашей карточки сохрани. '
                 'Спорные свойства sourceQuestions обойди нейтрально, не выбирай одно значение. '
+                'disputedClaims перечисляет ЗАПРЕЩЁННЫЕ для нового текста числовые значения: убери ОБА варианта '
+                'спорного параметра, даже если один встречается в цитате, сравнении или характеристике. '
+                'Вместо спорного общего числа предметов перечисли подтверждённые виды комплектации без общего итога. '
                 'confirmedComposition задаёт реальные части набора: ножницы не являются ножом; сталь лезвий не доказывает стальную подставку. '
-                'Напиши естественный грамотный русский текст для покупателя, без служебных комментариев, SEO-рассуждений и набивки ключами. '
+                'Напиши естественный грамотный русский текст для покупателя, без Markdown, звёздочек выделения, '
+                'служебных комментариев, SEO-рассуждений и набивки ключами. '
                 'selectedMeanings — подтверждённые смыслы, включи их естественно, можно объединять и менять словоформы. '
-                'placements — для КАЖДОГО K точная короткая цитата из реально написанного description.value, '
-                'передающая его ownMeaning. Не обязательно копировать ownMeaning дословно; нельзя подменять смысл общей фразой. '
+                'Не обязательно копировать ownMeaning дословно; передай каждый выбранный смысл, '
+                'не подменяй его общей рекламной фразой. '
                 'Учитывай сравнение и фактические данные MPStats; count не называй месячной частотностью. '
                 'Дай полноценный заголовок до ' + str(60 if card.get('marketplace') == 'Wildberries' else 200) + ' знаков. '
                 'Описание до ' + str(5000 if card.get('marketplace') == 'Wildberries' else 6000) + ' знаков. '
@@ -3273,9 +3366,9 @@ class AutomaticSeoService:
                     or not concrete_reason(response['description'].get('reason'))):
                 raise SeoError('seo_invalid_model_response')
             result['title'], result['description'] = deepcopy(response['title']), deepcopy(response['description'])
-            placements = response.get('placements')
-            if not isinstance(placements, dict) or set(placements) != set(selected):
-                raise SeoError('seo_keyword_decisions_incomplete')
+            for field in ('title', 'description'):
+                result[field]['value'] = re.sub(r'\*\*([^\n]*?)\*\*', r'\1', result[field]['value'])
+            result['keywords'] = deepcopy(result['_massPlans'])
             problem = []
             rewritten = normalized(result['description']['value'])
             own_description = normalized(plain(card.get('description', '')))
@@ -3284,20 +3377,20 @@ class AutomaticSeoService:
                     or len(own_description) >= 100 and own_description in rewritten):
                 problem.append({'kind': 'rewrite', 'quote': '', 'reason':
                     'Нужен полный самостоятельный рерайт по структуре конкурента, а не копия или дополнение прежнего описания.'})
-            for identifier, meaning in selected.items():
-                actual = source_phrase(placements[identifier], result['description']['value']) if isinstance(placements[identifier], str) else ''
-                if not actual:
-                    problem.append({'kind': 'missing_keyword', 'quote': '',
-                        'reason': 'Для ' + identifier + ' нужна реально написанная цитата, передающая смысл «' + meaning['ownMeaning'] + '».'})
-                else:
-                    result['keywords'][int(identifier[1:])]['outputPhrase'] = actual
             limit = 60 if card.get('marketplace') == 'Wildberries' else 200
             if len(result['title']['value']) > limit:
                 problem.append({'kind': 'length', 'quote': result['title']['value'], 'reason': 'Заголовок превышает допустимое число знаков.'})
             if not problem:
-                problem.extend(self.ready_text_problems(card, result))
+                guarded = deepcopy(result)
+                guarded['keywords'] = []  # Bind meanings only after the factual draft passes.
+                problem.extend(self.ready_text_problems(card, guarded))
+            if not problem:
                 audit, source_issues = self.audit_ready_text(card, result, cache, progress)
                 problem.extend(audit)
+                guarded = deepcopy(result)
+                if any(row['kind'] == 'missing_keyword' for row in audit):
+                    guarded['keywords'] = []
+                problem.extend(self.ready_text_problems(card, guarded))
             if not problem:
                 remember_valid_response(cache, key)
                 break
@@ -3669,7 +3762,8 @@ blocking=true, если неподтверждённое свойство ост
             if row.get('decision') not in {'использовать', 'адаптировать', 'объединить', 'исключить'} or not row.get('reason'):
                 raise SeoError('seo_keyword_reason_missing')
             if row['decision'] != 'исключить':
-                actual = source_phrase(row.get('outputPhrase', ''), result['description']['value'])
+                target = result['title']['value'] if result.get('_massRewrite') and row.get('destination') == 'заголовок' else result['description']['value']
+                actual = source_phrase(row.get('outputPhrase', ''), target)
                 if not actual:
                     raise SeoError('seo_keyword_lost_after_editing')
                 row['outputPhrase'] = actual

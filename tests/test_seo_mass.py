@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import test_automatic_seo as fixtures
 from test_seo_ready import response
-from automatic_seo import SeoError, fingerprint
+from automatic_seo import SeoError, fingerprint, unsupported_text_properties
 
 
 class MassComparisonTest(unittest.TestCase):
@@ -31,12 +31,13 @@ class MassComparisonTest(unittest.TestCase):
         if 'selectedMeanings' in data and 'competitorDescription' in data:
             return response({'title':{'value':'Смеситель для раковины ТЕСТ, латунь',
                     'reason':'Название сохраняет назначение, собственный бренд и латунный материал товара.'},
-                'description':{'value':'Латунный кран для умывальника ТЕСТ подходит для раковины.',
+                'description':{'value':'**Латунный кран для умывальника ТЕСТ** подходит для раковины.',
                     'reason':'Описание полностью переписано по структуре конкурента с сохранением собственных фактов.'},
                 'placements':{'K0':'кран для умывальника'}})
         if 'finalTexts' in data:
             self.assertIn('selectedMeanings',data);self.assertIn('retainedCharacteristics',data)
-            return response({'ready':True,'problems':[],'sourceQuestions':[]})
+            return response({'ready':True,'problems':[],'sourceQuestions':[],
+                'keywordBindings':{key:next(identifier for identifier,text in data['finalTexts'].items() if text.startswith('описание:')) for key in data['selectedMeanings']}})
         raise AssertionError('Unexpected stage: '+str(data.keys()))
 
     def test_full_comparison_and_rewrite_does_not_send_raw_query_batches_to_model(self):
@@ -49,6 +50,7 @@ class MassComparisonTest(unittest.TestCase):
         self.assertEqual([row['query'] for row in result['semanticDecisions']],[row['query'] for row in self.sources['semantic']])
         self.assertTrue(all(row['measurementOnly'] for row in result['semanticDecisions']))
         self.assertNotEqual(result['description']['value'],self.card['description'])
+        self.assertNotIn('**',result['description']['value'])
         self.assertEqual(result['comparison'][0]['action'],'использовать')
         self.service.verify_ready_result(self.card,result)
         changed=deepcopy(result);changed['description']['value']+=' Постороннее утверждение.'
@@ -75,6 +77,79 @@ class MassComparisonTest(unittest.TestCase):
         self.assertIn('Сравнение',workbook['Конкуренты'].cell(4,9).value)
         self.assertEqual(workbook['Семантика'].max_row,1001+4)
         self.assertEqual(workbook['Семантика'].cell(6,7).value,'Нет точного вхождения')
+
+    def test_reviewer_binds_real_title_quote_and_ignores_writer_placement(self):
+        def answer(messages):
+            data=json.loads(messages[1]['content'])
+            if 'competitorDescription' in data:
+                return response({'title':{'value':'Латунный кран для умывальника ТЕСТ',
+                    'reason':'Заголовок содержит собственное назначение и материал изделия.'},
+                    'description':{'value':'Смеситель ТЕСТ изготовлен из латуни и подходит для раковины.',
+                    'reason':'Самостоятельный текст передаёт подтверждённые материал и назначение.'},
+                    'placements':{'K0':'ВЫДУМАННАЯ ЦИТАТА'}})
+            if 'finalTexts' in data:
+                return response({'ready':True,'problems':[],'sourceQuestions':[], 'keywordBindings':{'K0':'T0'}})
+            return self.answer(messages)
+        with patch.object(self.host,'audit_llm_chat_completion',side_effect=answer):
+            result=self.service.generate_mass(self.card,self.sources,[],None,self.cache)
+        self.assertEqual(result['keywords'][0]['destination'],'заголовок')
+        self.assertEqual(result['keywords'][0]['outputPhrase'],result['title']['value'])
+        self.assertNotIn('ВЫДУМАННАЯ',json.dumps(result,ensure_ascii=False))
+        self.service.verify_mass_result(self.card,result)
+
+    def test_missing_meaning_and_invalid_reviewer_ids_cannot_be_ready(self):
+        for binding,code in [('MISSING','seo_content_repair_incomplete'),('T999','seo_invalid_content_audit'),
+                             ({'quote':'выдумано'},'seo_invalid_content_audit')]:
+            def answer(messages):
+                data=json.loads(messages[1]['content'])
+                if 'finalTexts' in data:
+                    return response({'ready':True,'problems':[],'sourceQuestions':[], 'keywordBindings':{'K0':binding}})
+                return self.answer(messages)
+            with self.subTest(binding=binding), patch.object(self.host,'audit_llm_chat_completion',side_effect=answer):
+                with self.assertRaisesRegex(SeoError,code):
+                    self.service.generate_mass(self.card,self.sources,[],None,deepcopy(self.cache))
+
+    def test_plate_shape_is_bound_to_its_object(self):
+        own='Тарелка плоская 21,6см - 6шт; глубокие салатники - 6шт'
+        self.assertTrue(unsupported_text_properties('Шесть глубоких обеденных тарелок.',own))
+        self.assertFalse(unsupported_text_properties('Плоские тарелки и глубокие салатники.',own))
+        self.assertFalse(unsupported_text_properties('Глубокие тарелки.',own+'; глубокие тарелки - 6шт'))
+        self.assertTrue(unsupported_text_properties('Серые рукоятки ножей.', 'Молочная подставка. Пластиковые рукояти.'))
+        self.assertFalse(unsupported_text_properties('Серые рукоятки ножей.', 'Рукояти серого цвета.'))
+
+    def test_disputed_total_is_removed_before_independent_audit(self):
+        conflict={'claims':['18 предметов','16 шт.'],'factIds':['F0','F1'],
+            'issue':{'field':'Количество предметов','detail':'В источниках 18 и 16.',
+                'question':'Сколько предметов: 18 или 16?','blocking':False}}
+        self.assertEqual(self.service.neutral_ready_facts('Набор 16 предметов; 18 шт.',[conflict]),'Набор.')
+        writes=[];audits=[]
+        def answer(messages):
+            data=json.loads(messages[1]['content'])
+            if 'competitorDescription' in data:
+                writes.append(data)
+                if len(writes)==1:
+                    return response({'title':{'value':self.card['title'],'reason':'Заголовок сохраняет назначение товара.'},
+                        'description':{'value':'В набор входят 18 предметов.', 'reason':'Полный рерайт под собственный товар.'}})
+            if 'finalTexts' in data:audits.append(data)
+            return self.answer(messages)
+        with patch.object(self.service,'ready_source_conflicts',return_value=[conflict]), \
+             patch.object(self.host,'audit_llm_chat_completion',side_effect=answer):
+            result=self.service.generate_mass(self.card,self.sources,[],None,self.cache)
+        self.assertEqual(len(writes),2)
+        self.assertEqual(len(audits),1)
+        self.assertIn('disputedClaims',writes[0])
+        self.assertTrue(any(row['kind']=='conflicting_source' for row in writes[1]['problems']))
+
+    def test_only_matching_schema_echo_may_precede_json_answer(self):
+        from automatic_seo import schema_object, TEXT
+        schema=schema_object({'value':TEXT});answer={'value':'Готовое описание'}
+        echo=deepcopy(schema);echo.pop('required');echo.pop('additionalProperties')
+        self.assertEqual(self.service.parse_response_json(json.dumps(echo)+'\n'+json.dumps(answer),schema),answer)
+        for prefix in [{'value':'Первый ответ'},{'type':'object','properties':{'other':TEXT}}]:
+            with self.assertRaises(ValueError):
+                self.service.parse_response_json(json.dumps(prefix)+'\n'+json.dumps(answer),schema)
+        with self.assertRaises(ValueError):
+            self.service.parse_response_json(json.dumps(echo)+'\n'+json.dumps(answer)+'\n{}',schema)
 
     def test_new_mass_repair_rewrites_old_ready_results_and_preserves_all_frozen_sources(self):
         self.case.action();self.case.finish()

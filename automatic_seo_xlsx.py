@@ -160,7 +160,7 @@ def build_workbook(path, version, previous=None):
         tr = append(titles, [sku, article, before_title, len(before_title), title, len(title), added, removed, result['title'].get('reason', '')])
         changed(titles.cell(tr, 5), before_title, title)
         titles.row_dimensions[tr].height = 150
-        phrases = list(dict.fromkeys(r['outputPhrase'] for r in result['keywords'] if r['decision'] != 'исключить' and r.get('outputPhrase')))
+        phrases = list(dict.fromkeys(r['outputPhrase'] for r in result['keywords'] if r['decision'] != 'исключить' and r.get('outputPhrase') and r.get('destination') != 'заголовок'))
         rich = rich_description(before_desc, desc, phrases)
         new_phrases = [p for p in phrases if len(re.findall(r'(?<!\w)' + re.escape(p) + r'(?!\w)', desc, re.I)) > len(re.findall(r'(?<!\w)' + re.escape(p) + r'(?!\w)', before_desc, re.I))]
         dr = append(descriptions, [sku, article, before_desc, rich, '; '.join(new_phrases), result['description'].get('reason', '')])
@@ -195,7 +195,7 @@ def build_workbook(path, version, previous=None):
         source = result['sources']
         comp = source['competitor']
         append(comps, [sku, comp['sku'], comp.get('title', ''), comp.get('versionDate', ''), comp.get('reason', '') + '\n' + result.get('compatibility', {}).get('reason', ''), comp['description'], '\n'.join(result['competitorProfile']['structure']),
-                       '\n'.join(f"{r['sourcePhrase']} → {r.get('outputPhrase', '')}: {r['decision']}; {r['reason']}" for r in result['keywords'])] + (['\n\n'.join('У конкурента: «' + row['competitorPhrase'] + '». У нас до рерайта: ' + row['before'] + '.\nРешение: ' + row['action'] + '; ' + row['reason'] + '\nВ новом описании: «' + row['after'] + '».\nОснования MPStats: ' + row['mpstats'] for row in result.get('comparison', [])), '\n'.join(row['name'] + ': у нас — ' + row['own'] + '; у конкурента — ' + row['competitor'] for row in result.get('attributeComparison', []))] if mass else []))
+                       '\n'.join(f"{r['sourcePhrase']} → {r.get('outputPhrase', '')}: {r['decision']}; {r['reason']}" for r in result['keywords'])] + (['\n\n'.join('У конкурента: «' + row['competitorPhrase'] + '». У нас до рерайта: ' + row['before'] + '.\nРешение: ' + row['action'] + '; ' + row['reason'] + '\nВ новом тексте (' + row.get('destination', 'описание') + '): «' + row['after'] + '».\nОснования MPStats: ' + row['mpstats'] for row in result.get('comparison', [])), '\n'.join(row['name'] + ': у нас — ' + row['own'] + '; у конкурента — ' + row['competitor'] for row in result.get('attributeComparison', []))] if mass else []))
         decisions = {r['query']: r for r in result['semanticDecisions']}
         keyword_map = {r['sourcePhrase']: r for r in result['keywords']}
         competitor_phrases = {normalized(r['phrase']): r for r in result['competitorProfile'].get('phrases', [])}
