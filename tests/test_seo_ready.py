@@ -24,9 +24,9 @@ class ReadyWorkflowTest(unittest.TestCase):
             'phrases': [{'phrase': 'кран для умывальника', 'quote': 'кран для умывальника'}]})
 
     def group(self, ids, **kwargs):
-        value = {'ids': list(ids), 'relevance': 'релевантен', 'kind': 'quote', 'field': 'описание',
-            'quote': 'кран для умывальника', 'reason': 'Назначение крана для умывальника подтверждено исходной карточкой смесителя.',
-            'factSource': 'description', 'factQuote': 'Смеситель для раковины'}
+        value = {'ids': list(ids), 'relevance': 'релевантен', 'kind': 'quote', 'textId': 'T2',
+            'phrase': 'NONE', 'reason': 'Назначение крана для умывальника подтверждено исходной карточкой смесителя.',
+            'factIds': ['F1']}
         return dict(value, **kwargs)
 
     def test_full_workflow_checks_facts_keywords_and_all_queries_before_ready(self):
@@ -36,7 +36,7 @@ class ReadyWorkflowTest(unittest.TestCase):
             if 'keywordIds' in data:
                 return response({'keywords': [{'id': 0, 'outputPhrase': 'кран для умывальника',
                     'decision': 'использовать', 'reason': 'Назначение соответствует собственному описанию смесителя для раковины.',
-                    'factSource': 'description', 'factQuote': 'Смеситель для раковины'}]})
+                    'factIds': ['F1']}]})
             if data.get('writeReadyDescription'):
                 return response({'value': fixtures.generated()['description']['value']})
             if 'queries' in data:
@@ -48,7 +48,7 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertEqual(result['issues'], [])
         self.assertEqual(result['quality']['state'], 'ready')
         self.assertEqual(result['quality']['checkedQueries'], 1)
-        self.assertEqual(result['semanticDecisions'][0]['witness'], 'кран для умывальника')
+        self.assertEqual(result['semanticDecisions'][0]['witness'], 'Латунный кран для умывальника.')
 
     def test_thousand_variants_have_complete_coverage_in_five_requests(self):
         phrases = [' '.join(words) for words in islice(permutations(
@@ -64,11 +64,11 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertEqual(len(calls), 5)
         self.assertEqual([r['query'] for r in self.result['semanticDecisions']], phrases)
         self.assertTrue(all(r['placementReviewed'] for r in self.result['semanticDecisions']))
-        self.assertTrue(all(r['outputPhrase'] == 'кран для умывальника' for r in self.result['semanticDecisions']))
+        self.assertTrue(all(r['outputPhrase'] == 'Латунный кран для умывальника.' for r in self.result['semanticDecisions']))
 
     def test_wrong_ids_nonexistent_quote_and_legacy_exclusion_shape_never_become_questions(self):
-        for broken in [self.group([999]), self.group([0, 0]), self.group([0], quote='Несуществующий текст'),
-                       self.group([0], kind='skip', field='', quote='сам запрос')]:
+        for broken in [self.group([999]), self.group([0, 0]), self.group([0], textId='T999'),
+                       self.group([0], kind='skip', textId='T2', phrase='сам запрос')]:
             with self.subTest(broken=broken):
                 with patch.object(self.service, 'chat', return_value={'groups': [broken]}):
                     with self.assertRaisesRegex(SeoError, 'seo_semantic_review_incomplete'):

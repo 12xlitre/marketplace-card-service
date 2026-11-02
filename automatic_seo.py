@@ -1634,9 +1634,34 @@ class AutomaticSeoService:
         return facts, [{'source': key, 'field': names.get(key, key), 'value': value}
                        for key, value in facts.items()]
 
+    def ready_fact_catalog(self, card):
+        facts, labeled = self.ready_facts(card)
+        catalog = {}
+        for row in labeled:
+            fragments = [part.strip() for part in re.split(r'(?<=[.!?])\s+|\n+', row['value']) if part.strip()]
+            for fragment in dict.fromkeys(fragments):
+                catalog['F' + str(len(catalog))] = {'source': row['source'], 'field': row['field'], 'quote': fragment}
+        return facts, catalog, {key: row['field'] + ': ' + row['quote'] for key, row in catalog.items()}
+
+    def ready_text_catalog(self, card, result):
+        catalog = {'T0': {'field': 'заголовок', 'quote': result['title']['value']}}
+        for part in re.split(r'(?<=[.!?])\s+|\n+', result['description']['value']):
+            if part.strip():
+                catalog['T' + str(len(catalog))] = {'field': 'описание', 'quote': part.strip()}
+        values = {row['id']: row for row in characteristic_rows(card)}
+        for row in result['characteristics']:
+            existing = values.get(str(row['id']), {})
+            values[str(row['id'])] = dict(existing, **row)
+        for row in values.values():
+            text = '; '.join(row['values'])
+            if text:
+                catalog['T' + str(len(catalog))] = {'field': 'характеристика', 'quote': text}
+        return catalog, {key: row['field'] + ': ' + row['quote'] for key, row in catalog.items()}
+
     def resolve_query_groups(self, card, result, cache, progress=None, allow_additions=True):
         """One bounded pass over all queries, with complete ID coverage and actual witnesses."""
-        facts, labeled_facts = self.ready_facts(card)
+        facts, fact_catalog, labeled_facts = self.ready_fact_catalog(card)
+        text_catalog, labeled_texts = self.ready_text_catalog(card, result)
         texts = {'заголовок': result['title']['value'], 'описание': result['description']['value']}
         values = {r['id']: r['values'] for r in characteristic_rows(card)}
         values.update({str(r['id']): r['values'] for r in result['characteristics']})
@@ -1647,14 +1672,15 @@ class AutomaticSeoService:
             'Объединяй только смысловые варианты одного запроса; разные числа, комплекты, материалы, цвета, '
             'бренды, латинские слова и отрицания не объединять. Если сомневаешься, оставь отдельную группу. Не требуй вставлять все перестановки слов. '
             'Для каждой группы верни ids (числа из queries), relevance и одно решение kind: '
-            'quote — смысл уже покрыт: field указывает раздел, quote является ДОСЛОВНЫМ фрагментом finalTexts; '
-            'add — есть дополнительный подтверждённый смысл, отсутствующий в тексте: field="описание", '
-            'quote — одна естественная фраза для добавления, без чужих свойств и брендов; '
-            'skip — запрос не подходит нашему товару либо есть конкретная причина пропуска: field="", quote="". '
+            'quote — смысл уже покрыт: textId указывает существующий фрагмент finalTexts (T0,T1,...), phrase="NONE"; '
+            'add — есть дополнительный подтверждённый смысл, отсутствующий в тексте: textId="NONE", '
+            'phrase — одна естественная фраза для добавления, без чужих свойств и брендов; '
+            'skip — запрос не подходит нашему товару либо есть конкретная причина пропуска: textId="NONE", phrase="NONE". '
             'Для каждого решения reason объясняет смысловую связь или конкретное несоответствие/пропуск. '
             'Объяснения пиши обычным русским языком, без ID/имён полей JSON. '
             'Фразы «дублирование смысла», «не применимо», «покрыт адаптацией», «не предложено» без объяснения не принимаются. '
-            'factSource и factQuote — источник и точная цитата из ownFacts, подтверждающая решение. '
+            'factIds — один или несколько существующих ID из ownFacts (F0,F1,...), подтверждающих решение. '
+            'Не сочиняй цитату: приложение само возьмёт текст выбранного ID. Не возвращай названия полей вместо ID. '
             'Бренд конкурента не является нашим брендом. Количество предметов, персон, материал и назначение '
             'нельзя переносить с похожего товара. Предпочитай quote подходящего смысла в названии/характеристиках/описании '
             'вместо повторения вариантов. add нужен только для НОВОГО подтверждённого смысла, не для каждого варианта. '
@@ -1663,8 +1689,9 @@ class AutomaticSeoService:
         row_schema = {'ids': {'type': 'array', 'items': {'type': 'integer'}},
             'relevance': {'type': 'string', 'enum': ['релевантен', 'нерелевантен', 'недостаточно данных']},
             'kind': {'type': 'string', 'enum': ['quote', 'add', 'skip']},
-            'field': {'type': 'string', 'enum': ['', *texts]}, 'quote': TEXT, 'reason': TEXT,
-            'factSource': TEXT, 'factQuote': TEXT}
+            'textId': {'type': 'string', 'enum': ['NONE', *text_catalog]}, 'phrase': TEXT,
+            'reason': {'type': 'string', 'description': 'Одно конкретное предложение от25символов: объясни смысловую связь либо несоответствие по фактам товара.'},
+            'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(fact_catalog)}}}
         schema = schema_object({'groups': schema_rows(row_schema)})
         def check(response, ids):
             rows = response.get('groups') if isinstance(response, dict) else None
@@ -1682,34 +1709,41 @@ class AutomaticSeoService:
                 reason = str(row['reason'] or '').strip()
                 if row['relevance'] not in row_schema['relevance']['enum'] or not concrete_reason(reason):
                     raise SeoError('seo_semantic_decisions_incomplete', details={'unexplainedGroup': True})
-                proof = source_phrase(row['factQuote'], facts.get(row['factSource'], ''))
-                if not proof:
+                fact_ids = row['factIds']
+                if not isinstance(fact_ids, list) or not fact_ids or any(key not in fact_catalog for key in fact_ids):
                     raise SeoError('seo_semantic_decisions_incomplete', details={'factWitnessMissing': True})
+                fact = fact_catalog[fact_ids[0]]
+                proof = fact['quote']
                 signatures = {query_modifiers(queries[index]) for index in members}
                 if len(signatures) != 1:
                     raise SeoError('seo_semantic_decisions_incomplete', details={'mixedQueryModifiers': True, 'invalidIds': members})
-                quote, field, kind = row['quote'], row['field'], row['kind']
+                quote, field, kind = row['phrase'], '', row['kind']
                 if not isinstance(quote, str):
                     raise SeoError('seo_semantic_decisions_incomplete', details={'invalidQuote': True})
                 if kind == 'quote':
-                    quote = source_phrase(quote, texts.get(field, ''))
-                    if not quote or row['relevance'] != 'релевантен':
+                    target = text_catalog.get(row['textId'])
+                    if not target or row['relevance'] != 'релевантен':
                         raise SeoError('seo_semantic_decisions_incomplete', details={'textWitnessMissing': True})
+                    field, quote = target['field'], target['quote']
                 elif kind == 'add':
-                    if not allow_additions or field != 'описание' or not quote.strip() or row['relevance'] != 'релевантен':
+                    if not allow_additions or row['textId'] != 'NONE' or not quote.strip() or quote == 'NONE' or row['relevance'] != 'релевантен':
                         raise SeoError('seo_semantic_decisions_incomplete', details={'invalidAddition': True})
+                    field = 'описание'
                     if numeric_values(quote) - numeric_values(' '.join(facts.values())):
                         raise SeoError('seo_semantic_decisions_incomplete', details={'unconfirmedAdditionNumber': True})
-                elif kind != 'skip' or field or quote:
+                elif kind != 'skip' or row['textId'] != 'NONE':
                     raise SeoError('seo_semantic_decisions_incomplete', details={'invalidSkip': True})
-                checked.append(dict(row, quote=quote, reason=reason, factQuote=proof))
+                else:
+                    quote = ''
+                checked.append(dict(row, field=field, quote=quote, reason=reason,
+                                    factSource=fact['source'], factQuote=proof))
             if len(seen) != len(set(seen)) or set(seen) != set(ids):
                 raise SeoError('seo_semantic_decisions_incomplete', details={'queryCoverageMismatch': True})
             return checked
 
         def review(ids, depth=0):
             data = {'queries': {str(i): queries[i] for i in ids}, 'ownFacts': labeled_facts,
-                    'finalTexts': texts, 'selectedPhrases': [r['outputPhrase'] for r in result['keywords']
+                    'finalTexts': labeled_texts, 'selectedPhrases': [r['outputPhrase'] for r in result['keywords']
                         if r['decision'] != 'исключить' and r.get('outputPhrase')], 'allowAdditions': allow_additions}
             scope = fingerprint(data)
             marker = 'ready-groups-repair:' + scope
@@ -1760,11 +1794,12 @@ class AutomaticSeoService:
         return additions
 
     def ready_keywords(self, card, result, cache, progress=None):
-        facts, labeled = self.ready_facts(card)
+        facts, catalog, labeled = self.ready_fact_catalog(card)
         phrases = list(dict.fromkeys(p['phrase'] for p in result['competitorProfile']['phrases']))
         rows = []
         props = {'id': {'type': 'integer'}, **KEYWORD_DECISION_SCHEMA['properties'],
-                 'factSource': TEXT, 'factQuote': TEXT}
+                 'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(catalog)}}}
+        props['reason'] = {'type': 'string', 'description': 'Одно развернутое предложение от25символов с конкретным фактом/отличием нашего товара; не просто «факт подтверждён».'}
         schema = schema_object({'keywords': schema_rows(props)})
         own_latin = {word.casefold() for word in re.findall(r'[A-Za-z][A-Za-z0-9-]*', ' '.join(facts.values()))}
         for offset in range(0, len(phrases), 24):
@@ -1779,8 +1814,9 @@ class AutomaticSeoService:
                     'Чужие бренд/модель, число предметов, материал или назначение не переносить. '
                     'Если можно сохранить полезный смысл без чужого свойства, адаптируй формулировку по нашим фактам. '
                     'Для использовать/адаптировать/объединить outputPhrase — естественная фраза, которую нужно включить в наше описание. '
-                    'Для исключить outputPhrase=""; reason — конкретное несоответствие или обоснованный пропуск, не отсутствие фразы в тексте. '
-                    'factSource/factQuote укажи как источник и дословную цитату из ownFacts. '
+                    'Для исключить outputPhrase="NONE"; reason — конкретное несоответствие или обоснованный пропуск, не отсутствие фразы в тексте. '
+                    'factIds — существующие ID собственных фактов F0,F1,... . Например factIds:["F0"]. '
+                    'Цитату не сочиняй: приложение само возьмёт исходный текст выбранного ID. '
                     'Учитывай комплектацию, число персон отдельно от количества предметов; собственные противоречия не разрешай догадкой. '
                     'Объяснения пиши обычным русским языком, без ID/имён полей JSON. '
                     'Верни keywords по схеме, все ID, непустое конкретное reason. Исправь previousProblem, если он передан.',
@@ -1798,11 +1834,16 @@ class AutomaticSeoService:
                     for row in selected:
                         phrase, reason = row.get('outputPhrase'), str(row.get('reason') or '').strip()
                         decision = row.get('decision')
-                        proof = source_phrase(row.get('factQuote'), facts.get(row.get('factSource'), ''))
+                        fact_ids = row.get('factIds')
+                        proof = (catalog[fact_ids[0]] if isinstance(fact_ids, list) and fact_ids
+                                 and all(isinstance(i, str) and i in catalog for i in fact_ids) else None)
+                        if decision == 'исключить':
+                            phrase = ''
                         if (decision not in KEYWORD_DECISION_SCHEMA['properties']['decision']['enum']
                                 or not isinstance(phrase, str) or not concrete_reason(reason) or not proof
-                                or (decision == 'исключить' and phrase) or (decision != 'исключить' and not phrase.strip())):
-                            raise SeoError('seo_keyword_decisions_incomplete', details={'invalidCoreDecision': True})
+                                or (decision != 'исключить' and (not phrase.strip() or phrase == 'NONE'))):
+                            raise SeoError('seo_keyword_decisions_incomplete', details={'invalidCoreDecision': True,
+                                'id': row.get('id'), 'unknownFactIds': not bool(proof), 'explanationTooShortOrTechnical': not concrete_reason(reason)})
                         if decision != 'исключить':
                             if numeric_values(phrase) - numeric_values(' '.join(facts.values())):
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'unconfirmedCoreNumber': True})
@@ -1810,7 +1851,7 @@ class AutomaticSeoService:
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'foreignCoreName': True})
                         checked.append({'sourcePhrase': phrases[row['id']], 'outputPhrase': phrase,
                             'decision': decision, 'reason': reason,
-                            'evidence': {'source': row['factSource'], 'quote': proof}})
+                            'evidence': {'source': proof['source'], 'quote': proof['quote']}})
                     rows.extend(checked)
                     remember_valid_response(cache, key)
                     break
@@ -1892,60 +1933,84 @@ class AutomaticSeoService:
         remember_valid_response(cache, key)
 
     def audit_ready_text(self, card, result, cache, progress=None):
-        facts, labeled = self.ready_facts(card)
-        data = {'ownFacts': labeled, 'title': result['title']['value'], 'description': result['description']['value'],
-                'characteristics': result['characteristics']}
+        _, facts, labeled = self.ready_fact_catalog(card)
+        all_texts, _ = self.ready_text_catalog(card, result)
+        texts = {key: value for key, value in all_texts.items() if value['field'] != 'характеристика'}
+        data = {'ownFacts': labeled, 'finalTexts': {key: row['field'] + ': ' + row['quote'] for key, row in texts.items()}}
         problem_schema = {'kind': {'type': 'string', 'enum': ['unsupported', 'missing', 'conflicting']},
-                          'quote': TEXT, 'source': TEXT, 'reason': TEXT}
-        question_schema = {'sourceA': TEXT, 'quoteA': TEXT, 'sourceB': TEXT, 'quoteB': TEXT, 'question': TEXT}
+                          'textId': {'type': 'string', 'enum': ['NONE', *texts]},
+                          'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(facts)}}, 'reason': TEXT}
+        question_schema = {'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(facts)}}, 'question': TEXT}
         schema = schema_object({'ready': {'type': 'boolean'}, 'problems': schema_rows(problem_schema),
                                 'sourceQuestions': schema_rows(question_schema)})
-        key = 'response:ready-facts-audit:' + fingerprint(data)
-        response = self.chat('Проверь готовый текст по собственным данным товара, без конкурентов и без домыслов. '
+        instruction = ('Проверь готовый текст по собственным данным товара, без конкурентов и без домыслов. '
             'Найди добавленные неподтверждённые факты, чужие наименования, неверные количество/единицы, '
             'материал, применение, размеры и потерянные важные подтверждённые условия. '
             'Число персон не равно числу предметов; диаметр не равен объёму;2.7и2,7равны. '
-            'Общие нейтральные оценки не считать новыми техническими свойствами, но обещанные функции/результаты требуют фактов. '
-            'Для unsupported/conflicting quote — дословный проблемный фрагмент готового текста, source="". '
-            'Для missing quote — дословный важный факт из ownFacts, source — его ID. Не требуй дословно копировать исходный текст: '
-            'сохранение смысла/равнозначных единиц достаточно. '
-            'Если собственные источники противоречат друг другу, sourceQuestions содержит обе ДОСЛОВНЫЕ цитаты '
-            'с действительными ID источников и один понятный вопрос по товару. Если новый текст нейтрален и не выбирает '
-            'спорное значение, такой вопрос не является проблемой нового текста. '
-            'ready=true только при пустом problems. Не выдумывай замечания и не объявляй отсутствие поискового запроса фактической ошибкой.',
-            data, journal=cache, journal_key=key, response_schema=schema,
-            before_request=(lambda: progress('Независимая проверка фактов готового текста')) if progress else None)
-        problems, questions = response.get('problems'), response.get('sourceQuestions')
-        if (type(response.get('ready')) is not bool or not isinstance(problems, list) or not isinstance(questions, list)
-                or response['ready'] != (not problems)):
-            raise SeoError('seo_invalid_content_audit')
-        checked = []
-        for row in problems:
-            if not isinstance(row, dict) or set(row) != set(problem_schema) or not str(row.get('reason') or '').strip():
-                raise SeoError('seo_invalid_content_audit')
-            if row['kind'] == 'missing':
-                quote = source_phrase(row['quote'], facts.get(row['source'], ''))
-            elif row['kind'] in {'unsupported', 'conflicting'}:
-                quote = source_phrase(row['quote'], result['title']['value'] + ' ' + result['description']['value'])
-            else:
-                quote = ''
-            if not quote:
-                raise SeoError('seo_invalid_content_audit', details={'auditWitnessMissing': True})
-            checked.append(dict(row, quote=quote))
-        source_issues = []
-        source_names = {row['source']: row['field'] for row in labeled}
-        for row in questions:
-            if not isinstance(row, dict) or set(row) != set(question_schema):
-                raise SeoError('seo_invalid_content_audit')
-            left = source_phrase(row['quoteA'], facts.get(row['sourceA'], ''))
-            right = source_phrase(row['quoteB'], facts.get(row['sourceB'], ''))
-            if not left or not right or left == right or not str(row.get('question') or '').strip():
-                raise SeoError('seo_invalid_content_audit', details={'sourceQuestionWitnessMissing': True})
-            source_issues.append({'code': 'own_source_question', 'field': 'Уточнение исходных данных',
-                'detail': source_names[row['sourceA']] + ': «' + left + '»; ' + source_names[row['sourceB']] + ': «' + right + '».',
-                'question': row['question'], 'blocking': False})
-        remember_valid_response(cache, key)
-        return checked, source_issues
+            'Общие нейтральные оценки не являются новыми техническими свойствами, но обещанные функции/результаты требуют фактов. '
+            'Для unsupported/conflicting textId — существующий ID проблемного фрагмента готового текста (T0,T1,...), '
+            'factIds — ID собственных данных, показывающих несоответствие. '
+            'Для missing textId="NONE", factIds — ID потерянного важного факта (F0,F1,...). '
+            'Не сочиняй цитаты: приложение само возьмёт исходный фрагмент по ID. '
+            'Не требуй дословно копировать исходное описание: равнозначная формулировка/единицы достаточны. '
+            'Если собственные источники противоречат друг другу, sourceQuestions содержит два существующих factIds '
+            'и понятный вопрос по товару. Если новый текст нейтрален и не выбирает спорное значение, '
+            'такой вопрос не является проблемой нового текста. Не считай ошибкой само сохранение исходной характеристики. '
+            'ready=true только при пустом problems. Не объявляй отсутствие поискового запроса фактической ошибкой. '
+            'Объяснения и вопросы пиши обычным русским языком, без ID и названий полей JSON.')
+        scope = fingerprint(data)
+        marker = 'ready-audit-repair:' + scope
+        correction = cache.get(marker)
+        for attempt in range(1 if correction else 2):
+            key = 'response:ready-facts-audit-ids:' + scope + (':repair' if correction else '')
+            response = self.chat(instruction + (' Исправь previousProblem.' if correction else ''),
+                dict(data, previousProblem=correction) if correction else data,
+                journal=cache, journal_key=key, response_schema=schema,
+                before_request=(lambda: progress('Независимая проверка фактов готового текста')) if progress else None)
+            try:
+                problems, questions = response.get('problems'), response.get('sourceQuestions')
+                if (type(response.get('ready')) is not bool or not isinstance(problems, list) or not isinstance(questions, list)
+                        or response['ready'] != (not problems)):
+                    raise SeoError('seo_invalid_content_audit')
+                checked = []
+                for row in problems:
+                    if not isinstance(row, dict) or set(row) != set(problem_schema) or not concrete_reason(row.get('reason')):
+                        raise SeoError('seo_invalid_content_audit', details={'invalidExplanation': True})
+                    ids = row['factIds']
+                    if not isinstance(ids, list) or any(not isinstance(i, str) or i not in facts for i in ids):
+                        raise SeoError('seo_invalid_content_audit', details={'unknownFactIds': True})
+                    if row['kind'] == 'missing' and row['textId'] == 'NONE' and ids:
+                        fact = facts[ids[0]]
+                        checked.append({'kind': 'missing', 'quote': fact['quote'], 'source': fact['source'], 'reason': row['reason']})
+                    elif row['kind'] in {'unsupported', 'conflicting'} and row['textId'] in texts:
+                        checked.append({'kind': row['kind'], 'quote': texts[row['textId']]['quote'], 'source': '', 'reason': row['reason']})
+                    else:
+                        raise SeoError('seo_invalid_content_audit', details={'auditWitnessMissing': True})
+                source_issues = []
+                seen = set()
+                for row in questions:
+                    if not isinstance(row, dict) or set(row) != set(question_schema):
+                        raise SeoError('seo_invalid_content_audit')
+                    ids = row['factIds']
+                    if (not isinstance(ids, list) or len(ids) != 2 or len(set(ids)) != 2
+                            or any(not isinstance(i, str) or i not in facts for i in ids) or not str(row['question'] or '').strip()):
+                        raise SeoError('seo_invalid_content_audit', details={'sourceQuestionWitnessMissing': True})
+                    left, right = (facts[i] for i in ids)
+                    pair = tuple(sorted(ids))
+                    if pair in seen or left['quote'] == right['quote']:
+                        continue
+                    seen.add(pair)
+                    source_issues.append({'code': 'own_source_question', 'field': 'Уточнение исходных данных',
+                        'detail': left['field'] + ': «' + left['quote'] + '»; ' + right['field'] + ': «' + right['quote'] + '».',
+                        'question': row['question'], 'blocking': False})
+                remember_valid_response(cache, key)
+                return checked, source_issues
+            except SeoError as exc:
+                if correction or attempt:
+                    raise
+                correction = {'code': str(exc), **exc.details}
+                cache[marker] = correction
+        raise SeoError('seo_invalid_content_audit')
 
     def generate_ready(self, card, sources, remarks, previous, cache, progress=None, verify_characteristics=None):
         started = time.monotonic()
@@ -2009,6 +2074,11 @@ class AutomaticSeoService:
                 continue
             if not all(isinstance(p, dict) and source_phrase(p.get('quote'), facts.get(p.get('source'), '')) for p in proof_rows):
                 notes.append({'field': aid, 'reason': 'Цитата правки не найдена в собственном источнике; исходное значение сохранено.'})
+                continue
+            if not all(isinstance(value, str) and any(source_phrase(value, proof['quote'])
+                       or normalized_characteristic(value) == normalized_characteristic(proof['quote']) for proof in proof_rows)
+                       for value in proposal['values']):
+                notes.append({'field': aid, 'reason': 'Предложенное значение отсутствует в подтверждающей цитате; исходное значение сохранено.'})
                 continue
             checked.append(proposal)
         result['characteristics'] = checked
