@@ -18,8 +18,8 @@ export default function SeoGenerationProgress({ version }) {
         <strong>{progress.complete ? "Файл готов к проверке" : progress.partial ? `Подготовлено ${progress.prepared} из ${total} карточек` : progress.needsRepair ? "Подготовка требует доработки" : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
         <span>{percentage}%</span>
       </div>
-      {version.continuation ? <p className="status-note">Обработка продолжена с сохранённых результатов: {version.continuation.preservedCount} готовых карточек.</p> : null}
-      {Number.isFinite(version.completedCount) ? <span className="status-note">Успешно подготовлено: {version.completedCount} из {total}</span> : null}
+      {version.continuation ? <p className="status-note">Использованы сохранённые результаты: {version.continuation.preservedCount} карточек.</p> : null}
+      {Number.isFinite(version.completedCount) ? <span className="status-note">{progress.needsRepair ? "Сохранены результаты" : "Подготовлено"}: {version.completedCount} из {total}</span> : null}
       {progress.partial ? <p className="status-note">Обработка завершена с ошибками. Осталось подготовить: {total - progress.prepared}. Готовые результаты сохранены для повторного запуска.</p> : null}
       <progress aria-label="Прогресс обработки карточек" max="100" value={percentage} />
       {query ? <div className="seo-query-progress">

@@ -75,6 +75,8 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
   const submitted = latest?.status === "submitted";
   const canPrepare = Boolean(report?.capabilities?.prepare);
   const canReview = Boolean(report?.capabilities?.review);
+  const requiresRepair = !running && Boolean(latest?.errors?.length || latest?.issues?.some((issue) => issue.blocking)
+    || latest?.workflowRevision && latest?.quality?.state !== "ready");
 
   useEffect(() => { setReport(null); setMapping(null); setAcknowledged(false); setError(""); }, [endpoint]);
 
@@ -144,7 +146,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
   return (
     <section className="automatic-seo-task" aria-label="Автоматическая оптимизация">
       <div className="task-batch-main"><strong>Автоматическая оптимизация</strong><span>{statusNames[latest?.status] || "Подготовка ещё не запускалась"}</span></div>
-      {latest ? <p role="status">Версия {latest.number} · {latest.stage} · обработано {latest.done} из {latest.total}</p> : <p>Подготовка заголовков, характеристик и описаний с Excel для проверки.</p>}
+      {latest ? <p role="status">Версия {latest.number} · {requiresRepair ? "Требуется автоматическая доработка" : latest.stage} · обработано {latest.done} из {latest.total}</p> : <p>Подготовка заголовков, характеристик и описаний с Excel для проверки.</p>}
       {latest ? <SeoGenerationProgress version={latest} /> : null}
       {latest?.sourceCapturedAt ? <p className="status-note">Свои данные получены {new Date(latest.sourceCapturedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}. Период MPStats: {latest.period?.d1} — {latest.period?.d2}.</p> : null}
       <details open={!latest || ["partial", "failed", "interrupted"].includes(latest.status)}>
