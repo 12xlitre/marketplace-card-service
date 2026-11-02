@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import threading
 import time
+import tracemalloc
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -497,6 +498,46 @@ class AdditionalContextTest(unittest.TestCase):
 
 
 class CacheAndPollingTest(unittest.TestCase):
+    def test_large_private_snapshot_save_has_bounded_extra_memory(self):
+        case = fixtures.AutomaticSeoTest()
+        case.setUp()
+        try:
+            directory = case.service.directory(1, 'batch')
+            with case.service.lock(directory):
+                rows = [str(index) + 'я' * 1024 for index in range(6000)]
+                state = {'versions': [{'number': 1, 'taskHash': 'scope', 'cache': rows}]}
+                tracemalloc.start()
+                try:
+                    case.service.save(directory, state)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+            self.assertLess(peak, 3 * 1024 * 1024, 'Saving allocated a full JSON snapshot')
+            self.assertEqual(case.service.load(directory), state)
+            self.assertNotIn('cache', case.service.metadata(directory)['versions'][0])
+            self.assertEqual((directory / 'state.json').stat().st_mode & 0o777, 0o600)
+            self.assertEqual((directory / 'metadata.json').stat().st_mode & 0o777, 0o600)
+        finally:
+            case.tearDown()
+
+    def test_failed_snapshot_write_keeps_previous_state_and_metadata(self):
+        case = fixtures.AutomaticSeoTest()
+        case.setUp()
+        try:
+            directory = case.service.directory(1, 'batch')
+            with case.service.lock(directory):
+                original = {'versions': [{'number': 1, 'taskHash': 'scope', 'status': 'interrupted'}]}
+                case.service.save(directory, original)
+                metadata = (directory / 'metadata.json').read_bytes()
+                broken = deepcopy(original)
+                broken['versions'][0]['cache'] = object()
+                with self.assertRaises(TypeError):
+                    case.service.save(directory, broken)
+            self.assertEqual(case.service.load(directory), original)
+            self.assertEqual((directory / 'metadata.json').read_bytes(), metadata)
+        finally:
+            case.tearDown()
+
     def test_handoff_report_checks_both_original_retry_and_latest_saved_checkpoint(self):
         case = fixtures.AutomaticSeoTest()
         case.setUp()
@@ -575,6 +616,72 @@ class CacheAndPollingTest(unittest.TestCase):
             if (case.service.directory(1, 'batch') / 'state.json').exists():
                 case.finish()
             case.tearDown()
+
+
+class CompletedRetryRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.case = fixtures.AutomaticSeoTest()
+        self.case.setUp()
+        self.case.action()
+        self.case.finish()
+        self.directory = self.case.service.directory(1, 'batch')
+        # finish() observes the terminal metadata before the worker unlocks.
+        with self.case.service.lock(self.directory, 'run.lock'):
+            state = self.case.service.load(self.directory)
+            origin = state['versions'][0]
+            retry = deepcopy(origin)
+            retry.update(number=2, status='interrupted')
+            for key in ['cards', 'cache', 'sha256', 'file', 'finishedAt']:
+                retry.pop(key, None)
+            retry['_preservation'] = {'fromVersion': 1, 'savedAt': origin['createdAt'],
+                'sourceCapturedAt': origin['sourceCapturedAt'], 'cardsHash': fingerprint(origin['cards']),
+                'resultHashes': {sku: fingerprint(result) for sku, result in origin['results'].items()}}
+            state['versions'].append(retry)
+            self.state = state
+            self.case.service.save(self.directory, state)
+
+    def tearDown(self):
+        self.case.tearDown()
+
+    def test_completed_retry_restores_verified_sources_and_exports_without_external_calls(self):
+        service, host = self.case.service, self.case.host
+        before = self.state['versions'][-1]['_preservation']['resultHashes']
+        with patch.object(host, 'automatic_seo_own_cards', side_effect=AssertionError('no source refresh')), \
+             patch.object(host, 'automatic_seo_sources', side_effect=AssertionError('no external sources')), \
+             patch.object(host, 'audit_llm_chat_completion', side_effect=AssertionError('no paid generation')):
+            service.resume(1, 'batch', self.case.tech, 2, self.state['versions'][-1]['taskHash'])
+            final = self.case.finish()
+        self.assertEqual(final['status'], 'review', final)
+        self.assertEqual(final['number'], 2)
+        self.assertEqual(final['continuation']['preservedCount'], 2)
+        self.assertEqual(final['continuation']['retryCount'], 0)
+        restored = service.load(self.directory)['versions'][-1]
+        self.assertEqual(restored['cards'], self.state['versions'][0]['cards'])
+        self.assertEqual({sku: fingerprint(result) for sku, result in restored['results'].items()}, before)
+        self.assertTrue(service.download(1, 'batch', self.case.tech, 2))
+        with patch.object(server, 'automatic_seo_service', return_value=service), patch.object(server, 'user_is_admin', return_value=True):
+            handoff = server.automatic_seo_handoff_report(1, 'batch', self.case.tech)
+        self.assertTrue(handoff['allPreserved'] and handoff['sourcePreserved'])
+        self.assertEqual(handoff['latestHandoff']['unchangedCount'], 2)
+
+    def test_missing_or_changed_proof_blocks_source_restoration(self):
+        for change in ['source', 'origin_result', 'result', 'scope', 'method', 'competitor', 'timestamp', 'manifest', 'incomplete']:
+            with self.subTest(change=change):
+                state = deepcopy(self.state)
+                origin, retry = state['versions']
+                if change == 'source': origin['cards'][0]['title'] = 'Другой товар'
+                if change == 'origin_result': origin['results']['1001']['title']['value'] = 'Другой товар'
+                if change == 'result': retry['results']['1001']['title']['value'] = 'Другой товар'
+                if change == 'scope': origin['taskHash'] = 'changed'
+                if change == 'method': origin['method'] = 'changed'
+                if change == 'competitor': origin['competitors']['1001']['sku'] = '9999'
+                if change == 'timestamp': origin['sourceCapturedAt'] = 'changed'
+                if change == 'manifest': retry.pop('_preservation')
+                if change == 'incomplete': retry['results'].pop('1001')
+                self.case.service.save(self.directory, state)
+                with self.assertRaisesRegex(SeoError, 'seo_resume_sources_missing'):
+                    self.case.service.resume(1, 'batch', self.case.tech, 2, retry['taskHash'])
+                self.assertEqual(self.case.service.load(self.directory), state)
 
 
 class LargeBatchRecoveryTest(unittest.TestCase):

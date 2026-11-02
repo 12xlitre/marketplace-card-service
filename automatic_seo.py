@@ -278,8 +278,10 @@ class AutomaticSeoService:
                 row['issuesCount'] = len(row.pop('issues', []))
         for name, value in [('state', state), ('metadata', metadata)]:
             temp = directory / (name + '-' + threading.current_thread().name + '.tmp')
-            temp.write_text(json.dumps(value, ensure_ascii=False))
-            os.chmod(temp, 0o600)
+            with temp.open('w', encoding='utf-8') as handle:
+                os.chmod(temp, 0o600)
+                # Large batches must not allocate another complete JSON string.
+                json.dump(value, handle, ensure_ascii=False)
             temp.replace(directory / (name + '.json'))
 
     def metadata(self, directory):
@@ -377,6 +379,8 @@ class AutomaticSeoService:
                         version['_preservation'] = {'fromVersion': previous['number'], 'savedAt': now(),
                             'sourceCapturedAt': version['sourceCapturedAt'], 'cardsHash': fingerprint(previous.get('cards')),
                             'resultHashes': {sku: fingerprint(result) for sku, result in preserved.items()}}
+                        if len(preserved) == version['total'] and isinstance(previous.get('cards'), list):
+                            version['cards'] = deepcopy(previous['cards'])
                 # Reserve the run lock before persisting/returning the running state.
                 run_handle = (directory / 'run.lock').open('a')
                 try:
@@ -513,8 +517,29 @@ class AutomaticSeoService:
                     raise SeoError('seo_task_scope_changed', 409)
                 if version.get('status') not in {'running', 'interrupted'} or version.get('sha256'):
                     raise SeoError('seo_resume_not_running', 409)
-                if version.get('method') != METHOD or not isinstance(version.get('cards'), list):
+                if version.get('method') != METHOD:
                     raise SeoError('seo_resume_sources_missing')
+                if not isinstance(version.get('cards'), list):
+                    # A crash can occur after a retry saves its results but before
+                    # its worker saves the inherited sources. Restore only a fully
+                    # completed, hash-verified retry from its recorded baseline.
+                    preservation = version.get('_preservation', {})
+                    origin = next((v for v in state['versions'][:-1]
+                                   if v['number'] == preservation.get('fromVersion')), None)
+                    scope = {t['sku'] for t in context['tasks']}
+                    hashes = preservation.get('resultHashes', {})
+                    if (not origin or version.get('errors') or set(version['results']) != scope
+                            or set(hashes) != scope or not isinstance(origin.get('cards'), list)
+                            or origin.get('taskHash') != task_hash or origin.get('method') != METHOD
+                            or origin.get('competitors') != version.get('competitors')
+                            or origin.get('sourceCapturedAt') != version.get('sourceCapturedAt')
+                            or preservation.get('sourceCapturedAt') != version.get('sourceCapturedAt')
+                            or fingerprint(origin['cards']) != preservation.get('cardsHash')
+                            or any(fingerprint(version['results'][sku]) != hashes[sku]
+                                   or fingerprint(origin.get('results', {}).get(sku)) != hashes[sku] for sku in scope)):
+                        raise SeoError('seo_resume_sources_missing')
+                    version['cards'] = deepcopy(origin['cards'])
+                    version['cache'] = {}
                 acquired = self.slots.acquire(blocking=False)
                 if not acquired:
                     raise SeoError('seo_capacity_busy', 409)
