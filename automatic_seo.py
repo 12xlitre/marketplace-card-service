@@ -3395,7 +3395,8 @@ class AutomaticSeoService:
                 remember_valid_response(cache, key)
                 break
             if attempt == 2:
-                raise SeoError('seo_content_repair_incomplete', details={'problemCount': len(problem)})
+                raise SeoError('seo_content_repair_incomplete', details={'problemCount': len(problem),
+                    'remainingProblems': [{'kind': row['kind'], 'reason': row['reason'][:500]} for row in problem[:10]]})
         if verify_characteristics:
             verify_characteristics(result)
         result['issues'] = [row['issue'] for row in result['_sourceConflicts']] + source_issues

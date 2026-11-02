@@ -106,8 +106,13 @@ class MassComparisonTest(unittest.TestCase):
                     return response({'ready':True,'problems':[],'sourceQuestions':[], 'keywordBindings':{'K0':binding}})
                 return self.answer(messages)
             with self.subTest(binding=binding), patch.object(self.host,'audit_llm_chat_completion',side_effect=answer):
-                with self.assertRaisesRegex(SeoError,code):
+                with self.assertRaisesRegex(SeoError,code) as caught:
                     self.service.generate_mass(self.card,self.sources,[],None,deepcopy(self.cache))
+                if binding=='MISSING':
+                    details=caught.exception.details
+                    self.assertEqual(details['remainingProblems'][0]['kind'],'missing_keyword')
+                    self.assertIn('В описании не передан',details['remainingProblems'][0]['reason'])
+                    self.assertEqual(set(details['remainingProblems'][0]),{'kind','reason'})
 
     def test_plate_shape_is_bound_to_its_object(self):
         own='Тарелка плоская 21,6см - 6шт; глубокие салатники - 6шт'
