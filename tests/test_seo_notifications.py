@@ -84,6 +84,12 @@ class SeoNotificationsTest(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text())['status'],'uncertain')
         self.assertEqual(version['status'],'partial')
 
+    def test_verified_xlsx_without_verified_content_is_not_announced_as_ready(self):
+        for values in [{'issues': [{'blocking': True}]}, {'workflowRevision': 3}, {'errors': [{'code': 'failed'}]}]:
+            payload = host.bitrix_seo_notification_payload(1, 'batch',
+                {'number': 1, 'status': 'review', 'sha256': 'checked', 'total': 58, 'done': 58, **values})
+            self.assertNotIn('Файл готов к проверке', payload['MESSAGE'])
+
     def test_transport_hides_secrets_does_not_retry_uncertain_send_and_honors_429(self):
         opener=unittest.mock.Mock()
         opener.open.side_effect=URLError('contains '+HOOK)

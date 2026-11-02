@@ -130,6 +130,11 @@ def jump(cell, target, row, label):
 
 
 def build_workbook(path, version, previous=None):
+    if version.get('workflowRevision') and (version.get('quality', {}).get('state') != 'ready'
+            or len(version['results']) != len(version['cards'])
+            or any(result.get('quality', {}).get('state') != 'ready' or any(i.get('blocking') for i in result.get('issues', []))
+                   for result in version['results'].values())):
+        raise SeoError('seo_content_repair_incomplete')
     wb = Workbook(); wb.remove(wb.active)
     note = f"Версия {version['number']}; методика {version['method']}; данные MPStats {version['period']['d1']} — {version['period']['d2']}; свои данные {version.get('sourceCapturedAt', 'см. запуск')} ."
     summary = sheet(wb, 'Итог', ['SKU', 'Артикул', 'Товар', 'Основные проблемы', 'Приоритет', 'Изменений', 'Заголовок', 'Характеристики', 'Описание', 'Вопросов', 'Видимость: начало → конец', 'Дней с наблюдением'], [17,17,40,60,20,12,16,18,16,12,35,24], note)

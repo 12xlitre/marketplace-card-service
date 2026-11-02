@@ -34,6 +34,15 @@ test('46 prepared cards out of 58 cannot show 100 percent readiness', () => {
   assert.equal(p.complete, false);
   assert.equal(p.remaining, null);
 });
+test('review file with unresolved automatic issues is never called ready', () => {
+  const version = {...base, done: 58, status: 'review', sha256: 'verified'};
+  assert.equal(seoProgress({...version, issues: [{blocking: true}]}, now).complete, false);
+  assert.equal(seoProgress({...version, issues: [{blocking: true}]}, now).needsRepair, true);
+  assert.equal(seoProgress({...version, workflowRevision: 3}, now).complete, false);
+  assert.equal(seoProgress({...version, workflowRevision: 3, quality: {state: 'ready'}}, now).complete, true);
+  const p = seoProgress({...base, stage: 'Проверка смысловых групп запросов 241–480 из 1804: 123'}, now);
+  assert.equal(p.query.done, 240);
+});
 test('preserved results do not count as observations for retry ETA', () => {
   const version = { ...base, done: 46, completedCount: 46,
     continuation: { preservedCount: 46, startedAt: started } };

@@ -301,7 +301,7 @@ def query_modifiers(query):
 
 def concrete_reason(value):
     reason = str(value or '').strip()
-    return (len(reason) >= 25 and not re.search(r'\bq\d+\b|attribute:\d+|finalTexts|ownFacts|outputPhrase', reason, re.I)
+    return (len(reason) >= 25 and not re.search(r'\b[qkft]\d+\b|attribute:\d+|finalTexts|ownFacts|outputPhrase|keywordIds|factIds|textId', reason, re.I)
             and normalized(reason).rstrip('.') not in {'дублирование смысла', 'не применимо',
                 'смысл покрыт адаптацией', 'не предложено в тексте'})
 
@@ -524,7 +524,8 @@ class AutomaticSeoService:
             row = {k: deepcopy(version[k]) for k in (
                 'number', 'status', 'createdAt', 'finishedAt', 'stage', 'done', 'total', 'errors',
                 'sha256', 'remarks', 'decisions', 'submittedBy', 'reviewedBy', 'competitors', 'sourceCapturedAt', 'period',
-                'workers', 'activeCards', 'completedCount', 'cardDurations', 'continuation', 'resolvedErrors', 'runBudgetSeconds') if k in version}
+                'workers', 'activeCards', 'completedCount', 'cardDurations', 'continuation', 'resolvedErrors', 'runBudgetSeconds',
+                'quality', 'workflowRevision') if k in version}
             if index == len(state['versions']) - 1:
                 if 'issues' in version:
                     row['issues'] = deepcopy(version['issues'])
@@ -567,12 +568,12 @@ class AutomaticSeoService:
                 raise SeoError('seo_version_conflict', 409)
             if previous and previous['status'] == 'running':
                 raise SeoError('seo_already_running', 409)
-            if action in {'generate', 'revise', 'recheck'}:
+            if action in {'generate', 'revise', 'recheck', 'repair'}:
                 if not context['capabilities']['prepare']:
                     raise PermissionError('forbidden')
                 if previous and previous['status'] in {'submitted', 'approved'}:
                     raise SeoError('seo_return_before_revision', 409)
-                if action == 'revise' and not previous:
+                if action in {'revise', 'repair'} and not previous:
                     raise SeoError('seo_report_missing')
                 recheckable = previous and (previous['status'] in {'partial', 'failed', 'interrupted'} or
                     (previous['status'] == 'review' and any(i.get('blocking') for i in previous.get('issues', []))))
@@ -585,6 +586,13 @@ class AutomaticSeoService:
                 if mappings is None:
                     mappings = previous.get('competitors', {}) if previous else {}
                 mappings = self.mappings(mappings, context)
+                ready_workflow = bool(getattr(self.host, 'automatic_seo_ready_workflow', lambda: False)())
+                if (ready_workflow and action == 'generate' and previous and previous['status'] == 'review'
+                        and any(i.get('blocking') for i in previous.get('issues', []))
+                        and not remarks and not payload.get('refreshSources') and mappings == previous['competitors']):
+                    action = 'repair'
+                if action == 'repair' and (payload.get('refreshSources') or mappings != previous['competitors'] or remarks):
+                    raise SeoError('seo_invalid_repair_scope')
                 preflight = getattr(self.host, 'automatic_seo_preflight', None)
                 if preflight and (not previous or payload.get('refreshSources')):
                     preflight(portal)
@@ -598,12 +606,17 @@ class AutomaticSeoService:
                            'refreshSources': bool(payload.get('refreshSources')),
                            'reuseResponses': action == 'recheck',
                            'period': previous['period'] if previous and not payload.get('refreshSources') else closed_period(), 'method': METHOD}
-                if (action == 'generate' and previous and previous['status'] in {'partial', 'failed', 'interrupted'}
+                if ready_workflow or action == 'repair':
+                    version['workflowRevision'] = 3
+                    version['repairReady'] = bool(previous and not version['refreshSources'])
+                if ((action == 'repair' or action == 'generate' and previous and previous['status'] in {'partial', 'failed', 'interrupted'})
+                        and previous
                         and previous.get('method') == METHOD and not version['refreshSources'] and not remarks):
                     # Seed successes before starting workers: only failed cards enter the queue.
                     preserved = {sku: deepcopy(result) for sku, result in previous.get('results', {}).items()
-                                 if previous.get('competitors', {}).get(sku) == mappings.get(sku)}
-                    if preserved:
+                                 if previous.get('competitors', {}).get(sku) == mappings.get(sku)
+                                 and (not version.get('workflowRevision') or result.get('quality', {}).get('state') == 'ready')}
+                    if preserved or action == 'repair':
                         version['results'] = preserved
                         version['done'] = version['completedCount'] = len(preserved)
                         version['sourceCapturedAt'] = previous.get('sourceCapturedAt', previous['createdAt'])
@@ -614,6 +627,10 @@ class AutomaticSeoService:
                             'resultHashes': {sku: fingerprint(result) for sku, result in preserved.items()}}
                         if len(preserved) == version['total'] and isinstance(previous.get('cards'), list):
                             version['cards'] = deepcopy(previous['cards'])
+                        if action == 'repair':
+                            version['cards'] = deepcopy(previous['cards'])
+                            version['_repairBaseline'] = {'number': previous['number'],
+                                'resultHashes': {sku: fingerprint(result) for sku, result in previous['results'].items()}}
                 # Reserve the run lock before persisting/returning the running state.
                 run_handle = (directory / 'run.lock').open('a')
                 try:
@@ -630,6 +647,16 @@ class AutomaticSeoService:
                     baseline = deepcopy(previous)
                     if baseline:
                         baseline['_completedSkus'] = list(baseline.get('results', {}))
+                        if version.get('repairReady'):
+                            cards_hash = fingerprint(baseline.get('cards'))
+                            candidates = [v for v in state['versions'][:-1]
+                                if v.get('taskHash') == task_hash and v.get('sourceCapturedAt') == baseline.get('sourceCapturedAt')
+                                and v.get('competitors') == baseline.get('competitors')
+                                and fingerprint(v.get('cards')) == cards_hash]
+                            if candidates:
+                                richest = max(candidates, key=lambda value: len(value.get('cache', {})))
+                                if len(richest.get('cache', {})) > len(baseline.get('cache', {})):
+                                    baseline['cache'] = deepcopy(richest['cache'])
                     if baseline and version['remarks']:
                         # A failed intervening attempt must not erase the last
                         # reviewable values of fields outside the requested edit.
@@ -654,6 +681,8 @@ class AutomaticSeoService:
                     if not context['capabilities']['prepare']:
                         raise PermissionError('forbidden')
                     if previous['status'] != 'review' or previous.get('errors'):
+                        raise SeoError('seo_not_ready', 409)
+                    if previous.get('workflowRevision') and previous.get('quality', {}).get('state') != 'ready':
                         raise SeoError('seo_not_ready', 409)
                     if any(i.get('blocking') for i in previous.get('issues', [])):
                         raise SeoError('seo_blocking_issues', 409)
@@ -824,6 +853,8 @@ class AutomaticSeoService:
                 version['sourceCapturedAt'] = previous.get('sourceCapturedAt', previous['createdAt']) if reused_cards else now()
             cache = version.get('cache', {}) if resuming else deepcopy(previous.get('cache', {})) if previous and not version['refreshSources'] else {}
             cache['_readOnlyReplay'] = bool(version.get('reuseResponses'))
+            cache['_readyWorkflowV2'] = bool(version.get('workflowRevision'))
+            cache['_readyRunId'] = version['number']
             version['cache'] = cache
             scope_skus = {task['sku'] for task in context['tasks']}
             if set(version['results']) - scope_skus:
@@ -841,7 +872,7 @@ class AutomaticSeoService:
             version['done'] = len(processed)
             version.setdefault('cardDurations', [])
             # Large semantic sets take longer than three minutes per card. Requests stay bounded.
-            budget = max(3600, len(cards) * 900)
+            budget = max(600, min(3600, len(cards) * 60)) if version.get('workflowRevision') else max(3600, len(cards) * 900)
             deadline = time.monotonic() + budget
             version['runBudgetSeconds'] = budget
             self.update(directory, version, portal, batch, user)
@@ -885,7 +916,8 @@ class AutomaticSeoService:
                     old = previous.get('results', {}).get(sku) if previous and not version['refreshSources'] else None
                     same_competitor = previous and previous['competitors'][sku] == version['competitors'][sku]
                     same_retry = previous and previous['status'] in {'partial', 'failed', 'interrupted'} and sku in previous.get('_completedSkus', []) and [r for r in previous.get('remarks', []) if r['sku'] in {'*', sku}] == remarks
-                    if old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses') and (not remarks or same_retry):
+                    if (old and same_competitor and previous.get('method') == METHOD and not version.get('reuseResponses')
+                            and (not remarks or same_retry) and (not version.get('workflowRevision') or old.get('quality', {}).get('state') == 'ready')):
                         result = deepcopy(old)
                     else:
                         def progress(stage):
@@ -898,14 +930,17 @@ class AutomaticSeoService:
                                 version['activeCards'][sku]['stage'] = stage
                                 self.update(directory, version, portal, batch, user)
                         progress('Источники и текст')
-                        sources = self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], local_cache, user)
-                        card_budget = card_budget_seconds(len(sources.get('semantic', [])))
+                        sources = (deepcopy(old['sources']) if version.get('repairReady') and old and same_competitor else
+                            self.host.automatic_seo_sources(portal, card, version['competitors'][sku], version['period'], local_cache, user))
+                        card_budget = 900 if version.get('workflowRevision') else card_budget_seconds(len(sources.get('semantic', [])))
                         result = self.generate(card, sources, remarks, old, local_cache, progress=progress,
                             reuse_responses=bool(version.get('reuseResponses')),
                             verify_characteristics=lambda candidate: self.verify_characteristic_proposals(
                                 portal, card, candidate, local_cache, user,
                                 reuse_responses=bool(version.get('reuseResponses')), recheck=False))
                         self.verify_final_facts(result, card)
+                    if version.get('workflowRevision'):
+                        self.verify_ready_result(card, result)
                     with writer:
                         version['results'][sku] = result
                         repaired = [e for e in version['errors'] if e['sku'] == sku]
@@ -941,6 +976,15 @@ class AutomaticSeoService:
                 version['status'], version['stage'] = 'partial', 'Требуется повторить проблемные SKU'
             else:
                 from automatic_seo_xlsx import build_workbook
+                if version.get('workflowRevision'):
+                    if len(version['results']) != len(cards):
+                        raise SeoError('seo_content_repair_incomplete')
+                    for card in cards:
+                        self.verify_ready_result(card, version['results'][str(card['sku'])])
+                    version['quality'] = {'state': 'ready', 'revision': 3, 'unresolvedAutomaticCount': 0,
+                        'checkedCards': len(version['results']),
+                        'checkedQueries': sum(result['quality']['checkedQueries'] for result in version['results'].values()),
+                        'modelRequests': sum(result['quality'].get('modelRequests', 0) for result in version['results'].values())}
                 version['stage'] = 'Сборка и проверка Excel'
                 self.update(directory, version, portal, batch, user)
                 filename = f"seo-v{version['number']}.xlsx"
@@ -1012,6 +1056,13 @@ class AutomaticSeoService:
             retryable.discard('seo_llm_response_truncated')
         for attempt in range(2):
             try:
+                if not reuse_response and journal is not None and journal.get('_readyWorkflowV2') and journal.get('_readyRequestBudget'):
+                    budget_key = journal['_readyRequestBudget']
+                    budget = journal[budget_key]
+                    if budget['used'] >= budget['limit']:
+                        raise SeoError('seo_request_budget_reached')
+                    budget['used'] += 1
+                    journal[budget_key] = budget
                 if before_request and not reuse_response:
                     before_request()
                 prompt = instruction + ('\nПредыдущий ответ не прошёл проверку формата. Повтори ответ строго по переданной схеме, сохрани все идентификаторы и не добавляй внешние действия.' if attempt else '')
@@ -1667,6 +1718,9 @@ class AutomaticSeoService:
         values.update({str(r['id']): r['values'] for r in result['characteristics']})
         texts['характеристика'] = ' '.join('; '.join(value) for value in values.values())
         queries = list(dict.fromkeys(r['query'] for r in result['sources']['semantic']))
+        own_text = ' '.join(facts.values())
+        own_numbers, own_latin = numeric_values(own_text), set(re.findall(r'[a-z]+', own_text.casefold()))
+        own_colors = set(query_modifiers(own_text)[3])
         groups = []
         instruction = ('Проверь поисковые запросы по НАШЕМУ товару и готовым текстам. Обработай каждый ID ровно один раз. '
             'Объединяй только смысловые варианты одного запроса; разные числа, комплекты, материалы, цвета, '
@@ -1735,6 +1789,12 @@ class AutomaticSeoService:
                     raise SeoError('seo_semantic_decisions_incomplete', details={'invalidSkip': True})
                 else:
                     quote = ''
+                if kind != 'skip':
+                    for index in members:
+                        numbers, latin, _, colors = query_modifiers(queries[index])
+                        if set(numbers) - own_numbers or set(latin) - own_latin or set(colors) - own_colors:
+                            raise SeoError('seo_semantic_decisions_incomplete',
+                                details={'unconfirmedQueryModifier': True, 'invalidIds': members})
                 checked.append(dict(row, field=field, quote=quote, reason=reason,
                                     factSource=fact['source'], factQuote=proof))
             if len(seen) != len(set(seen)) or set(seen) != set(ids):
@@ -1797,23 +1857,27 @@ class AutomaticSeoService:
         facts, catalog, labeled = self.ready_fact_catalog(card)
         phrases = list(dict.fromkeys(p['phrase'] for p in result['competitorProfile']['phrases']))
         rows = []
-        props = {'id': {'type': 'integer'}, **KEYWORD_DECISION_SCHEMA['properties'],
+        props = {**KEYWORD_DECISION_SCHEMA['properties'],
                  'factIds': {'type': 'array', 'items': {'type': 'string', 'enum': list(catalog)}}}
         props['reason'] = {'type': 'string', 'description': 'Одно развернутое предложение от25символов с конкретным фактом/отличием нашего товара; не просто «факт подтверждён».'}
-        schema = schema_object({'keywords': schema_rows(props)})
         own_latin = {word.casefold() for word in re.findall(r'[A-Za-z][A-Za-z0-9-]*', ' '.join(facts.values()))}
         for offset in range(0, len(phrases), 24):
-            candidates = {str(i): phrases[i] for i in range(offset, min(offset + 24, len(phrases)))}
+            candidates = {'K' + str(i): phrases[i] for i in range(offset, min(offset + 24, len(phrases)))}
+            schema = schema_object({'keywords': schema_object({key: schema_object(props) for key in candidates})})
             data = {'keywordIds': candidates, 'ownFacts': labeled,
                     'competitorStructure': result['competitorProfile']['structure']}
             correction = None
             for attempt in range(2):
                 key = 'response:ready-core-keywords:' + fingerprint(data) + (':repair' if correction else '')
                 response = self.chat('Выбери подтверждённые формулировки для НАШЕГО описания из keywordIds. '
-                    'Каждый ID должен получить одно решение. Выбор и количество определяет структура конкурента и наши факты, без квоты. '
+                    'Обрабатывай ТОЛЬКО ключи K из keywordIds, НЕ факты F из ownFacts. '
+                    'Ответ keywords — объект, ключи которого ТОЧНО равны ключам keywordIds: K0,K1,... . '
+                    'Каждый K получает одно решение; никаких дополнительных ключей. '
+                    'Выбор и количество определяет структура конкурента и наши факты, без квоты. '
                     'Чужие бренд/модель, число предметов, материал или назначение не переносить. '
                     'Если можно сохранить полезный смысл без чужого свойства, адаптируй формулировку по нашим фактам. '
-                    'Для использовать/адаптировать/объединить outputPhrase — естественная фраза, которую нужно включить в наше описание. '
+                    'Для использовать/адаптировать/объединить outputPhrase — короткая естественная ключевая фраза, '
+                    'сохраняющая полезный смысл соответствующего keywordIds[K], а не предложение из ownFacts. '
                     'Для исключить outputPhrase="NONE"; reason — конкретное несоответствие или обоснованный пропуск, не отсутствие фразы в тексте. '
                     'factIds — существующие ID собственных фактов F0,F1,... . Например factIds:["F0"]. '
                     'Цитату не сочиняй: приложение само возьмёт исходный текст выбранного ID. '
@@ -1825,13 +1889,12 @@ class AutomaticSeoService:
                     before_request=(lambda: progress(f'Выбор подтверждённых фраз {offset + 1}–{offset + len(candidates)} из {len(phrases)}')) if progress else None)
                 try:
                     selected = response.get('keywords')
-                    if not isinstance(selected, list) or len(selected) != len(candidates):
-                        raise SeoError('seo_keyword_decisions_incomplete')
-                    ids = [r.get('id') for r in selected if isinstance(r, dict)]
-                    if len(ids) != len(set(ids)) or set(ids) != {int(i) for i in candidates}:
-                        raise SeoError('seo_keyword_decisions_incomplete')
+                    if not isinstance(selected, dict) or set(selected) != set(candidates):
+                        raise SeoError('seo_keyword_decisions_incomplete', details={'expectedKeywordKeys': list(candidates)})
                     checked = []
-                    for row in selected:
+                    for keyword_id, row in selected.items():
+                        if not isinstance(row, dict) or set(row) != set(props):
+                            raise SeoError('seo_keyword_decisions_incomplete', details={'invalidKeyword': keyword_id})
                         phrase, reason = row.get('outputPhrase'), str(row.get('reason') or '').strip()
                         decision = row.get('decision')
                         fact_ids = row.get('factIds')
@@ -1843,13 +1906,13 @@ class AutomaticSeoService:
                                 or not isinstance(phrase, str) or not concrete_reason(reason) or not proof
                                 or (decision != 'исключить' and (not phrase.strip() or phrase == 'NONE'))):
                             raise SeoError('seo_keyword_decisions_incomplete', details={'invalidCoreDecision': True,
-                                'id': row.get('id'), 'unknownFactIds': not bool(proof), 'explanationTooShortOrTechnical': not concrete_reason(reason)})
+                                'keyword': keyword_id, 'unknownFactIds': not bool(proof), 'explanationTooShortOrTechnical': not concrete_reason(reason)})
                         if decision != 'исключить':
                             if numeric_values(phrase) - numeric_values(' '.join(facts.values())):
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'unconfirmedCoreNumber': True})
                             if {word.casefold() for word in re.findall(r'[A-Za-z][A-Za-z0-9-]*', phrase)} - own_latin:
                                 raise SeoError('seo_keyword_decisions_incomplete', details={'foreignCoreName': True})
-                        checked.append({'sourcePhrase': phrases[row['id']], 'outputPhrase': phrase,
+                        checked.append({'sourcePhrase': candidates[keyword_id], 'outputPhrase': phrase,
                             'decision': decision, 'reason': reason,
                             'evidence': {'source': proof['source'], 'quote': proof['quote']}})
                     rows.extend(checked)
@@ -1910,7 +1973,7 @@ class AutomaticSeoService:
                 'currentDescription': plain(card.get('description', '')),
                 'competitorStructure': result['competitorProfile']['structure'],
                 'requiredPhrases': phrases, 'previousText': result.get('description', {}).get('value', ''),
-                'problems': problems or [], 'marketplace': card.get('marketplace', 'Ozon')}
+                'problems': problems or [], 'remarks': result.get('_remarks', []), 'marketplace': card.get('marketplace', 'Ozon')}
         key = 'response:ready-description:' + fingerprint(data)
         response = self.chat('Подготовь готовое описание нашего товара для специалиста. '
             'Напиши естественный русский текст по абзацам и структуре конкурента, опираясь ТОЛЬКО на ownFacts. '
@@ -1919,7 +1982,7 @@ class AutomaticSeoService:
             'Если наши собственные источники противоречат по свойству, обойди спорную деталь нейтрально; не выбирай одну догадкой. '
             'Каждую requiredPhrases включи дословно, можно менять регистр. Вложенные фразы могут встречаться внутри одной общей фразы. '
             'Не превращай текст в перечисление запросов; не используй Markdown, хештеги или технические комментарии. '
-            'Исправь каждую problems. Перед ответом выполни редактуру. '
+            'Исправь каждую problems и учти remarks в указанном разделе. Замечания не заменяют подтверждение факта. Перед ответом выполни редактуру. '
             'Для WB ориентир2000символов, максимум5000; для Ozon максимум6000. '
             'Верни только окончательный текст описания, без объяснений, заголовка ответа и JSON.',
             data, journal=cache, journal_key=key, raw_text=True,
@@ -2014,7 +2077,16 @@ class AutomaticSeoService:
 
     def generate_ready(self, card, sources, remarks, previous, cache, progress=None, verify_characteristics=None):
         started = time.monotonic()
+        cache['_readyWorkflowV2'] = True
+        budget_key = 'ready-request-budget:' + str(cache.get('_readyRunId', 'pilot')) + ':' + str(card['sku'])
+        cache.setdefault(budget_key, {'used': 0, 'limit': 16 + 6 * max(1, (len(sources['semantic']) + 239) // 240)})
+        cache['_readyRequestBudget'] = budget_key
         same_sources = previous and fingerprint(previous.get('sources', {}).get('competitor')) == fingerprint(sources['competitor'])
+        scoped = bool(same_sources and previous.get('quality', {}).get('state') == 'ready' and remarks
+                      and not any(row['section'] in {'semantic', 'competitor'} for row in remarks))
+        targeted = {row['section'] for row in remarks} if scoped else {'title', 'description', 'characteristics'}
+        core_targets = ({row['section'] for row in remarks} if same_sources and remarks
+                        and not any(row['section'] in {'semantic', 'competitor'} for row in remarks) else targeted)
         if same_sources and previous.get('competitorProfile'):
             profile = deepcopy(previous['competitorProfile'])
         else:
@@ -2024,13 +2096,17 @@ class AutomaticSeoService:
             profile = deepcopy(cache[key])
         if same_sources:
             result = {key: deepcopy(previous[key]) for key in ('title', 'characteristics', 'compatibility')}
-        else:
+        if not same_sources or remarks and core_targets & {'title', 'characteristics'}:
             _, labeled = self.ready_facts(card)
             data = {'ownFacts': labeled, 'currentTitle': card['title'], 'competitor': sources['competitor'],
                     'definitions': sources['definitions'], 'remarks': remarks, 'marketplace': card.get('marketplace', 'Ozon')}
-            schema = schema_object({key: PLAN_SCHEMA['properties'][key] for key in ('compatibility', 'title', 'characteristics')})
+            fields = ['compatibility', *[key for key in ('title', 'characteristics') if key in core_targets]]
+            data['requestedFields'] = fields
+            data['previousProposal'] = {key: previous[key] for key in ('title', 'characteristics')} if scoped else {}
+            schema = schema_object({key: PLAN_SCHEMA['properties'][key] for key in fields})
             key = 'response:ready-core:' + fingerprint(data)
-            result = self.chat('Составь точечные предложения для нашего товара: совместимость конкурента, заголовок, характеристики. '
+            plan = self.chat('Составь точечные предложения для нашего товара только для requestedFields: совместимость конкурента, заголовок, характеристики. '
+                'Замечания специалиста относятся к указанным разделам. Учти их, сохрани остальные предложения. '
                 'Не пиши описание и не перечисляй поисковые запросы. Сохрани смысл и релевантные слова текущего названия; '
                 'не сокращай ради краткости. WB: максимум60символов; Ozon:максимум200. '
                 'Сравни назначение, конструкцию, материал и комплект; неизвестное не называй совпадением. '
@@ -2041,6 +2117,10 @@ class AutomaticSeoService:
                 'каждое удаление объясни. Rich не меняй без доказанной фактической ошибки. Чужие свойства не переносить.',
                 data, journal=cache, journal_key=key, response_schema=schema,
                 before_request=(lambda: progress('План проверяемых правок товара')) if progress else None)
+            if same_sources:
+                result.update({key: plan[key] for key in fields if key in plan})
+            else:
+                result = plan
             remember_valid_response(cache, key)
         if (not isinstance(result.get('compatibility'), dict) or type(result['compatibility'].get('comparable')) is not bool
                 or not result['compatibility'].get('reason') or not isinstance(result.get('title'), dict)
@@ -2050,6 +2130,7 @@ class AutomaticSeoService:
             raise SeoError('seo_competitor_not_comparable')
         result.update(sources=deepcopy(sources), competitorProfile=profile, issues=[], keywords=[],
                       description={'value': plain(card.get('description', ''))})
+        result['_remarks'] = deepcopy(remarks)
         facts, _ = self.ready_facts(card)
         current = {row['id']: row for row in characteristic_rows(card)}
         definitions = {str(row['id']) for row in sources['definitions']}
@@ -2090,8 +2171,12 @@ class AutomaticSeoService:
             if len(card['title']) > title_limit:
                 raise SeoError('seo_text_exceeds_review_limit', details={'field': 'title'})
             result['title'] = {'value': card['title'], 'reason': 'Исходный заголовок сохранён: предложение не прошло проверку длины.'}
-        self.ready_keywords(card, result, cache, progress)
-        self.write_ready_text(card, result, cache, progress)
+        if scoped and 'description' not in targeted:
+            result['keywords'] = deepcopy(previous['keywords'])
+            result['description'] = deepcopy(previous['description'])
+        else:
+            self.ready_keywords(card, result, cache, progress)
+            self.write_ready_text(card, result, cache, progress)
         source_issues = []
         for attempt in range(3):
             automatic = self.ready_text_problems(card, result)
@@ -2103,10 +2188,28 @@ class AutomaticSeoService:
                 raise SeoError('seo_content_repair_incomplete', details={'problemCount': len(problems)})
             self.repair_ready_title(card, result, problems, cache, progress)
             self.write_ready_text(card, result, cache, progress, problems)
-        additions = self.resolve_query_groups(card, result, cache, progress)
+        reuse_groups = bool(previous and previous.get('quality', {}).get('state') == 'ready'
+            and fingerprint(previous.get('sources', {}).get('semantic')) == fingerprint(sources['semantic'])
+            and previous.get('_queryGroups'))
+        if reuse_groups:
+            candidate = deepcopy(result)
+            candidate['semanticDecisions'] = deepcopy(previous['semanticDecisions'])
+            try:
+                self.verify_keywords(candidate, sources)
+                if any(not row.get('placementReviewed') or not concrete_reason(row.get('reason'))
+                       or row.get('destination') == 'требует решения' for row in candidate['semanticDecisions']):
+                    reuse_groups = False
+            except SeoError:
+                reuse_groups = False
+        if reuse_groups:
+            result['semanticDecisions'] = candidate['semanticDecisions']
+            result['_queryGroups'] = deepcopy(previous['_queryGroups'])
+            additions = []
+        else:
+            additions = self.resolve_query_groups(card, result, cache, progress)
         source_queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
         for group in result['_queryGroups']:
-            if group['kind'] == 'add':
+            if group['kind'] == 'add' and not reuse_groups:
                 query = source_queries[group['ids'][0]]
                 result['keywords'].append({'sourcePhrase': query, 'outputPhrase': group['quote'], 'decision': 'использовать', 'reason': group['reason']})
         if additions:
@@ -2150,11 +2253,44 @@ class AutomaticSeoService:
         if self.ready_text_problems(card, result):
             raise SeoError('seo_content_repair_incomplete')
         result['quality'] = {'state': 'ready', 'revision': 3, 'checkedQueries': len(result['semanticDecisions']),
-                             'unresolvedAutomaticCount': 0, 'elapsedSeconds': round(time.monotonic() - started, 3)}
+                             'unresolvedAutomaticCount': 0, 'modelRequests': cache[budget_key]['used'],
+                             'elapsedSeconds': round(time.monotonic() - started, 3)}
+        self.verify_ready_result(card, result)
         return result
 
+    def verify_ready_result(self, card, result):
+        if not isinstance(result.get('sources'), dict) or not isinstance(result['sources'].get('semantic'), list):
+            raise SeoError('seo_content_repair_incomplete')
+        quality = result.get('quality', {})
+        queries = list(dict.fromkeys(row['query'] for row in result['sources']['semantic']))
+        decisions = result.get('semanticDecisions', [])
+        facts, _ = self.ready_facts(card)
+        if (quality.get('state') != 'ready' or quality.get('checkedQueries') != len(queries)
+                or quality.get('unresolvedAutomaticCount') != 0
+                or [row.get('query') for row in decisions] != queries):
+            raise SeoError('seo_content_repair_incomplete')
+        for row in decisions:
+            proof = row.get('groupProof', {})
+            if (not row.get('placementReviewed') or not concrete_reason(row.get('reason'))
+                    or row.get('destination') == 'требует решения'
+                    or not source_phrase(proof.get('quote'), facts.get(proof.get('source'), ''))):
+                raise SeoError('seo_content_repair_incomplete')
+        candidate = deepcopy(result)
+        self.verify_final_facts(candidate, card)
+        self.verify_keywords(candidate, candidate['sources'])
+        if any(row.get('blocking') for row in candidate['issues']) or self.ready_text_problems(card, candidate):
+            raise SeoError('seo_content_repair_incomplete')
+
     def generate(self, card, sources, remarks, previous, cache, progress=None, reuse_responses=False, verify_characteristics=None):
-        if cache.get('_readyWorkflowV2') and not reuse_responses:
+        if cache.get('_readyWorkflowV2') and reuse_responses:
+            if not previous or previous.get('quality', {}).get('state') != 'ready':
+                raise SeoError('seo_recheck_response_missing')
+            result = deepcopy(previous)
+            if fingerprint(result.get('sources')) != fingerprint(sources):
+                raise SeoError('seo_content_repair_incomplete')
+            self.verify_ready_result(card, result)
+            return result
+        if cache.get('_readyWorkflowV2'):
             return self.generate_ready(card, sources, remarks, previous, cache, progress, verify_characteristics)
         competitor = sources['competitor']
         legacy_profile_key = 'profile:' + fingerprint({k: v for k, v in competitor.items() if k != 'reason'})

@@ -15,7 +15,7 @@ export default function SeoGenerationProgress({ version }) {
   return (
     <div className="seo-generation-progress">
       <div className="seo-progress-heading">
-        <strong>{progress.complete ? "Файл готов к проверке" : progress.partial ? `Подготовлено ${progress.prepared} из ${total} карточек` : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
+        <strong>{progress.complete ? "Файл готов к проверке" : progress.partial ? `Подготовлено ${progress.prepared} из ${total} карточек` : progress.needsRepair ? "Подготовка требует доработки" : assembling ? "Собираем и проверяем Excel" : `Обработано ${done} из ${total} карточек`}</strong>
         <span>{percentage}%</span>
       </div>
       {version.continuation ? <p className="status-note">Обработка продолжена с сохранённых результатов: {version.continuation.preservedCount} готовых карточек.</p> : null}

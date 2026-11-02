@@ -34,9 +34,9 @@ class ReadyWorkflowTest(unittest.TestCase):
         def answer(messages):
             data = json.loads(messages[1]['content']); calls.append(data)
             if 'keywordIds' in data:
-                return response({'keywords': [{'id': 0, 'outputPhrase': 'кран для умывальника',
+                return response({'keywords': {'K0': {'outputPhrase': 'кран для умывальника',
                     'decision': 'использовать', 'reason': 'Назначение соответствует собственному описанию смесителя для раковины.',
-                    'factIds': ['F1']}]})
+                    'factIds': ['F1']}}})
             if data.get('writeReadyDescription'):
                 return response({'value': fixtures.generated()['description']['value']})
             if 'queries' in data:
@@ -48,7 +48,67 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertEqual(result['issues'], [])
         self.assertEqual(result['quality']['state'], 'ready')
         self.assertEqual(result['quality']['checkedQueries'], 1)
+        self.assertEqual(result['quality']['modelRequests'], 4)
         self.assertEqual(result['semanticDecisions'][0]['witness'], 'Латунный кран для умывальника.')
+
+    def ready_result(self):
+        value = deepcopy(self.result)
+        value['semanticDecisions'][0].update(outputPhrase='кран для умывальника', placementReviewed=True,
+            reason='Назначение крана для умывальника подтверждено собственным описанием смесителя.',
+            groupProof={'source': 'description', 'quote': 'Смеситель для раковины.'})
+        value['_queryGroups'] = [dict(self.group([0]), field='описание', quote='кран для умывальника')]
+        value['quality'] = {'state': 'ready', 'checkedQueries': 1, 'unresolvedAutomaticCount': 0}
+        return value
+
+    def test_ready_label_cannot_bypass_missing_query_proof_or_new_number(self):
+        for change in ['proof', 'coverage', 'number', 'unresolved']:
+            value = self.ready_result()
+            if change == 'proof':
+                value['semanticDecisions'][0]['groupProof']['quote'] = 'Нет такой цитаты'
+            elif change == 'coverage':
+                value['semanticDecisions'] = []
+            elif change == 'number':
+                value['description']['value'] += ' Объем 999 литров.'
+            else:
+                value['semanticDecisions'][0]['destination'] = 'требует решения'
+            with self.subTest(change=change), self.assertRaises(SeoError):
+                self.service.verify_ready_result(self.card, value)
+
+    def test_recheck_of_ready_result_needs_no_model_and_cannot_reuse_legacy(self):
+        value = self.ready_result()
+        with patch.object(self.service, 'chat', side_effect=AssertionError('unexpected paid call')):
+            replay = self.service.generate(self.card, self.sources, [], value,
+                {'_readyWorkflowV2': True, '_readOnlyReplay': True}, reuse_responses=True)
+            self.assertEqual(replay['description'], value['description'])
+            with self.assertRaisesRegex(SeoError, 'seo_recheck_response_missing'):
+                self.service.generate(self.card, self.sources, [], self.result,
+                    {'_readyWorkflowV2': True, '_readOnlyReplay': True}, reuse_responses=True)
+
+    def test_title_revision_preserves_description_and_all_existing_keyword_decisions(self):
+        value = self.ready_result()
+        calls = []
+        def answer(instruction, data, **kwargs):
+            calls.append(data)
+            if 'requestedFields' in data:
+                self.assertEqual(set(data['requestedFields']), {'compatibility', 'title'})
+                return {'compatibility': value['compatibility'],
+                    'title': {'value': value['title']['value'] + ' для умывальника', 'reason': 'Добавлено подтвержденное назначение.'}}
+            if 'finalTexts' in data and 'queries' not in data:
+                return {'ready': True, 'problems': [], 'sourceQuestions': []}
+            raise AssertionError('unexpected full regeneration')
+        with patch.object(self.service, 'chat', side_effect=answer):
+            result = self.service.generate_ready(self.card, self.sources,
+                [{'sku': '1001', 'section': 'title', 'text': 'Уточнить назначение в заголовке'}], value, {})
+        self.assertEqual(result['description'], value['description'])
+        self.assertEqual(result['keywords'], value['keywords'])
+        self.assertEqual(result['characteristics'], value['characteristics'])
+        self.assertEqual(len(calls), 2)
+
+    def test_exhausted_budget_stops_before_external_request(self):
+        cache = {'_readyWorkflowV2': True, '_readyRequestBudget': 'budget', 'budget': {'used': 2, 'limit': 2}}
+        with patch.object(self.host, 'audit_llm_chat_completion', side_effect=AssertionError('unexpected paid call')):
+            with self.assertRaisesRegex(SeoError, 'seo_request_budget_reached'):
+                self.service.chat('test', {}, journal=cache, journal_key='new')
 
     def test_thousand_variants_have_complete_coverage_in_five_requests(self):
         phrases = [' '.join(words) for words in islice(permutations(

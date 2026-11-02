@@ -5298,7 +5298,8 @@ def automatic_seo_handoff_report(portal, batch, user):
   service.context(portal,batch,user,edit=True)
   directory = service.directory(portal,batch)
   with service.lock(directory):
-    version = service.load(directory)['versions'][-1]
+    state = service.load(directory)
+    version = state['versions'][-1]
   from automatic_seo import fingerprint
   paths = sorted((directory/'checkpoints').glob('handoff-*/manifest.json'))
   latest_checkpoint = json.loads(paths[-1].read_text()) if paths else None
@@ -5312,13 +5313,21 @@ def automatic_seo_handoff_report(portal, batch, user):
   preserved = manifest['preservedResults']
   unchanged = [sku for sku,digest in preserved.items() if sku in version['results'] and fingerprint(version['results'][sku])==digest]
   checkpoint_report = {}
+  repair_baseline = version.get('_repairBaseline')
+  if repair_baseline:
+    baseline_version = next((v for v in state['versions'] if v['number'] == repair_baseline['number']), None)
+    hashes = repair_baseline['resultHashes']
+    unchanged_baseline = sum(baseline_version is not None and sku in baseline_version['results']
+        and fingerprint(baseline_version['results'][sku]) == digest for sku, digest in hashes.items())
+    checkpoint_report['repair'] = {'fromVersion': repair_baseline['number'], 'baselineResults': len(hashes),
+        'unchangedBaselineResults': unchanged_baseline, 'baselineVersionUnchanged': unchanged_baseline == len(hashes)}
   if latest_checkpoint and latest_checkpoint.get('version') == version['number']:
     checkpoint_hashes = latest_checkpoint['preservedResults']
     unchanged_checkpoint = sum(sku in version['results'] and fingerprint(version['results'][sku]) == digest
                                for sku, digest in checkpoint_hashes.items())
-    checkpoint_report = {'latestHandoff': {'preservedCount':len(checkpoint_hashes),
+    checkpoint_report['latestHandoff'] = {'preservedCount':len(checkpoint_hashes),
         'unchangedCount':unchanged_checkpoint,'allPreserved':unchanged_checkpoint==len(checkpoint_hashes),
-        'doneAtCheckpoint':latest_checkpoint['done'],'savedAt':latest_checkpoint['savedAt']}}
+        'doneAtCheckpoint':latest_checkpoint['done'],'savedAt':latest_checkpoint['savedAt']}
   return {"version":version['number'],"status":version['status'],"done":version['done'],"total":version['total'],
           "completedCount":len(version['results']),"workers":version.get('workers',1),"maxConcurrentRequests":LLM_CONCURRENT_REQUESTS,
           "preservedSkus":list(preserved),"unchangedCount":len(unchanged),"allPreserved":len(unchanged)==len(preserved),

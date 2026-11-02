@@ -483,7 +483,10 @@ def bitrix_seo_notification_payload(portal, batch, version, portal_name='', mark
     total, done = int(version.get('total') or 0), int(version.get('done') or 0)
     errors = len(version.get('errors') or [])
     status = version.get('status')
-    heading = 'Автоматическая оптимизация завершена. Файл готов к проверке.' if status == 'review' and version.get('sha256') else (
+    blocked = any(row.get('blocking') for row in version.get('issues', []))
+    blocked = blocked or bool(version.get('workflowRevision') and version.get('quality', {}).get('state') != 'ready')
+    heading = 'Автоматическая оптимизация завершена. Файл готов к проверке.' if status == 'review' and version.get('sha256') and not blocked and not errors else (
+        'Подготовка требует автоматической доработки. Готовность файла пока не подтверждена.' if blocked else
         'Автоматическая оптимизация завершилась с ошибками. Проверьте проблемные карточки.' if status == 'partial'
         else 'Автоматическая оптимизация не завершена. Откройте задачу для проверки.')
     name = re.sub(r'[\[\]\r\n]', ' ', str(portal_name))[:120].strip()

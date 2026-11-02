@@ -17,6 +17,11 @@ const messages = {
   seo_invalid_characteristic_values: "Модель вернула значение характеристики в неверном формате. Подробности сохранены для исправления.",
   seo_generation_failed: "Подготовка файла прервана. Повторите запуск; готовые результаты будут использованы повторно.",
   seo_run_deadline: "Превышено время подготовки карточки. Готовые результаты и проверенные этапы сохранены для повторного запуска.",
+  seo_request_budget_reached: "Достигнут предел попыток обработки. Проверенные результаты сохранены; требуется исправить причину повторов.",
+  seo_semantic_review_incomplete: "Не удалось проверить все поисковые запросы. Непроверенные решения в готовый файл не включены.",
+  seo_content_repair_incomplete: "Итоговый текст не прошёл проверку фактов и ключевых фраз. Подготовка файла не завершена.",
+  seo_invalid_content_audit: "Проверка текста вернула неподтверждённые замечания. Эти замечания не переданы специалисту как ошибки товара.",
+  seo_invalid_repair_scope: "Для исправления этой версии нужно сохранить прежние источники и конкурентов.",
   seo_characteristic_evidence_missing: "Для предлагаемой характеристики не найдено подтверждение в собственных данных товара.",
   seo_competitor_witness_missing: "Выделенные алгоритмом фразы не найдены в описании конкурента. Формулировки показаны ниже; требуется проверить разбор текста.",
   seo_keyword_decisions_incomplete: "Модель вернула неполные или противоречивые решения по ключам. Подготовка остановлена; готовые результаты сохранены.",
@@ -176,7 +181,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         {mayGenerate ? <button type="button" className="btn primary" disabled={busy || mapping === null} onClick={() => act("generate")}>{!latest ? "Подготовить файл" : ["partial", "failed", "interrupted"].includes(latest.status) ? "Повторить проблемные SKU" : latest.status === "returned" ? "Доработать по возврату" : "Пересобрать файл"}</button> : null}
         {mayGenerate && latest ? <button type="button" className="btn" disabled={busy || !remark.text.trim()} onClick={() => act("revise")}>Пересобрать по замечанию</button> : null}
         {mayGenerate && latest ? <button type="button" className="btn" disabled={busy} onClick={() => act("generate", true)}>Обновить источники и пересобрать всё</button> : null}
-        {latest?.status === "review" && canPrepare ? <button type="button" className="btn primary" disabled={busy || latest.issues?.some((i) => i.blocking) || (latest.issues?.length > 0 && !acknowledged)} onClick={() => act("accept")}>Принять файл и передать аккаунту</button> : null}
+        {latest?.status === "review" && canPrepare ? <button type="button" className="btn primary" disabled={busy || latest.errors?.length > 0 || (latest.workflowRevision && latest.quality?.state !== "ready") || latest.issues?.some((i) => i.blocking) || (latest.issues?.length > 0 && !acknowledged)} onClick={() => act("accept")}>Принять файл и передать аккаунту</button> : null}
         {canReview && submitted ? <><button type="button" className="btn primary" disabled={busy} onClick={() => act("approve")}>Согласовать файл</button><button type="button" className="btn" disabled={busy || !remark.text.trim()} onClick={() => act("return")}>Вернуть с замечанием</button></> : null}
       </div>
       {report?.versions?.length ? <details open><summary>Файлы и история версий</summary><ul>{[...report.versions].reverse().map((version) => <li key={version.number}>

@@ -18,7 +18,9 @@ export function seoProgress(version, now = Date.now()) {
   const running = version.status === "running";
   const partial = version.status === "partial" && Number.isFinite(version.completedCount);
   const prepared = Math.min(total, count(version.completedCount));
-  const complete = ["review", "submitted", "approved", "returned"].includes(version.status) && Boolean(version.sha256);
+  const needsRepair = Boolean(version.errors?.length || version.issues?.some((issue) => issue.blocking)
+    || version.workflowRevision && version.quality?.state !== "ready");
+  const complete = ["review", "submitted", "approved", "returned"].includes(version.status) && Boolean(version.sha256) && !needsRepair;
   const percentage = total ? Math.min(running ? 99 : 100, Math.floor((partial ? prepared : done) / total * 100)) : 0;
   const started = Date.parse(version.createdAt);
   const finished = Date.parse(version.finishedAt);
@@ -37,11 +39,11 @@ export function seoProgress(version, now = Date.now()) {
     const estimate = average * (total - done) / lanes;
     remaining = [Math.max(60, estimate * 0.65), Math.max(120, estimate * 1.5)];
   }
-  const match = String(version.stage || "").match(/^(Проверка запросов|Проверка неприменённых запросов) (\d+)[–—-](\d+) из (\d+)/);
+  const match = String(version.stage || "").match(/^(Проверка запросов|Проверка неприменённых запросов|Проверка смысловых групп запросов) (\d+)[–—-](\d+) из (\d+)/);
   const query = running && match && count(match[4]) > 0 ? {
     label: match[1], done: Math.min(count(match[4]), Math.max(0, count(match[2]) - 1)),
     total: count(match[4]), from: count(match[2]), to: Math.min(count(match[3]), count(match[4])),
   } : null;
   return { done, total, percentage: complete ? 100 : percentage, elapsedSeconds, remaining, query,
-    running, complete, partial, prepared, assembling: running && total > 0 && done === total };
+    running, complete, partial, prepared, needsRepair: !running && needsRepair, assembling: running && total > 0 && done === total };
 }
