@@ -210,6 +210,69 @@ class ReadyWorkflowTest(unittest.TestCase):
         self.assertEqual(call.call_count, 2)
         self.assertNotIn('validated', cache['empty'])
 
+    def test_omitted_empty_actions_do_not_trigger_another_paid_edit(self):
+        schema={'type':'object','required':['edits','appendParagraphs'],
+                'properties':{'edits':{'type':'object'},'appendParagraphs':{'type':'array'}}}
+        cache={'_readyWorkflowV2':True}
+        with patch.object(self.host,'audit_llm_chat_completion',return_value=response({'edits':{'P0':'Готовый текст.'}})) as call:
+            value=self.service.chat('edit',{},journal=cache,journal_key='edits',response_schema=schema)
+        self.assertEqual(value,{'edits':{'P0':'Готовый текст.'},'appendParagraphs':[]})
+        self.assertEqual(call.call_count,1)
+
+    def test_audit_keeps_new_unsupported_claim_and_grammar_but_not_false_objection_to_source_copy(self):
+        result=deepcopy(self.result)
+        source=self.service.ready_facts(self.card)[0]['description']
+        result['description']['value']=source+'\nТовар сделан из титана.'
+        catalog,_=self.service.ready_text_catalog(self.card,result)
+        original=next(k for k,v in catalog.items() if v['field']=='описание' and v['quote'] in source)
+        added=next(k for k,v in catalog.items() if v['quote']=='Товар сделан из титана.')
+        problems=[{'kind':'unsupported','textId':original,'factIds':[],
+                   'reason':'В исходном описании не приведено объяснение удобства использования товара.'},
+                  {'kind':'grammar','textId':original,'factIds':[],
+                   'reason':'Проверить грамматическое согласование существительного в этом предложении.'},
+                  {'kind':'unsupported','textId':added,'factIds':[],
+                   'reason':'Титановый материал не подтверждается собственными характеристиками товара.'}]
+        with patch.object(self.service,'chat',return_value={'ready':False,'problems':problems,'sourceQuestions':[]}):
+            checked,_=self.service.audit_ready_text(self.card,result,{})
+        self.assertEqual([p['kind'] for p in checked],['grammar','unsupported'])
+        self.assertEqual(checked[-1]['quote'],'Товар сделан из титана.')
+
+    def test_missing_phrase_followup_preserves_first_paragraph_and_requests_only_remaining_phrase(self):
+        value=deepcopy(self.result)
+        value['description']={'value':'Смеситель для раковины.'}
+        value['keywords'] += [dict(value['keywords'][0],outputPhrase='латунный корпус')]
+        calls=[]
+        def answer(instruction,data,**kwargs):
+            calls.append(data)
+            if data.get('editReadyDescription'):return {'edits':[],'appendParagraphs':[]}
+            if len(calls)==2:return {'paragraph':'Латунный кран для умывальника.'}
+            self.assertEqual(data['missingPhrases'],['латунный корпус'])
+            self.assertIn('Латунный кран для умывальника.',data['currentDescription'])
+            return {'paragraph':'Латунный корпус сохраняет исходный материал.'}
+        with patch.object(self.service,'chat',side_effect=answer):
+            self.service.write_ready_text(self.card,value,{})
+        self.assertEqual(len(calls),3)
+        self.assertIn('Латунный кран для умывальника.',value['description']['value'])
+        self.assertIn('Латунный корпус',value['description']['value'])
+
+    def test_missing_phrase_can_adapt_to_its_actual_own_witness_but_not_an_invented_one(self):
+        value=deepcopy(self.result)
+        value['description']={'value':'Материал: латунь.'}
+        value['keywords'][0].update(outputPhrase='латунный корпус',reason='Латунный материал подтвержден характеристикой смесителя.',
+                                   evidence={'source':'attribute:100','quote':'латунь'})
+        def answer(instruction,data,**kwargs):
+            if data.get('editReadyDescription'):return {'edits':[],'appendParagraphs':[]}
+            return {'paragraph':'Смеситель подходит для раковины.'}
+        with patch.object(self.service,'chat',side_effect=answer):
+            self.service.write_ready_text(self.card,value,{})
+        self.assertEqual(value['keywords'][0]['outputPhrase'],'латунь')
+        self.assertEqual(value['keywords'][0]['decision'],'адаптировать')
+        self.assertIn('Материал: латунь.',value['description']['value'])
+        value['keywords'][0].update(outputPhrase='латунный корпус', evidence={'source':'attribute:100','quote':'титан'})
+        with patch.object(self.service,'chat',side_effect=answer):
+            with self.assertRaisesRegex(SeoError,'seo_keyword_lost_after_editing'):
+                self.service.write_ready_text(self.card,value,{})
+
     def test_paragraph_edits_preserve_untouched_text_and_repair_missing_phrase_once(self):
         value = deepcopy(self.result)
         value['description'] = {'value': 'Смеситель для раковины.\nМатериал: латунь.'}

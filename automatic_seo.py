@@ -1218,6 +1218,7 @@ class AutomaticSeoService:
                     and isinstance(saved.get('content'), str) and saved.get('contentLength') == len(saved['content'])):
                 try:
                     parsed = self.parse_response_json(saved['content'])
+                    parsed = self.normalize_stage_response(parsed, response_schema)
                     if (isinstance(parsed, dict) and (not response_schema or not journal.get('_readyWorkflowV2')
                             or set(response_schema.get('required', [])) <= set(parsed))):
                         return parsed
@@ -1398,11 +1399,28 @@ class AutomaticSeoService:
             raise SeoError('seo_llm_invalid_json', details={'responseCharacters': len(content)}) from None
         if not isinstance(parsed, dict):
             raise SeoError('seo_invalid_model_response')
+        parsed = self.normalize_stage_response(parsed, response_schema)
         if (response_schema and journal is not None and journal.get('_readyWorkflowV2')
                 and not set(response_schema.get('required', [])) <= set(parsed)):
             raise SeoError('seo_invalid_model_response', details={'missingRequiredFields':
                 sorted(set(response_schema['required']) - set(parsed))})
         return parsed
+
+    @staticmethod
+    def normalize_stage_response(value, schema):
+        """Supply empty optional actions, never invent decisions, text or proof."""
+        if not isinstance(value, dict) or not value or not schema:
+            return value
+        properties = schema.get('properties', {})
+        value = dict(value)
+        if set(properties) == {'edits', 'appendParagraphs'}:
+            if 'edits' in value:
+                value.setdefault('appendParagraphs', [])
+            if 'appendParagraphs' in value:
+                value.setdefault('edits', [])
+        if set(properties) == {'groups', 'corrections'} and 'corrections' in value:
+            value.setdefault('groups', [])
+        return value
 
     def assess_semantics(self, card, sources, cache, progress=None, reuse_responses=False):
         queries = list(dict.fromkeys(row['query'] for row in sources['semantic']))
@@ -2661,7 +2679,7 @@ class AutomaticSeoService:
             'Спорные свойства из sourceQuestions обойди нейтрально. Исправь problems и учти remarks в нужном разделе. '
             'Не возвращай служебные вставки, Markdown или комментарии. Перед ответом проверь язык. '
             'Ответ JSON: только необходимые edits и appendParagraphs, можно пустые списки.',
-            data, journal=cache, journal_key=key, response_schema=schema,
+            data, journal=cache, journal_key=key, response_schema=schema, read_candidate=True,
             before_request=(lambda: progress('Точечная редактура описания')) if progress else None)
         edits, added = response.get('edits', []), response.get('appendParagraphs', [])
         if isinstance(edits, dict):
@@ -2676,7 +2694,9 @@ class AutomaticSeoService:
         self.bind_ready_keyword_forms(result, text)
         phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
         missing = [phrase for phrase in phrases if not source_phrase(phrase, text)]
-        if missing:
+        for missing_attempt in range(2):
+            if not missing:
+                break
             repair_data = {'missingPhrases': missing, 'ownFacts': labeled, 'confirmedComposition': confirmed_composition(card), 'currentDescription': text}
             repair_key = key + ':missing:' + fingerprint(repair_data)
             extra = self.chat('Напиши один короткий грамотный абзац для дополнения описания товара. '
@@ -2686,17 +2706,32 @@ class AutomaticSeoService:
                 'Материал лезвий описывает только лезвия, а не ручки, подставку или все предметы набора. '
                 'Общее число предметов не называй числом инструментов: подставка учитывается отдельно. '
                 'Не приписывай подставке свойства ножей. Верни JSON paragraph.', repair_data,
-                journal=cache, journal_key=repair_key, response_schema=schema_object({'paragraph': TEXT}),
+                journal=cache, journal_key=repair_key, response_schema=schema_object({'paragraph': TEXT}), read_candidate=True,
                 before_request=(lambda: progress('Включение недостающих подтверждённых формулировок')) if progress else None)
             if not isinstance(extra.get('paragraph'), str) or not extra['paragraph'].strip():
                 raise SeoError('seo_invalid_model_response')
             text += '\n\n' + extra['paragraph'].strip()
             self.bind_ready_keyword_forms(result, text)
             phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
-            if any(not source_phrase(phrase, text) for phrase in phrases):
-                raise SeoError('seo_keyword_lost_after_editing', details={'missingPhrases':
-                    [phrase for phrase in phrases if not source_phrase(phrase, text)]})
-            remember_valid_response(cache, repair_key)
+            missing = [phrase for phrase in phrases if not source_phrase(phrase, text)]
+            if missing and missing_attempt:
+                own_facts, _ = self.ready_facts(card)
+                for row in result['keywords']:
+                    if row['decision'] == 'исключить' or row['outputPhrase'] not in missing:
+                        continue
+                    proof = row.get('evidence', {})
+                    if not source_phrase(proof.get('quote'), own_facts.get(proof.get('source'), '')):
+                        continue
+                    actual = (source_phrase(proof['quote'], text) or grammatical_phrase(proof['quote'], text))
+                    if actual:
+                        row.update(outputPhrase=actual, decision='адаптировать', reason=row['reason']
+                            + ' Использована уже присутствующая собственная формулировка «' + actual + '».')
+                phrases = list(dict.fromkeys(row['outputPhrase'] for row in result['keywords'] if row['decision'] != 'исключить'))
+                missing = [phrase for phrase in phrases if not source_phrase(phrase, text)]
+                if missing:
+                    raise SeoError('seo_keyword_lost_after_editing', details={'missingPhrases': missing})
+            if not missing:
+                remember_valid_response(cache, repair_key)
         text = output_text(text)
         result['description'] = {'value': text, 'reason': 'Исходные абзацы сохранены; выполнены точечные дополнения по собственным фактам и проверенным ключам.',
             'editorChanges': ['Изменён абзац ' + row['id'][1:] for row in edits] + (['Добавлены подтверждённые формулировки.'] if added else [])}
@@ -2758,6 +2793,15 @@ class AutomaticSeoService:
                     ids = row['factIds']
                     if not isinstance(ids, list) or any(not isinstance(i, str) or i not in facts for i in ids):
                         raise SeoError('seo_invalid_content_audit', details={'unknownFactIds': True})
+                    if row['kind'] == 'unsupported' and row['textId'] in texts:
+                        actual = texts[row['textId']]['quote']
+                        # The source is the authority for existing facts. A model's
+                        # stylistic objection cannot turn a literal own-source copy
+                        # into a newly invented property. Numeric conflicts and
+                        # composition remain independently checked locally.
+                        if any(source_phrase(actual, self.neutral_ready_facts(fact['quote'], conflicts))
+                               for fact in facts.values()):
+                            continue
                     if (row['kind'] in {'missing', 'unsupported'} and row['textId'] in texts
                             and re.search(r'отсутств|не указан|нет информац|неизвест', row['reason'], re.I)):
                         actual = texts[row['textId']]['quote']
