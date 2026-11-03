@@ -802,6 +802,10 @@ class AutomaticSeoService:
     def action(self, portal, batch, user, payload):
         context = self.context(portal, batch, user, edit=True)
         action = payload.get('action')
+        if action == 'import_review':
+            return self.import_prepared_review(portal, batch, user, payload, context)
+        if action == 'prune_history':
+            return self.prune_history(portal, batch, user, payload, context)
         directory = self.directory(portal, batch)
         with self.lock(directory):
             state = self.load(directory)
@@ -846,7 +850,7 @@ class AutomaticSeoService:
                 task_hash = fingerprint([(t['id'], t['cardKey'], t['sku']) for t in context['tasks']])
                 if previous and previous.get('taskHash') != task_hash:
                     raise SeoError('seo_task_scope_changed', 409)
-                version = {'number': len(state['versions']) + 1, 'status': 'running', 'createdAt': now(),
+                version = {'number': previous['number'] + 1 if previous else 1, 'status': 'running', 'createdAt': now(),
                            'stage': 'Получение источников', 'done': 0, 'total': len(context['tasks']),
                            'errors': [], 'issues': [], 'results': {}, 'competitors': mappings,
                            'taskHash': task_hash, 'remarks': remarks or (previous.get('remarks', []) if previous and (action == 'recheck' or previous['status'] in {'returned', 'partial', 'failed', 'interrupted'}) else []),
@@ -966,6 +970,294 @@ class AutomaticSeoService:
             else:
                 raise SeoError('seo_invalid_action')
             return self.public(state, self.context(portal, batch, user))
+
+    def import_prepared_review(self, portal, batch, user, payload, context):
+        """Append a staged, source-bound review artifact; never generate or approve."""
+        if not (context['capabilities']['prepare'] and getattr(self.host, 'user_is_admin', lambda u: False)(user)):
+            raise PermissionError('forbidden')
+        if isinstance(payload.get('version'), bool) or not isinstance(payload.get('version'), int) or payload['version'] < 1:
+            raise SeoError('seo_version_conflict', 409)
+        identifier = payload.get('importId', '')
+        if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{64}', identifier):
+            raise SeoError('seo_review_import_invalid')
+        root = self.root.parent / 'seo-review-imports'
+        parent = root / str(int(portal))
+        staged = parent / identifier
+        manifest_path, artifact_path = staged / 'manifest.json', staged / 'report.xlsx'
+        if any(p.is_symlink() for p in (root, parent, staged, manifest_path, artifact_path)):
+            raise SeoError('seo_review_import_invalid')
+        if not staged.resolve().is_relative_to(parent.resolve()):
+            raise SeoError('seo_review_import_invalid')
+        try:
+            if manifest_path.stat().st_size > 64 * 1024 * 1024 or artifact_path.stat().st_size > 32 * 1024 * 1024:
+                raise SeoError('seo_review_import_too_large')
+            raw = manifest_path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != identifier:
+                raise SeoError('seo_review_import_invalid')
+            package, artifact = json.loads(raw), artifact_path.read_bytes()
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, SeoError):
+                raise
+            raise SeoError('seo_review_import_invalid') from None
+        if (package.get('schema') != 'prepared-review-v1' or package.get('portal') != int(portal)
+                or package.get('batch') != batch or package.get('previousVersion') != payload.get('version')):
+            raise SeoError('seo_review_import_scope_mismatch', 409)
+        if hashlib.sha256(artifact).hexdigest() != package.get('sha256') or not artifact.startswith(b'PK\x03\x04'):
+            raise SeoError('seo_file_verification_failed', 409)
+        directory = self.directory(portal, batch)
+        try:
+            with self.lock(directory, 'run.lock', blocking=False), self.lock(directory):
+                state = self.load(directory)
+                previous = state['versions'][-1] if state['versions'] else None
+                task_hash = fingerprint([(t['id'], t['cardKey'], t['sku']) for t in context['tasks']])
+                if previous and previous['taskHash'] != task_hash:
+                    raise SeoError('seo_task_scope_changed', 409)
+                if previous and previous.get('_preparedImport', {}).get('id') == identifier:
+                    self.checked_file(directory, previous)
+                    return self.public(state, context)
+                if (not previous or previous['number'] != payload['version'] or previous['status'] != 'review'
+                        or previous.get('sha256') != package.get('previousSha256')):
+                    raise SeoError('seo_version_conflict', 409)
+                self.checked_file(directory, previous)
+                if task_hash != previous['taskHash'] or package.get('taskHash') != task_hash:
+                    raise SeoError('seo_task_scope_changed', 409)
+                packet, clean = package.get('sources', {}), package.get('results', {})
+                skus = [t['sku'] for t in context['tasks']]
+                if ([str(c.get('sku')) for c in packet.get('cards', [])] != skus or set(clean) != set(skus)
+                        or packet.get('sourceCapturedAt') != previous.get('sourceCapturedAt')
+                        or packet.get('period') != previous.get('period')):
+                    raise SeoError('seo_review_import_scope_mismatch', 409)
+                old_cards = {str(c['sku']): c for c in previous['cards']}
+                results, issues = {}, []
+                for card in packet['cards']:
+                    sku = str(card['sku'])
+                    if card != {key: old_cards[sku].get(key) for key in card}:
+                        raise SeoError('seo_review_import_source_mismatch', 409, {'sku': sku, 'field': 'ownCard'})
+                    source = packet['sourcesBySku'][sku]
+                    old_source = previous['results'][sku]['sources']
+                    if (source['competitor'] != {key: old_source['competitor'].get(key) for key in source['competitor']}
+                            or source['definitions'] != old_source['definitions']):
+                        raise SeoError('seo_review_import_source_mismatch', 409, {'sku': sku, 'field': 'competitorOrDefinitions'})
+                    queries = [r for r in source['semantic'] if r.get('sourceKind', 'MPStats') == 'MPStats']
+                    if len(queries) != len(old_source['semantic']):
+                        raise SeoError('seo_review_import_source_mismatch', 409)
+                    for current, old in zip(queries, old_source['semantic']):
+                        if any(current.get(k) != old.get(k) for k in ('query', 'count', 'countSourceSku', 'position', 'dynamics')):
+                            raise SeoError('seo_review_import_source_mismatch', 409)
+                        if len(current.get('observations', [])) != len(old.get('observations', [])) or any(
+                                a != {k: b.get(k) for k in a} for a, b in zip(current.get('observations', []), old.get('observations', []))):
+                            raise SeoError('seo_review_import_source_mismatch', 409)
+                    for row in source['semantic']:
+                        if row.get('sourceKind', 'MPStats') != 'MPStats' and not (
+                                row.get('sourceKind') in {'Текст конкурента: заголовок', 'Текст конкурента: описание'}
+                                and source_phrase(row.get('sourceQuote'), old_source['competitor']['title'] + '\n' + old_source['competitor']['description'])):
+                            raise SeoError('seo_review_import_source_mismatch', 409)
+                    result = clean[sku]
+                    self.check_prepared_result(card, source, result)
+                    fields = result['attributes']['fields']
+                    names = {str(r['id']): r['name'] for r in source['definitions']}
+                    proposals = [{'id': aid, 'name': names.get(aid, aid), 'values': row['values'],
+                                  'reason': row['reason'], 'evidence': row.get('evidence', []), 'removedValues': []}
+                                 for aid, row in fields.items() if row['action'] in {'add', 'extend'}]
+                    for question in result['attributes']['sourceQuestions']:
+                        issues.append({'sku': sku, 'field': 'Собственные источники', 'detail': question['question'],
+                                       'question': 'Сверить исходные значения перед переносом карточки.', 'blocking': False})
+                    conditional_fields = sum(row['action'] == 'confirm' or bool(row.get('conditionalValues')) for row in fields.values())
+                    if conditional_fields or result['quality']['conditionalRows']:
+                        issues.append({'sku': sku, 'field': 'Проверка применимости',
+                                       'detail': f"Запросов на подтверждение: {result['quality']['conditionalRows']}; полей-кандидатов: {conditional_fields}. Они показаны отдельно в Excel.",
+                                       'question': 'Проверить применимость и смысловые адаптации; условные значения не внесены в подтверждённые правки.', 'blocking': False})
+                    results[sku] = {'title': {'value': result['title'], 'reason': 'Независимая сборка по собственным фактам и ключам.'},
+                                    'description': {'value': result['description'], 'reason': 'Сохранены свои сведения и добавлено поисковое наполнение.', 'editorChanges': []},
+                                    'characteristics': proposals, 'keywords': [], 'semanticDecisions': result['semanticDecisions'],
+                                    'issues': [row for row in issues if row['sku'] == sku], 'sources': source,
+                                    'quality': result['quality'], '_preparedOutputHash': result['outputHash']}
+                report = package.get('verification', {})
+                if (report.get('sha256') != package['sha256'] or report.get('cards') != len(skus)
+                        or report.get('semanticRows') != sum(len(packet['sourcesBySku'][s]['semantic']) for s in skus)
+                        or report.get('unplacedRelevantRows') != 0 or report.get('requiresSpecialistReview') is not True):
+                    raise SeoError('seo_review_import_checks_missing')
+                from io import BytesIO
+                from openpyxl import load_workbook
+                try:
+                    workbook = load_workbook(BytesIO(artifact), read_only=True)
+                    if (workbook.sheetnames != ['Итог', 'Семантика', 'Заголовки', 'Характеристики', 'Описания', 'Конкуренты', 'Противоречия', 'Изменения версии']
+                            or [str(row[0]) for row in workbook['Итог'].iter_rows(min_row=5, max_col=1, values_only=True)] != skus
+                            or workbook['Семантика'].max_row != report['semanticRows'] + 4):
+                        raise SeoError('seo_file_verification_failed', 409)
+                    workbook.close()
+                except SeoError:
+                    raise
+                except Exception:
+                    raise SeoError('seo_file_verification_failed', 409) from None
+                number = previous['number'] + 1
+                if payload.get('validateOnly') is True:
+                    return dict(self.public(state, context), preparedImport={'version': number, 'cards': len(skus), 'sha256': package['sha256'], 'valid': True})
+                history_hash = fingerprint(json.loads((directory / 'state.json').read_text())['versions'])
+                checkpoint = directory / 'checkpoints' / ('review-import-' + identifier + '-' + uuid.uuid4().hex[:8])
+                checkpoint.mkdir(parents=True, mode=0o700, exist_ok=False)
+                import shutil
+                for name in ('state.json', 'metadata.json'):
+                    if (directory / name).exists():
+                        shutil.copyfile(directory / name, checkpoint / name)
+                        (checkpoint / name).chmod(0o600)
+                target = directory / f'seo-v{number}.xlsx'
+                if target.exists():
+                    raise SeoError('seo_version_conflict', 409)
+                temp = target.with_suffix('.importing')
+                with temp.open('xb') as handle:
+                    os.chmod(temp, 0o600)
+                    handle.write(artifact)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temp.replace(target)
+                version = {'number': number, 'status': 'review', 'createdAt': now(), 'finishedAt': now(),
+                           'stage': 'Файл готов к проверке', 'done': len(skus), 'completedCount': len(skus), 'total': len(skus),
+                           'errors': [], 'issues': issues, 'results': results, 'cards': previous['cards'],
+                           'competitors': previous['competitors'], 'taskHash': task_hash, 'remarks': [],
+                           'cache': {k: deepcopy(v) for k, v in previous.get('cache', {}).items()
+                                     if k.startswith(('wb-keywords:', 'wb-competitor:', 'wb-definitions:', 'mp:', 'competitor:', 'dictionary:'))},
+                           'period': previous['period'], 'sourceCapturedAt': previous['sourceCapturedAt'],
+                           'method': 'prepared-review-v1', 'workflowRevision': 'prepared-review-v1',
+                           'quality': {'state': 'ready', 'revision': 'prepared-review-v1', 'checkedQueries': report['semanticRows'],
+                                       'unresolvedAutomaticCount': 0, 'requiresSpecialistReview': True,
+                                       'relevanceMethod': 'source-rules', 'auditKind': report['auditKind'], 'historyPreserved': True},
+                           'file': target.name, 'sha256': package['sha256'],
+                           '_preparedImport': {'id': identifier, 'by': user['login'], 'previousVersion': previous['number'],
+                                               'previousVersionsHash': history_hash, 'checkpoint': str(checkpoint.relative_to(directory))}}
+                state['versions'].append(version)
+                try:
+                    self.save(directory, state)
+                    if fingerprint(json.loads((directory / 'state.json').read_text())['versions'][:-1]) != history_hash:
+                        raise SeoError('seo_review_import_preservation_failed', 409)
+                except Exception:
+                    for name in ('state.json', 'metadata.json'):
+                        if (checkpoint / name).exists():
+                            shutil.copyfile(checkpoint / name, directory / name)
+                            (directory / name).chmod(0o600)
+                    target.unlink(missing_ok=True)
+                    raise
+                return self.public(state, context)
+        except BlockingIOError:
+            raise SeoError('seo_already_running', 409) from None
+
+    def prune_history(self, portal, batch, user, payload, context):
+        """Keep the verified current review and its sources; collect obsolete objects."""
+        if not (context['capabilities']['prepare'] and getattr(self.host, 'user_is_admin', lambda u: False)(user)):
+            raise PermissionError('forbidden')
+        directory = self.directory(portal, batch)
+        if any(p.is_symlink() for p in (self.root, directory.parent, directory)):
+            raise SeoError('seo_snapshot_invalid')
+        try:
+            with self.lock(directory, 'run.lock', blocking=False), self.lock(directory):
+                state = self.load(directory)
+                current = state['versions'][-1] if state['versions'] else None
+                expected = payload.get('version')
+                if not current or isinstance(expected, bool) or not isinstance(expected, int) or expected != current['number']:
+                    raise SeoError('seo_version_conflict', 409)
+                if current.get('taskHash') != fingerprint([(t['id'], t['cardKey'], t['sku']) for t in context['tasks']]):
+                    raise SeoError('seo_task_scope_changed', 409)
+                if current['status'] != 'review' or current.get('done') != current.get('total'):
+                    raise SeoError('seo_not_ready', 409)
+                self.checked_file(directory, current)
+                skus = {t['sku'] for t in context['tasks']}
+                if ({str(c['sku']) for c in current.get('cards', [])} != skus
+                        or set(current.get('results', {})) != skus):
+                    raise SeoError('seo_snapshot_invalid')
+                objects, checkpoints = directory / 'objects', directory / 'checkpoints'
+                candidates = [directory / 'state-before-object-storage.json']
+                removed = sorted(set(current.get('_historyPruned', {}).get('removedVersions', [])) |
+                                 {v['number'] for v in state['versions'][:-1]})
+                candidates.extend(directory / f'seo-v{n}.xlsx' for n in removed)
+                for folder in (objects, checkpoints):
+                    if folder.is_symlink() or folder.exists() and any(p.is_symlink() for p in folder.rglob('*')):
+                        raise SeoError('seo_snapshot_invalid')
+                if any(p.is_symlink() for p in candidates):
+                    raise SeoError('seo_snapshot_invalid')
+                original = {name: (directory / name).read_bytes() if (directory / name).exists() else None
+                            for name in ('state.json', 'metadata.json')}
+                current['_historyPruned'] = {'at': now(), 'by': user['login'], 'removedVersions': removed}
+                if 'quality' in current:
+                    current['quality'] = dict(current['quality'], historyPreserved=False, historyPruned=True)
+                state['versions'] = [current]
+                try:
+                    self.save(directory, state)
+                except Exception:
+                    for name, data in original.items():
+                        path = directory / name
+                        if data is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            path.write_bytes(data)
+                            path.chmod(0o600)
+                    raise
+                packed = json.loads((directory / 'state.json').read_text())['versions'][0]
+                retained = set(packed.get('_dataRefs', {}).values()) | set(packed.get('_cacheEntries', {}).values())
+                candidates.extend(p for p in objects.glob('*.json')
+                                  if re.fullmatch(r'[a-f0-9]{64}', p.stem) and p.stem not in retained)
+                if checkpoints.exists():
+                    candidates.extend(p for p in checkpoints.rglob('*') if p.is_file())
+                freed, count, pending = 0, 0, 0
+                for path in candidates:
+                    try:
+                        if path.exists():
+                            size = path.stat().st_size
+                            path.unlink()
+                            freed += size
+                            count += 1
+                    except OSError:
+                        pending += 1
+                if checkpoints.exists():
+                    for path in sorted((p for p in checkpoints.rglob('*') if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                        try:
+                            path.rmdir()
+                        except OSError:
+                            pass
+                    try:
+                        checkpoints.rmdir()
+                    except OSError:
+                        pass
+                self.checked_file(directory, current)
+                return dict(self.public(state, context), pruning={'removedVersions': removed, 'deletedFiles': count,
+                            'freedBytes': freed, 'pendingFiles': pending, 'retainedVersion': current['number']})
+        except BlockingIOError:
+            raise SeoError('seo_already_running', 409) from None
+
+    @staticmethod
+    def check_prepared_result(card, source, result):
+        revision = 'source-grounded-review-v1'
+        if (result.get('revision') != revision
+                or result.get('inputHash') != fingerprint({'revision': revision, 'card': card, 'sources': source})
+                or result.get('outputHash') != fingerprint({k: v for k, v in result.items() if k != 'outputHash'})
+                or result.get('unplaced') or result.get('textProblems')
+                or result.get('quality', {}).get('unplacedRelevantRows') != 0
+                or result.get('quality', {}).get('requiresSpecialistReview') is not True):
+            raise SeoError('seo_review_import_checks_missing')
+        if not (isinstance(result.get('title'), str) and 0 < len(result['title']) <= 59
+                and isinstance(result.get('description'), str)
+                and len(plain(card['description'])) <= len(result['description']) <= 5000):
+            raise SeoError('seo_review_import_checks_missing')
+        rows = result.get('semanticDecisions', [])
+        if [r.get('query') for r in rows] != [r['query'] for r in source['semantic']]:
+            raise SeoError('seo_review_import_checks_missing')
+        own = {r['id']: r['values'] for r in characteristic_rows(card)}
+        proofs = factual_evidence(card)
+        proofs.update(brand=card.get('brand', ''), category=card.get('subjectName', ''))
+        for aid, row in result['attributes']['fields'].items():
+            if row['action'] in {'add', 'extend'}:
+                if not set(own.get(aid, [])) <= set(row['values']) or not row.get('evidence'):
+                    raise SeoError('seo_review_import_checks_missing')
+                if not all(source_phrase(p.get('quote'), proofs.get(p.get('source'), '')) for p in row['evidence']):
+                    raise SeoError('seo_review_import_checks_missing')
+                own[aid] = row['values']
+        texts = {'заголовок': result['title'], 'описание': result['description'],
+                 'характеристики': '\n'.join('; '.join(v) for v in own.values())}
+        for row in rows:
+            if row.get('status') not in {'use', 'exclude', 'confirm'}:
+                raise SeoError('seo_review_import_checks_missing')
+            if row['status'] == 'use' and not all(source_phrase(p, texts.get(row.get('field'), ''))
+                    for p in (row.get('witnessParts') or [row.get('witness')])):
+                raise SeoError('seo_review_import_checks_missing')
 
     def remarks(self, rows, context):
         if not isinstance(rows, list) or len(rows) > 100:

@@ -63,6 +63,22 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         self.assertEqual(self.request('GET', path.replace(str(self.portal), str(self.other), 1))[0], 403)
         self.assertEqual(self.request('POST', path, {'action': 'generate', 'version': 0, 'competitors': {}})[0], 400)
 
+    def test_prepared_review_import_requires_admin_and_portal_access(self):
+        path = f'/api/portals/{self.portal}/automatic-seo/batch'
+        payload = {'action': 'import_review', 'version': 13, 'importId': 'invalid'}
+        self.assertEqual(self.request('POST', path, payload, authenticated=False)[0], 401)
+        self.assertEqual(self.request('POST', path, payload)[0], 403)
+        self.assertEqual(self.request('POST', path.replace(str(self.portal), str(self.other), 1), payload)[0], 403)
+        prune = {'action': 'prune_history', 'version': 14}
+        self.assertEqual(self.request('POST', path, prune, authenticated=False)[0], 401)
+        self.assertEqual(self.request('POST', path, prune)[0], 403)
+        self.assertEqual(self.request('POST', path.replace(str(self.portal), str(self.other), 1), prune)[0], 403)
+        with server.connect_db() as db:
+            db.execute("UPDATE users SET user_role='admin' WHERE login='owner'")
+        status, raw = self.request('POST', path, payload)
+        self.assertEqual(status, 400, raw)
+        self.assertEqual(json.loads(raw)['error'], 'seo_review_import_invalid')
+
     def test_gigachat_seo_enforces_json_schema_without_changing_other_calls(self):
         from automatic_seo import PROFILE_SCHEMA
         requests = []
@@ -170,6 +186,10 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
         other_dir = service.directory(self.other, 'other-batch')
         other_dir.mkdir(parents=True)
         (other_dir/'keep.txt').write_text('Other cabinet data')
+        staging = server.DB_PATH.parent/'seo-review-imports'/str(self.portal)
+        staging.mkdir(parents=True);(staging/'manifest.json').write_text('Private staged source')
+        other_staging = staging.parent/str(self.other)
+        other_staging.mkdir();(other_staging/'keep.json').write_text('Other staged source')
         with patch.object(service.host, 'automatic_seo_preflight'), \
              patch.object(service.host, 'automatic_seo_own_cards', side_effect=own_cards), \
              patch.object(service, 'worker', side_effect=worker):
@@ -185,6 +205,8 @@ class AutomaticSeoRoutesTest(unittest.TestCase):
                 self.assertTrue(completed.wait(5))
         self.assertFalse((service.root/str(self.portal)).exists())
         self.assertTrue((other_dir/'keep.txt').exists())
+        self.assertFalse(staging.exists())
+        self.assertTrue((other_staging/'keep.json').exists())
 
     def test_dictionary_validation_and_unknown_attribute_fail_closed(self):
         adapter = OzonSeoHost(server)

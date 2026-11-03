@@ -2334,11 +2334,12 @@ def delete_portal(portal_id, actor=None):
       ),
     )
     db.execute("DELETE FROM portals WHERE id = ?", (numeric_portal_id,))
-  report_directory = DB_PATH.parent / "automatic-seo" / str(numeric_portal_id)
-  try:
-    shutil.rmtree(report_directory)
-  except FileNotFoundError:
-    pass
+  for namespace in ("automatic-seo", "seo-review-imports"):
+    report_directory = DB_PATH.parent / namespace / str(numeric_portal_id)
+    try:
+      shutil.rmtree(report_directory)
+    except FileNotFoundError:
+      pass
   return portal_details
 
 
