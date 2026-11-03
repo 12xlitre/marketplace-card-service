@@ -1115,7 +1115,7 @@ class AutomaticSeoService:
                            'stage': 'Файл готов к проверке', 'done': len(skus), 'completedCount': len(skus), 'total': len(skus),
                            'errors': [], 'issues': issues, 'results': results, 'cards': previous['cards'],
                            'competitors': previous['competitors'], 'taskHash': task_hash, 'remarks': [],
-                           'cache': {k: deepcopy(v) for k, v in previous.get('cache', {}).items()
+                           'cache': {k: deepcopy(previous['cache'][k]) for k in previous.get('cache', {})
                                      if k.startswith(('wb-keywords:', 'wb-competitor:', 'wb-definitions:', 'mp:', 'competitor:', 'dictionary:'))},
                            'period': previous['period'], 'sourceCapturedAt': previous['sourceCapturedAt'],
                            'method': 'prepared-review-v1', 'workflowRevision': 'prepared-review-v1',

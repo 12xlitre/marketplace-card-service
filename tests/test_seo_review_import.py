@@ -90,6 +90,19 @@ class PreparedReviewImportTest(unittest.TestCase):
         self.assertEqual((self.directory/'state.json').read_bytes(),self.before)
         self.assertFalse((self.directory/'seo-v14.xlsx').exists())
 
+    def test_import_reads_source_cache_without_materializing_old_model_responses(self):
+        from automatic_seo import SeoObjects
+        raw={'words':[{'query':'исходный запрос'}]}
+        digest=SeoObjects(self.directory).put(raw)
+        path=self.directory/'state.json';packed=json.loads(path.read_text())
+        packed['versions'][-1]['_cacheEntries']={'wb-keywords:1001:period':digest,'response:old-model':'f'*64}
+        path.write_text(json.dumps(packed));old=deepcopy(packed['versions'])
+        self.service.action(1,'batch',self.user,self.payload)
+        self.assertEqual(json.loads(path.read_text())['versions'][:-1],old)
+        cache=self.service.load(self.directory)['versions'][-1]['cache']
+        self.assertEqual(set(cache),{'wb-keywords:1001:period'})
+        self.assertEqual(cache['wb-keywords:1001:period'],raw)
+
     def test_busy_batch_and_symlink_are_rejected(self):
         with self.service.lock(self.directory,'run.lock'):
             with self.assertRaisesRegex(SeoError,'seo_already_running'):
