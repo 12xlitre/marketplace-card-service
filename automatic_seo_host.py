@@ -75,6 +75,9 @@ class OzonSeoHost:
     def automatic_seo_mass_workflow(self):
         return True
 
+    def automatic_seo_grounded_workflow(self):
+        return True
+
     def automatic_seo_chat_completion(self, messages, schema):
         if self.server.OPTICARDS_LLM_PROVIDER == 'gigachat':
             return self.server.audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192,
@@ -165,6 +168,7 @@ class OzonSeoHost:
             return positions[-1] if isinstance(positions, list) and positions else row.get('position')
         for query, row in queries.items():
             left, right = position(start.get(query)), position(end.get(query))
+            row['start'], row['end'] = left, right
             row['position'] = right
             row['dynamics'] = f"{left if left is not None else 'нет наблюдения'} → {right if right is not None else 'нет наблюдения'}"
         visibility = self.mp(f'/analytics/v1/oz/items/{own_sku}/by_period?{urlencode(dict(period, withSearchStats="true"))}', cache)

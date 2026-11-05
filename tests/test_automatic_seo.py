@@ -77,7 +77,30 @@ class FakeHost:
 
     def audit_llm_chat_completion(self, messages):
         evidence = json.loads(messages[1]['content'])
-        if 'competitorDescription' in evidence and 'selectedMeanings' in evidence:
+        if evidence.get('groundedRelevance'):
+            answer = {'decisions': {key: {
+                'status': 'exclude' if any(q.startswith('Конкурент') for q in queries) else 'use',
+                'reason': 'Служебное название конкурента не является запросом о нашем товаре.' if any(q.startswith('Конкурент') for q in queries)
+                          else 'Назначение крана для умывальника соответствует собственному смесителю.',
+                'factIds': [next(iter(evidence['ownFacts']))]}
+                for key, queries in evidence['semanticGroups'].items()}}
+        elif evidence.get('groundedWrite'):
+            sku = evidence['ownSku']; self.calls.append(sku)
+            if self.fail_sku == sku:
+                raise RuntimeError('private-token-must-not-leak')
+            answer = {'title': 'Смеситель для раковины ТЕСТ, латунь',
+                'titleReason': 'Сохранены назначение и собственный бренд, добавлен подтверждённый материал.',
+                'descriptionAddition': 'Латунный кран для умывальника ТЕСТ подходит для раковины.',
+                'queryParagraphs': {key: 'Латунный кран для умывальника ТЕСТ подходит для раковины.'
+                                    for key in evidence['uncoveredQueries']}}
+        elif evidence.get('groundedAudit'):
+            answer = {'ready': True, 'problems': [], 'claims': {key: {'supported': True,
+                'factIds': [next(iter(evidence['ownFactCatalog']))],
+                'reason': 'Назначение и материал предложения подтверждены собственной карточкой смесителя.'}
+                for key in evidence['newClaims']}}
+        elif 'candidatePairs' in evidence:
+            answer = {'conflicts': []}
+        elif 'competitorDescription' in evidence and 'selectedMeanings' in evidence:
             sku = evidence['sku']; self.calls.append(sku)
             if self.fail_sku == sku:
                 raise RuntimeError('private-token-must-not-leak')

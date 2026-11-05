@@ -20,6 +20,9 @@ const messages = {
   seo_request_budget_reached: "Достигнут предел попыток обработки. Проверенные результаты сохранены; требуется исправить причину повторов.",
   seo_semantic_review_incomplete: "Не удалось проверить все поисковые запросы. Непроверенные решения в готовый файл не включены.",
   seo_content_repair_incomplete: "Итоговый текст не прошёл проверку фактов и ключевых фраз. Подготовка файла не завершена.",
+  seo_grounded_plan_incomplete: "Не удалось получить полный разбор запросов. Проверенные этапы сохранены; незавершённый файл не выдаётся.",
+  seo_grounded_text_invalid: "Новая редакция текста пришла в неверном формате. Готовые карточки сохранены.",
+  seo_grounded_review_incomplete: "Текст не прошёл проверку фактов, длины или размещения обязательных ключей. Готовые карточки и проверенные этапы сохранены.",
   seo_invalid_content_audit: "Проверка текста вернула неподтверждённые замечания. Эти замечания не переданы специалисту как ошибки товара.",
   seo_invalid_repair_scope: "Для исправления этой версии нужно сохранить прежние источники и конкурентов.",
   seo_characteristic_evidence_missing: "Для предлагаемой характеристики не найдено подтверждение в собственных данных товара.",
@@ -165,6 +168,7 @@ export default function AutomaticSeoTask({ portalId, group, apiRequest, onTasksU
         {row.details?.field ? <span> Поле: {row.details.field}.</span> : null}
         {row.details?.phrases?.length ? <details><summary>Какие фразы не подтверждены</summary><ul>{row.details.phrases.map((phrase, j) => <li key={j}>{phrase}</li>)}</ul></details> : null}
         {row.details?.missingQueries?.length ? <details><summary>Какие запросы пропущены · оценено {row.details.receivedQueries} из {row.details.expectedQueries}</summary><ul>{row.details.missingQueries.map((query, j) => <li key={j}>{query}</li>)}</ul></details> : null}
+        {row.details?.remainingProblems?.length ? <details><summary>Что требуется исправить в тексте</summary><ul>{row.details.remainingProblems.map((problem, j) => <li key={j}>{problem}</li>)}</ul></details> : null}
       </li>)}</ul> : null}
       {latest && !latest.sha256 ? <p role="status" className="status-note">{running ? "Excel появится здесь после завершения подготовки." : "Excel этой версии не создан: подготовка не завершена. Повторите проблемные товары кнопкой ниже — готовые результаты сохранятся."}</p> : null}
       {latest?.resolvedErrors?.length ? <details><summary>Исправленные ошибки: {latest.resolvedErrors.length}</summary><ul>{latest.resolvedErrors.map((row, i) => <li key={`${row.sku}-${i}`}>{row.sku} · повторная обработка завершена успешно.</li>)}</ul></details> : null}
