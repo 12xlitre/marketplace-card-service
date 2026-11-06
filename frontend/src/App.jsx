@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import AutomaticSeoTask from "./AutomaticSeoTask";
 import BitrixNotificationsSettings from "./BitrixNotificationsSettings";
 import CabinetFilesDialog from "./CabinetFilesDialog";
+import SemanticRelevancePanel from "./SemanticRelevancePanel";
+import ServiceGuide from "./ServiceGuide";
+import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import {
   Archive,
@@ -49,7 +52,7 @@ const hardcodedDirectoryFallback = [
 
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
-const appScreens = new Set(["cabinets", "client", "seller", "card", "settings", "admin"]);
+const appScreens = new Set(["cabinets", "client", "seller", "card", "settings", "admin", "guide"]);
 const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods"]);
 const sellerWorkspaceTabs = [
   { key: "cabinet", label: "Кабинет", Icon: LayoutDashboard },
@@ -257,6 +260,11 @@ function safeSheetName(value, fallback = "Лист", usedNames = new Set()) {
 function readSavedAppView() {
   try {
     const params = new URLSearchParams(window.location.search);
+    if (params.get("screen") === "guide") {
+      params.delete("screen");
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
+      return { screen: "guide" };
+    }
     const portalId = params.get("portal");
     if (portalId && /^[1-9]\d*$/.test(portalId)) {
       const tab = params.get("tab");
@@ -3584,6 +3592,7 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, rem
       "Ключ к удалению из карточки",
       "Причина удаления",
       "Согласование удаления",
+      "Обоснование добавления",
     ],
     ...Array.from({ length: rowCount }, (_, index) => [
       currentRows[index]?.query || "",
@@ -3596,6 +3605,7 @@ function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, rem
       removalRows[index]?.query || { value: "", style: 2 },
       removalRows[index]?.query ? { value: semanticRemovalReason(removalRows[index]), style: 2 } : { value: "", style: 2 },
       removalRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
+      selectedRows[index]?.relevanceReason || selectedRows[index]?.reason || "",
     ]),
   ];
 }
@@ -3613,17 +3623,17 @@ function buildSemanticCoreExportSheet(name, core, selectedRows, removalRows = []
   return {
     name,
     freezeRows: 1,
-    widths: [48, 48, 22, 48, 32, 22, 48, 54, 22],
+    widths: [48, 48, 22, 48, 32, 32, 22, 48, 54, 22, 64],
     rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized, removalRowsNormalized, semanticManualAppendRows),
     protected: true,
     dataValidations: tableRowCount ? [{
       type: "list",
-      range: `F2:F${agreementEndRow}`,
+      range: `G2:G${agreementEndRow}`,
       formula1: '"Да,Нет"',
       allowBlank: true,
     }, {
       type: "list",
-      range: `I2:I${agreementEndRow}`,
+      range: `J2:J${agreementEndRow}`,
       formula1: '"Да,Нет"',
       allowBlank: true,
     }] : [],
@@ -3648,6 +3658,7 @@ function buildSemanticCoreInstructionSheet(card = null) {
       ["Частота WB ключа к добавлению", "Прямая частотность WB по запросу из MPStats. Не подменяется кластером или wbcount из расширения."],
       ["Частота Ozon ключа к добавлению", "Прямая частотность Ozon по запросу из MPStats, если WB-частота не передана или нужна для сравнения."],
       ["Согласование добавления", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
+      ["Обоснование добавления", "Почему запрос соответствует названию, описанию и характеристикам. Спорные запросы включаются только после решения специалиста."],
       ["Ключ к удалению из карточки", "Действующий ключ или ранжирующийся запрос, который специалист предлагает исключить перед переоптимизацией."],
       ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
       ["Согласование удаления", "Да - после согласования специалист вручную удаляет ключ в SEO карточки WB и переоптимизирует текст без него. Нет - ключ оставить."],
@@ -3726,6 +3737,9 @@ function semanticFinalExportSignature(finalExport) {
     contentKeys,
     rankingKeys,
     selectedExportKeys,
+    hasSemanticRelevance(core) ? JSON.stringify(normalized.selected.map((row) => [
+      semanticQueryKey(row), row.relevance || "", row.relevanceReason || "", row.manualDecision || "",
+    ]).sort((left, right) => left[0].localeCompare(right[0]))) : "",
   ].join("::");
 }
 
@@ -4410,7 +4424,7 @@ function semanticQueryKey(value) {
   return normalizedCharacteristicOption(query);
 }
 
-const semanticSelectionLimit = 2000;
+const semanticSelectionLimit = 5000;
 const semanticReportHistoryLimit = 3;
 const semanticCurrentRowsLimit = 600;
 const semanticRecommendedRowsLimit = 1200;
@@ -4613,6 +4627,9 @@ function compactSemanticCore(core) {
         ["field", item.field],
         ["status", item.status],
         ["reason", item.reason],
+        ["relevance", item.relevance],
+        ["relevanceReason", item.relevanceReason],
+        ["manualDecision", item.manualDecision],
       ].forEach(([field, value]) => {
         const text = String(value || "").trim();
         if (text) compactItem[field] = text;
@@ -4633,6 +4650,12 @@ function compactSemanticCore(core) {
       ].forEach(([field, value]) => {
         if (value) compactItem[field] = value;
       });
+      if (Array.isArray(item.relevanceEvidence)) {
+        compactItem.relevanceEvidence = item.relevanceEvidence.slice(0, 3).map((evidence) => ({
+          factId: String(evidence.factId || ""),
+          quote: String(evidence.quote || "").slice(0, 300),
+        }));
+      }
       output.push(compactItem);
     });
     return output;
@@ -4665,6 +4688,7 @@ function compactSemanticCore(core) {
     rankingSource: core.rankingSource || "",
     rankingPeriod: core.rankingPeriod || null,
     reason: core.reason || "",
+    ...(hasSemanticRelevance(core) ? { relevanceVersion: core.relevanceVersion, relevanceCounts: core.relevanceCounts } : {}),
   };
 }
 
@@ -4779,7 +4803,8 @@ function semanticCandidateSourceRows(core) {
     ...(Array.isArray(core.recommended) ? core.recommended : []),
     ...(Array.isArray(core.missing) ? core.missing : []),
   ];
-  return semanticRowsByKey(rows).filter((item) => semanticDirectDemandValue(item));
+  return semanticRowsByKey(rows).filter((item) => semanticDirectDemandValue(item)
+    && (!hasSemanticRelevance(core) || item.relevance === "relevant" || item.relevance === "disputed"));
 }
 
 function semanticReportCandidateCount(report) {
@@ -7569,6 +7594,7 @@ export default function App() {
           <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
         ) : null}
 
+        {displayScreen === "guide" ? <ServiceGuide onNavigate={setScreen} /> : null}
         {displayScreen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
         {(displayScreen === "admin" || displayScreen === "settings") && canManagePortals ? (
           <SettingsScreen
@@ -7683,6 +7709,7 @@ function LoginScreen({ onLogin }) {
 function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
     { key: "cabinets", label: "Клиенты", Icon: LayoutDashboard },
+    { key: "guide", label: "Как работать", Icon: HelpCircle },
     { key: "audit", label: "Рыночный аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
     canManage ? { key: "admin", label: "Администрирование", Icon: Settings } : null,
   ].filter(Boolean);
@@ -16422,6 +16449,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticDraftDirty, setSemanticDraftDirty] = useState(false);
   const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
+  const [semanticRelevanceProgress, setSemanticRelevanceProgress] = useState(null);
+  const semanticRequestSequence = useRef(0);
+  useEffect(() => {
+    semanticRequestSequence.current += 1;
+    return () => { semanticRequestSequence.current += 1; };
+  }, [portal.id, card?.nmID]);
   const [semanticCoreRemoval, setSemanticCoreRemoval] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
@@ -16555,6 +16588,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const activeApprovalSection = APPROVAL_SECTION_KEYS.includes(changesTab) ? changesTab : "content";
   const activeApproval = normalizeApprovalState(approvalSections[activeApprovalSection]);
   const approvalReadOnly = isProjectLead || (activeApproval.status === "submitted" && isApprovalReviewer);
+  // Сбор СЯ руководителем не является редактированием или согласованием контента.
+  const semanticReadOnly = semanticCoreStatus === "loading" || (!isProjectLead && approvalReadOnly);
   const canSubmitApproval = !approvalReadOnly && ["draft", "changes_requested"].includes(activeApproval.status);
   const canReviewApproval = activeApproval.status === "submitted" && isApprovalReviewer;
   const canWithdrawApproval = !isProjectLead && activeApproval.status === "submitted" && !isApprovalReviewer;
@@ -16617,7 +16652,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const shouldRefreshSemanticExpansion = Boolean(hasSemanticExpansion && !semanticSeedQueryChanged);
   const shouldConfirmSemanticCollectMore = Boolean(hasSemanticExpansion && !semanticSeedQueryChanged);
   const semanticRunButtonLabel = semanticCoreStatus === "loading"
-    ? "Подбираем запросы"
+    ? semanticRelevanceProgress ? "Проверяем " + semanticRelevanceProgress.completed + " из " + semanticRelevanceProgress.total : "Подбираем запросы"
     : semanticCoreStatus === "pending"
       ? "Повторить подбор"
       : semanticSeedQueryChanged
@@ -16639,7 +16674,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     return `${collection.name || ""} ${keywordText}`.toLowerCase().includes(semanticCollectionSearchText);
   });
   const autoSemanticCandidateRows = semanticAutoSelectCandidateRows();
-  const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving" && !approvalReadOnly);
+  const canAutoSelectSemantic = Boolean(autoSemanticCandidateRows.length && semanticSaveStatus !== "saving" && !semanticReadOnly);
   const autoSemanticTitle = activeSemanticCore
     ? autoSemanticCandidateRows.length
       ? `Автоматически добавить ${formatNumber(autoSemanticCandidateRows.length)} ${pluralRu(autoSemanticCandidateRows.length, "подходящий запрос", "подходящих запроса", "подходящих запросов")} в работу.`
@@ -16659,8 +16694,10 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const semanticFinalMatchesCurrent = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && semanticStoredFinalSignature === semanticCurrentFinalSignature);
   const semanticFinalConflict = Boolean(semanticStoredFinalSignature && semanticCurrentFinalSignature && !semanticFinalMatchesCurrent);
   const semanticCurrentChoiceSaved = Boolean(semanticDraftSaved && !semanticDraftDirty && semanticSaveStatus !== "error");
-  const semanticSaveCurrentDisabled = approvalReadOnly || !semanticDraftDirty || semanticSaveStatus === "saving";
-  const semanticSaveCurrentTitle = approvalReadOnly
+  const semanticSaveCurrentDisabled = semanticReadOnly || !semanticDraftDirty || semanticSaveStatus === "saving";
+  const semanticSaveCurrentTitle = semanticCoreStatus === "loading"
+    ? "Дождитесь завершения подбора запросов."
+    : semanticReadOnly
     ? "Раздел находится на согласовании: менять текущий выбор нельзя."
     : semanticDraftDirty
       ? "Сохранить текущий подбор, выбранные ключи и источники MPStats в карточке без добавления в итоговую выгрузку."
@@ -16719,7 +16756,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     }
     return null;
   })();
-  const semanticFinalAddDisabled = !semanticCurrentChoiceSaved || !currentSemanticFinalExport || !semanticFinalHasRows || semanticFinalStatus === "saving" || semanticFinalMatchesCurrent || semanticFinalConflict;
+  const semanticFinalAddDisabled = semanticReadOnly || !semanticCurrentChoiceSaved || !currentSemanticFinalExport || !semanticFinalHasRows || semanticFinalStatus === "saving" || semanticFinalMatchesCurrent || semanticFinalConflict;
   const semanticFinalAddTitle = !semanticCurrentChoiceSaved
     ? "Сначала нажмите Сохранить текущий выбор."
     : semanticFinalMatchesCurrent
@@ -17488,6 +17525,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function loadSemanticCore({ forceRefresh = false, query = semanticSeedQuery } = {}) {
+    const requestSequence = ++semanticRequestSequence.current;
+    setSemanticRelevanceProgress(null);
     const requestedSeedQuery = String(query || "").trim();
     if (!portal?.id || !card?.nmID || !requestedSeedQuery) {
       setSemanticCoreStatus("missing-card");
@@ -17500,7 +17539,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticRankStatus("idle");
     setSemanticSaveStatus("");
     try {
-      const payload = await apiRequest("/api/mpstats/semantic-expansion", {
+      let payload = await apiRequest("/api/mpstats/semantic-expansion", {
         method: "POST",
         body: JSON.stringify({
           portalId: portal.id,
@@ -17509,8 +17548,29 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
           refresh: forceRefresh,
         }),
       });
-      const nextSemanticCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
+      const pollingStarted = Date.now();
+      while (payload.status === "classifying") {
+        if (requestSequence !== semanticRequestSequence.current) return null;
+        setSemanticRelevanceProgress({ completed: payload.completed, total: payload.total });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (requestSequence !== semanticRequestSequence.current) return null;
+        if (Date.now() - pollingStarted > 35 * 60 * 1000) throw new Error("semantic_relevance_timeout");
+        payload = await apiRequest("/api/mpstats/semantic-expansion", {
+          method: "POST",
+          body: JSON.stringify({ portalId: portal.id, relevanceJobId: payload.jobId }),
+        });
+      }
+      if (requestSequence !== semanticRequestSequence.current) return null;
+      if (payload.status === "failed") throw new Error(payload.error || "semantic_relevance_failed");
+      const enrichedCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
+      if (requestSequence !== semanticRequestSequence.current) return null;
+      const reconciled = reconcileSemanticRelevance(enrichedCore, semanticCoreSelected,
+        [semanticCore, ...semanticCoreReports.map((report) => report.semanticCore)].filter(Boolean).reverse(),
+        semanticExistingQueryKeys(enrichedCore), semanticCoreRemoval);
+      const nextSemanticCore = reconciled.core;
+      const nextSelection = normalizeSemanticSelection(reconciled.selected);
       setSemanticCore(nextSemanticCore);
+      setSemanticCoreSelected(nextSelection);
       setSemanticCleared(false);
       const nextSubjectFilter = "";
       setSemanticSubjectFilter(nextSubjectFilter);
@@ -17518,7 +17578,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       const existingReportForSeed = semanticCoreReports.find((report) => (
         requestedSeedKey && semanticQueryKey(report.seedQuery) === requestedSeedKey
       ));
-      const nextReport = semanticReportFromCore(nextSemanticCore, semanticCoreSelected, {
+      const nextReport = semanticReportFromCore(nextSemanticCore, nextSelection, {
         id: existingReportForSeed?.id,
         seedQuery: requestedSeedQuery,
         subjectFilter: nextSubjectFilter,
@@ -17534,14 +17594,24 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
       return nextSemanticCore;
     } catch (error) {
+      if (requestSequence !== semanticRequestSequence.current) return null;
       const message = error.payload?.message || error.message || "";
-      const readableMessage = message === "mpstats_expanding_report_not_ready"
+      const relevanceErrors = {
+        semantic_relevance_not_configured: "Проверка релевантности недоступна: не подключена языковая модель.",
+        semantic_card_content_missing: "Для проверки нужны название, описание или характеристики карточки.",
+        semantic_relevance_busy: "Проверка занята другими подборками. Повторите позже.",
+        semantic_relevance_failed: "Проверка запросов не завершена. Повторите подбор: готовые части будут использованы повторно.",
+        semantic_relevance_job_not_found: "Проверка больше недоступна после перезапуска сервера. Повторите подбор.",
+        semantic_relevance_timeout: "Проверка не уложилась в отведённое время. Повторите подбор.",
+        semantic_relevance_too_many_queries: "MPStats вернул больше 5 000 запросов. Уточните стартовую фразу.",
+      };
+      const readableMessage = relevanceErrors[message] || (message === "mpstats_expanding_report_not_ready"
         ? "MPStats еще готовит SEO-отчет. Повторите подбор через минуту."
         : message === "mpstats_key_missing"
           ? "MPStats ключ не подключен."
           : message && message !== "mpstats_api_error"
             ? `MPStats: ${message}`
-            : "MPStats SEO expansion не загрузился. Повторите позже.";
+            : "MPStats SEO expansion не загрузился. Повторите позже.");
       setSemanticCoreStatus(error.payload?.status === 202 || message === "mpstats_expanding_report_not_ready" ? "pending" : error.message === "mpstats_api_error" ? "error" : "unavailable");
       setSemanticCoreError(readableMessage);
       return null;
@@ -17598,6 +17668,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function saveSemanticCurrentSelection() {
+    if (semanticReadOnly) return;
     const normalizedSelection = normalizeSemanticSelection(semanticCoreSelected);
     const normalizedRemoval = normalizeSemanticRemoval(semanticCoreRemoval);
     let reportSource = semanticCoreReports;
@@ -17878,7 +17949,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function takeSemanticKeyword(item) {
-    if (approvalReadOnly) return;
+    if (semanticReadOnly) return;
     const key = semanticQueryKey(item);
     if (!key || semanticCoreSelected.some((selected) => semanticQueryKey(selected) === key)) {
       return;
@@ -17893,6 +17964,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     }
     setSemanticCoreError("");
     stageSemanticSelection([...semanticCoreSelected, item]);
+    recordSemanticRelevanceDecision(item, "included");
   }
 
   function semanticAutoSelectCandidateRows() {
@@ -17904,6 +17976,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     const searchText = semanticSearch.trim().toLowerCase();
     const excludedWords = semanticFilterWords(semanticExcludeWords);
     return semanticCandidateSourceRows(activeSemanticCore)
+      .filter((item) => !hasSemanticRelevance(activeSemanticCore) || item.relevance === "relevant")
       .filter((item) => !semanticSubjectFilter || item.prioritySubject === semanticSubjectFilter)
       .filter((item) => !semanticMatchesExclusion(item.query, excludedWords))
       .filter((item) => !searchText || `${item.query || ""} ${item.cluster || ""} ${item.prioritySubject || ""}`.toLowerCase().includes(searchText))
@@ -17973,14 +18046,23 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   function removeSemanticKeyword(item) {
-    if (approvalReadOnly) return;
+    if (semanticReadOnly) return;
     const key = semanticQueryKey(item);
     if (!key) return;
     stageSemanticSelection(semanticCoreSelected.filter((selected) => semanticQueryKey(selected) !== key));
+    recordSemanticRelevanceDecision(item, "excluded");
+  }
+
+  function recordSemanticRelevanceDecision(item, decision) {
+    if (!hasSemanticRelevance(semanticCore)) return;
+    const nextCore = setSemanticRelevanceDecision(semanticCore, item, decision);
+    setSemanticCore(nextCore);
+    setSemanticCoreReports((reports) => reports.map((report) => report.id === semanticActiveReportId
+      ? { ...report, semanticCore: compactSemanticCore(nextCore) } : report));
   }
 
   function toggleSemanticRemovalKeyword(item) {
-    if (approvalReadOnly) return;
+    if (semanticReadOnly) return;
     const key = semanticQueryKey(item);
     if (!key) return;
     const currentRemoval = normalizeSemanticRemoval(semanticCoreRemoval);
@@ -19177,6 +19259,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function persistSemanticFinal(nextFinal, { replacing = false } = {}) {
+    if (semanticReadOnly) return false;
     const previousFinal = semanticCoreFinal;
     setSemanticCoreFinal(nextFinal);
     setSemanticFinalStatus("saving");
@@ -19408,7 +19491,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   title="Порядок работы с СЯ"
                   items={[
                     "Введите стартовый запрос и нажмите Enter или Подобрать запросы: MPStats соберет новую выдачу именно по этому запросу.",
-                    "Добавьте подходящие ключи в работу вручную или кнопкой Автодобавить запросы, затем нажмите Сохранить текущий выбор.",
+                    "После подбора система проверит запросы по названию, описанию и характеристикам. Релевантные сразу включены: при необходимости исключите лишние. Спорные можно добавить вручную.",
                     "Когда выбор сохранен, можно переоптимизировать описание, сохранить подборку в архив или добавить версию в итоговое СЯ кабинета.",
                   ]}
                 />
@@ -19543,7 +19626,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
 	                    onTakeKeyword={takeSemanticKeyword}
 	                    onRemoveKeyword={removeSemanticKeyword}
 	                    onToggleRemoveKeyword={toggleSemanticRemovalKeyword}
-	                    readOnly={approvalReadOnly}
+	                    readOnly={semanticReadOnly}
 	                  />
                 ) : (
                   <div className="empty-state">
@@ -19569,7 +19652,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   {semanticContentStatus === "done" ? <span className="status-note">Новый вариант блока “{semanticContentActionText}” сохранен в черновик.</span> : null}
                   {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}
-                  <button
+                  {!hasSemanticRelevance(activeSemanticCore) ? <button
                     className="btn"
                     type="button"
                     onClick={handleAutoSelectSemanticKeywords}
@@ -19577,11 +19660,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                     title={autoSemanticTitle}
                   >
                     <WandSparkles size={17} />Автодобавить запросы
-                  </button>
+                  </button> : null}
                   <span
                     className="semantic-help-icon"
-                    title="Сначала нажмите Подобрать запросы: система соберет новые запросы MPStats. Затем Автодобавить запросы перенесет подходящие ключи в Добавленные в работу; после проверки нажмите Сохранить текущий выбор."
-                    aria-label="Как работает автодобавление запросов"
+                    title="Подбор проверяет запросы по содержанию карточки. Релевантные включаются автоматически, спорные требуют решения специалиста. Затем сохраните текущий выбор."
+                    aria-label="Как работает подбор запросов"
                   >
                     <HelpCircle size={15} />
                   </span>
@@ -21789,6 +21872,7 @@ function SemanticWorkSummary({ title, copy, items }) {
 }
 
 function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", removalRows = [], onTakeKeyword = null, onRemoveKeyword = null, onToggleRemoveKeyword = null, readOnly = false }) {
+  const classified = hasSemanticRelevance(semanticCore);
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
   const contentItems = semanticCurrentContentRows(semanticCore);
@@ -21867,7 +21951,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
         : metricFilter === "remove"
           ? "К удалению из карточки"
           : "Ключи в карточке и ранжирующиеся запросы";
-  const showWorkColumn = metricFilter === "all";
+  const showWorkColumn = metricFilter === "all" && !classified;
   const semanticSummaryTitle = selectedItems.length
     ? `${formatNumber(selectedItems.length)} ${pluralRu(selectedItems.length, "запрос", "запроса", "запросов")} взято в работу`
     : filteredWorkItems.length
@@ -21971,6 +22055,12 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
           />
         </div>
       ) : null}
+      {classified && standalone && metricFilter === "all" ? (
+        <SemanticRelevancePanel core={semanticCore} selected={selectedItems} existingKeys={existingKeys}
+          removalKeys={removalKeys} search={search} subjectFilter={subjectFilter} excludeWords={excludeWords}
+          readOnly={readOnly} onInclude={onTakeKeyword} onExclude={onRemoveKeyword} onToggleRemoval={onToggleRemoveKeyword}
+          formatMeta={semanticKeywordMeta} />
+      ) : (
       <div className={`semantic-core-grid ${showWorkColumn ? "" : "single"}`}>
         <div>
           <span>{leftListTitle}</span>
@@ -21984,7 +22074,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
                 </div>
                 {standalone && onRemoveKeyword ? (
                   <button className="btn mini" type="button" onClick={() => onRemoveKeyword(item)} disabled={readOnly}>
-                    <X size={14} />Убрать
+                    <X size={14} />Исключить
                   </button>
                 ) : null}
               </div>
@@ -22094,6 +22184,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
         </div>
         ) : null}
       </div>
+      )}
     </div>
   );
 }
