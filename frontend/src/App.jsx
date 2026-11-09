@@ -64,7 +64,7 @@ const sellerWorkspaceTabs = [
   { key: "tasks", label: "Задачи", Icon: ClipboardList },
   { key: "reports", label: "Отчеты", Icon: FileText },
   { key: "work-periods", label: "Отчетный период", Icon: CheckSquare },
-  { key: "mail", label: "Переписка", Icon: Mail },
+  { key: "mail", label: "Почта", Icon: Mail },
 ];
 const cardWorkspaceTabs = [
   { key: "card", label: "Карточка", Icon: ShoppingBag },
@@ -304,7 +304,7 @@ function sellerBackLabel(tab) {
     tasks: "Задачи",
     reports: "Отчеты",
     "work-periods": "Отчетный период",
-    mail: "Переписка",
+    mail: "Почта",
   }[tab] || "Карточки";
 }
 
@@ -2318,7 +2318,7 @@ function batchContentErrorText(errorObject) {
   if (code === "unsupported_marketplace" || reason === "unsupported_marketplace") return "Для этого маркетплейса нужна своя методология";
   if (code === "semantic_final_missing" || reason === "semantic_final_missing") return "Нет итогового СЯ";
   if (code === "missing_semantic_keywords" || reason === "missing_semantic_keywords") return "Нет ключей для переоптимизации";
-  if (code === "llm_key_missing" || reason === "llm_key_missing") return "GigaChat не подключен";
+  if (code === "llm_key_missing" || reason === "llm_key_missing") return "Модель генерации не подключена";
   if (code === "card_not_found") return "Карточка не найдена в кабинете";
   if (code === "task_not_found") return "Задача карточки не найдена";
   if (code === "content_reoptimization_task_failed") return reason ? `Ошибка переоптимизации: ${reason}` : "Backend не завершил переоптимизацию";
@@ -12608,7 +12608,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
         </button>
       </div>
       {generateStatus === "done" ? <p className="status-note">Ozon-контент подготовлен по сохраненному итоговому СЯ и сохранен в черновик.</p> : null}
-      {generateStatus === "error" ? <p className="status-note">Не удалось подготовить Ozon-контент. Проверьте, что итоговое СЯ сохранено и доступен GigaChat.</p> : null}
+      {generateStatus === "error" ? <p className="status-note">Не удалось подготовить Ozon-контент. Проверьте, что итоговое СЯ сохранено и доступна модель генерации.</p> : null}
       {saveStatus === "error" ? <p className="status-note">Не удалось сохранить Ozon-контент.</p> : null}
       {status === "loading" ? <p className="status-note">Загружаем сохраненный Ozon-черновик.</p> : null}
     </section>
@@ -15486,7 +15486,7 @@ function ContentVariantPromptModal({ value, loading = false, onChange, onClose, 
   const placeholder = mode === "addition"
     ? "Вставьте абзац или несколько предложений, которые нужно добавить в описание."
     : mode === "reference"
-      ? "Вставьте свой вариант описания. GigaChat должен сохранить его основу и поправить только то, что требуется по фактам, лимиту и правилам WB."
+      ? "Вставьте свой вариант описания. Модель должна сохранить его основу и поправить только то, что требуется по фактам, лимиту и правилам WB."
       : "Например: сделать текст мягче, добавить акцент на состав, убрать медицинские формулировки, больше SEO в начале, не повторять слово леденцы.";
   const maxLength = mode === "reference" ? 5000 : mode === "addition" ? 2600 : 1800;
   const quickPrompts = [
@@ -18232,11 +18232,11 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setSemanticContentStatus("done");
     } catch (error) {
       const message = error.message === "llm_key_missing"
-        ? "GigaChat не подключен: добавьте ключ на backend."
+        ? "Модель генерации не подключена: добавьте ключ на backend."
         : error.message === "unsupported_marketplace"
           ? "Для этого маркетплейса нужна отдельная методология переоптимизации."
         : error.status === 502
-          ? "GigaChat не смог подготовить текст. Повторите позже."
+          ? "Модель не смогла подготовить текст. Повторите позже."
           : "Не удалось переоптимизировать контент по СЯ.";
       setSemanticContentError(message);
       setSemanticContentStatus("error");
@@ -18816,7 +18816,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       setCompetitorStatus("change-applied");
     } catch (error) {
       if (error.message === "llm_key_missing") {
-        setSemanticContentError("GigaChat не подключен: добавьте ключ на backend.");
+        setSemanticContentError("Модель генерации не подключена: добавьте ключ на backend.");
       }
       setCompetitorStatus("change-error");
     }
@@ -19639,7 +19639,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   {semanticSaveStatus === "saving" ? <span className="status-note">Сохраняем текущий выбор СЯ...</span> : null}
                   {semanticSaveStatus === "saved" ? <span className="status-note">Текущий выбор СЯ сохранен в карточке.</span> : null}
                   {semanticSaveStatus === "error" ? <span className="status-note">Выбрано на экране, но не сохранилось в черновик. Повторите действие позже.</span> : null}
-                  {semanticContentStatus === "loading" ? <span className="status-note">GigaChat готовит {semanticContentActionText}...</span> : null}
+                  {semanticContentStatus === "loading" ? <span className="status-note">Модель готовит {semanticContentActionText}...</span> : null}
                   {semanticContentStatus === "done" ? <span className="status-note">Новый вариант блока “{semanticContentActionText}” сохранен в черновик.</span> : null}
                   {semanticContentError ? <span className="status-note">{semanticContentError}</span> : null}
                   {semanticCoreStatus === "missing-card" ? <span className="status-note">Укажите стартовый запрос для СЯ.</span> : null}

@@ -115,6 +115,9 @@ WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "1
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
+OPTICARDS_LLM_CLASSIFIER_MODEL = os.environ.get("OPTICARDS_LLM_CLASSIFIER_MODEL", OPTICARDS_LLM_MODEL)
+OPTICARDS_LLM_REASONING_EFFORT = os.environ.get("OPTICARDS_LLM_REASONING_EFFORT", "none").strip()
+OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT = os.environ.get("OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT", "low").strip()
 GIGACHAT_AUTH_KEY = os.environ.get("GIGACHAT_AUTH_KEY", "").strip()
 GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip() or "GIGACHAT_API_PERS"
 GIGACHAT_OAUTH_URL = os.environ.get("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
@@ -1202,6 +1205,9 @@ def admin_system_status(user):
       "configured": configured,
       "status": "configured" if configured else "missing",
       "maxConcurrentRequests": LLM_CONCURRENT_REQUESTS,
+      "classifierModel": OPTICARDS_SEO_GIGACHAT_MODEL if provider == "gigachat" else OPTICARDS_LLM_CLASSIFIER_MODEL,
+      "reasoningEffort": OPTICARDS_LLM_REASONING_EFFORT if provider == "openai" else "",
+      "classifierReasoningEffort": OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT if provider == "openai" else "",
       "connectionType": GIGACHAT_SCOPE if provider == "gigachat" else provider,
     },
     "storage": {
@@ -18061,7 +18067,7 @@ def semantic_classify_query_batch(card, rows):
       "facts": facts, "queries": {key: rows[index]["query"] for index, key in enumerate(decisions)},
     }, ensure_ascii=False)},
   ]
-  options = {"model_override": OPTICARDS_SEO_GIGACHAT_MODEL} if OPTICARDS_LLM_PROVIDER == "gigachat" else {}
+  options = {"model_override": OPTICARDS_SEO_GIGACHAT_MODEL} if OPTICARDS_LLM_PROVIDER == "gigachat" else {'model_override':OPTICARDS_LLM_CLASSIFIER_MODEL,'reasoning_effort':OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT}
   payload, _, _ = audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192, **options)
   if not isinstance(payload, dict) or not payload.get("choices") or payload["choices"][0].get("finish_reason") == "length":
     raise ValueError("semantic_relevance_invalid_response")
@@ -18145,7 +18151,7 @@ def semantic_facts_hash(card):
 
 
 def semantic_model_key():
-  model = OPTICARDS_SEO_GIGACHAT_MODEL if OPTICARDS_LLM_PROVIDER == 'gigachat' else OPTICARDS_LLM_MODEL
+  model = OPTICARDS_SEO_GIGACHAT_MODEL if OPTICARDS_LLM_PROVIDER == 'gigachat' else OPTICARDS_LLM_CLASSIFIER_MODEL+':'+OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT
   return SEMANTIC_CLASSIFIER_REVISION + ':' + OPTICARDS_LLM_PROVIDER + ':' + model
 
 
@@ -19955,7 +19961,7 @@ def automatic_seo_queue_seconds():
 
 
 def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                              model_override=None, native_functions=True):
+                              model_override=None, native_functions=True, reasoning_effort=None):
   global LLM_COOLDOWN_UNTIL
   for attempt in range(3):
     try:
@@ -19972,6 +19978,8 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
           options = {}
           if model_override is not None:
             options['model_override'] = model_override
+          if reasoning_effort is not None:
+            options['reasoning_effort'] = reasoning_effort
           if not native_functions:
             options['native_functions'] = False
           return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens, **options)
@@ -19992,7 +20000,7 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
 
 
 def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                               model_override=None, native_functions=True):
+                               model_override=None, native_functions=True, reasoning_effort=None):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
@@ -20030,29 +20038,27 @@ def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False,
   if not token:
     return None, "", provider or "openai"
   url = f"{OPTICARDS_LLM_API_BASE.rstrip('/')}/chat/completions"
-  body = {
-    "model": OPTICARDS_LLM_MODEL,
-    "temperature": 0.2,
-    "response_format": {"type": "json_object"},
-    "messages": messages,
-  }
+  selected_model = model_override or OPTICARDS_LLM_MODEL
+  modern = bool(re.match(r"^(?:gpt-[56](?:[.-]|$)|o[134](?:-|$))", selected_model))
+  effort = reasoning_effort if reasoning_effort is not None else OPTICARDS_LLM_REASONING_EFFORT
+  if effort not in {'none','minimal','low','medium','high','xhigh','max'}:
+    raise ValueError('llm_invalid_reasoning_effort')
+  if modern and effort == 'none' and (selected_model.startswith(('gpt-6-astra','gpt-6.1-sol','gpt-5-mini','gpt-5-nano','o1','o3','o4')) or selected_model == 'gpt-5' or selected_model.startswith('gpt-5-2025')):
+    effort = 'low'
+  body = {'model':selected_model,'messages':messages,'response_format':{'type':'json_object'}}
+  if modern: body['reasoning_effort'] = 'low' if effort == 'minimal' and selected_model.startswith('gpt-6') else effort
+  if not modern or effort == 'none': body['temperature'] = .2
+  if response_schema is not None and not plain_text and provider == 'openai':
+    body['response_format'] = {'type':'json_schema','json_schema':{'name':'opticards_result','strict':True,'schema':response_schema}}
   if max_output_tokens is not None:
-    body["max_tokens"] = max(512, min(8192, int(max_output_tokens)))
-  if plain_text:
-    body.pop("response_format", None)
-  request = urlrequest.Request(
-    url,
-    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-    headers={
-      "Authorization": f"Bearer {token}",
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-      "User-Agent": "OptiCards/0.1 audit-llm",
-    },
-    method="POST",
-  )
-  with urlrequest.urlopen(request, timeout=45) as response:
-    return json.loads(response.read().decode("utf-8")), OPTICARDS_LLM_MODEL, provider or "openai"
+    body['max_completion_tokens' if modern else 'max_tokens'] = max(512,min(8192,int(max_output_tokens)))
+  if plain_text: body.pop('response_format',None)
+  request = urlrequest.Request(url,data=json.dumps(body,ensure_ascii=False).encode('utf-8'),headers={
+      'Authorization':f'Bearer {token}','Content-Type':'application/json','Accept':'application/json','User-Agent':'OptiCards/0.1 audit-llm'},method='POST')
+  with urlrequest.urlopen(request,timeout=120 if response_schema is not None else 60) as response:
+    raw=response.read(4*1024*1024+1)
+    if len(raw)>4*1024*1024: raise ValueError('llm_response_too_large')
+    return json.loads(raw.decode('utf-8')),selected_model,provider or 'openai'
 
 
 def audit_llm_refine(evidence, base_result, warnings):

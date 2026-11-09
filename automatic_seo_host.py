@@ -91,7 +91,11 @@ class OzonSeoHost:
         return self.server.audit_llm_chat_completion(messages, plain_text=True, max_output_tokens=4096)
 
     def automatic_seo_classify_completion(self, messages, schema):
-        return self.automatic_seo_chat_completion(messages, schema)
+        if self.server.OPTICARDS_LLM_PROVIDER == 'gigachat':
+            return self.automatic_seo_chat_completion(messages, schema)
+        return self.server.audit_llm_chat_completion(messages,response_schema=schema,max_output_tokens=8192,
+            model_override=self.server.OPTICARDS_LLM_CLASSIFIER_MODEL,
+            reasoning_effort=self.server.OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT)
 
     def automatic_seo_own_cards(self, portal, tasks, user):
         h = self.server

@@ -190,7 +190,7 @@ export function ContentWorkflowSettings({apiRequest}){
   const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   useEffect(()=>{apiRequest(endpoint+'/settings').then(setData).catch(e=>setError(e.message))},[]);
   async function save(payload){setBusy(true);setError('');try{setData(await apiRequest(endpoint+'/settings',{method:'POST',body:JSON.stringify(payload)}))}catch(e){setError(e.message)}finally{setBusy(false)}}
-  return <section className="panel cw-settings"><h2>Клиентские письма и исполнители</h2><p>Почта работает через существующий вебхук Б24 с правом «CRM». Пароли SMTP/IMAP в сервисе не нужны. Ящик подключается к CRM в самом Б24; сделка выбирается в кабинете → «Переписка».</p><ErrorNote error={error}/>
+  return <section className="panel cw-settings"><h2>Клиентские письма и исполнители</h2><p>Почта работает через существующий вебхук Б24 с правом «CRM». Пароли SMTP/IMAP в сервисе не нужны. Ящик подключается к CRM в самом Б24; сделка выбирается в кабинете → «Почта».</p><ErrorNote error={error}/>
     <details><summary>Б24 и рабочие дни исполнителей</summary><button className="btn" disabled={busy} onClick={()=>save({action:'retry_blocked_bitrix'})}>Повторить уведомления, ожидавшие настройки</button><p>Укажите действительный ID сотрудника в Б24. Рабочая неделя по умолчанию — понедельник–пятница.</p>{data?.people.map(person=><PersonSettings key={person.login} person={person} busy={busy} onSave={p=>save({action:'person',...p})}/>)}</details>
   </section>;
 }

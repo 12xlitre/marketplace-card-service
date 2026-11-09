@@ -2,6 +2,40 @@
 
 Обновлено: 2026-11-09. Текущий статус здесь; постоянные правила — в [памяти проекта](docs/memory/INDEX.md).
 
+## GPT вместо GigaChat и название «Почта» — 09.11.2026
+
+По поручению Дмитрия выбран и подготовлен маршрут: gpt-6.1-terra/none для
+контента, gpt-6-luna/low для массовой классификации СЯ. Модель Sol/low сравнили,
+существенного преимущества на небольшом наборе не выявлено. Все3модели на18
+контрольных запросах сохранили6положительных и не включили12неподтверждённых;
+медиана6-query классификации Luna2.59с/Terra4.59с/Sol4.18с. Terra также прошла
+живые схемыPROFILE/PLAN automatic SEO. Это не доказательство превосходства над
+GigaChat: такую сравнительную проверку не выполняли. Ограниченные live вызовы
+сделаны только на обезличенных придуманных фактах, без платного MPStats/пачек.
+
+Ключ в6строке .env.local действующий, был голой строкой и не читался dotenv.
+Теперь OPENAI_API_KEY=..., файл owner600/ignored; локальная конфигурация GPT
+выставлена. OpenAI adapter исправлен: request-local model_override, strictJSON
+schema, GPT5/6 max_completion_tokens, effort-aware sampling; отдельная classifier
+модель в durable/automaticSEO, semantic cache учитывает модель и effort.
+UI сообщения провайдера нейтральны, вкладка/заголовок/инструкция теперь «Почта».
+
+БЛОК ВКЛЮЧЕНИЯ PRODUCTION: прямой GET api.openai.com/v1/models с46.19.66.244
+вернул403 unsupported_country_region_territory; с локальной машины тот же ключ
+работает. Production env НЕ переключён, остаётся GigaChat. Дмитрий попросил
+описать проблему, чтобы передать Сергею: проверить регион исходящего IP/
+геоопределение или подготовить разрешённую инфраструктуру в поддерживаемом
+OpenAI регионе. После этого нужен live smoke с реального места исполнения и
+отдельное безопасное включение env. Ключи/пароли в сообщения Сергею не включены.
+Артефакты/риски/проверки: var/research/2026-11-09-openai/; контракт/сравнение:
+docs/llm-model-routing.md. 165 серверных regression checks (адаптер/semantic jobs/groundedSEO/WB/Ozon/
+recovery/handoff) PASS, frontend14/build PASS; настоящий браузер с реальным
+HTTP/SQLite/worker и transport fixtures: «Почта», письма/точныйPDF/ответ,
+WB/Ozon, mobile390, инструкция/изоляция, JS errors0 PASS. В regression runner
+ключи пустые и сеть запрещена;14живых GPT completions ограничены syntheticfacts.
+SQLitebackup/idle guard PASS, путь:/opt/opticards/var/backups/openai-adapter-release-20261109T151039Z/opticards.sqlite3.
+Готовится выпуск адаптера и названия без изменения production provider/env.
+
 ## Переписка кабинета через сделку Б24 — 09.11.2026
 
 Дмитрий изменил почтовый маршрут: существующий вебхук, без передачи SMTP/IMAP
