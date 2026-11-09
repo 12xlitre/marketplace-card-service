@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticRelevanceVersion } from "../src/semanticRelevance.js";
+import { reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticRelevanceVersion, semanticJobSelectionState } from "../src/semanticRelevance.js";
 
 const relevant = { query: "средство от моли", wbCount: 100, relevance: "relevant" };
 const disputed = { query: "от моли лаванда", ozonCount: 50, relevance: "disputed" };
@@ -45,4 +45,15 @@ test("Ozon requires Ozon frequency and retains manual decisions across different
   assert.equal(returned.selected.length, 0);
   const included = setSemanticRelevanceDecision(returned.core, disputed, "included");
   assert.deepEqual(reconcileSemanticRelevance(included, [], [included]).selected.map(row => row.query), [disputed.query]);
+});
+
+test("background input retains choices without sending entire query histories and evidence again", () => {
+  const selected = { ...relevant, relevanceEvidence: [{ quote: 'x'.repeat(1000) }], manualDecision: 'excluded' };
+  const previous = { semanticCore: { allKeywords: [{ ...disputed, manualDecision: 'included' }, ...Array(5000).fill(irrelevant)] } };
+  const state = semanticJobSelectionState({ ...core, allKeywords: [selected] }, [relevant], [], [previous]);
+  assert.equal(state.selected[0].wbCount, 100);
+  assert.equal(state.selected[0].query, relevant.query);
+  assert.equal(state.decisions.length, 2);
+  assert.ok(!JSON.stringify(state).includes('relevanceEvidence'));
+  assert.ok(JSON.stringify(state).length < 1000);
 });

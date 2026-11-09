@@ -10,7 +10,7 @@ from unittest.mock import patch
 import server
 
 
-CARD = {"title": "Антимоль спрей", "description": "Спрей защищает одежду от моли.",
+CARD = {"nmID": "1001", "title": "Антимоль спрей", "description": "Спрей защищает одежду от моли.",
         "characteristics": [{"name": "Форма", "value": ["спрей"]}]}
 USER = {"login": "semantic-test"}
 
@@ -31,7 +31,15 @@ def wait_for_job(job_id):
 
 class SemanticRelevanceTest(unittest.TestCase):
     def setUp(self):
-        server.SEMANTIC_RELEVANCE_JOBS.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_patch = patch.object(server, "DB_PATH", Path(self.tmp.name) / "test.sqlite3")
+        self.db_patch.start()
+        server.init_db()
+        with server.connect_db() as db:
+            db.execute("INSERT INTO users(login,password_hash,full_name,role,user_role,access_level) VALUES('semantic-test','x','Test','Manager','manager','overview')")
+        server.create_portal("Test", "Wildberries", "full", "semantic-test", {"lead": "semantic-test"})
+        with server.connect_db() as db:
+            db.execute("UPDATE portals SET cards_snapshot_json=? WHERE id=1", (json.dumps([CARD]),))
         self.cache = {}
         self.patches = [
             patch.object(server, "content_reoptimization_configured", return_value=True),
@@ -42,9 +50,13 @@ class SemanticRelevanceTest(unittest.TestCase):
             item.start()
 
     def tearDown(self):
+        worker = server.SEMANTIC_JOB_WORKERS.get(str(server.DB_PATH.resolve()))
+        if worker:
+            worker.stop.set(); worker.wake.set(); worker.thread.join(3)
         for item in reversed(self.patches):
             item.stop()
-        server.SEMANTIC_RELEVANCE_JOBS.clear()
+        self.db_patch.stop()
+        self.tmp.cleanup()
 
     def test_model_checks_every_query_with_all_card_fields_and_keeps_uncertain(self):
         rows = [{"query": query, "wbCount": 100} for query in ["средство от моли", "от моли лаванда", "секции от моли"]]
@@ -74,6 +86,17 @@ class SemanticRelevanceTest(unittest.TestCase):
         with patch.object(server, "audit_llm_chat_completion", return_value=(payload, "model", "openai")):
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 server.semantic_classify_query_batch(CARD, [{"query": "от моли"}])
+
+    def test_compact_decision_keeps_evidence_checks_and_rejects_malformed_fields(self):
+        valid = {"q0": {"s": "r", "r": "Назначение совпадает", "f": "description", "q": "защищает одежду от моли"}}
+        with patch.object(server, "audit_llm_chat_completion", return_value=({"choices": [{"message": {"content": json.dumps(valid)}}]}, "model", "openai")) as model:
+            result = server.semantic_classify_query_batch(CARD, [{"query": "средство от моли"}])
+        self.assertEqual(result[0]["relevance"], "relevant")
+        self.assertEqual(set(model.call_args.kwargs["response_schema"]["properties"]["q0"]["properties"]), {"s", "r", "f", "q"})
+        valid["q0"]["q"] = None
+        with patch.object(server, "audit_llm_chat_completion", return_value=({"choices": [{"message": {"content": json.dumps(valid)}}]}, "model", "openai")):
+            with self.assertRaisesRegex(ValueError, "invalid_response"):
+                server.semantic_classify_query_batch(CARD, [{"query": "средство от моли"}])
 
     def test_expansion_preserves_all_queries_for_classification(self):
         raw = {"words": [{"word": "средство от моли", "wb_count": 4000},
@@ -183,12 +206,12 @@ class SemanticRelevanceHttpTest(unittest.TestCase):
         self.db_patch.stop()
         self.tmp.cleanup()
 
-    def request(self, data, authenticated=True):
+    def request(self, data, authenticated=True, path="/api/mpstats/semantic-expansion", method="POST"):
         client = http.client.HTTPConnection(*self.httpd.server_address, timeout=5)
         headers = {"Content-Type": "application/json"}
         if authenticated:
             headers["Cookie"] = server.SESSION_COOKIE + "=" + self.session
-        client.request("POST", "/api/mpstats/semantic-expansion", json.dumps(data), headers)
+        client.request(method, path, json.dumps(data) if data is not None else None, headers)
         response = client.getresponse()
         result = response.status, json.loads(response.read())
         client.close()
@@ -206,17 +229,40 @@ class SemanticRelevanceHttpTest(unittest.TestCase):
         self.assertEqual(payload["status"], "classifying")
         self.assertEqual(poll.call_args.args[:2], ("missing", str(self.portal)))
 
+    def test_durable_api_create_discover_cancel_and_resume_are_scoped(self):
+        with server.connect_db() as db:
+            db.execute("UPDATE portals SET cards_snapshot_json=? WHERE id=?", (json.dumps([CARD]), self.portal))
+        endpoint = "/api/semantic-jobs"
+        with patch.object(server, "content_reoptimization_configured", return_value=True), patch.object(server, "start_semantic_worker"):
+            status, result = self.request({"portalId": self.portal, "card": CARD, "query": "от моли"}, path=endpoint)
+            self.assertEqual(status, 200)
+            job = result["job"]
+            query = endpoint + f"?portal_id={self.portal}&card_key=1001"
+            self.assertEqual(self.request(None, path=query, method="GET")[1]["jobs"][0]["jobId"], job["jobId"])
+            self.assertEqual(self.request(None, authenticated=False, path=query, method="GET")[0], 401)
+            self.assertEqual(self.request(None, path=endpoint+f"?portal_id={self.foreign}", method="GET")[0], 403)
+            self.assertEqual(self.request(None, path=endpoint+f"?portal_id={self.ozon}&job_id={job['jobId']}", method="GET")[0], 404)
+            for action, expected in (("cancel", "cancelled"), ("retry", "queued")):
+                status, result = self.request({"portalId": self.portal, "jobId": job["jobId"], "action": action}, path=endpoint)
+                self.assertEqual(status, 200)
+                self.assertEqual(result["job"]["status"], expected)
+
     def test_marketplace_is_taken_from_portal_instead_of_client_card(self):
+        with server.connect_db() as db:
+            db.execute("UPDATE portals SET cards_snapshot_json=? WHERE id IN (?,?)", (json.dumps([CARD]), self.portal, self.ozon))
         with patch.object(server, "content_reoptimization_configured", return_value=True), \
-             patch.object(server, "fetch_mpstats_semantic_expansion", return_value=result_for([])) as fetch, \
-             patch.object(server, "start_semantic_relevance_job", return_value={"status": "empty"}):
+             patch.object(server, "start_semantic_worker"), \
+             patch.object(server, "fetch_mpstats_semantic_expansion", side_effect=AssertionError("start must return before network")):
             for portal, expected in ((self.ozon, "Ozon"), (self.portal, "Wildberries")):
                 status, payload = self.request({"portalId": str(portal), "marketplace": "untrusted", "card": CARD, "query": "от моли"})
                 self.assertEqual(status, 200)
-                self.assertEqual(fetch.call_args.kwargs["marketplace"], expected)
+                job = server.semantic_get_job(payload["jobId"], portal, {"login": "owner"})
+                self.assertEqual(job["marketplace"], expected)
+                self.assertEqual(job["status"], "queued")
 
     def test_ozon_readonly_cannot_start_paid_queries(self):
         with server.connect_db() as db:
+            db.execute("UPDATE portals SET cards_snapshot_json=? WHERE id=?", (json.dumps([CARD]), self.ozon))
             db.execute("UPDATE users SET role='Tech',user_role='tech',access_level='readonly_wb' WHERE login='owner'")
         with patch.object(server, "fetch_mpstats_semantic_expansion", side_effect=AssertionError("no network")):
             self.assertEqual(self.request({"portalId": str(self.ozon), "card": CARD, "query": "от моли"})[0], 403)

@@ -3,8 +3,9 @@ import AutomaticSeoTask from "./AutomaticSeoTask";
 import BitrixNotificationsSettings from "./BitrixNotificationsSettings";
 import CabinetFilesDialog from "./CabinetFilesDialog";
 import SemanticRelevancePanel from "./SemanticRelevancePanel";
+import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJobs";
 import ServiceGuide from "./ServiceGuide";
-import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision } from "./semanticRelevance";
+import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import {
   Archive,
@@ -4676,6 +4677,8 @@ function compactSemanticCore(core) {
   const compactRankedKeywords = compactItems(rankedSource, semanticRankedRowsLimit, { prioritizeRanked: true });
   return {
     source: core.source || "mpstats-expanding",
+    marketplace: core.marketplace,
+    decisions: core.decisions || [],
     seedQuery: core.seedQuery || "",
     seedQueries: Array.isArray(core.seedQueries) ? core.seedQueries.slice(0, 6) : [],
     period: core.period || {},
@@ -9470,6 +9473,10 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               </>
             ) : null}
 
+            {activeSellerTab === "tasks" && !portal.isDemo ? <SemanticJobsList portalId={portal.id} onOpen={(key) => {
+              const card = (portal.realCards || []).find((item) => ozonCardStableKey(item) === key);
+              if (card) onOpenCard(card);
+            }} /> : null}
             {activeSellerTab === "tasks" ? (
               <OzonTasksPanel
                 portalId={portal.id}
@@ -11857,13 +11864,10 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
   const [savedFinalSelection, setSavedFinalSelection] = useState(null);
   const [semanticCore, setSemanticCore] = useState(null);
   const [semanticStatus, setSemanticStatus] = useState("idle");
-  const [semanticError, setSemanticError] = useState("");
-  const [progress, setProgress] = useState(null);
   const [search, setSearch] = useState("");
   const [excludeWords, setExcludeWords] = useState("");
   const [selectedLimit, setSelectedLimit] = useState(100);
   const [dirty, setDirty] = useState(false);
-  const requestSequence = useRef(0);
   const [draftStatus, setDraftStatus] = useState("idle");
   const [draftUpdatedAt, setDraftUpdatedAt] = useState("");
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
@@ -11914,10 +11918,7 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
     setSavedFinalSelection(null);
     setSemanticCore(null);
     setSemanticStatus("idle");
-    setSemanticError("");
-    setProgress(null);
     setDirty(false);
-    requestSequence.current += 1;
     setDraftUpdatedAt("");
     setSemanticImportStatus("");
     setSemanticImportError("");
@@ -11947,9 +11948,22 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
       });
     return () => {
       active = false;
-      requestSequence.current += 1;
     };
   }, [portal?.id, portal?.isDemo, cardKey, defaultSeed]);
+
+  const semanticJob = useSemanticJob({ portalId: portal?.id, cardKey,
+    enabled: Boolean(portal?.id && !portal.isDemo && !["idle", "loading", "load-error"].includes(draftStatus)),
+    onReady: async () => {
+      const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-draft?card_key=${encodeURIComponent(cardKey)}`);
+      return () => {
+        applySavedOzonSemanticDraft(payload.draft.draft, payload.draft.updatedAt);
+        setDraftStatus("saved"); setSemanticStatus("loaded");
+      };
+    },
+  });
+  useEffect(() => {
+    setSemanticStatus(semanticJob.busy ? "loading" : semanticJob.job?.status === "ready" ? "loaded" : "idle");
+  }, [semanticJob.busy, semanticJob.job?.status]);
 
   function toggleSelected(query) {
     setDirty(true);
@@ -12004,57 +12018,10 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
 
   async function collectQueries() {
     if (saveDisabled || !seedQuery.trim()) return;
-    const sequence = ++requestSequence.current;
     setSemanticStatus("loading");
-    setSemanticError("");
-    setProgress(null);
-    try {
-      let payload = await apiRequest("/api/mpstats/semantic-expansion", {
-        method: "POST",
-        body: JSON.stringify({ portalId: portal.id, card, query: seedQuery.trim() }),
-      });
-      const started = Date.now();
-      while (payload.status === "classifying") {
-        if (sequence !== requestSequence.current) return;
-        setProgress({ completed: payload.completed, total: payload.total });
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        if (sequence !== requestSequence.current) return;
-        if (Date.now() - started > 35 * 60 * 1000) throw new Error("semantic_relevance_timeout");
-        payload = await apiRequest("/api/mpstats/semantic-expansion", {
-          method: "POST", body: JSON.stringify({ portalId: portal.id, relevanceJobId: payload.jobId }),
-        });
-      }
-      if (sequence !== requestSequence.current) return;
-      if (payload.status === "failed") throw new Error(payload.error || "semantic_relevance_failed");
-      if (!hasSemanticRelevance(payload.semanticCore)) throw new Error("semantic_relevance_failed");
-      const core = payload.semanticCore;
-      const next = reconcileSemanticRelevance(core, selectedRows, [semanticCore].filter(Boolean),
-        new Set((core.current || []).map(semanticQueryKey)), removalRows);
-      setSemanticCore(next.core);
-      setSavedSelectedRows(next.selected);
-      setSelectedQueries(next.selected.map((item) => item.query));
-      setDirty(true);
-      setSemanticStatus("loaded");
-    } catch (error) {
-      if (sequence !== requestSequence.current) return;
-      const code = error.payload?.message || error.message || "";
-      const errors = {
-        semantic_relevance_not_configured: "Для проверки запросов подключите языковую модель.",
-        semantic_card_content_missing: "Для проверки нужны название, описание или характеристики карточки.",
-        semantic_relevance_busy: "Проверка занята другими подборками. Повторите позже.",
-        semantic_relevance_failed: "Проверка не завершена. Повторите подбор: готовые части будут использованы повторно.",
-        semantic_relevance_timeout: "Проверка не уложилась в отведённое время. Повторите подбор.",
-        semantic_relevance_job_not_found: "Проверка недоступна после перезапуска сервера. Повторите подбор.",
-        semantic_relevance_too_many_queries: "Больше 5 000 запросов. Уточните стартовую фразу.",
-        mpstats_expanding_report_not_ready: "MPStats ещё готовит отчёт. Повторите подбор через минуту.",
-        mpstats_key_missing: "Подключите ключ MPStats в настройках интеграций.",
-        forbidden: "Нет прав на подбор СЯ в этом кабинете.",
-      };
-      setSemanticError(errors[code] || "Не удалось получить запросы MPStats. Проверьте подключение и повторите подбор.");
-      setSemanticStatus("error");
-    } finally {
-      if (sequence === requestSequence.current) setProgress(null);
-    }
+    const job = await semanticJob.start({ card, query: seedQuery.trim(),
+      selectionState: semanticJobSelectionState(semanticCore, selectedRows, removalRows) });
+    if (!job) setSemanticStatus("error");
   }
 
   function decideQuery(row, decision) {
@@ -12152,6 +12119,7 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
 
   return (
     <section className="workspace-strip ozon-semantic-workspace">
+      <SemanticJobStatus controller={semanticJob} />
       <div className="strip-head">
         <div>
           <h2>Семантическое ядро Ozon</h2>
@@ -12184,8 +12152,6 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
         </button>
         <Tag tone="blue">Ozon</Tag>
       </div>
-      {semanticStatus === "loading" ? <p className="status-note" role="status">{progress ? `Проверено ${progress.completed} из ${progress.total} запросов` : "Получаем запросы MPStats…"}</p> : null}
-      {semanticError ? <p className="status-note" role="alert">{semanticError}</p> : null}
       {dirty ? <p className="status-note">Текущий выбор СЯ не сохранён. Сохраните его перед выгрузкой или добавлением в итоговое СЯ.</p> : null}
       {semanticCore?.period?.d1 ? <p className="status-note">MPStats · Ozon · {semanticPeriodLabel(semanticCore.period)}</p> : null}
       {savedAtLabel ? <p className="status-note">Последнее сохранение: {savedAtLabel}</p> : null}
@@ -13657,6 +13623,10 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             ) : null}
             {activeSellerTab === "tasks" ? (
               <>
+              {!portal.isDemo ? <SemanticJobsList portalId={portal.id} onOpen={(key) => {
+                const card = cards.find((item) => cardDraftKey(item) === key);
+                if (card) onOpenCard(card);
+              }} /> : null}
               <WbAutomaticTasksPanel portalId={portal.id} tasks={automaticTasks} status={automaticTaskStatus}
                 onReload={loadAutomaticTasks} workPeriods={workPeriods} workPeriodsStatus={workPeriodsStatus}
                 onLink={linkApprovalTaskGroupToWorkPeriod} onCreate={() => { setSellerTab("cabinet"); onNotice?.("Выберите карточки, нажмите «Взять в работу» и выберите «Автоматическая оптимизация»."); }} />
@@ -16517,11 +16487,6 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const [semanticDraftSaved, setSemanticDraftSaved] = useState(false);
   const [semanticCoreSelected, setSemanticCoreSelected] = useState([]);
   const [semanticRelevanceProgress, setSemanticRelevanceProgress] = useState(null);
-  const semanticRequestSequence = useRef(0);
-  useEffect(() => {
-    semanticRequestSequence.current += 1;
-    return () => { semanticRequestSequence.current += 1; };
-  }, [portal.id, card?.nmID]);
   const [semanticCoreRemoval, setSemanticCoreRemoval] = useState([]);
   const [semanticCoreReports, setSemanticCoreReports] = useState([]);
   const [semanticCoreFinal, setSemanticCoreFinal] = useState(null);
@@ -16614,6 +16579,27 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   const storedDraftLoadKey = `${portal?.id || "portal"}:${draftCardKeySignature || draftCardKey || card?.nmID || card?.vendorCode || ""}`;
   const storedDraftLoaded = Boolean(storedDraftLoadedKey && storedDraftLoadedKey === storedDraftLoadKey);
   const backendDraftEnabled = Boolean(portal?.id && !portal?.isDemo && portal.id !== "demo-wb");
+  const semanticJob = useSemanticJob({ portalId: portal?.id, cardKey: cardDraftKey(card),
+    enabled: backendDraftEnabled && storedDraftLoaded,
+    onReady: async () => {
+      const payload = await apiRequest(`/api/card-drafts?portal_id=${encodeURIComponent(portal.id)}&card_key=${encodeURIComponent(cardDraftKey(card))}`);
+      const meta = payload.draft?.draft?.meta || {};
+      return () => {
+        const reports = normalizeSemanticReports(meta.semanticCoreReports);
+        setSemanticCoreReports(reports); setSemanticActiveReportId(reports[0]?.id || "");
+        setSemanticCore(reports[0]?.semanticCore || null);
+        setSemanticCoreSelected(normalizeSemanticSelection(meta.semanticCoreSelected));
+        setSemanticCoreRemoval(normalizeSemanticRemoval(meta.semanticCoreRemoval));
+        setSemanticDraftDirty(false); setSemanticDraftSaved(true); setSemanticCleared(false);
+        setSemanticSaveStatus("saved"); setSemanticCoreStatus("loaded");
+      };
+    },
+  });
+  useEffect(() => {
+    if (semanticJob.busy) setSemanticCoreStatus("loading");
+    else if (["failed", "cancelled"].includes(semanticJob.job?.status)) setSemanticCoreStatus("idle");
+    if (semanticJob.job) setSemanticRelevanceProgress({ completed: semanticJob.job.completed, total: semanticJob.job.total });
+  }, [semanticJob.busy, semanticJob.job?.status, semanticJob.job?.completed, semanticJob.job?.total]);
   const semanticPersistSucceeded = (status) => (
     backendDraftEnabled ? status === "backend" : ["backend", "local"].includes(status)
   );
@@ -17592,97 +17578,12 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function loadSemanticCore({ forceRefresh = false, query = semanticSeedQuery } = {}) {
-    const requestSequence = ++semanticRequestSequence.current;
-    setSemanticRelevanceProgress(null);
-    const requestedSeedQuery = String(query || "").trim();
-    if (!portal?.id || !card?.nmID || !requestedSeedQuery) {
-      setSemanticCoreStatus("missing-card");
-      setSemanticCoreError("");
-      setSemanticRankStatus("idle");
-      return null;
-    }
-    setSemanticCoreStatus("loading");
-    setSemanticCoreError("");
-    setSemanticRankStatus("idle");
-    setSemanticSaveStatus("");
-    try {
-      let payload = await apiRequest("/api/mpstats/semantic-expansion", {
-        method: "POST",
-        body: JSON.stringify({
-          portalId: portal.id,
-          card,
-          query: requestedSeedQuery,
-          refresh: forceRefresh,
-        }),
-      });
-      const pollingStarted = Date.now();
-      while (payload.status === "classifying") {
-        if (requestSequence !== semanticRequestSequence.current) return null;
-        setSemanticRelevanceProgress({ completed: payload.completed, total: payload.total });
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        if (requestSequence !== semanticRequestSequence.current) return null;
-        if (Date.now() - pollingStarted > 35 * 60 * 1000) throw new Error("semantic_relevance_timeout");
-        payload = await apiRequest("/api/mpstats/semantic-expansion", {
-          method: "POST",
-          body: JSON.stringify({ portalId: portal.id, relevanceJobId: payload.jobId }),
-        });
-      }
-      if (requestSequence !== semanticRequestSequence.current) return null;
-      if (payload.status === "failed") throw new Error(payload.error || "semantic_relevance_failed");
-      const enrichedCore = await enrichSemanticCoreWithRanks(payload.semanticCore || null, { forceRefresh });
-      if (requestSequence !== semanticRequestSequence.current) return null;
-      const reconciled = reconcileSemanticRelevance(enrichedCore, semanticCoreSelected,
-        [semanticCore, ...semanticCoreReports.map((report) => report.semanticCore)].filter(Boolean).reverse(),
-        semanticExistingQueryKeys(enrichedCore), semanticCoreRemoval);
-      const nextSemanticCore = reconciled.core;
-      const nextSelection = normalizeSemanticSelection(reconciled.selected);
-      setSemanticCore(nextSemanticCore);
-      setSemanticCoreSelected(nextSelection);
-      setSemanticCleared(false);
-      const nextSubjectFilter = "";
-      setSemanticSubjectFilter(nextSubjectFilter);
-      const requestedSeedKey = semanticQueryKey(requestedSeedQuery);
-      const existingReportForSeed = semanticCoreReports.find((report) => (
-        requestedSeedKey && semanticQueryKey(report.seedQuery) === requestedSeedKey
-      ));
-      const nextReport = semanticReportFromCore(nextSemanticCore, nextSelection, {
-        id: existingReportForSeed?.id,
-        seedQuery: requestedSeedQuery,
-        subjectFilter: nextSubjectFilter,
-      });
-      if (nextReport) {
-        const nextReports = normalizeSemanticReports([nextReport, ...semanticCoreReports.filter((report) => report.id !== nextReport.id)]);
-        setSemanticCoreReports(nextReports);
-        setSemanticActiveReportId(nextReport.id);
-        setSemanticDraftDirty(true);
-        setSemanticDraftSaved(false);
-        setSemanticSaveStatus("unsaved");
-      }
-      setSemanticCoreStatus(payload.cached ? "cached" : "loaded");
-      return nextSemanticCore;
-    } catch (error) {
-      if (requestSequence !== semanticRequestSequence.current) return null;
-      const message = error.payload?.message || error.message || "";
-      const relevanceErrors = {
-        semantic_relevance_not_configured: "Проверка релевантности недоступна: не подключена языковая модель.",
-        semantic_card_content_missing: "Для проверки нужны название, описание или характеристики карточки.",
-        semantic_relevance_busy: "Проверка занята другими подборками. Повторите позже.",
-        semantic_relevance_failed: "Проверка запросов не завершена. Повторите подбор: готовые части будут использованы повторно.",
-        semantic_relevance_job_not_found: "Проверка больше недоступна после перезапуска сервера. Повторите подбор.",
-        semantic_relevance_timeout: "Проверка не уложилась в отведённое время. Повторите подбор.",
-        semantic_relevance_too_many_queries: "MPStats вернул больше 5 000 запросов. Уточните стартовую фразу.",
-      };
-      const readableMessage = relevanceErrors[message] || (message === "mpstats_expanding_report_not_ready"
-        ? "MPStats еще готовит SEO-отчет. Повторите подбор через минуту."
-        : message === "mpstats_key_missing"
-          ? "MPStats ключ не подключен."
-          : message && message !== "mpstats_api_error"
-            ? `MPStats: ${message}`
-            : "MPStats SEO expansion не загрузился. Повторите позже.");
-      setSemanticCoreStatus(error.payload?.status === 202 || message === "mpstats_expanding_report_not_ready" ? "pending" : error.message === "mpstats_api_error" ? "error" : "unavailable");
-      setSemanticCoreError(readableMessage);
-      return null;
-    }
+    if (!portal?.id || !card?.nmID || !String(query || "").trim()) return null;
+    setSemanticCoreStatus("loading"); setSemanticCoreError("");
+    const job = await semanticJob.start({ card, query: String(query).trim(), refresh: forceRefresh,
+      selectionState: semanticJobSelectionState(semanticCore, semanticCoreSelected, semanticCoreRemoval, semanticCoreReports) });
+    if (!job) setSemanticCoreStatus("error");
+    return job;
   }
 
   function handleRunSemanticCore() {
@@ -19521,6 +19422,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
 
             {activeTab === "semantic" ? (
               <section className="workspace-strip semantic-core-workspace">
+                <SemanticJobStatus controller={semanticJob} />
                   <div className="strip-head">
                     <div>
                       <h2>Семантическое ядро</h2>

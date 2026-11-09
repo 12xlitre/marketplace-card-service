@@ -43,3 +43,14 @@ export function setSemanticRelevanceDecision(core, row, decision) {
     allKeywords: (core?.allKeywords || []).map((item) => relevanceQueryKey(item) === key ? { ...item, manualDecision: decision } : item),
   };
 }
+
+export function semanticJobSelectionState(core, selected = [], removal = [], reports = []) {
+  const decisions = new Map([...reports].reverse().flatMap(report => [
+    ...(report?.semanticCore?.decisions || []), ...(report?.semanticCore?.allKeywords || []),
+  ]).concat(core?.decisions || [], core?.allKeywords || [])
+    .filter(row => ['included', 'excluded'].includes(row.manualDecision))
+    .map(row => [relevanceQueryKey(row), { query: row.query, manualDecision: row.manualDecision }]));
+  const compact = rows => rows.map(row => Object.fromEntries(['query','wbCount','ozonCount','source','relevanceReason','removalReason']
+    .filter(key => row[key] !== undefined).map(key => [key, row[key]])));
+  return { selected: compact(selected), removal: compact(removal), decisions: [...decisions.values()] };
+}

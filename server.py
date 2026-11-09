@@ -5,6 +5,7 @@ import binascii
 import csv
 import datetime as dt
 import getpass
+import fcntl
 import hashlib
 import hmac
 import io
@@ -420,6 +421,51 @@ def init_db():
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (portal_id, name)
+      );
+
+      CREATE TABLE IF NOT EXISTS semantic_jobs (
+        id TEXT PRIMARY KEY,
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        card_key TEXT NOT NULL,
+        user_login TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+        marketplace TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        query_text TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'queued',
+        request_json TEXT NOT NULL,
+        source_json TEXT,
+        result_json TEXT,
+        provider_json TEXT NOT NULL DEFAULT '{}',
+        facts_hash TEXT NOT NULL,
+        model_key TEXT NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        total INTEGER NOT NULL DEFAULT 0,
+        model_seconds REAL NOT NULL DEFAULT 0,
+        model_queries INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        run_token TEXT NOT NULL DEFAULT '',
+        auto_saved INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        scheduled_at REAL NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_job_active_card
+        ON semantic_jobs(portal_id, card_key)
+        WHERE status IN ('queued','collecting','classifying','saving');
+      CREATE INDEX IF NOT EXISTS idx_semantic_job_owner
+        ON semantic_jobs(portal_id,user_login,card_key,created_at);
+      CREATE INDEX IF NOT EXISTS idx_semantic_job_schedule
+        ON semantic_jobs(scheduled_at,created_at)
+        WHERE status IN ('queued','collecting','classifying','saving');
+      CREATE TABLE IF NOT EXISTS semantic_query_cache (
+        portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+        user_login TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+        facts_hash TEXT NOT NULL,
+        model_key TEXT NOT NULL,
+        query_key TEXT NOT NULL,
+        decision_json TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(portal_id,user_login,facts_hash,model_key,query_key)
       );
 
       CREATE TABLE IF NOT EXISTS card_approval_events (
@@ -17934,8 +17980,6 @@ def normalize_mpstats_expanding_query(item):
 
 
 SEMANTIC_RELEVANCE_VERSION = "card-relevance-v1"
-SEMANTIC_RELEVANCE_JOBS = {}
-SEMANTIC_RELEVANCE_LOCK = threading.Lock()
 SEMANTIC_RELEVANCE_BATCH_SIZE = 32
 
 
@@ -17952,19 +17996,13 @@ def semantic_classify_query_batch(card, rows):
   if not facts:
     raise ValueError("semantic_card_content_missing")
   decisions = {
-    f"q{index}": {
-      "type": "object",
-      "properties": {
-        "status": {"type": "string", "enum": ["relevant", "disputed", "irrelevant"]},
-        "reason": {"type": "string"},
-        "evidence": {"type": "array", "items": {
-          "type": "object",
-          "properties": {"factId": {"type": "string", "enum": [fact["id"] for fact in facts]}, "quote": {"type": "string"}},
-          "required": ["factId", "quote"], "additionalProperties": False,
-        }},
-      },
-      "required": ["status", "reason", "evidence"], "additionalProperties": False,
-    } for index in range(len(rows))
+    f"q{index}": {"type": "object", "properties": {
+      "s": {"type": "string", "enum": ["r", "d", "i"]},
+      "r": {"type": "string"},
+      "f": {"type": "string", "enum": ["", *[fact["id"] for fact in facts]]},
+      "q": {"type": "string"},
+    }, "required": ["s", "r", "f", "q"], "additionalProperties": False}
+    for index in range(len(rows))
   }
   schema = {"type": "object", "properties": decisions, "required": list(decisions), "additionalProperties": False}
   messages = [
@@ -17987,7 +18025,9 @@ def semantic_classify_query_batch(card, rows):
       "названия, синонима либо состава комплекта оставляй на проверку специалисту. "
       "Пример: средство от моли подходит широкому запросу 'средство от моли'; "
       "запрос 'от моли лаванда' спорный, если аромат не указан; спрей не соответствует запросу о секциях. "
-      "Объясни каждое решение кратко и конкретно по-русски. "
+      "Формат: s=r для relevant, s=d для disputed, s=i для irrelevant; "
+      "r — конкретное обоснование по-русски до 120 символов; f — идентификатор факта, "
+      "q — одна точная цитата до 120 символов. Для disputed/irrelevant f и q могут быть пустыми. "
       "Для relevant обязательна точная цитата из собственного факта и его factId, "
       "подтверждающая соответствие товару. Цитаты нельзя сочинять. "
       "Верни только JSON по схеме, без выполнения каких-либо действий."
@@ -18009,6 +18049,12 @@ def semantic_classify_query_batch(card, rows):
   output = []
   for index, row in enumerate(rows):
     decision = parsed[f"q{index}"]
+    if isinstance(decision, dict) and "s" in decision:
+      if set(decision) != {'s', 'r', 'f', 'q'} or any(not isinstance(decision[key], str) for key in decision):
+        raise ValueError('semantic_relevance_invalid_response')
+      decision = {"status": {"r": "relevant", "d": "disputed", "i": "irrelevant"}.get(decision.get("s")),
+                  "reason": decision.get("r"), "evidence": [{"factId": decision.get("f"), "quote": decision.get("q")}]
+                  if decision.get("f") or decision.get("q") else []}
     if not isinstance(decision, dict) or decision.get("status") not in {"relevant", "disputed", "irrelevant"}:
       raise ValueError("semantic_relevance_invalid_response")
     reason = audit_str(decision.get("reason") or "", 320)
@@ -18052,105 +18098,501 @@ def semantic_relevance_result(result, card, rows):
   return {**result, "status": "loaded" if rows else "empty", "semanticCore": core}
 
 
+SEMANTIC_JOB_ACTIVE = ('queued', 'collecting', 'classifying', 'saving')
+SEMANTIC_JOB_WORKERS = {}
+SEMANTIC_JOB_WORKERS_LOCK = threading.Lock()
+SEMANTIC_CLASSIFIER_REVISION = 'compact-evidence-v2'
+
+
+def semantic_json(value):
+  return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def semantic_job_connection(path=None):
+  db = sqlite3.connect(path or DB_PATH, timeout=30)
+  db.row_factory = sqlite3.Row
+  db.execute('PRAGMA foreign_keys=ON')
+  return db
+
+
+def semantic_facts_hash(card):
+  return hashlib.sha256(semantic_json(semantic_relevance_facts(card)).encode()).hexdigest()
+
+
+def semantic_model_key():
+  model = OPTICARDS_SEO_GIGACHAT_MODEL if OPTICARDS_LLM_PROVIDER == 'gigachat' else OPTICARDS_LLM_MODEL
+  return SEMANTIC_CLASSIFIER_REVISION + ':' + OPTICARDS_LLM_PROVIDER + ':' + model
+
+
+def semantic_job_key(card):
+  return draft_card_key(card.get('cardKey') or card.get('nmID') or card.get('sku') or card_key_from_snapshot_card(card))
+
+
+def semantic_job_context(db, job):
+  user = db.execute('SELECT * FROM users WHERE login=? AND is_active=1', (job['user_login'],)).fetchone()
+  portal = db.execute('SELECT * FROM portals WHERE id=? AND is_active=1', (job['portal_id'],)).fetchone()
+  if not user or not portal or not user_can_access_portal(user, job['portal_id']):
+    raise PermissionError('forbidden')
+  if portal['marketplace'] == 'Ozon' and not user_can_edit_portal(user, job['portal_id']):
+    raise PermissionError('forbidden')
+  card = next((card for card in wb_snapshot_cards_from_row(portal) if semantic_job_key(card) == job['card_key']), None)
+  if not card:
+    raise ValueError('semantic_card_not_found')
+  return user, card
+
+
+def semantic_job_public(row, include_result=False):
+  row = dict(row)
+  remaining = max(0, row['total'] - row['completed'])
+  eta = round(remaining * row['model_seconds'] / row['model_queries']) if row['model_queries'] and remaining else None
+  value = {'jobId': row['id'], 'portalId': str(row['portal_id']), 'cardKey': row['card_key'],
+           'marketplace': row['marketplace'], 'query': row['query_text'],
+           'status': row['status'], 'completed': row['completed'], 'total': row['total'],
+           'error': row['error'], 'autoSaved': bool(row['auto_saved']),
+           'createdAt': dt.datetime.fromtimestamp(row['created_at'], dt.timezone.utc).isoformat(),
+           'updatedAt': dt.datetime.fromtimestamp(row['updated_at'], dt.timezone.utc).isoformat(),
+           'etaLowSeconds': round(eta * .7) if eta else None, 'etaHighSeconds': round(eta * 1.6) if eta else None,
+           'title': row['title']}
+  if include_result and row.get('result_json'):
+    value['result'] = json.loads(row['result_json'])
+  return value
+
+
+def semantic_get_job(job_id, portal_id, user, include_result=True):
+  with semantic_job_connection() as db:
+    row = db.execute('SELECT * FROM semantic_jobs WHERE id=? AND portal_id=? AND user_login=?',
+                     (job_id, str(portal_id), user_login_value(user))).fetchone()
+  if not row:
+    raise ValueError('semantic_relevance_job_not_found')
+  return semantic_job_public(row, include_result)
+
+
+def semantic_list_jobs(portal_id, user, card_key=''):
+  with semantic_job_connection() as db:
+    rows = db.execute('SELECT id,portal_id,card_key,marketplace,title,query_text,status,completed,total,model_seconds,model_queries,error,auto_saved,created_at,updated_at FROM semantic_jobs WHERE portal_id=? AND user_login=? AND (?="" OR card_key=?) '
+                      'ORDER BY created_at DESC LIMIT 40',
+                      (portal_id, user_login_value(user), card_key, card_key)).fetchall()
+  return {'jobs': [semantic_job_public(row) for row in rows]}
+
+
+def semantic_payload_state(payload, marketplace):
+  meta = payload.get('meta') or {}
+  if marketplace == 'Ozon':
+    cores = [payload.get('semanticCore') or {}]
+    selected, removal = payload.get('selected') or [], payload.get('removal') or []
+  else:
+    cores = [report.get('semanticCore') or {} for report in reversed(meta.get('semanticCoreReports') or [])]
+    selected, removal = meta.get('semanticCoreSelected') or [], meta.get('semanticCoreRemoval') or []
+  decisions = {}
+  for core in cores:
+    for row in [*(core.get('decisions') or []), *(core.get('allKeywords') or [])]:
+      if row.get('manualDecision') in ('included', 'excluded'):
+        decisions[audit_normalized(row['query'])] = row['manualDecision']
+  return {'selected': selected, 'removal': removal, 'decisions': decisions}
+
+
+def semantic_compact_state(state):
+  output = {}
+  for kind in ('selected', 'removal', 'decisions'):
+    rows = state.get(kind) or []
+    if not isinstance(rows, list) or len(rows) > 5000:
+      raise ValueError('invalid_semantic_selection')
+    output[kind] = []
+    for row in rows:
+      if not isinstance(row, dict) or not audit_str(row.get('query'), 500):
+        raise ValueError('invalid_semantic_selection')
+      clean = {'query': audit_str(row['query'], 500)}
+      for key in ('wbCount', 'ozonCount'):
+        if audit_int(row.get(key), 0) > 0:
+          clean[key] = audit_int(row[key], 0)
+      for key in ('source', 'relevanceReason', 'removalReason'):
+        if row.get(key):
+          clean[key] = audit_str(row[key], 320)
+      if row.get('manualDecision') in ('included', 'excluded'):
+        clean['manualDecision'] = row['manualDecision']
+      elif kind == 'decisions':
+        raise ValueError('invalid_semantic_selection')
+      output[kind].append(clean)
+  return output
+
+
+def semantic_merge_working_state(payload, request, marketplace):
+  initial = request.get('selectionState')
+  if not initial:
+    return payload
+  latest = semantic_payload_state(payload, marketplace)
+  base = request.get('baseState') or {}
+  decisions = dict(latest['decisions'])
+  for row in initial['decisions']:
+    key = audit_normalized(row['query'])
+    if latest['decisions'].get(key) == (base.get('decisions') or {}).get(key):
+      decisions[key] = row.get('manualDecision')
+  merged = {}
+  for kind in ('selected', 'removal'):
+    before = set(base.get(kind) or [])
+    local = {audit_normalized(row['query']): row for row in initial[kind]}
+    current = {audit_normalized(row['query']): row for row in latest[kind]}
+    keys = [*current, *[key for key in local if key not in current]]
+    merged[kind] = [{**local.get(key, {}), **current.get(key, {})} if (key in current) == (key in before) else current[key]
+                    for key in keys if (key in local if (key in current) == (key in before) else key in current)]
+    if kind == 'selected':
+      for key in before - set(local):
+        if (key in current) == (key in before) and latest['decisions'].get(key) == (base.get('decisions') or {}).get(key):
+          decisions[key] = 'excluded'
+  decision_rows = [{'query': key, 'manualDecision': value} for key, value in decisions.items() if value in ('included', 'excluded')]
+  if marketplace == 'Ozon':
+    core = payload.get('semanticCore') or {}
+    core = {**core, 'decisions': decision_rows, 'allKeywords': [
+      {**row, **({'manualDecision': decisions[audit_normalized(row['query'])]} if audit_normalized(row['query']) in decisions else {})}
+      for row in core.get('allKeywords') or []]}
+    return {**payload, **merged, 'semanticCore': core}
+  meta = payload.get('meta') or {}
+  return {**payload, 'meta': {**meta, 'semanticCoreSelected': merged['selected'], 'semanticCoreRemoval': merged['removal'],
+          'semanticCoreReports': [{'semanticCore': {'decisions': decision_rows}}, *(meta.get('semanticCoreReports') or [])]}}
+
+
+def semantic_create_job(portal_id, card, query, user, refresh=False, source=None, selection_state=None):
+  key = semantic_job_key(card)
+  if not key:
+    raise ValueError('invalid_card_key')
+  now, job_id = time.time(), uuid.uuid4().hex
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    context = {'portal_id': int(portal_id), 'card_key': key, 'user_login': user_login_value(user)}
+    _, stored_card = semantic_job_context(db, context)
+    if not content_reoptimization_configured():
+      raise ValueError('semantic_relevance_not_configured')
+    if not semantic_relevance_facts(stored_card):
+      raise ValueError('semantic_card_content_missing')
+    portal = db.execute('SELECT marketplace FROM portals WHERE id=?', (portal_id,)).fetchone()
+    existing = db.execute("SELECT * FROM semantic_jobs WHERE portal_id=? AND card_key=? AND status IN ('queued','collecting','classifying','saving')", (portal_id, key)).fetchone()
+    if existing:
+      if existing['user_login'] != user_login_value(user):
+        raise ValueError('semantic_card_busy')
+      return semantic_job_public(existing)
+    if db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving')").fetchone()[0] >= 64:
+      raise ValueError('semantic_relevance_busy')
+    if db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE user_login=? AND status IN ('queued','collecting','classifying','saving')", (user_login_value(user),)).fetchone()[0] >= 8:
+      raise ValueError('semantic_relevance_busy')
+    seeds = mpstats_expanding_seed_queries(stored_card, query)
+    if not seeds:
+      raise ValueError('missing_semantic_query')
+    request = {'card': stored_card, 'query': query or seeds[0], 'refresh': bool(refresh),
+               'period': mpstats_semantic_period_default(), 'seedQueries': seeds}
+    request['sourceKey'] = hashlib.sha256(semantic_json({'seeds': seeds, 'period': request['period'], 'marketplace': portal['marketplace']}).encode()).hexdigest()
+    if source is None and not refresh:
+      previous_source = db.execute("SELECT source_json FROM semantic_jobs WHERE portal_id=? AND user_login=? AND marketplace=? AND json_extract(request_json,'$.sourceKey')=? AND source_json IS NOT NULL AND updated_at>? ORDER BY updated_at DESC LIMIT 1",
+        (portal_id, user_login_value(user), portal['marketplace'], request['sourceKey'], now-AUDIT_MARKET_CACHE_TTL_SECONDS)).fetchone()
+      if previous_source:
+        source = json.loads(previous_source['source_json'])
+    if source is not None:
+      source = {**source, 'semanticCore': {**source['semanticCore'], 'seedQuery': request['query'],
+                                          'marketplace': portal['marketplace']}}
+    table = 'ozon_semantic_drafts' if portal['marketplace'] == 'Ozon' else 'card_drafts'
+    draft = db.execute(f'SELECT payload_json FROM {table} WHERE portal_id=? AND card_key=?', (portal_id, key)).fetchone()
+    if isinstance(selection_state, dict):
+      request['selectionState'] = semantic_compact_state(selection_state)
+      base = semantic_payload_state(json.loads(draft['payload_json']) if draft else {}, portal['marketplace'])
+      request['baseState'] = {'selected': [audit_normalized(row['query']) for row in base['selected']],
+                              'removal': [audit_normalized(row['query']) for row in base['removal']], 'decisions': base['decisions']}
+    db.execute('INSERT INTO semantic_jobs(id,portal_id,card_key,user_login,marketplace,title,query_text,request_json,source_json,facts_hash,model_key,created_at,updated_at,scheduled_at,total) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+               (job_id, int(portal_id), key, user_login_value(user), portal['marketplace'], audit_str(stored_card.get('title'), 240), request['query'], semantic_json(request),
+                semantic_json(source) if source is not None else None, semantic_facts_hash(stored_card), semantic_model_key(),
+                now, now, now, len(source['semanticCore']['allKeywords']) if source else 0))
+  start_semantic_worker()
+  return semantic_get_job(job_id, portal_id, user)
+
+
+def semantic_job_action(job_id, portal_id, user, action):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    row = db.execute('SELECT * FROM semantic_jobs WHERE id=? AND portal_id=? AND user_login=?',
+                     (job_id, portal_id, user_login_value(user))).fetchone()
+    if not row:
+      raise ValueError('semantic_relevance_job_not_found')
+    if action == 'cancel':
+      if row['status'] in SEMANTIC_JOB_ACTIVE:
+        db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE id=?", (time.time(), job_id))
+    elif action == 'retry':
+      semantic_job_context(db, row)
+      if row['status'] not in ('failed', 'cancelled'):
+        raise ValueError('semantic_job_not_retryable')
+      conflict = db.execute("SELECT id FROM semantic_jobs WHERE portal_id=? AND card_key=? AND status IN ('queued','collecting','classifying','saving')", (portal_id, row['card_key'])).fetchone()
+      if conflict:
+        raise ValueError('semantic_card_busy')
+      if db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving')").fetchone()[0] >= 64 or db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE user_login=? AND status IN ('queued','collecting','classifying','saving')", (user_login_value(user),)).fetchone()[0] >= 8:
+        raise ValueError('semantic_relevance_busy')
+      provider = json.loads(row['provider_json'])
+      if provider.get('creating') and not provider.get('reportHash'):
+        raise ValueError('semantic_report_creation_unknown')
+      provider['pollAttempts'] = 0
+      db.execute("UPDATE semantic_jobs SET status='queued',error='',run_token='',provider_json=?,scheduled_at=?,updated_at=? WHERE id=?", (semantic_json(provider), time.time(), time.time(), job_id))
+    else:
+      raise ValueError('invalid_semantic_job_action')
+  start_semantic_worker()
+  return semantic_get_job(job_id, portal_id, user)
+
+
+def semantic_reconcile_result(core, payload, marketplace):
+  meta = payload.get('meta') or {}
+  if marketplace == 'Ozon':
+    previous = [payload.get('semanticCore') or {}]
+    selected, removal = payload.get('selected') or [], payload.get('removal') or []
+  else:
+    previous = [report.get('semanticCore') or {} for report in reversed(meta.get('semanticCoreReports') or [])]
+    selected, removal = meta.get('semanticCoreSelected') or [], meta.get('semanticCoreRemoval') or []
+    # Existing stable WB rankings survive a fresh expansion.
+    ranked = next((item for item in reversed(previous) if item.get('rankingSource')), {})
+    for key in ('rankedKeywords', 'rankingSource', 'rankingPeriod'):
+      if key in ranked:
+        core[key] = ranked[key]
+  decisions = {}
+  for old in previous:
+    for row in [*(old.get('decisions') or []), *(old.get('allKeywords') or [])]:
+      if row.get('manualDecision') in ('included', 'excluded'):
+        decisions[audit_normalized(row['query'])] = row['manualDecision']
+  rows = [{**row, **({'manualDecision': decisions[audit_normalized(row['query'])]} if audit_normalized(row['query']) in decisions else {})}
+          for row in core['allKeywords']]
+  source_keys = {audit_normalized(row['query']) for row in rows}
+  existing = {audit_normalized(row['query']) for row in [*core.get('current', []), *core.get('rankedKeywords', [])]}
+  removed = {audit_normalized(row['query']) for row in removal}
+  chosen = [row for row in selected if audit_normalized(row['query']) not in source_keys and audit_normalized(row['query']) not in removed]
+  chosen.extend(row for row in rows if audit_normalized(row['query']) not in existing | removed
+                and (audit_int(row.get('ozonCount'), 0) > 0 or (marketplace != 'Ozon' and audit_int(row.get('wbCount'), 0) > 0))
+                and row.get('manualDecision') != 'excluded'
+                and (row['relevance'] == 'relevant' or row['relevance'] == 'disputed' and row.get('manualDecision') == 'included'))
+  return {**core, 'allKeywords': rows, 'decisions': [{'query': key, 'manualDecision': value} for key, value in decisions.items()]}, chosen, removal
+
+
+def semantic_autosave(db, job, result):
+  _, current_card = semantic_job_context(db, job)
+  if semantic_facts_hash(current_card) != job['facts_hash']:
+    raise ValueError('semantic_card_changed')
+  table = 'ozon_semantic_drafts' if job['marketplace'] == 'Ozon' else 'card_drafts'
+  existing = db.execute(f'SELECT * FROM {table} WHERE portal_id=? AND card_key=?', (job['portal_id'], job['card_key'])).fetchone()
+  payload = json.loads(existing['payload_json']) if existing else {}
+  if job['marketplace'] == 'Ozon' and payload.get('final') and not isinstance(payload.get('finalSelection'), dict):
+    payload['finalSelection'] = {key: payload.get(key) or [] for key in ('current', 'selected', 'removal')}
+    payload['finalSelection']['period'] = (payload.get('semanticCore') or {}).get('period') or {}
+  request = json.loads(job['request_json'])
+  working = semantic_merge_working_state(payload, request, job['marketplace'])
+  core, selected, removal = semantic_reconcile_result(result['semanticCore'], working, job['marketplace'])
+  now = utc_now().isoformat()
+  if job['marketplace'] == 'Ozon':
+    payload = normalize_ozon_semantic_payload({**payload, 'cardKey': job['card_key'],
+      'sku': current_card.get('sku') or current_card.get('id'), 'offerId': current_card.get('offerId') or current_card.get('vendorCode'),
+      'title': current_card.get('title'), 'seedQuery': core['seedQuery'], 'semanticCore': core,
+      'current': core['current'], 'selected': selected, 'removal': removal})
+    # Update only the semantic draft. The final/finalSelection fields came from the latest stored row.
+    db.execute('INSERT INTO ozon_semantic_drafts(portal_id,card_key,sku,offer_id,title,payload_json,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?) '
+               'ON CONFLICT(portal_id,card_key) DO UPDATE SET payload_json=excluded.payload_json,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP',
+               (job['portal_id'], job['card_key'], payload['sku'], payload['offerId'], payload['title'], semantic_json(payload), job['user_login'], job['user_login']))
+  else:
+    meta = dict(payload.get('meta') or {})
+    reports = meta.get('semanticCoreReports') or []
+    report = {'id': 'semantic-job-' + job['id'], 'createdAt': now, 'seedQuery': core['seedQuery'], 'semanticCore': core, 'selected': selected}
+    meta.update(semanticCoreReports=[report, *[item for item in reports if audit_normalized(item.get('seedQuery')) != audit_normalized(core['seedQuery'])]][:20],
+                semanticCoreSelected=selected, semanticCoreRemoval=removal, semanticJobId=job['id'])
+    payload['meta'] = meta
+    if not existing:
+      payload = normalize_card_draft_payload(payload)
+    db.execute('INSERT INTO card_drafts(portal_id,card_key,nm_id,vendor_code,payload_json,audit_status,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?) '
+               'ON CONFLICT(portal_id,card_key) DO UPDATE SET payload_json=excluded.payload_json,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP',
+               (job['portal_id'], job['card_key'], str(current_card.get('nmID') or ''), str(current_card.get('vendorCode') or ''), semantic_json(payload), payload.get('auditStatus') or 'idle', job['user_login'], job['user_login']))
+  return {**result, 'semanticCore': core, 'selected': selected, 'removal': removal}
+
+
+class SemanticJobCancelled(Exception):
+  pass
+
+
+class SemanticJobWorker:
+  def __init__(self, path):
+    self.path = Path(path).resolve()
+    self.stop = threading.Event()
+    self.wake = threading.Event()
+    self.thread = threading.Thread(target=self.run, daemon=True, name='semantic-jobs')
+
+  def update_provider(self, job, token, state):
+    with semantic_job_connection(self.path) as db:
+      changed = db.execute("UPDATE semantic_jobs SET provider_json=?,updated_at=? WHERE id=? AND run_token=? AND status IN ('collecting','classifying')",
+                           (semantic_json(state), time.time(), job['id'], token)).rowcount
+    if not changed or self.stop.is_set():
+      raise SemanticJobCancelled()
+
+  def step(self, job_id):
+    token = uuid.uuid4().hex
+    with semantic_job_connection(self.path) as db:
+      db.execute('BEGIN IMMEDIATE')
+      row = db.execute("SELECT * FROM semantic_jobs WHERE id=? AND status IN ('queued','collecting','classifying','saving')", (job_id,)).fetchone()
+      if not row:
+        return
+      job = dict(row)
+      db.execute('UPDATE semantic_jobs SET run_token=?,status=?,updated_at=? WHERE id=?',
+                 (token, 'classifying' if job['source_json'] else 'collecting', time.time(), job_id))
+    try:
+      with semantic_job_connection(self.path) as db:
+        user, current_card = semantic_job_context(db, job)
+        if semantic_facts_hash(current_card) != job['facts_hash']:
+          raise ValueError('semantic_card_changed')
+      if job['model_key'] != semantic_model_key():
+        raise ValueError('semantic_model_changed')
+      request = json.loads(job['request_json'])
+      card = request['card']
+      if not job['source_json']:
+        provider = json.loads(job['provider_json'])
+        if provider.get('creating') and not provider.get('reportHash'):
+          raise ValueError('semantic_report_creation_unknown')
+        context = mpstats_call_context_start(user, 'СЯ: фоновый подбор', portal_id=job['portal_id'], card_key=job['card_key'])
+        try:
+          source = fetch_mpstats_semantic_expansion(card, query=request['query'], force_refresh=request['refresh'], marketplace=job['marketplace'],
+            resume_state=provider, checkpoint=lambda state: self.update_provider(job, token, state), request_context=request)
+        finally:
+          mpstats_call_context_stop(context)
+        with semantic_job_connection(self.path) as db:
+          if not db.execute("UPDATE semantic_jobs SET source_json=?,total=?,status='classifying',updated_at=? WHERE id=? AND run_token=? AND status='collecting'",
+                            (semantic_json(source), len(source['semanticCore']['allKeywords']), time.time(), job_id, token)).rowcount:
+            return
+        job['source_json'] = semantic_json(source)
+      else:
+        source = json.loads(job['source_json'])
+      rows = source['semanticCore']['allKeywords']
+      scope = (job['portal_id'], job['user_login'], job['facts_hash'], job['model_key'])
+      with semantic_job_connection(self.path) as db:
+        cached = {row['query_key']: json.loads(row['decision_json']) for row in db.execute(
+          'SELECT query_key,decision_json FROM semantic_query_cache WHERE portal_id=? AND user_login=? AND facts_hash=? AND model_key=?', scope)}
+      missing = [row for row in rows if audit_normalized(row['query']) not in cached]
+      if missing:
+        batch = missing[:SEMANTIC_RELEVANCE_BATCH_SIZE]
+        if self.stop.is_set():
+          return
+        with semantic_job_connection(self.path) as db:
+          latest = db.execute('SELECT status,run_token FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
+          if not latest or latest['status'] not in SEMANTIC_JOB_ACTIVE or latest['run_token'] != token:
+            return
+          _, current_card = semantic_job_context(db, job)
+          if semantic_facts_hash(current_card) != job['facts_hash']:
+            raise ValueError('semantic_card_changed')
+        started = time.monotonic()
+        checked = semantic_classify_query_batch(card, batch)
+        elapsed = time.monotonic() - started
+        if len(checked) != len(batch) or [audit_normalized(r['query']) for r in checked] != [audit_normalized(r['query']) for r in batch]:
+          raise ValueError('semantic_relevance_incomplete')
+        with semantic_job_connection(self.path) as db:
+          db.execute('BEGIN IMMEDIATE')
+          for row in checked:
+            decision = {key: row[key] for key in ('relevance', 'relevanceReason', 'relevanceEvidence') if key in row}
+            if decision.get('relevance') not in ('relevant','disputed','irrelevant') or not decision.get('relevanceReason'):
+              raise ValueError('semantic_relevance_incomplete')
+            db.execute('INSERT OR REPLACE INTO semantic_query_cache VALUES(?,?,?,?,?,?,?)', (*scope, audit_normalized(row['query']), semantic_json(decision), time.time()))
+            cached[audit_normalized(row['query'])] = decision
+          completed = sum(audit_normalized(row['query']) in cached for row in rows)
+          db.execute("UPDATE semantic_jobs SET completed=?,model_seconds=model_seconds+?,model_queries=model_queries+?,scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
+                     (completed, elapsed, len(batch), time.time(), time.time(), job_id, token))
+        return
+      result = semantic_relevance_result(source, card, [{**row, **cached[audit_normalized(row['query'])]} for row in rows])
+      with semantic_job_connection(self.path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = db.execute('SELECT * FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
+        if not current or current['status'] not in SEMANTIC_JOB_ACTIVE or current['run_token'] != token:
+          return
+        result = semantic_autosave(db, current, result)
+        db.execute("UPDATE semantic_jobs SET status='ready',completed=total,result_json=?,auto_saved=1,error='',run_token='',updated_at=? WHERE id=?", (semantic_json(result), time.time(), job_id))
+    except SemanticJobCancelled:
+      return
+    except Exception as exc:
+      if isinstance(exc, MpstatsApiError) and exc.status == HTTPStatus.ACCEPTED:
+        with semantic_job_connection(self.path) as db:
+          db.execute("UPDATE semantic_jobs SET status='collecting',run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='collecting'", (time.time()+5, time.time(), job_id, token))
+        return
+      allowed = {'semantic_card_changed', 'semantic_card_not_found', 'semantic_model_changed', 'semantic_report_creation_unknown',
+                 'semantic_relevance_not_configured', 'semantic_relevance_too_many_queries', 'semantic_card_content_missing', 'semantic_report_timeout'}
+      code = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else 'forbidden' if isinstance(exc, PermissionError) else 'semantic_relevance_failed'
+      with semantic_job_connection(self.path) as db:
+        state = db.execute('SELECT provider_json FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
+        provider = json.loads(state['provider_json']) if state else {}
+      if provider.get('creating') and not provider.get('reportHash'):
+        code = 'semantic_report_creation_unknown'
+      print('semantic-job=' + job_id + ' failed kind=' + type(exc).__name__ + ' code=' + code, file=sys.stderr)
+      with semantic_job_connection(self.path) as db:
+        finished = locals().get('result')
+        db.execute("UPDATE semantic_jobs SET status='failed',error=?,result_json=COALESCE(?,result_json),run_token='',updated_at=? WHERE id=? AND run_token=? AND status IN ('collecting','classifying','saving')", (code, semantic_json(finished) if isinstance(finished, dict) else None, time.time(), job_id, token))
+
+  def run(self):
+    handle = None
+    try:
+      handle = self.path.with_suffix('.semantic-worker.lock').open('a')
+      os.chmod(handle.name, 0o600)
+      while not self.stop.is_set() and self.path == DB_PATH.resolve():
+        try:
+          fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+          break
+        except BlockingIOError:
+          self.stop.wait(1)
+      else:
+        return
+      with semantic_job_connection(self.path) as db:
+        db.execute("DELETE FROM semantic_jobs WHERE status IN ('ready','cancelled','failed') AND updated_at<?", (time.time()-30*86400,))
+        db.execute("DELETE FROM semantic_query_cache WHERE updated_at<? AND NOT EXISTS (SELECT 1 FROM semantic_jobs j WHERE j.portal_id=semantic_query_cache.portal_id AND j.user_login=semantic_query_cache.user_login AND j.facts_hash=semantic_query_cache.facts_hash AND j.model_key=semantic_query_cache.model_key AND j.status IN ('queued','collecting','classifying','saving'))", (time.time()-90*86400,))
+      while not self.stop.is_set() and self.path == DB_PATH.resolve():
+        try:
+          with semantic_job_connection(self.path) as db:
+            row = db.execute("SELECT id FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving') AND scheduled_at<=? ORDER BY scheduled_at,created_at LIMIT 1", (time.time(),)).fetchone()
+          if row:
+            self.step(row['id'])
+          else:
+            self.wake.wait(1)
+            self.wake.clear()
+        except sqlite3.OperationalError:
+          print('semantic-worker database temporarily unavailable', file=sys.stderr)
+          self.stop.wait(5)
+    except Exception as exc:
+      print('semantic-worker failed kind=' + type(exc).__name__, file=sys.stderr)
+    finally:
+      if handle:
+        handle.close()
+
+
+def start_semantic_worker():
+  path = DB_PATH.resolve()
+  with SEMANTIC_JOB_WORKERS_LOCK:
+    worker = SEMANTIC_JOB_WORKERS.get(str(path))
+    if not worker or not worker.thread.is_alive():
+      worker = SemanticJobWorker(path)
+      SEMANTIC_JOB_WORKERS[str(path)] = worker
+      worker.thread.start()
+    worker.wake.set()
+  return worker
+
+
 def semantic_relevance_job_payload(job_id, portal_id, user):
-  with SEMANTIC_RELEVANCE_LOCK:
-    job = SEMANTIC_RELEVANCE_JOBS.get(job_id)
-    if not job or job["portalId"] != str(portal_id) or job["user"] != user_login_value(user):
-      raise ValueError("semantic_relevance_job_not_found")
-    if job["status"] == "ready":
-      return job["result"]
-    return {key: job[key] for key in ("status", "jobId", "completed", "total", "error")}
+  job = semantic_get_job(job_id, portal_id, user)
+  if job['status'] == 'ready':
+    return {**job['result'], 'jobId': job_id, 'autoSaved': job['autoSaved']}
+  return {**job, 'phase': job['status'], 'status': 'classifying' if job['status'] in SEMANTIC_JOB_ACTIVE else job['status']}
 
 
 def start_semantic_relevance_job(result, card, portal_id, user):
-  rows = result["semanticCore"]["allKeywords"]
-  if not rows:
-    return semantic_relevance_result(result, card, [])
-  if not content_reoptimization_configured():
-    raise ValueError("semantic_relevance_not_configured")
-  if not semantic_relevance_facts(card):
-    raise ValueError("semantic_card_content_missing")
-  fingerprint = hashlib.sha256(json.dumps({
-    "version": SEMANTIC_RELEVANCE_VERSION, "portal": str(portal_id), "user": user_login_value(user),
-    "facts": semantic_relevance_facts(card), "result": result["semanticCore"],
-  }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-  with SEMANTIC_RELEVANCE_LOCK:
-    now = time.monotonic()
-    for key, job in list(SEMANTIC_RELEVANCE_JOBS.items()):
-      if job["status"] != "classifying" and now - job["started"] > 3600:
-        del SEMANTIC_RELEVANCE_JOBS[key]
-    while len(SEMANTIC_RELEVANCE_JOBS) >= 32:
-      oldest = next((key for key, value in SEMANTIC_RELEVANCE_JOBS.items() if value["status"] != "classifying"), None)
-      if oldest is None:
-        break
-      del SEMANTIC_RELEVANCE_JOBS[oldest]
-    existing = next((job for job in SEMANTIC_RELEVANCE_JOBS.values()
-                     if job["fingerprint"] == fingerprint and job["status"] != "failed"), None)
-    if existing:
-      return existing["result"] if existing["status"] == "ready" else {
-        key: existing[key] for key in ("status", "jobId", "completed", "total", "error")
-      }
-    if sum(job["status"] == "classifying" for job in SEMANTIC_RELEVANCE_JOBS.values()) >= 2:
-      raise ValueError("semantic_relevance_busy")
-    job_id = uuid.uuid4().hex
-    job = {"jobId": job_id, "portalId": str(portal_id), "user": user_login_value(user), "fingerprint": fingerprint,
-           "started": now, "status": "classifying", "completed": 0, "total": len(rows), "error": ""}
-    SEMANTIC_RELEVANCE_JOBS[job_id] = job
-
-  def run():
-    try:
-      classified = []
-      for offset in range(0, len(rows), SEMANTIC_RELEVANCE_BATCH_SIZE):
-        if time.monotonic() - job["started"] > 1800:
-          raise ValueError("semantic_relevance_timeout")
-        batch = rows[offset:offset + SEMANTIC_RELEVANCE_BATCH_SIZE]
-        batch_key = "semantic-relevance:" + hashlib.sha256(json.dumps({
-          "version": SEMANTIC_RELEVANCE_VERSION, "portal": str(portal_id), "user": user_login_value(user),
-          "facts": semantic_relevance_facts(card), "rows": batch,
-        }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-        cached = audit_cache_get(batch_key)
-        checked = cached if cached is not None else semantic_classify_query_batch(card, batch)
-        if cached is None:
-          audit_cache_set(batch_key, checked, AUDIT_MARKET_CACHE_TTL_SECONDS)
-        classified.extend(checked)
-        with SEMANTIC_RELEVANCE_LOCK:
-          job["completed"] = len(classified)
-      finished = semantic_relevance_result(result, card, classified)
-      with SEMANTIC_RELEVANCE_LOCK:
-        job.update(status="ready", result=finished)
-    except Exception as exc:
-      # Provider bodies, credentials and product texts never become public errors.
-      print("semantic-relevance job=" + job_id + " failed kind=" + type(exc).__name__, file=sys.stderr)
-      with SEMANTIC_RELEVANCE_LOCK:
-        code = "semantic_relevance_timeout" if isinstance(exc, ValueError) and str(exc) == "semantic_relevance_timeout" else "semantic_relevance_failed"
-        job.update(status="failed", error=code)
-
-  threading.Thread(target=run, name="semantic-relevance-" + job_id[:8], daemon=True).start()
-  return {"status": "classifying", "jobId": job_id, "completed": 0, "total": len(rows), "error": ""}
+  job = semantic_create_job(portal_id, card, result['semanticCore'].get('seedQuery', ''), user, source=result)
+  return semantic_relevance_job_payload(job['jobId'], portal_id, user)
 
 
-def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False, marketplace="Wildberries"):
+
+def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False, marketplace="Wildberries", resume_state=None, checkpoint=None, request_context=None):
   if marketplace not in ("Wildberries", "Ozon"):
     raise ValueError("invalid_semantic_marketplace")
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
-  seed_queries = mpstats_expanding_seed_queries(card, query)
+  request_context = request_context or {}
+  seed_queries = request_context.get("seedQueries") or mpstats_expanding_seed_queries(card, query)
   if not seed_queries:
     raise ValueError("missing_semantic_query")
   seed_query = seed_queries[0]
-
-  period = mpstats_semantic_period_default()
-  body = {
-    "type": "keyword",
-    "mp": 1 if marketplace == "Ozon" else 0,
-    "queryData": seed_queries,
-    "d1": period["d1"],
-    "d2": period["d2"],
-    "stopWords": [],
-    "searchFullWord": False,
-    "similar": False,
-  }
+  period = request_context.get("period") or mpstats_semantic_period_default()
+  body = {"type": "keyword", "mp": 1 if marketplace == "Ozon" else 0,
+          "queryData": seed_queries, "d1": period["d1"], "d2": period["d2"],
+          "stopWords": [], "searchFullWord": False, "similar": False}
   cache_key = f"POST:/seo/keywords/expanding/create-report:{json.dumps(body, sort_keys=True, ensure_ascii=False)}"
   cached = None if force_refresh else audit_cache_get(cache_key)
   if cached is not None:
@@ -18158,17 +18600,38 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False, market
     payload = cached
     cached_flag = True
   else:
-    create_payload = mpstats_post_body_json(token, "/seo/keywords/expanding/create-report", body=body, attempts=2)
-    report_hash = audit_str(create_payload.get("reportHash") or create_payload.get("result") or create_payload.get("hash") or "")
+    state = dict(resume_state or {})
+    report_hash = state.get("reportHash")
     if not report_hash:
-      raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_expanding_hash_missing", retryable=True)
+      if checkpoint:
+        state["creating"] = True
+        checkpoint(state)
+      # A durable job must not retry an ambiguous, potentially paid report creation.
+      try:
+        create_payload = mpstats_post_body_json(token, "/seo/keywords/expanding/create-report", body=body, attempts=1 if checkpoint else 2)
+      except MpstatsApiError as exc:
+        if checkpoint and isinstance(exc.status, int) and 400 <= exc.status < 500 and exc.status != 408:
+          state["creating"] = False
+          checkpoint(state)
+        raise
+      report_hash = audit_str(create_payload.get("reportHash") or create_payload.get("result") or create_payload.get("hash") or "")
+      if not report_hash:
+        raise MpstatsApiError(HTTPStatus.BAD_GATEWAY, "mpstats_expanding_hash_missing", retryable=True)
+      if checkpoint:
+        state.update(reportHash=report_hash, creating=False, pollAttempts=0)
+        checkpoint(state)
     payload = None
-    for attempt in range(18):
+    for attempt in range(1 if checkpoint else 18):
+      if checkpoint:
+        state["pollAttempts"] = int(state.get("pollAttempts", 0)) + 1
+        if state["pollAttempts"] > 240:
+          raise ValueError("semantic_report_timeout")
+        checkpoint(state)
       poll_payload = mpstats_get_json(token, f"/seo/keywords/expanding/{report_hash}", attempts=1)
       if isinstance(poll_payload, dict) and isinstance(poll_payload.get("words"), list):
         payload = poll_payload
         break
-      if attempt < 17:
+      if not checkpoint and attempt < 17:
         time.sleep(1.5 if attempt < 3 else 3)
     if payload is None:
       raise MpstatsApiError(HTTPStatus.ACCEPTED, "mpstats_expanding_report_not_ready", retryable=True)
@@ -23373,9 +23836,53 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "seo_service_unavailable"})
     return True
 
+  def handle_semantic_jobs(self, path, method):
+    if path != "/api/semantic-jobs":
+      return False
+    user = self.require_user()
+    if not user:
+      return True
+    if method == "GET":
+      query = parse_qs(urlparse(self.path).query)
+      payload = {key: values[0] for key, values in query.items()}
+    else:
+      payload = self.read_json(MAX_OZON_SEMANTIC_JSON_BYTES)
+      if not isinstance(payload, dict):
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        return True
+    portal_id = payload.get("portalId") or payload.get("portal_id")
+    try:
+      portal_id = int(portal_id)
+    except (TypeError, ValueError):
+      self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_id"})
+      return True
+    if not user_can_access_portal(user, portal_id):
+      self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      return True
+    try:
+      job_id = audit_str(payload.get("jobId") or payload.get("job_id"), 64)
+      if method == "GET":
+        result = {"job": semantic_get_job(job_id, portal_id, user)} if job_id else semantic_list_jobs(portal_id, user, draft_card_key(payload.get("cardKey") or payload.get("card_key")))
+      elif payload.get("action", "start") == "start":
+        card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+        result = {"job": semantic_create_job(portal_id, card, audit_str(payload.get("query"), 240), user, bool(payload.get("refresh")), selection_state=payload.get("selectionState"))}
+      else:
+        result = {"job": semantic_job_action(job_id, portal_id, user, payload.get("action"))}
+    except PermissionError:
+      self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+      return True
+    except ValueError as exc:
+      code = str(exc)
+      self.send_json(HTTPStatus.NOT_FOUND if code == "semantic_relevance_job_not_found" else HTTPStatus.CONFLICT if code == "semantic_card_busy" else HTTPStatus.BAD_REQUEST, {"error": code})
+      return True
+    self.send_json(HTTPStatus.OK, result)
+    return True
+
   def do_GET(self):
     parsed = urlparse(self.path)
     path = parsed.path
+    if self.handle_semantic_jobs(path, "GET"):
+      return
     if self.handle_automatic_seo(path, "GET"):
       return
     if path == "/healthz":
@@ -24054,6 +24561,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
 
   def do_POST(self):
     path = urlparse(self.path).path
+    if self.handle_semantic_jobs(path, "POST"):
+      return
     if self.handle_automatic_seo(path, "POST"):
       return
     if path == "/api/login":
@@ -24650,46 +25159,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, result)
         return
       with connect_db() as db:
-        portal = db.execute("SELECT marketplace FROM portals WHERE id = ?", (portal_id,)).fetchone()
-      marketplace = portal["marketplace"] if portal else "Wildberries"
-      if marketplace == "Ozon" and not user_can_edit_portal(user, portal_id):
+        portal = db.execute("SELECT marketplace FROM portals WHERE id=?", (portal_id,)).fetchone()
+      if portal and portal["marketplace"] == "Ozon" and not user_can_edit_portal(user, portal_id):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
-      force_refresh = bool(payload.get("refresh"))
       try:
-        context_token = mpstats_call_context_start(user, "СЯ: подбор новых запросов", portal_id=portal_id, card_key=card_key_from_snapshot_card(raw_card), nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
-          "query": payload.get("query") or "",
-          "refresh": force_refresh,
-        })
-        try:
-          if not content_reoptimization_configured():
-            raise ValueError("semantic_relevance_not_configured")
-          if not semantic_relevance_facts(raw_card):
-            raise ValueError("semantic_card_content_missing")
-          result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh, marketplace=marketplace)
-          result = start_semantic_relevance_job(result, raw_card, portal_id, user)
-        finally:
-          mpstats_call_context_stop(context_token)
+        if not content_reoptimization_configured():
+          raise ValueError("semantic_relevance_not_configured")
+        if not semantic_relevance_facts(raw_card):
+          raise ValueError("semantic_card_content_missing")
+        job = semantic_create_job(portal_id, raw_card, audit_str(payload.get("query"), 240), user, bool(payload.get("refresh")))
+        result = semantic_relevance_job_payload(job["jobId"], portal_id, user)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
       except ValueError as exc:
-        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_semantic_request"})
-        return
-      except RuntimeError:
-        self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
-        return
-      except MpstatsApiError as exc:
-        status = exc.status if isinstance(exc.status, int) else HTTPStatus.BAD_GATEWAY
-        if status < 400 or status >= 600:
-          status = HTTPStatus.BAD_GATEWAY
-        self.send_json(
-          status,
-          {
-            "error": "mpstats_api_error",
-            "status": exc.status,
-            "message": exc.message,
-            "retryable": exc.retryable,
-          },
-        )
+        self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         return
       self.send_json(HTTPStatus.OK, result)
       return
@@ -25776,6 +26262,7 @@ def start_competitor_auto_check_worker():
 def run_server(host, port):
   init_db()
   recover_automatic_seo_handoffs()
+  start_semantic_worker()
   bitrix_seo_notifier().start()
   start_competitor_auto_check_worker()
   server = ThreadingHTTPServer((host, port), OpticardsHandler)
