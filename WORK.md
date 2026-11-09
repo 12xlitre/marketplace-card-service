@@ -28,7 +28,19 @@ Backup quick_check OK: /opt/opticards/var/backups/deal-mail-release-20261109T145
 Guard: jobs/recovery/workflow active0; сохранены199drafts/58auto/7Ozon и3state;
 текущая рабочая запись workflow_legacy_schedule1 и event1 не трогаются.
 Audit GO с внешним условием CRM scope, ещё отсутствует при последней проверке.
-Production runtime на момент разработки c32a075; выпуск текущих правок готовится.
+Код **4beaf4a** отправлен в main и выложен штатным `sudo -n opticards-deploy`
+на46.19.66.244. Production acceptance PASS: WB/Ozon кабинеты, новая вкладка,
+состояние «нужно CRM», приватность mail API/preview tech403, mobile390 и
+обновлённая инструкция; JS errors0. Публичный bundle совпал с root index,
+health/session200, private API401, source/docs/git/tests404. Временные кабинеты,
+пользователь и сессии полностью удалены, auth-файл уничтожен. После очистки
+все прежние rowCounts/3state.json/пользовательская calendar запись и event1
+совпали с predeploy; физические SHA WBv14/Ozonv4 сохранены, CRM links0.
+Реальная отправка через production Б24 ещё не проверена: при последнем read-only
+запросе CRM scope отсутствует. Дмитрий обещал добавить; ящик уже подключён.
+Аккаунтам выбрать сделки; для первого теста нужен свой адрес и явное поручение.
+Добавлена память product_crm_correspondence.md; SMTP/IMAP реквизиты не нужны.
+Выпуск и техническая приёмка закончены, повторный deploy ради этих docs не нужен.
 Реальные сделки автоматически не привязываются, реальные письма не отправляются.
 
 ## Дни аккаунта и оценка специалиста перетаскиванием — 09.11.2026

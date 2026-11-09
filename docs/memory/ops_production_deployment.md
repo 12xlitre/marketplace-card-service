@@ -89,3 +89,12 @@ workflow_day_assignments без фиктивных минут; оценки ос
 WB/Ozon/30мин/mobile390 PASS, fixtures полностью удалены. Перед выпуском
 консистентный backup и idle guard, после — исходные количества/state/Excel SHA.
 Документационный follow-up не требует повторного перезапуска.
+
+09.11.2026 выпуск4beaf4a: переписка Б24 через сделку в существующем server.py,
+additive workflow_crm_links, root index пересобран; runtime/infra зависимости
+без изменений. Backup deal-mail-release-20261109T145202Z quick_check OK.
+Production WB/Ozon mail-tab/CRM-needed state/tech403/guide/mobile390 PASS;
+реальных писем/привязок не делали, fixtures полностью удалены. Существующие
+календарная запись/event1, paid states и Excel SHA сохранены. Последний scope
+пока без CRM; это внешняя настройка, не повод повторять выкладку. Docs follow-up
+после приёмки не требует повторного перезапуска.
