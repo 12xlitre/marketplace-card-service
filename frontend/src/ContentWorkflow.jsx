@@ -1,12 +1,13 @@
 import {useEffect,useRef,useState} from 'react';
 import './contentWorkflow.css';
+import {MailComposer} from './ClientMail';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'В плане',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
   awaiting_semantic:'Ожидает согласованного СЯ',generating:'Переоптимизация',account_review:'Передано аккаунту',
   client_review:'На согласовании клиента',approved:'Выполнено',changes_requested:'На доработке',cancelled:'Отменено',
   archived:'Архив плана',sending:'Отправляется',pending:'В очереди',sent:'Отправлено',blocked:'Ожидает настройки',uncertain:'Требует проверки доставки',superseded:'В истории',in_progress:'В работе',queued:'В очереди',ready:'Подбор готов',generated:'Проверить контент',reviewed:'Проверено',running:'Готовим',failed:'Ошибка'};
-const messages={workflow_rate_limited:'Слишком много действий. Подождите минуту и повторите.',forbidden:'Нет прав на это действие.',workflow_contacts_required:'Заполните контактное лицо, email и телефон клиента.',
+const messages={crm_deal_required:'Привяжите сделку в кабинете → Переписка.',crm_scope_required:'Добавьте вебхуку Б24 право CRM.',workflow_rate_limited:'Слишком много действий. Подождите минуту и повторите.',forbidden:'Нет прав на это действие.',workflow_contacts_required:'Заполните контактное лицо, email и телефон клиента.',
   workflow_schedule_required:'Сначала назначьте плановую длительность задачи в календаре.',workflow_cards_required:'Выберите от 1 до 200 карточек.',workflow_assignee_required:'Выберите исполнителя с доступом к кабинету.',
   workflow_approval_proof_required:'Укажите дату и приложите подтверждение клиента (до 2 МБ).',
   workflow_version_conflict:'Версия изменилась. Обновите задачу и проверьте актуальный файл.',
@@ -136,12 +137,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       {editor.batch.fields.includes('description')?<label className="field-label">Описание<textarea required rows={12} value={editor.content.description||''} onChange={e=>setEditor({...editor,content:{...editor.content,description:e.target.value}})}/></label>:null}
       {(editor.content.characteristics||[]).map((c,i)=><label className="field-label" key={i}>{c.name}<input value={c.value} onChange={e=>setEditor({...editor,content:{...editor.content,characteristics:editor.content.characteristics.map((v,n)=>n===i?{...v,value:e.target.value}:v)}})}/></label>)}
       <ErrorNote error={error}/><button className="btn primary" disabled={busy}>Проверено · сохранить</button></form></Modal>:null}
-    {mail?<Modal title="Письмо клиенту на согласование" onClose={()=>setMail(null)}><form onSubmit={async e=>{e.preventDefault();try{await act('send_mail',mail);setMail(null)}catch{}}}>
-      <p>Вложение: {mail.fileName}</p><label className="field-label">Кому<input type="email" required value={mail.to} onChange={e=>setMail({...mail,to:e.target.value})}/></label>
-      <label className="field-label">Тема<input required value={mail.subject} onChange={e=>setMail({...mail,subject:e.target.value})}/></label>
-      <label className="field-label">Текст<textarea rows={8} required value={mail.body} onChange={e=>setMail({...mail,body:e.target.value})}/></label>
-      {!mail.configured?<p className="status-note">Почта ещё не подключена. Реквизиты добавлены в список необходимых материалов.</p>:null}
-      <ErrorNote error={error}/><button className="btn primary" disabled={busy||!mail.configured}>Отправить клиенту</button></form></Modal>:null}
+    {mail?<Modal title="Письмо клиенту на согласование" onClose={()=>setMail(null)}><MailComposer draft={mail} portalId={portal.id} apiRequest={apiRequest} onClose={()=>setMail(null)} onSent={reload}/></Modal>:null}
     {incoming?<Modal title="Клиент внёс правки" onClose={()=>setIncoming(null)}><p>{incoming.file.name}. Загрузите возвращённый XLSX из этой задачи.</p>
       <input type="file" accept=".xlsx" onChange={async e=>{try{const file=e.target.files[0];if(!file)return;const value=await attachment(file,8*1024*1024);const body=value.dataUrl.split(',')[1];const preview=await act('import_preview',{fileId:incoming.file.id,body});setIncoming({...incoming,body,preview})}catch(e){setError(e.message)}}}/>
       {incoming.preview?<><p>Изменений: {incoming.preview.changeCount}. {incoming.preview.rejected?'Есть отказы: результат вернётся на доработку.':''}</p>
@@ -188,14 +184,13 @@ function ScheduleForm({batch,busy,onRemove}){
   </details>;
 }
 
-const eventLabel=action=>({task_day_assigned:'Аккаунт назначил день задачи',task_day_removed:'Назначение дня снято',content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
+const eventLabel=action=>({task_day_assigned:'Аккаунт назначил день задачи',task_day_removed:'Назначение дня снято',content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',crm_deal_linked:'Кабинет связан со сделкой Б24',crm_deal_unlinked:'Привязка сделки снята',crm_mail_sent:'Письмо передано в Б24',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
 
 export function ContentWorkflowSettings({apiRequest}){
-  const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[form,setForm]=useState({host:'',port:465,tls:'ssl',from:'',fromName:'',login:'',password:'',replyTo:'',cc:'',signature:''});
-  useEffect(()=>{apiRequest(endpoint+'/settings').then(value=>{setData(value);setForm(f=>({...f,...value.smtp,password:''}))}).catch(e=>setError(e.message))},[]);
-  async function save(payload){setBusy(true);setError('');try{const next=await apiRequest(endpoint+'/settings',{method:'POST',body:JSON.stringify(payload)});setData(next);setForm(f=>({...f,...next.smtp,password:''}))}catch(e){setError(e.message)}finally{setBusy(false)}}
-  return <section className="panel cw-settings"><h2>Клиентские письма и исполнители</h2><p>Секрет почты хранится зашифрованно. Подключение проверяется при отправке; автоматических тестовых писем нет.</p><ErrorNote error={error}/>
-    <details><summary>Подключить SMTP · {data?.configured?'настройки сохранены':'не подключено'}</summary><form onSubmit={e=>{e.preventDefault();save({action:'smtp',...form})}}><div className="form-two">{[['host','SMTP-сервер'],['port','Порт'],['login','Логин'],['password','Пароль приложения'],['from','Адрес отправителя'],['fromName','Имя отправителя'],['replyTo','Reply-To'],['cc','Копия письма']].map(([key,label])=><label className="field-label" key={key}>{label}<input type={key==='password'?'password':key==='port'?'number':'text'} autoComplete="off" required={['host','port','login','from'].includes(key)} value={form[key]} onChange={e=>setForm({...form,[key]:e.target.value})}/></label>)}</div><label className="field-label">Защита<select value={form.tls} onChange={e=>setForm({...form,tls:e.target.value})}><option value="ssl">SSL/TLS</option><option value="starttls">STARTTLS</option></select></label><label className="field-label">Подпись<textarea value={form.signature} onChange={e=>setForm({...form,signature:e.target.value})}/></label><button className="btn primary" disabled={busy}>Сохранить подключение</button></form></details>
+  const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  useEffect(()=>{apiRequest(endpoint+'/settings').then(setData).catch(e=>setError(e.message))},[]);
+  async function save(payload){setBusy(true);setError('');try{setData(await apiRequest(endpoint+'/settings',{method:'POST',body:JSON.stringify(payload)}))}catch(e){setError(e.message)}finally{setBusy(false)}}
+  return <section className="panel cw-settings"><h2>Клиентские письма и исполнители</h2><p>Почта работает через существующий вебхук Б24 с правом «CRM». Пароли SMTP/IMAP в сервисе не нужны. Ящик подключается к CRM в самом Б24; сделка выбирается в кабинете → «Переписка».</p><ErrorNote error={error}/>
     <details><summary>Б24 и рабочие дни исполнителей</summary><button className="btn" disabled={busy} onClick={()=>save({action:'retry_blocked_bitrix'})}>Повторить уведомления, ожидавшие настройки</button><p>Укажите действительный ID сотрудника в Б24. Рабочая неделя по умолчанию — понедельник–пятница.</p>{data?.people.map(person=><PersonSettings key={person.login} person={person} busy={busy} onSave={p=>save({action:'person',...p})}/>)}</details>
   </section>;
 }

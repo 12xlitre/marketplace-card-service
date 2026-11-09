@@ -4,6 +4,7 @@ import BitrixNotificationsSettings from "./BitrixNotificationsSettings";
 import CabinetFilesDialog from "./CabinetFilesDialog";
 import SemanticRelevancePanel from "./SemanticRelevancePanel";
 import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJobs";
+import ClientMail from "./ClientMail";
 import ServiceGuide from "./ServiceGuide";
 import WorkCalendar, {CalendarTaskFocus} from "./WorkCalendar";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
@@ -15,6 +16,7 @@ import {
   ArrowDown,
   ArrowLeft,
   ArrowUp,
+  Mail,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -56,12 +58,13 @@ const hardcodedDirectoryFallback = [
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
 const appScreens = new Set(["cabinets", "client", "seller", "card", "ozon-card", "settings", "admin", "guide", "calendar"]);
-const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods"]);
+const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods", "mail"]);
 const sellerWorkspaceTabs = [
   { key: "cabinet", label: "Кабинет", Icon: LayoutDashboard },
   { key: "tasks", label: "Задачи", Icon: ClipboardList },
   { key: "reports", label: "Отчеты", Icon: FileText },
   { key: "work-periods", label: "Отчетный период", Icon: CheckSquare },
+  { key: "mail", label: "Переписка", Icon: Mail },
 ];
 const cardWorkspaceTabs = [
   { key: "card", label: "Карточка", Icon: ShoppingBag },
@@ -301,6 +304,7 @@ function sellerBackLabel(tab) {
     tasks: "Задачи",
     reports: "Отчеты",
     "work-periods": "Отчетный период",
+    mail: "Переписка",
   }[tab] || "Карточки";
 }
 
@@ -9516,6 +9520,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                 onDeleteTask={deleteOzonTask}
               />
             ) : null}
+            {activeSellerTab === "mail" ? <ClientMail key={portal.id} portal={portal} apiRequest={apiRequest} /> : null}
             {activeSellerTab === "reports" ? (
               <OzonReportsPanel portal={portal} cards={portal.realCards || []} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
@@ -13663,6 +13668,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
 	              />
               </>
             ) : null}
+            {activeSellerTab === "mail" ? <ClientMail key={portal.id} portal={portal} apiRequest={apiRequest} /> : null}
             {activeSellerTab === "reports" ? (
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}

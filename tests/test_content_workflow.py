@@ -185,10 +185,10 @@ class ContentWorkflowTest(unittest.TestCase):
         public=server.workflow_settings(self.users['admin'],config)
         self.assertNotIn('fixture-password',json.dumps(public))
         with self.assertRaises(PermissionError):server.workflow_settings(self.users['lead'],config)
-        draft=server.workflow_mail_draft(self.portal,{'fileId':file_id},self.users['account'])
+        draft=server.workflow_legacy_smtp_draft(self.portal,{'fileId':file_id},self.users['account'])
         payload={**draft,'requestId':'mail-1'}
-        first=server.workflow_enqueue_mail(self.portal,payload,self.users['account'])
-        self.assertEqual(first,server.workflow_enqueue_mail(self.portal,payload,self.users['account']))
+        first=server.workflow_legacy_enqueue_smtp(self.portal,payload,self.users['account'])
+        self.assertEqual(first,server.workflow_legacy_enqueue_smtp(self.portal,payload,self.users['account']))
         with patch.object(server,'workflow_send_smtp',side_effect=TimeoutError('secret provider response')) as send:
             server.workflow_deliver_one();server.workflow_deliver_one()
         send.assert_called_once()

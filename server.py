@@ -23859,6 +23859,11 @@ def workflow_init_schema(db):
       day TEXT NOT NULL,created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(task_id,day));
     CREATE INDEX IF NOT EXISTS idx_workflow_day_owner ON workflow_day_assignments(assignee,day);
+    CREATE TABLE IF NOT EXISTS workflow_crm_links(
+      portal_id INTEGER PRIMARY KEY REFERENCES portals(id) ON DELETE CASCADE,
+      id TEXT NOT NULL UNIQUE,origin TEXT NOT NULL,deal_id INTEGER NOT NULL,title TEXT NOT NULL,
+      data_json TEXT NOT NULL,created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS workflow_people(
       login TEXT PRIMARY KEY REFERENCES users(login) ON DELETE CASCADE,bitrix_id INTEGER,
       weekdays_json TEXT NOT NULL DEFAULT '[0,1,2,3,4]');
@@ -24165,7 +24170,7 @@ def workflow_list(portal, user, batch_id=None):
     return {'deliveries':deliveries,'plans':plans,'batches':[workflow_public_batch(db,r) for r in visible],'people':people,'team':roles,
             'canManage':manager,'canConfigure':current['user_role']=='admin','login':current['login'],'contact':client_contact_from_json(record['client_contact_json']),
             'taskOptions':{**{k:v for k,v in WORK_PERIOD_TASK_LABELS.items() if k in DEFAULT_WORK_PERIOD_TASK_KEYS},'content':'Контент: наименование, характеристики и описание'},
-            'events':events,'mailConfigured':bool(get_service_integration(WORKFLOW_SMTP).get('connected'))}
+            'events':events,'mailConfigured':bool(workflow_crm_link(db,portal))}
 
 
 def workflow_schedule_task(portal, payload, user):
@@ -25171,7 +25176,310 @@ def workflow_export_plan(portal,payload,user):
   return {'fileId':file_id}
 
 
+# CRM correspondence uses the existing, host-restricted Bitrix webhook.
+CRM_MAIL_LOCK = threading.Lock()
+CRM_MAIL_NEXT_CALL = 0
+
+
+def workflow_crm_hook():
+  from automatic_seo_host import clean_bitrix_notification_webhook
+  secret=get_service_integration_secret('bitrix-notifications')
+  if not secret: raise workflow_error('crm_not_configured',409)
+  try: return clean_bitrix_notification_webhook(secret)
+  except ValueError: raise workflow_error('crm_not_configured',409) from None
+
+
+def workflow_crm_request(method,payload=None):
+  """Only crm.activity.add mutates CRM; it is deliberately NEVER retried."""
+  from urllib.request import Request,build_opener,HTTPRedirectHandler
+  from urllib.error import HTTPError,URLError
+  global CRM_MAIL_NEXT_CALL
+  allowed={'scope','crm.deal.get','crm.contact.get','crm.company.get','crm.activity.list','crm.activity.get','crm.activity.add'}
+  if method not in allowed: raise workflow_error('crm_invalid_method')
+  hook=workflow_crm_hook()
+  class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+  request=Request(hook+method+'.json',data=json.dumps(payload or {}).encode(),headers={'Content-Type':'application/json'})
+  attempts=1 if method=='crm.activity.add' else 3
+  for attempt in range(attempts):
+    retry_delay=None
+    try:
+      with CRM_MAIL_LOCK:
+        delay=max(0,CRM_MAIL_NEXT_CALL-time.monotonic())
+        if delay: time.sleep(delay)
+        CRM_MAIL_NEXT_CALL=time.monotonic()+.55
+      with build_opener(NoRedirect).open(request,timeout=8) as response:
+        raw=response.read(4*1024*1024+1)
+      if len(raw)>4*1024*1024: raise workflow_error('crm_invalid_response',502)
+      value=json.loads(raw)
+      if not isinstance(value,dict): raise workflow_error('crm_invalid_response',502)
+      if value.get('error'):
+        code=str(value['error'])
+        if code in ('QUERY_LIMIT_EXCEEDED','OPERATION_TIME_LIMIT'): retry_delay=.5*(2**attempt)
+        else:
+          exc=workflow_error('crm_access_denied' if any(k in code.upper() for k in ('ACCESS','AUTH','PERMISSION','SCOPE')) else 'crm_request_rejected',502)
+          exc.certain=True
+          raise exc
+      else: return value
+    except HTTPError as exc:
+      if exc.code==429 or exc.code>=500:
+        try: retry_delay=min(2,max(.5,float(exc.headers.get('Retry-After',.5*(2**attempt)))))
+        except (TypeError,ValueError): retry_delay=.5*(2**attempt)
+      else:
+        error=workflow_error('crm_access_denied' if exc.code in (401,403) else 'crm_request_rejected',502)
+        # A malformed response/redirect may follow a processed mutation: fail uncertain.
+        error.certain=exc.code in (400,401,403,404,405)
+        raise error from None
+    except (URLError,TimeoutError,OSError,http.client.HTTPException): retry_delay=.5*(2**attempt)
+    except (json.JSONDecodeError,UnicodeError): raise workflow_error('crm_invalid_response',502) from None
+    if attempt+1>=attempts: raise workflow_error('crm_unavailable',502)
+    time.sleep(min(2,retry_delay or .5))
+
+
+def workflow_crm_access(db,portal,user,write=False):
+  record,current,manager=workflow_access(db,portal,user,write)
+  if current['user_role']=='tech' or (not manager and not user_has_global_portal_access(current)):
+    raise PermissionError('forbidden')
+  return record,current,manager
+
+
+def workflow_crm_link(db,portal):
+  row=db.execute('SELECT * FROM workflow_crm_links WHERE portal_id=?',(portal,)).fetchone()
+  return dict(row) if row else None
+
+
+def workflow_crm_public_link(link):
+  if not link: return None
+  return {'id':link['id'],'dealId':link['deal_id'],'title':link['title'],
+          'url':link['origin']+'/crm/deal/details/'+str(link['deal_id'])+'/'}
+
+
+def workflow_crm_check_link(link):
+  if not link: raise workflow_error('crm_deal_required',409)
+  origin='https://'+urlparse(workflow_crm_hook()).hostname
+  if link['origin']!=origin: raise workflow_error('crm_portal_changed',409)
+
+
+def workflow_crm_deal(value,user=None):
+  value=str(value or '').strip()
+  if value.isdigit(): deal_id=int(value)
+  else:
+    url=urlparse(value);origin='https://'+urlparse(workflow_crm_hook()).hostname
+    match=re.fullmatch(r'/crm/deal/details/([1-9]\d*)/?',url.path)
+    if url.scheme!='https' or 'https://'+url.netloc!=origin or not match: raise workflow_error('crm_invalid_deal')
+    deal_id=int(match[1])
+  if not 0<deal_id<2**53: raise workflow_error('crm_invalid_deal')
+  deal=workflow_crm_request('crm.deal.get',{'id':deal_id}).get('result')
+  if not isinstance(deal,dict) or str(deal.get('ID'))!=str(deal_id): raise workflow_error('crm_deal_not_found',404)
+  # A service webhook can see more CRM than the OptiCards account. An account
+  # may only establish its own CRM deal; admins can explicitly approve other links.
+  with semantic_job_connection() as db:
+    actor=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(user_login_value(user),)).fetchone()
+    person=db.execute('SELECT bitrix_id FROM workflow_people WHERE login=?',(user_login_value(user),)).fetchone()
+    if not actor or (actor['user_role']!='admin' and not user_has_global_portal_access(actor) and
+                     (not person or not person[0] or str(person[0])!=str(deal.get('ASSIGNED_BY_ID')))):
+      raise workflow_error('crm_deal_owner_required',403)
+  contact_id=int(deal.get('CONTACT_ID') or 0);company_id=int(deal.get('COMPANY_ID') or 0)
+  recipient=''
+  for method,entity_id in [('crm.contact.get',contact_id),('crm.company.get',company_id)]:
+    if not entity_id: continue
+    entity=workflow_crm_request(method,{'id':entity_id}).get('result') or {}
+    recipient=next((audit_str(e.get('VALUE'),180) for e in (entity.get('EMAIL') or []) if e.get('VALUE')),'')
+    if recipient: break
+  return {'dealId':deal_id,'title':audit_str(deal.get('TITLE'),300),'contactId':contact_id,'companyId':company_id,
+          'responsibleId':int(deal.get('ASSIGNED_BY_ID') or 0),'email':recipient,
+          'origin':'https://'+urlparse(workflow_crm_hook()).hostname}
+
+
+def workflow_crm_bind(portal,payload,user):
+  with semantic_job_connection() as db:
+    workflow_crm_access(db,portal,user,True)
+    old=workflow_crm_link(db,portal)
+    if (old['id'] if old else '')!=payload.get('previousLinkId',''): raise workflow_error('workflow_version_conflict',409)
+  deal=workflow_crm_deal(payload.get('dealId'),user) if payload.get('action')!='unlink_deal' else None
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE');workflow_crm_access(db,portal,user,True)
+    current=workflow_crm_link(db,portal)
+    if (current['id'] if current else '')!=payload.get('previousLinkId',''): raise workflow_error('workflow_version_conflict',409)
+    if db.execute("SELECT 1 FROM workflow_outbox WHERE portal_id=? AND kind='crm_email' AND status IN ('pending','sending','uncertain')",(portal,)).fetchone():
+      raise workflow_error('crm_delivery_pending',409)
+    db.execute('DELETE FROM workflow_crm_links WHERE portal_id=?',(portal,))
+    if deal:
+      link_id=uuid.uuid4().hex
+      db.execute('INSERT INTO workflow_crm_links(portal_id,id,origin,deal_id,title,data_json,created_by) VALUES(?,?,?,?,?,?,?)',
+                 (portal,link_id,deal['origin'],deal['dealId'],deal['title'],semantic_json(deal),user_login_value(user)))
+    workflow_event(db,portal,user,'crm_deal_linked' if deal else 'crm_deal_unlinked',dealId=deal['dealId'] if deal else old['deal_id'] if old else None)
+  return {'linked':bool(deal)}
+
+
+def workflow_crm_plain_text(body,kind):
+  if str(kind)!='2': return audit_str(body,70000)
+  from html.parser import HTMLParser
+  class Plain(HTMLParser):
+    def __init__(self): super().__init__(convert_charrefs=True);self.parts=[];self.hidden=0
+    def handle_starttag(self,tag,attrs):
+      if tag in ('script','style','head','iframe','object'): self.hidden+=1
+      elif not self.hidden and tag in ('br','p','div','tr','li'): self.parts.append('\n')
+    def handle_endtag(self,tag):
+      if tag in ('script','style','head','iframe','object'): self.hidden=max(0,self.hidden-1)
+    def handle_data(self,data):
+      if not self.hidden: self.parts.append(data)
+  parser=Plain();parser.feed(str(body or '')[:150000]);return ''.join(parser.parts).strip()[:70000]
+
+
+def workflow_crm_mailbox(portal,user,before=None):
+  with semantic_job_connection() as db:
+    record,_,manager=workflow_crm_access(db,portal,user)
+    link=workflow_crm_link(db,portal)
+    contact=client_contact_from_json(record['client_contact_json'])
+    deliveries=[dict(r) for r in db.execute("SELECT id,status,error,created_at,updated_at FROM workflow_outbox WHERE portal_id=? AND kind='crm_email' ORDER BY created_at DESC LIMIT 30",(portal,))]
+  result={'link':workflow_crm_public_link(link),'canManage':manager,'messages':[],'deliveries':deliveries,'email':contact.get('email') or '',
+          'checkedAt':dt.datetime.now(dt.timezone.utc).isoformat(),'error':'','hasMore':False}
+  try:
+    scopes=workflow_crm_request('scope').get('result',[])
+    if 'crm' not in scopes: raise workflow_error('crm_scope_required',409)
+    if not link: return result
+    workflow_crm_check_link(link)
+    filters={'BINDINGS':[{'OWNER_TYPE_ID':2,'OWNER_ID':link['deal_id']}],'TYPE_ID':4}
+    if before:
+      if not str(before).isdigit(): raise workflow_error('crm_invalid_cursor')
+      filters['<ID']=int(before)
+    value=workflow_crm_request('crm.activity.list',{'filter':filters,'order':{'ID':'DESC'},'select':['ID','SUBJECT','DESCRIPTION','DESCRIPTION_TYPE','DIRECTION','START_TIME','CREATED','COMMUNICATIONS','SETTINGS','FILES'],'start':0})
+    rows=value.get('result')
+    if not isinstance(rows,list): raise workflow_error('crm_invalid_response',502)
+    for row in rows[:50]:
+      result['messages'].append({'id':str(int(row['ID'])),'subject':audit_str(row.get('SUBJECT'),300),
+          'body':workflow_crm_plain_text(row.get('DESCRIPTION'),row.get('DESCRIPTION_TYPE')),
+          'direction':'in' if str(row.get('DIRECTION'))=='1' else 'out',
+          'date':audit_str(row.get('START_TIME') or row.get('CREATED'),60),
+          'addresses':[audit_str(c.get('VALUE'),180) for c in (row.get('COMMUNICATIONS') or []) if c.get('TYPE')=='EMAIL'],
+          'hasAttachments':bool(row.get('FILES'))})
+    result['hasMore']='next' in value
+    result['before']=result['messages'][-1]['id'] if result['messages'] else None
+    if not result['email']: result['email']=json.loads(link['data_json']).get('email','')
+  except ValueError as exc:
+    result['error']=str(exc) if re.fullmatch(r'crm_[a-z_]+',str(exc)) else 'crm_unavailable'
+  return result
+
+
 def workflow_mail_draft(portal,payload,user):
+  with semantic_job_connection() as db:
+    record,_,_=workflow_crm_access(db,portal,user,True)
+    link=workflow_crm_link(db,portal)
+    contact=client_contact_from_json(record['client_contact_json'])
+    file=None
+    if payload.get('fileId'):
+      file,_,_=workflow_file_context(db,portal,payload['fileId'],user,True)
+      if file['period_id']:
+        plan=db.execute('SELECT data_json FROM workflow_plans WHERE period_id=?',(file['period_id'],)).fetchone()
+        contact=json.loads(plan[0])['contact']
+  crm_contact=json.loads(link['data_json']) if link else {}
+  return {'fileId':file['id'] if file else None,'fileSha':file['sha256'] if file else None,'fileName':file['name'] if file else '',
+          'to':contact.get('email') or crm_contact.get('email') or '',
+          'subject':'На согласование · '+file['name'] if file else '',
+          'body':'Добрый день!\n\nНаправляем материалы на согласование. Пожалуйста, подтвердите принятие или верните файл с правками.\n' if file else '',
+          'configured':bool(link),'provider':'bitrix','linkId':link['id'] if link else '',
+          'deal':workflow_crm_public_link(link)}
+
+
+def workflow_enqueue_mail(portal,payload,user):
+  key=audit_str(payload.get('requestId'),80)
+  if not key: raise workflow_error('workflow_request_id_required')
+  recipient=workflow_email(payload.get('to'));subject=audit_str(payload.get('subject'),300)
+  body=audit_str(payload.get('body'),14000)
+  if not subject or not body or '\n' in subject or '\r' in subject: raise workflow_error('workflow_invalid_email')
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE');workflow_crm_access(db,portal,user,True)
+    link=workflow_crm_link(db,portal);workflow_crm_check_link(link)
+    if link['id']!=payload.get('linkId'): raise workflow_error('workflow_version_conflict',409)
+    file=batch=None
+    if payload.get('fileId'):
+      file,batch,_=workflow_file_context(db,portal,payload['fileId'],user,True)
+      if file['sha256']!=payload.get('fileSha'): raise workflow_error('workflow_version_conflict',409)
+    data={'fileId':file['id'] if file else None,'sha256':file['sha256'] if file else None,'to':recipient,'subject':subject,'body':body,
+          'actor':user_login_value(user),'linkId':link['id'],'dealId':link['deal_id'],'origin':link['origin']}
+    dedup='crm-mail:'+str(portal)+':'+key
+    old=db.execute('SELECT id,payload_json FROM workflow_outbox WHERE dedup_key=?',(dedup,)).fetchone()
+    if old:
+      if json.loads(old['payload_json'])!=data: raise workflow_error('workflow_version_conflict',409)
+      return {'deliveryId':old['id']}
+    delivery=uuid.uuid4().hex
+    db.execute("INSERT INTO workflow_outbox(id,portal_id,batch_id,kind,dedup_key,payload_json) VALUES(?,?,?,'crm_email',?,?)",(delivery,portal,batch['id'] if batch else None,dedup,semantic_json(data)))
+    workflow_event(db,portal,user,'mail_queued',file['period_id'] if file else None,batch['id'] if batch else None,fileId=data['fileId'],deliveryId=delivery,dealId=link['deal_id'])
+  start_workflow_worker();return {'deliveryId':delivery}
+
+
+def workflow_crm_deliver_one():
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    row=db.execute("SELECT * FROM workflow_outbox WHERE kind='crm_email' AND status='pending' ORDER BY created_at,id LIMIT 1").fetchone()
+    if not row: return False
+    row=dict(row);data=json.loads(row['payload_json']);file=batch=None
+    try:
+      actor=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(data['actor'],)).fetchone()
+      workflow_crm_access(db,row['portal_id'],actor,True)
+      link=workflow_crm_link(db,row['portal_id']);workflow_crm_check_link(link)
+      if link['id']!=data['linkId']: raise workflow_error('workflow_version_conflict')
+      if data['fileId']:
+        file,batch,_=workflow_file_context(db,row['portal_id'],data['fileId'],actor,True)
+        if file['sha256']!=data['sha256']: raise workflow_error('workflow_version_conflict')
+    except (PermissionError,ValueError):
+      db.execute("UPDATE workflow_outbox SET status='failed',error='workflow_version_conflict',updated_at=CURRENT_TIMESTAMP WHERE id=?",(row['id'],));return True
+    db.execute("UPDATE workflow_outbox SET status='sending',updated_at=CURRENT_TIMESTAMP WHERE id=?",(row['id'],))
+  try:
+    deal=workflow_crm_request('crm.deal.get',{'id':link['deal_id']}).get('result')
+    if not isinstance(deal,dict) or str(deal.get('ID'))!=str(link['deal_id']): raise workflow_error('crm_deal_not_found')
+    contact_id=int(deal.get('CONTACT_ID') or 0);company_id=int(deal.get('COMPANY_ID') or 0)
+    fields={'OWNER_TYPE_ID':2,'OWNER_ID':link['deal_id'],'TYPE_ID':4,'DIRECTION':2,'COMPLETED':'Y',
+            'SUBJECT':data['subject'],'DESCRIPTION':data['body'],'DESCRIPTION_TYPE':1,
+            'BINDINGS':[{'OWNER_TYPE_ID':2,'OWNER_ID':link['deal_id']}],
+            'COMMUNICATIONS':[{'VALUE':data['to'],'ENTITY_ID':contact_id or company_id or link['deal_id'],
+                               'ENTITY_TYPE_ID':3 if contact_id else 4 if company_id else 2}],
+            'ORIGINATOR_ID':'OPTICARDS','ORIGIN_ID':row['id']}
+    # Omitting MESSAGE_FROM lets CRM choose its connected, authorized sender.
+    if deal.get('ASSIGNED_BY_ID'): fields['RESPONSIBLE_ID']=int(deal['ASSIGNED_BY_ID'])
+    if file: fields['FILES']=[{'fileData':[file['name'],base64.b64encode(file['body']).decode()]}]
+    # Read checks failed before attempting mutation: safe to mark failed, never resend.
+  except (ValueError,PermissionError):
+    with semantic_job_connection() as db:
+      db.execute("UPDATE workflow_outbox SET status='failed',error='crm_access_denied',updated_at=CURRENT_TIMESTAMP WHERE id=?",(row['id'],))
+    return True
+  try:
+    activity=workflow_crm_request('crm.activity.add',{'fields':fields}).get('result')
+    if not str(activity).isdigit() or int(activity)<=0: raise workflow_error('crm_invalid_response')
+    workflow_crm_mark_sent(row,data,int(activity),file,batch)
+  except Exception as exc:
+    with semantic_job_connection() as db:
+      db.execute("UPDATE workflow_outbox SET status=?,error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",('failed' if getattr(exc,'certain',False) else 'uncertain',str(exc) if getattr(exc,'certain',False) else 'workflow_delivery_unknown',row['id']))
+  return True
+
+
+def workflow_crm_mark_sent(row,data,activity,file=None,batch=None):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    current=db.execute('SELECT status FROM workflow_outbox WHERE id=? AND portal_id=?',(row['id'],row['portal_id'])).fetchone()
+    if not current or current[0]=='sent': return
+    db.execute("UPDATE workflow_outbox SET status='sent',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(row['id'],))
+    workflow_event(db,row['portal_id'],{'login':data['actor']},'crm_mail_sent',file['period_id'] if file else None,row['batch_id'],deliveryId=row['id'],activityId=activity,dealId=data['dealId'])
+    if row['batch_id']:
+      db.execute("UPDATE workflow_batches SET status='client_review' WHERE id=? AND status='account_review'",(row['batch_id'],))
+
+
+def workflow_crm_reconcile(portal,payload,user):
+  with semantic_job_connection() as db:
+    workflow_crm_access(db,portal,user,True);link=workflow_crm_link(db,portal);workflow_crm_check_link(link)
+    row=db.execute("SELECT * FROM workflow_outbox WHERE portal_id=? AND id=? AND kind='crm_email'",(portal,payload.get('deliveryId'))).fetchone()
+    if not row or row['status']!='uncertain': raise workflow_error('workflow_version_conflict',409)
+    row=dict(row);data=json.loads(row['payload_json'])
+    if data['linkId']!=link['id']: raise workflow_error('workflow_version_conflict',409)
+  rows=workflow_crm_request('crm.activity.list',{'filter':{'BINDINGS':[{'OWNER_TYPE_ID':2,'OWNER_ID':link['deal_id']}],'TYPE_ID':4,'DIRECTION':2,'ORIGINATOR_ID':'OPTICARDS','ORIGIN_ID':row['id']},'select':['ID','ORIGIN_ID','ORIGINATOR_ID','COMPLETED']}).get('result')
+  matching=[r for r in rows if r.get('ORIGIN_ID')==row['id'] and r.get('ORIGINATOR_ID')=='OPTICARDS' and r.get('COMPLETED')=='Y'] if isinstance(rows,list) else []
+  if len(matching)!=1: raise workflow_error('workflow_delivery_unknown',409)
+  workflow_crm_mark_sent(row,data,int(matching[0]['ID']))
+  return {'confirmed':True}
+
+
+def workflow_legacy_smtp_draft(portal,payload,user):
   with semantic_job_connection() as db:
     record,_,_=workflow_access(db,portal,user,True)
     file,batch,snapshot=workflow_file_context(db,portal,payload.get('fileId'),user,True)
@@ -25192,7 +25500,7 @@ def workflow_email(value):
   return value
 
 
-def workflow_enqueue_mail(portal,payload,user):
+def workflow_legacy_enqueue_smtp(portal,payload,user):
   request_key=audit_str(payload.get('requestId'),80)
   if not request_key: raise workflow_error('workflow_request_id_required')
   config=get_service_integration(WORKFLOW_SMTP)
@@ -25286,9 +25594,10 @@ def workflow_send_smtp(config,envelope,file):
 
 
 def workflow_deliver_one():
+  if workflow_crm_deliver_one(): return
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
-    row=db.execute("SELECT * FROM workflow_outbox WHERE status='pending' ORDER BY created_at,id LIMIT 1").fetchone()
+    row=db.execute("SELECT * FROM workflow_outbox WHERE status='pending' AND kind!='crm_email' ORDER BY created_at,id LIMIT 1").fetchone()
     if not row: return
     row=dict(row);data=json.loads(row['payload_json'])
     if row['kind']=='bitrix':
@@ -25505,6 +25814,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         if path=='/api/content-workflow/calendar-window' and method=='GET':
           self.send_json(200,workflow_calendar_window(portal,data.get('taskId'),data.get('day'),data.get('startTime'),user,data.get('windowEnd',1080)))
           return True
+        if path=='/api/content-workflow/mail' and method=='GET':
+          self.send_json(200,workflow_crm_mailbox(portal,user,data.get('before')));return True
         if path!='/api/content-workflow': raise workflow_error('not_found',404)
         if method=='GET':
           result=workflow_list(portal,user,data.get('batchId') or data.get('batch_id'))
@@ -25515,8 +25826,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
                    'calendar_schedule':workflow_calendar_schedule,'calendar_unschedule':workflow_calendar_unschedule,
                    'content_task':workflow_content_task,'schedule':workflow_schedule_task,'start':workflow_start_batch,'cancel':workflow_start_batch,'regenerate':workflow_start_batch,
                    'review_card':workflow_review_card,'export_files':workflow_export_files,'export_plan':workflow_export_plan,
-                   'mail_draft':workflow_mail_draft,'send_mail':workflow_enqueue_mail}
-          if action in actions: result=actions[action](portal,data,user)
+                   'mail_draft':workflow_mail_draft,'send_mail':workflow_enqueue_mail,'link_deal':workflow_crm_bind,'unlink_deal':workflow_crm_bind,'reconcile_mail':workflow_crm_reconcile}
+          if action=='preview_deal':
+            with semantic_job_connection() as db: workflow_crm_access(db,portal,user,True)
+            result=workflow_crm_deal(data.get('dealId'),user)
+          elif action in actions: result=actions[action](portal,data,user)
           elif action in ('approve_file','import_preview','import_apply'):
             result=workflow_approve_file(portal,data,user,edited=action!='approve_file',preview_only=action=='import_preview')
           elif action=='unschedule':
