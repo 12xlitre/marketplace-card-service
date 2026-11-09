@@ -56,7 +56,7 @@ Keep this section compact. Add only stable locations that help avoid future sear
 
 - Frontend app: `frontend/src/`
 - In-app workflow diagram and printable guide: `frontend/src/ServiceGuide.jsx`, menu «Как работать», deep link `/?screen=guide`.
-- Manual WB semantic collection: `server.py` (semantic relevance jobs, semantic-expansion), `frontend/src/semanticRelevance.js` / `SemanticRelevancePanel.jsx`; contract: `docs/semantic-relevance.md`.
+- Manual WB/Ozon semantic collection: `server.py` (SQLite semantic_jobs/query cache, semantic-expansion), `frontend/src/SemanticJobs.jsx` / `semanticRelevance.js` / `SemanticRelevancePanel.jsx`; contract: `docs/semantic-relevance.md`.
 - Final content XLSX builders: `frontend/src/App.jsx` (`buildFinalContentCardSheets`, `buildPortalContentSheets`)
 - Ozon content/SEO: `server.py` (`build_ozon_card_content_reoptimization_result`), `frontend/src/App.jsx` (`ozonSemanticDraftRows`, `buildOzonContentSheets`); BOSF analysis: `docs/bosf-mass-seo-analysis.md`
 - Ozon Seller connection: `server.py` (`update_ozon_connection`, `check_ozon_credentials`), `frontend/src/App.jsx` (`OzonConnectionPanel`), `docs/ozon-seller-connection.md`
