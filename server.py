@@ -23851,6 +23851,14 @@ def workflow_init_schema(db):
       minutes INTEGER NOT NULL CHECK(minutes BETWEEN 1 AND 480),title TEXT NOT NULL,group_key TEXT NOT NULL,
       UNIQUE(task_id,day));
     CREATE INDEX IF NOT EXISTS idx_workflow_legacy_load ON workflow_legacy_schedule(assignee,day);
+    CREATE TABLE IF NOT EXISTS workflow_day_assignments(
+      id TEXT PRIMARY KEY,task_id TEXT NOT NULL,
+      batch_id TEXT REFERENCES workflow_batches(id) ON DELETE CASCADE,
+      portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      assignee TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+      day TEXT NOT NULL,created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(task_id,day));
+    CREATE INDEX IF NOT EXISTS idx_workflow_day_owner ON workflow_day_assignments(assignee,day);
     CREATE TABLE IF NOT EXISTS workflow_people(
       login TEXT PRIMARY KEY REFERENCES users(login) ON DELETE CASCADE,bitrix_id INTEGER,
       weekdays_json TEXT NOT NULL DEFAULT '[0,1,2,3,4]');
@@ -24088,6 +24096,11 @@ def workflow_revise_plan(portal, payload, user):
           db.execute('UPDATE workflow_schedule SET batch_id=? WHERE id=?',(target,slot['id']));moved+=1
         else:
           db.execute('DELETE FROM workflow_schedule WHERE id=?',(slot['id'],));released+=1
+      for assigned in db.execute('SELECT * FROM workflow_day_assignments WHERE batch_id=?',(previous['id'],)).fetchall():
+        if same_scope and start<=assigned['day']<=end:
+          db.execute('UPDATE workflow_day_assignments SET batch_id=?,task_id=? WHERE id=?',(target,target,assigned['id']));moved+=1
+        else:
+          db.execute('DELETE FROM workflow_day_assignments WHERE id=?',(assigned['id'],));released+=1
     workflow_event(db,portal,user,'plan_revised',plan['period_id'],version=version,previousVersion=plan['version'],movedSlots=moved,releasedSlots=released)
   start_workflow_worker()
   return {'periodId':str(plan['period_id']),'version':version}
@@ -24118,6 +24131,7 @@ def workflow_public_batch(db, row, detail=False):
   for file in result['files']:
     file['current']=file['version']==latest[file['kind']] and file['generation']==row['generation'] and row['status']!='archived'
   result['schedule'] = [dict(r) for r in db.execute('SELECT id,day,minutes,assignee FROM workflow_schedule WHERE batch_id=? ORDER BY day',(row['id'],))]
+  result['plannedDays']=[dict(r) for r in db.execute('SELECT id,day,assignee FROM workflow_day_assignments WHERE batch_id=? ORDER BY day',(row['id'],))]
   return result
 
 
@@ -24192,6 +24206,7 @@ def workflow_schedule_task(portal, payload, user):
                (uuid.uuid4().hex,batch['id'],portal,assignee,day,minutes))
     if 'startTime' in payload:
       db.execute('UPDATE workflow_schedule SET start_minute=? WHERE batch_id=? AND day=?',(start_minute,batch['id'],day))
+    workflow_calendar_clear_day(db,batch['id'],day,move_from)
     workflow_event(db,portal,user,'task_scheduled',batch['period_id'],batch['id'],day=day,minutes=minutes,startMinute=start_minute)
   return {'scheduled':True}
 
@@ -24205,6 +24220,7 @@ def workflow_calendar_start(payload, minutes, previous=None):
   if not isinstance(raw,str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',raw): raise workflow_error('workflow_invalid_time')
   hour,minute=map(int,raw.split(':'));start=hour*60+minute
   if start+minutes>1440: raise workflow_error('workflow_invalid_time')
+  if 'windowEnd' in payload and start+minutes>workflow_calendar_window_end(payload['windowEnd']): raise workflow_error('workflow_window_too_short',409)
   return start
 
 
@@ -24242,6 +24258,10 @@ def workflow_calendar_tasks(db, current, portals, teams, manage):
   for portal in portals:
     for row in db.execute("SELECT b.*, (SELECT COUNT(*) FROM workflow_cards c WHERE c.batch_id=b.id) AS card_count FROM workflow_batches b WHERE b.portal_id=? AND b.status NOT IN ('archived','cancelled')",(portal,)).fetchall():
       add(row['id'],portal,row['assignee'],row['title'],row['status'],count=row['card_count'],closed=row['status']=='approved')
+      if row['id'] in tasks:
+        plan=db.execute('SELECT data_json FROM workflow_plans WHERE period_id=? AND portal_id=?',(row['period_id'],portal)).fetchone() if row['period_id'] else None
+        plan_data=json.loads(plan[0]) if plan else {}
+        tasks[row['id']].update(periodId=str(row['period_id'] or ''),planTitle=plan_data.get('title',''),periodStart=plan_data.get('start',''),periodEnd=plan_data.get('end',''))
     # Existing manual tasks remain their original tasks; reading never creates a
     # batch or starts providers. Scheduling uses a separate small slot table.
     groups={}
@@ -24283,6 +24303,10 @@ def workflow_calendar(user, assignee, start, end):
             task={'id':row['task_id'],'portalId':str(row['portal_id']),'project':portals[row['portal_id']]['name'],'marketplace':portals[row['portal_id']]['marketplace'],'assignee':row['assignee'],'title':row['title'],'status':'done','source':'legacy','groupKey':row['group_key'],'batchId':'','cardCount':0,'canEdit':manager or row['assignee']==current['login'],'closed':True,'schedule':[]}
             tasks[task['id']]=task
         if task: task['schedule'].append({'id':row['id'],'day':row['day'],'minutes':row['minutes'],'startMinute':row['start_minute']})
+    for row in db.execute('SELECT * FROM workflow_day_assignments ORDER BY day,id').fetchall():
+      task=tasks.get(row['task_id'])
+      if task and not task['closed']:
+        task['schedule'].append({'id':row['id'],'day':row['day'],'minutes':None,'startMinute':None,'plannedOnly':True})
     people_by_login={}
     users=db.execute('SELECT login,full_name,user_role FROM users WHERE is_active=1 ORDER BY full_name,login').fetchall()
     relevant={t['assignee'] for t in tasks.values()}|{t.get('tech') for t in teams.values()}|({current['login']} if not manage else set())
@@ -24299,9 +24323,98 @@ def workflow_calendar(user, assignee, start, end):
     for login in targets:
       for offset in range((dt.date.fromisoformat(end)-dt.date.fromisoformat(start)).days+1):
         day=(dt.date.fromisoformat(start)+dt.timedelta(days=offset)).isoformat()
-        scheduled=[{**t,'batch_id':t['id'],'portal_id':t['portalId'],'minutes':slot['minutes'],'slotId':slot['id'],'startMinute':slot['startMinute']} for t in visible if t['assignee']==login for slot in t['schedule'] if slot['day']==day]
-        days.append({'assignee':login,'day':day,'used':workflow_calendar_load(db,login,day),'tasks':scheduled})
+        scheduled=[{**t,'batch_id':t['id'],'portal_id':t['portalId'],'minutes':slot['minutes'],'slotId':slot['id'],'startMinute':slot['startMinute'],'plannedOnly':bool(slot.get('plannedOnly'))} for t in visible if t['assignee']==login for slot in t['schedule'] if slot['day']==day]
+        days.append({'assignee':login,'day':day,'used':workflow_calendar_load(db,login,day),'unestimated':sum(t.get('plannedOnly',False) for t in scheduled),'tasks':scheduled})
     return {'assignee':selected,'login':current['login'],'canManage':manage,'people':list(people_by_login.values()),'tasks':visible,'days':days,'limit':480,'timezone':'Europe/Moscow'}
+
+
+def workflow_calendar_clear_day(db, task_id, day, move_from=None):
+  db.execute('DELETE FROM workflow_day_assignments WHERE task_id=? AND day IN (?,?)',(task_id,day,move_from or day))
+
+
+def workflow_calendar_task_context(db, portal, task_id, user, manage=False):
+  workflow_access(db,portal,user,manage)
+  current,portals,teams,can_manage=workflow_calendar_context(db,user)
+  task=workflow_calendar_tasks(db,current,portals,teams,can_manage).get(task_id)
+  if not task or task['portalId']!=str(portal) or not task['canEdit']: raise PermissionError('forbidden')
+  if task['closed']: raise workflow_error('workflow_task_closed',409)
+  if task['source']=='workflow': workflow_batch(db,portal,task_id,user,manage=manage,write=True)
+  settings=db.execute('SELECT weekdays_json FROM workflow_people WHERE login=?',(task['assignee'],)).fetchone()
+  return task,current,json.loads(settings[0]) if settings else [0,1,2,3,4]
+
+
+def workflow_calendar_day_bounds(task, day, weekdays):
+  if not day: raise workflow_error('invalid_report_date')
+  if dt.date.fromisoformat(day).weekday() not in weekdays: raise workflow_error('workflow_nonworking_day')
+  if task.get('periodStart') and not task['periodStart']<=day<=task['periodEnd']: raise workflow_error('workflow_outside_period')
+
+
+def workflow_calendar_assign_day(portal, payload, user):
+  task_id=audit_str(payload.get('taskId'),80);day=clean_report_date(payload.get('day'))
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    task,current,weekdays=workflow_calendar_task_context(db,portal,task_id,user,True)
+    workflow_calendar_day_bounds(task,day,weekdays)
+    old=None
+    if payload.get('assignmentId'):
+      old=db.execute('SELECT * FROM workflow_day_assignments WHERE id=? AND task_id=? AND portal_id=?',(payload['assignmentId'],task_id,portal)).fetchone()
+      if not old: raise workflow_error('workflow_version_conflict',409)
+    existing=db.execute('SELECT id FROM workflow_day_assignments WHERE task_id=? AND day=?',(task_id,day)).fetchone()
+    if existing and (not old or old['day']==day): return {'assigned':True,'assignmentId':existing[0]}
+    estimated=db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=? AND day=? UNION ALL SELECT 1 FROM workflow_legacy_schedule WHERE task_id=? AND day=?',(task_id,day,task_id,day)).fetchone()
+    if estimated: raise workflow_error('workflow_day_already_estimated',409)
+    used=workflow_calendar_load(db,task['assignee'],day,task_id)
+    if used>=480:
+      suggestions=[]
+      for offset in range(1,367):
+        alternative=(dt.date.fromisoformat(day)+dt.timedelta(days=offset)).isoformat()
+        if task.get('periodEnd') and alternative>task['periodEnd']: break
+        if dt.date.fromisoformat(alternative).weekday() not in weekdays: continue
+        load=workflow_calendar_load(db,task['assignee'],alternative,task_id)
+        if load<480:suggestions.append({'day':alternative,'used':load,'free':480-load})
+        if len(suggestions)==3:break
+      raise workflow_error('workflow_day_overloaded',409,used=used,limit=480,suggestions=suggestions)
+    assignment=existing[0] if existing else uuid.uuid4().hex
+    if old: db.execute('DELETE FROM workflow_day_assignments WHERE id=?',(old['id'],))
+    if not existing:
+      db.execute('INSERT INTO workflow_day_assignments(id,task_id,batch_id,portal_id,assignee,day,created_by) VALUES(?,?,?,?,?,?,?)',
+        (assignment,task_id,task_id if task['source']=='workflow' else None,portal,task['assignee'],day,current['login']))
+    workflow_event(db,portal,current,'task_day_assigned',batch=task_id if task['source']=='workflow' else None,taskId=task_id,day=day,previousDay=old['day'] if old else None)
+  return {'assigned':True,'assignmentId':assignment}
+
+
+def workflow_calendar_unassign_day(portal,payload,user):
+  task_id=audit_str(payload.get('taskId'),80)
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    _,current,_=workflow_calendar_task_context(db,portal,task_id,user,True)
+    row=db.execute('SELECT id FROM workflow_day_assignments WHERE id=? AND task_id=? AND portal_id=?',(payload.get('assignmentId'),task_id,portal)).fetchone()
+    if not row: raise workflow_error('workflow_version_conflict',409)
+    db.execute('DELETE FROM workflow_day_assignments WHERE id=?',(row[0],))
+    workflow_event(db,portal,current,'task_day_removed',taskId=task_id)
+  return {'removed':True}
+
+
+def workflow_calendar_window_end(value):
+  try:end=int(value)
+  except (ValueError,TypeError):raise workflow_error('workflow_invalid_time')
+  if not 1<=end<=1440:raise workflow_error('workflow_invalid_time')
+  return end
+
+
+def workflow_calendar_window(portal, task_id, day, start_time, user, end=1080):
+  day=clean_report_date(day);end=workflow_calendar_window_end(end)
+  with semantic_job_connection() as db:
+    task,_,weekdays=workflow_calendar_task_context(db,portal,task_id,user)
+    workflow_calendar_day_bounds(task,day,weekdays)
+    start=workflow_calendar_start({'startTime':start_time},1)
+    if start is None:raise workflow_error('workflow_invalid_time')
+    used=workflow_calendar_load(db,task['assignee'],day,task_id)
+    for row in db.execute("SELECT start_minute,minutes FROM workflow_schedule WHERE assignee=? AND day=? AND batch_id!=? AND start_minute IS NOT NULL UNION ALL SELECT start_minute,minutes FROM workflow_legacy_schedule WHERE assignee=? AND day=? AND task_id!=? AND start_minute IS NOT NULL",(task['assignee'],day,task_id,task['assignee'],day,task_id)).fetchall():
+      if row['start_minute']<=start<row['start_minute']+row['minutes']:end=start;break
+      if row['start_minute']>start:end=min(end,row['start_minute'])
+    maximum=max(0,min(end-start,480-used))
+    return {'day':day,'startMinute':start,'endMinute':start+maximum,'maxMinutes':maximum,'used':used,'limit':480}
 
 
 def workflow_calendar_schedule(portal, payload, user):
@@ -24339,6 +24452,7 @@ def workflow_calendar_schedule(portal, payload, user):
                (uuid.uuid4().hex,task_id,portal,login,day,minutes,task['title'],task['groupKey']))
     if 'startTime' in payload:
       db.execute('UPDATE workflow_legacy_schedule SET start_minute=? WHERE task_id=? AND day=?',(start_minute,task_id,day))
+    workflow_calendar_clear_day(db,task_id,day,move)
     workflow_event(db,portal,current,'task_scheduled',taskId=task_id,day=day,minutes=minutes,startMinute=start_minute)
   return {'scheduled':True}
 
@@ -24627,6 +24741,7 @@ def workflow_sync_status(db, batch):
 
 
 def workflow_sync_plan_task(db,batch,status):
+  if status=='done': db.execute('DELETE FROM workflow_day_assignments WHERE task_id=?',(batch['id'],))
   if batch['period_id']:
     row=db.execute('SELECT w.tasks_json FROM portal_work_periods w JOIN workflow_plans p ON p.period_id=w.id WHERE w.id=? AND w.portal_id=? AND p.version=?',(batch['period_id'],batch['portal_id'],batch['plan_version'])).fetchone()
     if not row: return
@@ -24679,6 +24794,7 @@ def workflow_start_batch(portal,payload,user):
       db.execute("UPDATE workflow_cards SET state='cancelled' WHERE batch_id=? AND state NOT IN ('ready','reviewed','failed')",(batch['id'],))
       db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE status IN ('queued','collecting','classifying','saving') AND portal_id=? AND json_extract(request_json,'$.workflowBatch')=?",(time.time(),portal,batch['id']))
       db.execute('DELETE FROM workflow_schedule WHERE batch_id=?',(batch['id'],))
+      db.execute('DELETE FROM workflow_day_assignments WHERE batch_id=?',(batch['id'],))
       workflow_sync_plan_task(db,batch,'planned')
       workflow_event(db,portal,user,'task_cancelled',batch['period_id'],batch['id'])
       return {'cancelled':True}
@@ -24738,6 +24854,7 @@ def workflow_create_standalone(portal,payload,user):
       for slot in db.execute('SELECT * FROM workflow_legacy_schedule WHERE task_id=?',(legacy['id'],)).fetchall():
         db.execute('INSERT INTO workflow_schedule(id,batch_id,portal_id,assignee,day,minutes,start_minute) VALUES(?,?,?,?,?,?,?)',(slot['id'],batch,portal,assignee,slot['day'],slot['minutes'],slot['start_minute']))
       db.execute('DELETE FROM workflow_legacy_schedule WHERE task_id=?',(legacy['id'],))
+      db.execute('UPDATE workflow_day_assignments SET task_id=?,batch_id=? WHERE task_id=?',(batch,batch,legacy['id']))
       workflow_event(db,portal,current,'legacy_source_linked',batch=batch,taskId=legacy['id'])
   start_workflow_worker()
   return {'batchId':batch}
@@ -25385,12 +25502,16 @@ class OpticardsHandler(BaseHTTPRequestHandler):
             if not proof: raise workflow_error('workflow_file_not_found',404)
             body=base64.b64decode(proof['dataUrl'].split(';base64,',1)[1])
           self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(proof['name']));self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return True
+        if path=='/api/content-workflow/calendar-window' and method=='GET':
+          self.send_json(200,workflow_calendar_window(portal,data.get('taskId'),data.get('day'),data.get('startTime'),user,data.get('windowEnd',1080)))
+          return True
         if path!='/api/content-workflow': raise workflow_error('not_found',404)
         if method=='GET':
           result=workflow_list(portal,user,data.get('batchId') or data.get('batch_id'))
         else:
           action=data.get('action')
           actions={'create_plan':workflow_create_plan,'revise_plan':workflow_revise_plan,'approve_plan':workflow_approve_plan,'standalone':workflow_create_standalone,
+                   'calendar_assign_day':workflow_calendar_assign_day,'calendar_unassign_day':workflow_calendar_unassign_day,
                    'calendar_schedule':workflow_calendar_schedule,'calendar_unschedule':workflow_calendar_unschedule,
                    'content_task':workflow_content_task,'schedule':workflow_schedule_task,'start':workflow_start_batch,'cancel':workflow_start_batch,'regenerate':workflow_start_batch,
                    'review_card':workflow_review_card,'export_files':workflow_export_files,'export_plan':workflow_export_plan,

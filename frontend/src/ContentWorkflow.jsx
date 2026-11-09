@@ -87,6 +87,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     {mode==='periods'&&plans.length?<div className="cw-plans">{plans.map(plan=><article className="cw-plan" key={plan.id}>
       <div className="strip-head"><div><h3>{plan.title}</h3><p>{plan.start} — {plan.end} · {plan.cardKeys.length} карточек · версия {plan.version}</p></div><Status value={plan.status} label={plan.status==='approved'?'Клиент согласовал план':'План ждёт подтверждения'}/></div>
       <p>{plan.tasks.map(t=>t.label).join(' · ')}</p><div className="task-batch-actions">
+        <button className="btn mini" onClick={()=>location.assign('/?screen=calendar&calendarAssignee='+encodeURIComponent(plan.assignee)+'&calendarPeriod='+encodeURIComponent(plan.id)+'&calendarDate='+encodeURIComponent(plan.start))}>Распределить задачи по дням</button>
         <button className="btn mini" disabled={busy} onClick={()=>act('export_plan',{periodId:plan.id}).then(r=>download(r.fileId)).catch(()=>{})}>Скачать PDF плана</button>
         {data.canManage&&onExportReport?<button className="btn mini" disabled={plan.end>=today()} title="Доступен после окончания периода" onClick={()=>onExportReport(plan)}>Итоговый отчёт</button>:null}
         {data.canManage?<button className="btn mini" onClick={()=>setCreate({kind:'plan',plan})}>Изменить план</button>:null}
@@ -113,7 +114,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
         {canWork&&current.kind==='work'&&current.status!=='approved'?<button className="btn" disabled={busy} onClick={()=>safe('start',{batchId:current.id,complete:true})}>Работа выполнена</button>:null}
       </div><ErrorNote error={current.error}/>
       {!current.schedule.length&&canWork?<p className="status-note">Перед проверкой карточек назначьте длительность задачи в календаре.</p>:null}
-      <ScheduleForm batch={current} busy={busy||!canWork} onSave={p=>safe('schedule',p)} onRemove={p=>safe('unschedule',p)}/>
+      <ScheduleForm batch={current} busy={busy||!canWork} onRemove={p=>safe('unschedule',p)}/>
       <div className="cw-card-list">{current.cards.map(card=><div className="cw-card" key={card.cardKey}><div><strong>{card.title}</strong><p>{card.cardKey} · <Status value={card.state}/>{card.job?.total?' · '+card.job.completed+'/'+card.job.total+' запросов':''}</p><ErrorNote error={card.error}/></div>
         <div className="task-batch-actions"><button className="btn mini" onClick={()=>{const source=cards.find(c=>keyOf(c)===card.cardKey);if(source)onOpenCard?.(source)}}>Открыть карточку</button>
         {current.kind==='semantic'?<button className="btn mini" disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||current.status==='approved'} onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>
@@ -124,7 +125,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     {batches.some(b=>b.status==='archived')?<details><summary>Задачи прежних версий плана</summary>{batches.filter(b=>b.status==='archived').map(b=><button className="btn mini" key={b.id} onClick={()=>choose(b)}>{b.title} · план v{b.planVersion}</button>)}</details>:null}
     {data.deliveries?.length?<details><summary>Уведомления и доставка писем</summary>{data.deliveries.map(d=><p key={d.id}>{d.kind==='bitrix'?'Б24':'Письмо'} · {labels[d.status]||d.status} · {messages[d.error]||d.error}</p>)}</details>:null}
     {data.events.length?<details className="cw-events"><summary>История: файлы, передачи и согласование</summary>{data.events.map(e=><p key={e.id}><time>{new Date(e.created_at.replace(' ','T')+'Z').toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})} МСК</time> · {e.actor||'Сервис'} · {eventLabel(e.action)} {e.details.name||e.details.version&&'· версия '+e.details.version||''}</p>)}</details>:null}
-    {create?<CreateWorkflow portal={portal} error={error} data={data} cards={cards} initial={create} busy={busy} onClose={()=>setCreate(null)} onSubmit={async payload=>{try{const r=await act(create.kind==='plan'?(create.plan?'revise_plan':'create_plan'):create.kind==='content'?'content_task':'standalone',payload);setCreate(null);if(r.batchId)setSelected(r.batchId)}catch{}}}/>:null}
+    {create?<CreateWorkflow portal={portal} error={error} data={data} cards={cards} initial={create} busy={busy} onClose={()=>setCreate(null)} onSubmit={async payload=>{try{const r=await act(create.kind==='plan'?(create.plan?'revise_plan':'create_plan'):create.kind==='content'?'content_task':'standalone',payload);setCreate(null);if(create.kind==='plan'&&r.periodId){location.assign('/?screen=calendar&calendarAssignee='+encodeURIComponent(payload.assignee)+'&calendarPeriod='+encodeURIComponent(r.periodId)+'&calendarDate='+encodeURIComponent(payload.start));return}if(r.batchId)setSelected(r.batchId)}catch{}}}/>:null}
     {approval?<Modal title={'Клиент согласовал план · версия '+approval.plan.version} onClose={()=>setApproval(null)}><form onSubmit={async e=>{e.preventDefault();try{await act('approve_plan',{periodId:approval.plan.id,version:approval.plan.version,day:approval.day,proof:approval.proof,comment:approval.comment});setApproval(null)}catch{}}}>
       <label className="field-label">Дата согласования<input type="date" required value={approval.day} onChange={e=>setApproval({...approval,day:e.target.value})}/></label>
       <label className="field-label">Подтверждение клиента · до 2 МБ<input type="file" required onChange={async e=>{try{if(e.target.files[0])setApproval({...approval,proof:await attachment(e.target.files[0])})}catch(e){setError(e.message)}}}/></label>
@@ -177,16 +178,17 @@ function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit})
   </form></Modal>;
 }
 
-function ScheduleForm({batch,busy,onSave,onRemove}){
-  const [day,setDay]=useState(today()),[minutes,setMinutes]=useState(60);
+function ScheduleForm({batch,busy,onRemove}){
+  const day=batch.plannedDays?.[0]?.day||batch.schedule[0]?.day||today();
   return <details className="cw-schedule"><summary>Плановая длительность · {batch.schedule.length?batch.schedule.reduce((v,s)=>v+s.minutes,0)+' мин':'нужно оценить'}</summary>
-    <form className="cw-schedule-form" onSubmit={e=>{e.preventDefault();onSave({batchId:batch.id,day,minutes:Number(minutes)})}}><label className="field-label">День<input type="date" required value={day} onChange={e=>setDay(e.target.value)}/></label><label className="field-label">Минут на день<input type="number" required min="1" max="480" value={minutes} onChange={e=>setMinutes(e.target.value)}/></label><button className="btn" disabled={busy}>Назначить время</button></form>
-    <p className="status-note">Работу больше 8 часов распределите на несколько дней. Учитываются все проекты исполнителя.</p>
+    {batch.plannedDays?.length?<p className="status-note">Аккаунт назначил дни: {batch.plannedDays.map(s=>s.day).join(', ')}. Нужно оценить длительность.</p>:null}
+    <p className="status-note">Перетащите задачу в свободную ячейку календаря и выберите длительность. Дата и начало берутся из точки размещения.</p>
+    <a className="btn" href={'/?screen=calendar&calendarAssignee='+encodeURIComponent(batch.assignee)+'&calendarDate='+day}>Открыть календарь</a>
     {batch.schedule.map(s=><p key={s.id}>{s.day} · {s.minutes} мин <button className="btn mini" disabled={busy} onClick={()=>onRemove({batchId:batch.id,scheduleId:s.id})}>Убрать</button></p>)}
   </details>;
 }
 
-const eventLabel=action=>({content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
+const eventLabel=action=>({task_day_assigned:'Аккаунт назначил день задачи',task_day_removed:'Назначение дня снято',content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
 
 export function ContentWorkflowSettings({apiRequest}){
   const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[form,setForm]=useState({host:'',port:465,tls:'ssl',from:'',fromName:'',login:'',password:'',replyTo:'',cc:'',signature:''});
