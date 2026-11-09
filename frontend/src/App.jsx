@@ -5,6 +5,7 @@ import CabinetFilesDialog from "./CabinetFilesDialog";
 import SemanticRelevancePanel from "./SemanticRelevancePanel";
 import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJobs";
 import ServiceGuide from "./ServiceGuide";
+import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import {
@@ -1414,6 +1415,7 @@ function normalizeWorkPeriod(period) {
       planned: Number(summary.planned ?? activeTasks.filter((task) => task.status === "planned").length),
       progress: Number(summary.progress ?? (total ? Math.round((done / total) * 100) : 0)),
     },
+    workflowVersion: period?.workflowVersion || 0,
     report: period?.report && typeof period.report === "object" ? period.report : {},
     createdBy: period?.createdBy || "",
     updatedBy: period?.updatedBy || "",
@@ -7166,6 +7168,7 @@ export default function App() {
           scope,
           name: cabinetName || `${client.name} Ozon`,
           clientName: client.name,
+          clientContact: source.clientContact || clientContactFromClient(client),
           teamRoles,
           storeUrl,
           manualSource,
@@ -7589,7 +7592,7 @@ export default function App() {
             key={cardDraftKey(selectedCardFromPortal)}
             card={selectedCardFromPortal}
             portal={currentPortal}
-            canManage={canManagePortals || canManageOzon}
+            canManage={canManagePortals || canManageOzon || currentUser?.user_role === 'tech' || currentPortal?.teamRoles?.tech === currentUser?.login}
             onBack={backFromCard}
             backLabel={cardReturnTarget.label}
             helpEnabled={helpEnabled}
@@ -7608,6 +7611,7 @@ export default function App() {
             portals={allPortals}
             canManage={canManagePortals}
             canManageUsers={canManageUsers}
+            canConfigureWorkflow={currentUser?.user_role === "admin"}
             canConfigureBitrix={getUserRoleType(currentUser) === "admin"}
             mpstatsIntegration={mpstatsIntegration}
             onMpstatsIntegrationChange={setMpstatsIntegration}
@@ -7625,6 +7629,7 @@ export default function App() {
             mode={portalModalMode}
             users={displayUsers}
             currentUser={currentUser}
+            initialContact={currentClient?clientContactFromClient(currentClient):null}
             allowOzon={userCanSeeOzon(currentUser)}
             targetPortal={portalModalTarget}
             onMode={setPortalModalMode}
@@ -9473,6 +9478,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               </>
             ) : null}
 
+            {activeSellerTab === "tasks" && !portal.isDemo ? <ContentWorkflow portal={portal} cards={portal.realCards || []} onOpenCard={onOpenCard} apiRequest={apiRequest} mode="tasks" /> : null}
             {activeSellerTab === "tasks" && !portal.isDemo ? <SemanticJobsList portalId={portal.id} onOpen={(key) => {
               const card = (portal.realCards || []).find((item) => ozonCardStableKey(item) === key);
               if (card) onOpenCard(card);
@@ -9509,7 +9515,7 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
               <OzonReportsPanel portal={portal} cards={portal.realCards || []} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
             {activeSellerTab === "work-periods" ? (
-              <WorkPeriodsPanel portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
+              <WorkPeriodsPanel cards={portal.realCards || []} onOpenCard={onOpenCard} portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
           </div>
         </div>
@@ -11401,6 +11407,7 @@ function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, w
                       </div> : null}
                       <div className="task-batch-actions">
                         {!automatic ? <>
+                        <LegacySemanticBatchButton portalId={portalId} group={group} apiRequest={apiRequest} />
                         <button className="btn primary" type="button" onClick={() => firstCard && onOpenCard?.(firstCard)} disabled={!firstCard}>
                           <Eye size={17} />Начать работу
                         </button>
@@ -13623,6 +13630,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
             ) : null}
             {activeSellerTab === "tasks" ? (
               <>
+              {!portal.isDemo ? <ContentWorkflow portal={portal} cards={cards} onOpenCard={onOpenCard} apiRequest={apiRequest} mode="tasks" /> : null}
               {!portal.isDemo ? <SemanticJobsList portalId={portal.id} onOpen={(key) => {
                 const card = cards.find((item) => cardDraftKey(item) === key);
                 if (card) onOpenCard(card);
@@ -13654,7 +13662,7 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
               <ReportsPanel portal={portal} cards={cards} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
             {activeSellerTab === "work-periods" ? (
-              <WorkPeriodsPanel portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
+              <WorkPeriodsPanel cards={cards} onOpenCard={onOpenCard} portal={portal} findUser={findUser} canManage={canManage} onNotice={onNotice} helpEnabled={helpEnabled} />
             ) : null}
           </div>
         </div>
@@ -13959,7 +13967,7 @@ function WorkPeriodFinalReportPreview({ period, report, reportSummary, findUser 
   );
 }
 
-function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpEnabled = false }) {
+function WorkPeriodsPanel({ portal, cards = [], onOpenCard, findUser, canManage = false, onNotice, helpEnabled = false }) {
   const [periods, setPeriods] = useState([]);
   const [status, setStatus] = useState("idle");
   const [actionStatus, setActionStatus] = useState("");
@@ -13989,7 +13997,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
     setStatus("loading");
     try {
       const payload = await apiRequest(`/api/portal-work-periods?portal_id=${encodeURIComponent(portal.id)}`);
-      setPeriods(normalizeWorkPeriods(payload.periods));
+      setPeriods(normalizeWorkPeriods(payload.periods).filter(period => !period.workflowVersion));
       setStatus("loaded");
     } catch {
       setPeriods([]);
@@ -13999,6 +14007,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 
   function upsertPeriod(period) {
     const normalized = normalizeWorkPeriod(period);
+    if(normalized.workflowVersion===2)return;
     setPeriods((current) => [normalized, ...current.filter((item) => String(item.id) !== String(normalized.id))]
       .sort((left, right) => String(right.period.start || "").localeCompare(String(left.period.start || "")) || Number(right.id) - Number(left.id)));
   }
@@ -14298,6 +14307,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
 
   return (
     <>
+      {canUseBackend ? <ContentWorkflow portal={portal} cards={cards} onOpenCard={onOpenCard} apiRequest={apiRequest} mode="periods" onExportReport={plan=>downloadFinalWorkPeriodReport({id:plan.id,title:plan.title,period:{start:plan.start,end:plan.end}})} /> : null}
       <section className="workspace-strip work-periods-strip">
         <div className="strip-head">
           <div>
@@ -14309,7 +14319,7 @@ function WorkPeriodsPanel({ portal, findUser, canManage = false, onNotice, helpE
               {status === "loading" ? "загрузка" : `${activeCount} в работе`}
             </Tag>
             <button className="btn primary" type="button" onClick={openCreatePeriod} disabled={!canUseBackend || actionStatus === "creating"}>
-              <Plus size={17} />Создать период
+              <Plus size={17} />План без набора карточек
             </button>
           </div>
         </div>
@@ -16216,6 +16226,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                               <Tag tone={batchEvents.length ? "blue" : "amber"}>{formatNumber(batchEvents.length)} событий</Tag>
                             </div>
 	                          <div className="task-batch-actions">
+                              {section.key === "semantic" ? <LegacySemanticBatchButton portalId={portalId} group={group} apiRequest={apiRequest} /> : null}
 	                            <button className="btn primary" type="button" onClick={() => onOpenTask(openableTask, runGroup, section.key)} disabled={!canOpen}>
 	                              <Eye size={17} />Начать работу
 	                            </button>
@@ -22438,6 +22449,7 @@ function ozonPortalErrorText(errorObject) {
   if (["ozon_sync_timeout", "ozon_sync_limit", "ozon_response_too_large", "ozon_selected_cards_required", "ozon_selected_cards_not_found", "ozon_incomplete_response"].includes(errorObject.message)) return `${ozonSellerErrorText(errorObject)} Кабинет не создан.`;
   if (errorObject.message === "ozon_auth_error") return "Ozon отклонил доступ. Проверьте Client-Id, API-ключ и права на чтение товаров. Кабинет не создан.";
   if (errorObject.message === "invalid_portal_team") return "Проверьте назначенных сотрудников в команде клиента. Кабинет не создан.";
+  if (errorObject.message === "workflow_contacts_required") return "Заполните контактное лицо, email и телефон клиента.";
   if (errorObject.message === "ozon_credentials_required") return "Введите числовой Client-Id и API-ключ из настроек Seller API.";
   if (errorObject.message === "ozon_account_already_connected") return "Этот Ozon-аккаунт уже подключён к другому кабинету приложения.";
   if (["ozon_check_rate_limited", "ozon_rate_limited"].includes(errorObject.message)) return "Проверка временно ограничена. Повторите позже; новый кабинет пока не создан.";
@@ -22451,10 +22463,15 @@ function ozonPortalErrorText(errorObject) {
   return "Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.";
 }
 
-function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
+function ClientContactFields({value,onChange}){
+  return <fieldset><legend>Обязательные контакты клиента</legend>{[["name","Контактное лицо"],["phone","Телефон"],["email","Email"]].map(([key,label])=><label className="field-label" key={key}>{label}<input required type={key==="email"?"email":key==="phone"?"tel":"text"} value={value?.[key]||""} onChange={e=>onChange({...value,[key]:e.target.value})}/></label>)}</fieldset>;
+}
+
+function PortalModal({ mode, users, currentUser, initialContact, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
   const isReplacement = Boolean(targetPortal);
   const initialTeam = currentUser?.login === "anastasia.tech" ? { ...defaultTeamFromUsers(users), tech: currentUser.login } : {};
   const [form, setForm] = useState({
+    clientContact: normalizeClientContact(initialContact),
     name: "",
     marketplace: "",
     scope: "",
@@ -22476,6 +22493,7 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
   }
 
   function errorText(errorObject) {
+    if (errorObject.message === "workflow_contacts_required") return "Заполните контактное лицо, email и телефон клиента.";
     if (isOzon) return ozonPortalErrorText(errorObject);
     if (errorObject.message === "portal_already_connected") {
       return `Этот WB кабинет уже подключен: ${errorObject.payload?.portal?.name || "существующий кабинет"}. Повторно добавить его нельзя.`;
@@ -22527,6 +22545,7 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
     try {
       await onSubmit({
         name: isOzon ? (form.name.trim() || "Кабинет Ozon") : (mode === "api" || isReplacement ? "" : form.name.trim()),
+        ...(!isReplacement?{clientContact:form.clientContact}:{}),
         marketplace: form.marketplace,
         mode: isReplacement ? "api" : mode,
         scope: form.scope,
@@ -22634,6 +22653,7 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
               </label>
             </>
           )}
+          {!isReplacement?<ClientContactFields value={form.clientContact} onChange={value=>update("clientContact",value)}/>:null}
           {error ? <div className="form-error">{error}</div> : null}
         </div>
         <div className="modal-actions">
@@ -22647,6 +22667,7 @@ function PortalModal({ mode, users, currentUser, allowOzon = false, targetPortal
 
 function OzonPortalModal({ client, onClose, onSubmit }) {
   const [form, setForm] = useState({
+    clientContact: clientContactFromClient(client),
     mode: "manual",
     clientId: "",
     apiKey: "",
@@ -22682,6 +22703,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     setLoading(true);
     try {
       const saved = await onSubmit({
+        clientContact: form.clientContact,
         mode: form.mode,
         ...(form.mode === "api" ? { clientId: form.clientId.trim(), apiKey: form.apiKey.trim() } : {}),
         name: form.name.trim(),
@@ -22710,6 +22732,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           <IconButton icon={X} label="Закрыть" onClick={onClose} disabled={loading} />
         </div>
         <div className="modal-body">
+          <ClientContactFields value={form.clientContact} onChange={value=>update("clientContact",value)}/>
           <div className="ozon-connect-mode" role="group" aria-label="Способ подключения Ozon">
             <button type="button" className={form.mode === "manual" ? "active" : ""} aria-pressed={form.mode === "manual"} disabled={loading} onClick={() => { setForm((current) => ({ ...current, mode: "manual", scope: "selected" })); setError(""); }}>
               <strong>MPStats по ссылке</strong>
@@ -23225,7 +23248,7 @@ function AdminUserRow({ user, canManageUsers, saving, resetting, onSave, onReset
   );
 }
 
-function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, canConfigureBitrix = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
+function SettingsScreen({ users, portals = [], canManage = false, canManageUsers = false, canConfigureBitrix = false, canConfigureWorkflow = false, mpstatsIntegration: initialMpstatsIntegration = null, onMpstatsIntegrationChange, onCreateUser, onUpdateUser, onResetPassword, onUpdatePortalTeam }) {
   const [adminTab, setAdminTab] = useState("users");
   const [mpstatsIntegration, setMpstatsIntegration] = useState(initialMpstatsIntegration);
   const [adminEvents, setAdminEvents] = useState([]);
@@ -23838,7 +23861,7 @@ function SettingsScreen({ users, portals = [], canManage = false, canManageUsers
           ) : null}
           {adminTab === "integrations" ? (
           <section className="admin-integrations">
-            {canConfigureBitrix ? <BitrixNotificationsSettings apiRequest={apiRequest} /> : null}
+            {canConfigureBitrix ? <BitrixNotificationsSettings apiRequest={apiRequest} /> : null}{canConfigureWorkflow ? <ContentWorkflowSettings apiRequest={apiRequest} /> : null}
             <div className="panel integration-overview-panel">
               <div className="panel-title-row">
                 <div>

@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import hmac
 import io
+import html
 import http.client
 import json
 import mimetypes
@@ -17,6 +18,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import smtplib
 import sys
 import ssl
 import time
@@ -26,6 +28,8 @@ import unicodedata
 import uuid
 import zipfile
 from email.utils import parsedate_to_datetime
+from email.message import EmailMessage
+from email.headerregistry import Address
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -684,6 +688,7 @@ def init_db():
         expires_at TEXT NOT NULL
       );
     """)
+    workflow_init_schema(db)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "user_role" not in columns:
       db.execute("ALTER TABLE users ADD COLUMN user_role TEXT NOT NULL DEFAULT 'manager'")
@@ -1313,6 +1318,16 @@ def user_can_edit_portal(user, portal_id):
       (numeric_portal_id,),
     ).fetchone()
   return bool(row and audit_normalized(row["marketplace"]) == "ozon")
+
+
+def user_can_edit_card_content(user, portal_id):
+  if user_can_edit_portal(user,portal_id): return True
+  if not user or not user_can_access_portal(user,portal_id): return False
+  with connect_db() as db:
+    roles=portal_team_roles_from_db(db,portal_id)
+  if user['user_role']!='tech' and roles.get('tech')!=user_login_value(user): return False
+  with connect_db() as db:
+    return bool(db.execute("SELECT 1 FROM workflow_batches WHERE portal_id=? AND assignee=? AND status NOT IN ('archived','cancelled','approved') LIMIT 1",(portal_id,user_login_value(user))).fetchone())
 
 
 def portal_conflict_payload(existing_portal, user):
@@ -3850,13 +3865,13 @@ OZON_TASK_STATUS_LABELS = {
 }
 
 
-def ensure_ozon_portal_access(portal_id, user, edit=False):
+def ensure_ozon_portal_access(portal_id, user, edit=False, local_work=False):
   try:
     numeric_portal_id = int(portal_id)
   except (TypeError, ValueError) as exc:
     raise ValueError("invalid_portal_id") from exc
   if edit:
-    allowed = user_can_edit_portal(user, numeric_portal_id)
+    allowed = user_can_edit_card_content(user, numeric_portal_id) if local_work else user_can_edit_portal(user, numeric_portal_id)
   else:
     allowed = user_can_access_portal(user, numeric_portal_id)
   if not allowed:
@@ -4822,7 +4837,7 @@ def get_ozon_card_draft(portal_id, card_key, user):
 
 
 def save_ozon_semantic_draft(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
   draft = normalize_ozon_semantic_payload(payload)
   if not draft:
     raise ValueError("invalid_ozon_semantic_draft")
@@ -4871,7 +4886,7 @@ def save_ozon_semantic_draft(portal_id, payload, user):
 
 
 def save_ozon_card_draft(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
   draft = normalize_ozon_content_payload(payload)
   if not draft:
     raise ValueError("invalid_ozon_card_draft")
@@ -5203,7 +5218,7 @@ def build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=Non
 
 
 def build_ozon_card_content_reoptimization(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
   payload = payload if isinstance(payload, dict) else {}
   raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else payload
   card_key = audit_str(payload.get("cardKey") or raw_card.get("cardKey"), 160)
@@ -5240,7 +5255,7 @@ def build_ozon_card_content_reoptimization(portal_id, payload, user):
 
 
 def build_ozon_card_audit(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True)
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
   payload = payload if isinstance(payload, dict) else {}
   raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else payload
   card_key = audit_str(payload.get("cardKey") or raw_card.get("cardKey"), 160)
@@ -5649,6 +5664,7 @@ def link_batch_to_work_periods_in_db(db, portal_id, batch_id, work_types, target
                      (portal_id, period_id, 'archived')).fetchone()
     if not row:
       raise ValueError("work_period_not_found")
+    if row['workflow_version']==2: raise ValueError('workflow_versioned_plan_required')
     plan = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
     item = next((t for t in plan if t["key"] == task_key), None)
     if not item:
@@ -8258,6 +8274,7 @@ def public_portal_work_period(row):
       "end": row["period_end"] or "",
     },
     "status": clean_work_period_status(row["status"]),
+    "workflowVersion": row["workflow_version"],
     "tasks": tasks,
     "summary": work_period_task_summary(tasks),
     "report": report,
@@ -8304,11 +8321,12 @@ def ensure_work_period_link_target(portal_id, period_id, task_key):
   init_db()
   with connect_db() as db:
     row = db.execute(
-      "SELECT tasks_json FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      "SELECT tasks_json,workflow_version FROM portal_work_periods WHERE portal_id = ? AND id = ?",
       (numeric_portal_id, numeric_period_id),
     ).fetchone()
   if not row:
     raise ValueError("work_period_not_found")
+  if row['workflow_version']==2: raise ValueError('workflow_versioned_plan_required')
   tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
   target = next((task for task in tasks if task["key"] == clean_task_key), None)
   if not target:
@@ -8503,6 +8521,9 @@ def update_portal_work_period(portal_id, payload, user):
     ).fetchone()
     if not row:
       raise ValueError("work_period_not_found")
+    if row['workflow_version']==2:
+      workflow_access(db,numeric_portal_id,user,True)
+      if action!='generate_report': raise ValueError('workflow_versioned_plan_required')
     tasks = normalize_work_period_tasks(parse_work_period_json(row["tasks_json"], []))
     report = parse_work_period_json(row["report_json"], {})
     status = clean_work_period_status(row["status"])
@@ -8819,12 +8840,16 @@ def delete_portal_work_period(portal_id, period_id, user):
     raise PermissionError("forbidden")
   init_db()
   with connect_db() as db:
+    db.execute('BEGIN IMMEDIATE')
     row = db.execute(
-      "SELECT id, title FROM portal_work_periods WHERE portal_id = ? AND id = ?",
+      "SELECT id,title,workflow_version FROM portal_work_periods WHERE portal_id = ? AND id = ?",
       (numeric_portal_id, numeric_period_id),
     ).fetchone()
     if not row:
       raise ValueError("work_period_not_found")
+    if row['workflow_version']==2:
+      workflow_access(db,numeric_portal_id,user,True)
+      db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE portal_id=? AND status IN ('queued','collecting','classifying','saving') AND json_extract(request_json,'$.workflowBatch') IN (SELECT id FROM workflow_batches WHERE period_id=? AND portal_id=?)",(time.time(),numeric_portal_id,numeric_period_id,numeric_portal_id))
     db.execute(
       "DELETE FROM portal_work_periods WHERE portal_id = ? AND id = ?",
       (numeric_portal_id, numeric_period_id),
@@ -11132,7 +11157,7 @@ def update_service_integration_check(provider, status):
 
 
 def save_service_integration(provider, token, user):
-  if provider not in {MPSTATS_PROVIDER, 'bitrix-notifications'}:
+  if provider not in {MPSTATS_PROVIDER, 'bitrix-notifications', WORKFLOW_SMTP}:
     raise ValueError("unsupported_provider")
   token = str(token or "").strip()
   if len(token) < 8:
@@ -18133,7 +18158,7 @@ def semantic_job_context(db, job):
   portal = db.execute('SELECT * FROM portals WHERE id=? AND is_active=1', (job['portal_id'],)).fetchone()
   if not user or not portal or not user_can_access_portal(user, job['portal_id']):
     raise PermissionError('forbidden')
-  if portal['marketplace'] == 'Ozon' and not user_can_edit_portal(user, job['portal_id']):
+  if portal['marketplace'] == 'Ozon' and not user_can_edit_card_content(user, job['portal_id']):
     raise PermissionError('forbidden')
   card = next((card for card in wb_snapshot_cards_from_row(portal) if semantic_job_key(card) == job['card_key']), None)
   if not card:
@@ -18251,13 +18276,17 @@ def semantic_merge_working_state(payload, request, marketplace):
           'semanticCoreReports': [{'semanticCore': {'decisions': decision_rows}}, *(meta.get('semanticCoreReports') or [])]}}
 
 
-def semantic_create_job(portal_id, card, query, user, refresh=False, source=None, selection_state=None):
+def semantic_create_job(portal_id, card, query, user, refresh=False, source=None, selection_state=None, workflow_batch=None):
   key = semantic_job_key(card)
   if not key:
     raise ValueError('invalid_card_key')
   now, job_id = time.time(), uuid.uuid4().hex
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
+    if workflow_batch:
+      parent = db.execute('SELECT status FROM workflow_batches WHERE id=? AND portal_id=?', (workflow_batch, portal_id)).fetchone()
+      if not parent or parent['status'] != 'collecting':
+        raise ValueError('workflow_task_closed')
     context = {'portal_id': int(portal_id), 'card_key': key, 'user_login': user_login_value(user)}
     _, stored_card = semantic_job_context(db, context)
     if not content_reoptimization_configured():
@@ -18267,8 +18296,12 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
     portal = db.execute('SELECT marketplace FROM portals WHERE id=?', (portal_id,)).fetchone()
     existing = db.execute("SELECT * FROM semantic_jobs WHERE portal_id=? AND card_key=? AND status IN ('queued','collecting','classifying','saving')", (portal_id, key)).fetchone()
     if existing:
+      if workflow_batch and json.loads(existing['request_json']).get('workflowBatch') != workflow_batch:
+        raise ValueError('semantic_card_busy')
       if existing['user_login'] != user_login_value(user):
         raise ValueError('semantic_card_busy')
+      if workflow_batch:
+        db.execute("UPDATE workflow_cards SET job_id=?,state='collecting' WHERE batch_id=? AND card_key=?",(existing['id'],workflow_batch,key))
       return semantic_job_public(existing)
     if db.execute("SELECT COUNT(*) FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving')").fetchone()[0] >= 64:
       raise ValueError('semantic_relevance_busy')
@@ -18279,6 +18312,8 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
       raise ValueError('missing_semantic_query')
     request = {'card': stored_card, 'query': query or seeds[0], 'refresh': bool(refresh),
                'period': mpstats_semantic_period_default(), 'seedQueries': seeds}
+    if workflow_batch:
+      request['workflowBatch'] = workflow_batch
     request['sourceKey'] = hashlib.sha256(semantic_json({'seeds': seeds, 'period': request['period'], 'marketplace': portal['marketplace']}).encode()).hexdigest()
     if source is None and not refresh:
       previous_source = db.execute("SELECT source_json FROM semantic_jobs WHERE portal_id=? AND user_login=? AND card_key=? AND marketplace=? AND json_extract(request_json,'$.sourceKey')=? AND source_json IS NOT NULL AND updated_at>? ORDER BY updated_at DESC LIMIT 1",
@@ -18299,6 +18334,8 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
                (job_id, int(portal_id), key, user_login_value(user), portal['marketplace'], audit_str(stored_card.get('title'), 240), request['query'], semantic_json(request),
                 semantic_json(source) if source is not None else None, semantic_facts_hash(stored_card), semantic_model_key(),
                 now, now, now, len(source['semanticCore']['allKeywords']) if source else 0))
+    if workflow_batch:
+      db.execute("UPDATE workflow_cards SET job_id=?,state='collecting' WHERE batch_id=? AND card_key=?",(job_id,workflow_batch,key))
   start_semantic_worker()
   return semantic_get_job(job_id, portal_id, user)
 
@@ -21423,13 +21460,13 @@ def content_card_for_portal(portal_id, card_key, raw_card):
   return card
 
 
-def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None, revision_instruction="", revision_mode="", revision_text=""):
+def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_keywords=None, current_keywords=None, remove_keywords=None, desired_keywords=None, draft=None, characteristics_context=None, sections=None, revision_instruction="", revision_mode="", revision_text="", frozen_semantic=False):
   requested_sections = content_reoptimization_sections(sections)
   selected = content_keywords_from_payload(selected_keywords, limit=120)
   current = content_keywords_from_payload(current_keywords, limit=140)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
   desired = content_keywords_from_payload(desired_keywords, limit=80)
-  stored_selected, stored_current, stored_remove = stored_semantic_reoptimization_keywords(portal_id, card_key)
+  stored_selected, stored_current, stored_remove = ([], [], []) if frozen_semantic else stored_semantic_reoptimization_keywords(portal_id, card_key)
   remove = content_merge_keyword_rows(remove, stored_remove, limit=100)
   remove_keys = {audit_normalized(item.get("query")) for item in remove}
   selected = [
@@ -21452,7 +21489,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     raise ValueError("missing_semantic_keywords")
   if not content_reoptimization_configured():
     raise ValueError("llm_key_missing")
-  title_keywords = content_merge_keyword_rows(target_keywords, stored_semantic_title_keyword_rows(portal_id, card_key), limit=360)
+  title_keywords = content_merge_keyword_rows(target_keywords, [] if frozen_semantic else stored_semantic_title_keyword_rows(portal_id, card_key), limit=360)
 
   card = content_card_for_portal(portal_id, card_key, raw_card)
   raw_fields = card.get("rawFields") if isinstance(card.get("rawFields"), dict) else {}
@@ -23745,6 +23782,1205 @@ def public_portal_payload(portal_id, name, marketplace, mode, scope, team, snaps
   }
 
 
+# Versioned account -> specialist -> client workflow. Legacy tasks stay independent.
+WORKFLOW_FIELDS = {'optimized_product_title': ['title'], 'optimized_characteristics': ['characteristics'],
+                   'optimized_description': ['description'], 'content': ['title', 'characteristics', 'description']}
+WORKFLOW_SEMANTIC = {'semantic_core_collection', 'semantic'}
+WORKFLOW_SMTP = 'client-workflow-smtp'
+WORKFLOW_WORKERS = {}
+WORKFLOW_WORKERS_LOCK = threading.Lock()
+WORKFLOW_REQUESTS = {}
+WORKFLOW_REQUESTS_LOCK = threading.Lock()
+
+
+def workflow_init_schema(db):
+  db.executescript("""
+    CREATE TABLE IF NOT EXISTS workflow_plans(
+      period_id INTEGER PRIMARY KEY REFERENCES portal_work_periods(id) ON DELETE CASCADE,
+      portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'draft',
+      request_key TEXT NOT NULL,data_json TEXT NOT NULL,approval_json TEXT NOT NULL DEFAULT '{}',
+      created_by TEXT REFERENCES users(login) ON DELETE SET NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(portal_id,request_key));
+    CREATE TABLE IF NOT EXISTS workflow_plan_versions(
+      period_id INTEGER NOT NULL REFERENCES workflow_plans(period_id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,data_json TEXT NOT NULL,approval_json TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY(period_id,version));
+    CREATE TABLE IF NOT EXISTS workflow_batches(
+      id TEXT PRIMARY KEY,portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      period_id INTEGER REFERENCES workflow_plans(period_id) ON DELETE CASCADE,plan_version INTEGER NOT NULL DEFAULT 1,
+      task_key TEXT NOT NULL DEFAULT '',parent_id TEXT REFERENCES workflow_batches(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,title TEXT NOT NULL,assignee TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,
+      created_by TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'planned',
+      generation INTEGER NOT NULL DEFAULT 1,semantic_file_id TEXT REFERENCES workflow_files(id) ON DELETE SET NULL,fields_json TEXT NOT NULL DEFAULT '[]',error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(period_id,plan_version,task_key));
+    CREATE INDEX IF NOT EXISTS idx_workflow_batch_owner ON workflow_batches(portal_id,assignee,created_at);
+    CREATE TABLE IF NOT EXISTS workflow_cards(
+      batch_id TEXT NOT NULL REFERENCES workflow_batches(id) ON DELETE CASCADE,card_key TEXT NOT NULL,
+      position INTEGER NOT NULL,snapshot_json TEXT NOT NULL,facts_hash TEXT NOT NULL,
+      job_id TEXT REFERENCES semantic_jobs(id) ON DELETE SET NULL,state TEXT NOT NULL DEFAULT 'queued',
+      final_json TEXT,result_json TEXT,error TEXT NOT NULL DEFAULT '',PRIMARY KEY(batch_id,card_key));
+    CREATE TABLE IF NOT EXISTS workflow_files(
+      id TEXT PRIMARY KEY,portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      period_id INTEGER REFERENCES workflow_plans(period_id) ON DELETE CASCADE,
+      batch_id TEXT REFERENCES workflow_batches(id) ON DELETE CASCADE,kind TEXT NOT NULL,version INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'review',name TEXT NOT NULL,sha256 TEXT NOT NULL,body BLOB NOT NULL,
+      snapshot_json TEXT NOT NULL,created_by TEXT REFERENCES users(login) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,approved_at TEXT,
+      UNIQUE(batch_id,kind,version));
+    CREATE TABLE IF NOT EXISTS workflow_returns(
+      id TEXT PRIMARY KEY,file_id TEXT NOT NULL REFERENCES workflow_files(id) ON DELETE CASCADE,
+      source_file_id TEXT NOT NULL REFERENCES workflow_files(id) ON DELETE CASCADE,body BLOB NOT NULL,sha256 TEXT NOT NULL,
+      actor TEXT REFERENCES users(login) ON DELETE SET NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS workflow_events(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      period_id INTEGER REFERENCES workflow_plans(period_id) ON DELETE CASCADE,
+      batch_id TEXT REFERENCES workflow_batches(id) ON DELETE CASCADE,
+      actor TEXT REFERENCES users(login) ON DELETE SET NULL,action TEXT NOT NULL,details_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS workflow_schedule(
+      id TEXT PRIMARY KEY,batch_id TEXT NOT NULL REFERENCES workflow_batches(id) ON DELETE CASCADE,
+      portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      assignee TEXT NOT NULL REFERENCES users(login) ON DELETE CASCADE,day TEXT NOT NULL,minutes INTEGER NOT NULL CHECK(minutes BETWEEN 1 AND 480),
+      UNIQUE(batch_id,day));
+    CREATE INDEX IF NOT EXISTS idx_workflow_schedule_load ON workflow_schedule(assignee,day);
+    CREATE TABLE IF NOT EXISTS workflow_people(
+      login TEXT PRIMARY KEY REFERENCES users(login) ON DELETE CASCADE,bitrix_id INTEGER,
+      weekdays_json TEXT NOT NULL DEFAULT '[0,1,2,3,4]');
+    CREATE TABLE IF NOT EXISTS workflow_outbox(
+      id TEXT PRIMARY KEY,portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+      batch_id TEXT REFERENCES workflow_batches(id) ON DELETE CASCADE,kind TEXT NOT NULL,
+      dedup_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL DEFAULT 'pending',payload_json TEXT NOT NULL,
+      error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  """)
+  columns = {r['name'] for r in db.execute('PRAGMA table_info(portal_work_periods)')}
+  if 'workflow_version' not in columns:
+    db.execute('ALTER TABLE portal_work_periods ADD COLUMN workflow_version INTEGER NOT NULL DEFAULT 0')
+  if db.execute("SELECT 1 FROM users WHERE login='anastasia.tech' AND NOT EXISTS(SELECT 1 FROM workflow_people WHERE login='anastasia.tech')").fetchone():
+    db.execute("INSERT INTO workflow_people(login,bitrix_id) VALUES('anastasia.tech',91)")
+
+
+def workflow_error(code, status=400, **details):
+  exc = ValueError(code)
+  exc.status, exc.details = status, details
+  return exc
+
+
+def workflow_access(db, portal_id, user, manage=False):
+  current = db.execute('SELECT * FROM users WHERE login=? AND is_active=1', (user_login_value(user),)).fetchone()
+  portal = db.execute('SELECT * FROM portals WHERE id=? AND is_active=1', (portal_id,)).fetchone()
+  if not current or not portal or not user_can_access_portal(current, portal_id):
+    raise PermissionError('forbidden')
+  roles = portal_team_roles_from_db(db, portal_id)
+  manager = current['user_role'] == 'admin' or roles.get('manager') == current['login']
+  if manage and not manager:
+    raise PermissionError('forbidden')
+  return dict(portal), dict(current), manager
+
+
+def workflow_batch(db, portal, batch_id, user, manage=False, write=False):
+  _, current, manager = workflow_access(db, portal, user, manage)
+  row = db.execute('SELECT * FROM workflow_batches WHERE id=? AND portal_id=?', (batch_id, portal)).fetchone()
+  if not row:
+    raise workflow_error('workflow_task_not_found', 404)
+  if not manager and row['assignee'] != current['login'] and (write or not user_has_global_portal_access(current)):
+    raise PermissionError('forbidden')
+  if write and row['period_id']:
+    version = db.execute('SELECT version FROM workflow_plans WHERE period_id=?',(row['period_id'],)).fetchone()
+    if not version or version[0] != row['plan_version']:
+      raise workflow_error('workflow_version_conflict',409)
+  return dict(row)
+
+
+def workflow_event(db, portal, user, action, period=None, batch=None, **details):
+  db.execute('INSERT INTO workflow_events(portal_id,period_id,batch_id,actor,action,details_json) VALUES(?,?,?,?,?,?)',
+             (portal, period, batch, user_login_value(user) or None, action, semantic_json(details)))
+
+
+def workflow_contacts(raw):
+  data = clean_client_contact(raw)
+  if not data['name'] or not data['phone'] or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', data['email']):
+    raise workflow_error('workflow_contacts_required')
+  return data
+
+
+def workflow_cards_scope(db, portal, keys):
+  if not isinstance(keys, list) or not 1 <= len(keys) <= 200 or len(set(map(str,keys))) != len(keys):
+    raise workflow_error('workflow_cards_required')
+  row = db.execute('SELECT * FROM portals WHERE id=?', (portal,)).fetchone()
+  cards = {semantic_job_key(c): c for c in wb_snapshot_cards_from_row(row)}
+  if any(str(key) not in cards for key in keys):
+    raise workflow_error('semantic_card_not_found')
+  return [cards[str(key)] for key in keys]
+
+
+def workflow_assignee(db, portal, login):
+  current = db.execute('SELECT * FROM users WHERE login=? AND is_active=1', (login,)).fetchone()
+  if not current or not user_can_access_portal(current, portal) or (current['user_role'] not in ('tech','admin') and portal_team_roles_from_db(db,portal).get('tech')!=login):
+    raise workflow_error('workflow_assignee_required')
+  return login
+
+
+def workflow_insert_batch(db, portal, user, cards, assignee, kind, title, period=None, task_key='', parent=None, fields=None, plan_version=1):
+  batch = uuid.uuid4().hex
+  db.execute('INSERT INTO workflow_batches(id,portal_id,period_id,plan_version,task_key,parent_id,kind,title,assignee,created_by,status,fields_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+             (batch, portal, period, plan_version, task_key, parent, kind, title, assignee, user_login_value(user),
+              'collecting' if kind == 'semantic' else 'planned', semantic_json(fields or [])))
+  for pos, card in enumerate(cards):
+    db.execute('INSERT INTO workflow_cards(batch_id,card_key,position,snapshot_json,facts_hash) VALUES(?,?,?,?,?)',
+               (batch, semantic_job_key(card), pos, semantic_json(card), semantic_facts_hash(card)))
+  workflow_event(db, portal, user, 'task_created', period, batch, kind=kind, count=len(cards), assignee=assignee)
+  return batch
+
+
+def workflow_create_plan(portal, payload, user):
+  request_key = audit_str(payload.get('requestId'), 80)
+  if not request_key:
+    raise workflow_error('workflow_request_id_required')
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    record, current, _ = workflow_access(db, portal, user, True)
+    existing = db.execute('SELECT period_id FROM workflow_plans WHERE portal_id=? AND request_key=?', (portal, request_key)).fetchone()
+    if existing:
+      saved=db.execute('SELECT data_json FROM workflow_plans WHERE period_id=?',(existing['period_id'],)).fetchone()
+      if json.loads(saved[0]).get('requestHash')!=hashlib.sha256(semantic_json(payload).encode()).hexdigest(): raise workflow_error('workflow_version_conflict',409)
+      return {'periodId': str(existing['period_id'])}
+    contact = workflow_contacts(payload.get('contact') or client_contact_from_json(record['client_contact_json']))
+    start, end = validate_work_period_dates(payload.get('start'), payload.get('end'))
+    tasks = normalize_work_period_tasks(payload.get('tasks'), fallback_default=False)
+    if not tasks:
+      raise workflow_error('invalid_work_period_task')
+    cards = workflow_cards_scope(db, portal, payload.get('cardKeys'))
+    assignee = workflow_assignee(db, portal, audit_str(payload.get('assignee'), 120))
+    title = audit_str(payload.get('title'),180) or 'Работы с контентом'
+    cursor = db.execute("INSERT INTO portal_work_periods(portal_id,title,period_start,period_end,tasks_json,created_by,updated_by,workflow_version) VALUES(?,?,?,?,?,?,?,2)",
+                       (portal,title,start,end,semantic_json(tasks),current['login'],current['login']))
+    period = cursor.lastrowid
+    data = {'requestHash':hashlib.sha256(semantic_json(payload).encode()).hexdigest(),'title':title,'start':start,'end':end,'tasks':tasks,'cardKeys':[semantic_job_key(c) for c in cards],'assignee':assignee,'contact':contact}
+    db.execute('INSERT INTO workflow_plans(period_id,portal_id,request_key,data_json,created_by) VALUES(?,?,?,?,?)',
+               (period,portal,request_key,semantic_json(data),current['login']))
+    db.execute('INSERT INTO workflow_plan_versions(period_id,version,data_json) VALUES(?,1,?)', (period,semantic_json(data)))
+    db.execute('UPDATE portals SET client_contact_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', (semantic_json(contact),portal))
+    requires_semantic = any(t['key'] in WORKFLOW_SEMANTIC or t['key'] in WORKFLOW_FIELDS for t in tasks)
+    parent = workflow_insert_batch(db,portal,current,cards,assignee,'semantic','СЯ · '+title,period,'semantic_core_collection') if requires_semantic else None
+    for task in tasks:
+      if task['key'] in WORKFLOW_SEMANTIC:
+        continue
+      workflow_insert_batch(db,portal,current,cards,assignee,'content' if task['key'] in WORKFLOW_FIELDS else 'work',
+                            task['label'],period,task['key'],parent,WORKFLOW_FIELDS.get(task['key']))
+    workflow_event(db,portal,current,'plan_created',period,version=1,count=len(cards))
+  start_workflow_worker()
+  return {'periodId':str(period)}
+
+
+def workflow_approve_plan(portal, payload, user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    workflow_access(db,portal,user,True)
+    row = db.execute('SELECT * FROM workflow_plans WHERE portal_id=? AND period_id=?',(portal,payload.get('periodId'))).fetchone()
+    if not row: raise workflow_error('invalid_work_period',404)
+    if int(payload.get('version') or 0) != row['version']: raise workflow_error('workflow_version_conflict',409)
+    if row['status']=='approved': return {'approved':True}
+    evidence = clean_work_period_attachments([payload.get('proof')])
+    day = clean_report_date(payload.get('day'))
+    if not evidence or not day: raise workflow_error('workflow_approval_proof_required')
+    evidence[0].update(uploadedBy=user_login_value(user),uploadedAt=utc_now().isoformat())
+    approval = {'day':day,'by':user_login_value(user),'at':utc_now().isoformat(),'comment':audit_str(payload.get('comment'),1200),'proof':evidence[0]}
+    db.execute("UPDATE workflow_plans SET status='approved',approval_json=?,updated_at=CURRENT_TIMESTAMP WHERE period_id=?",
+               (semantic_json(approval),row['period_id']))
+    db.execute('UPDATE workflow_plan_versions SET approval_json=? WHERE period_id=? AND version=?',(semantic_json(approval),row['period_id'],row['version']))
+    workflow_event(db,portal,user,'plan_approved',row['period_id'],version=row['version'],day=day,proof=evidence[0]['name'])
+  return {'approved':True}
+
+
+def workflow_revise_plan(portal, payload, user):
+  """A new plan version archives old tasks and keeps their immutable evidence.
+
+  Reuse only matching card facts. Transfer the durable job, including its paid
+  provider checkpoint, instead of issuing another MPStats report on revision.
+  """
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    workflow_access(db,portal,user,True)
+    plan=db.execute('SELECT * FROM workflow_plans WHERE portal_id=? AND period_id=?',(portal,payload.get('periodId'))).fetchone()
+    if not plan: raise workflow_error('invalid_work_period',404)
+    if int(payload.get('version') or 0)!=plan['version']: raise workflow_error('workflow_version_conflict',409)
+    contact=workflow_contacts(payload.get('contact'))
+    start,end=validate_work_period_dates(payload.get('start'),payload.get('end'))
+    tasks=normalize_work_period_tasks(payload.get('tasks'),fallback_default=False)
+    if not tasks: raise workflow_error('invalid_work_period_task')
+    cards=workflow_cards_scope(db,portal,payload.get('cardKeys'))
+    assignee=workflow_assignee(db,portal,audit_str(payload.get('assignee'),120))
+    title=audit_str(payload.get('title'),180) or 'Работы с контентом'
+    version=plan['version']+1
+    data={'title':title,'start':start,'end':end,'tasks':tasks,'cardKeys':[semantic_job_key(c) for c in cards],
+          'assignee':assignee,'contact':contact,'requestHash':json.loads(plan['data_json']).get('requestHash')}
+    old=[dict(r) for r in db.execute('SELECT * FROM workflow_batches WHERE period_id=? AND plan_version=?',(plan['period_id'],plan['version']))]
+    for batch in old:
+      db.execute("UPDATE workflow_batches SET status='archived',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+      db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE portal_id=? AND status IN ('queued','collecting','classifying','saving') AND json_extract(request_json,'$.workflowBatch')=?",(time.time(),portal,batch['id']))
+    db.execute("UPDATE workflow_plans SET version=?,status='draft',approval_json='{}',data_json=?,updated_at=CURRENT_TIMESTAMP WHERE period_id=?",(version,semantic_json(data),plan['period_id']))
+    db.execute('INSERT INTO workflow_plan_versions(period_id,version,data_json) VALUES(?,?,?)',(plan['period_id'],version,semantic_json(data)))
+    db.execute('UPDATE portal_work_periods SET title=?,period_start=?,period_end=?,tasks_json=?,updated_by=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(title,start,end,semantic_json(tasks),user_login_value(user),plan['period_id']))
+    db.execute('UPDATE portals SET client_contact_json=? WHERE id=?',(semantic_json(contact),portal))
+    requires_semantic=any(t['key'] in WORKFLOW_SEMANTIC or t['key'] in WORKFLOW_FIELDS for t in tasks)
+    parent=workflow_insert_batch(db,portal,user,cards,assignee,'semantic','СЯ · '+title,plan['period_id'],'semantic_core_collection',plan_version=version) if requires_semantic else None
+    prior_sem=next((b for b in old if b['kind']=='semantic'),None)
+    if parent and prior_sem:
+      db.execute('UPDATE workflow_batches SET created_by=? WHERE id=?',(prior_sem['created_by'],parent))
+      for card in db.execute('SELECT * FROM workflow_cards WHERE batch_id=?',(parent,)).fetchall():
+        previous=db.execute('SELECT * FROM workflow_cards WHERE batch_id=? AND card_key=? AND facts_hash=?',(prior_sem['id'],card['card_key'],card['facts_hash'])).fetchone()
+        if not previous: continue
+        state=previous['state'] if previous['state'] in ('ready','reviewed') else 'queued'
+        db.execute('UPDATE workflow_cards SET state=?,final_json=?,job_id=? WHERE batch_id=? AND card_key=?',(state,previous['final_json'],previous['job_id'],parent,card['card_key']))
+        if previous['job_id']:
+          db.execute("UPDATE semantic_jobs SET request_json=json_set(request_json,'$.workflowBatch',?) WHERE id=? AND portal_id=? AND json_extract(request_json,'$.workflowBatch')=?",(parent,previous['job_id'],portal,prior_sem['id']))
+      reusable=db.execute("SELECT COUNT(*) FROM workflow_cards WHERE batch_id=? AND state!='reviewed'",(parent,)).fetchone()[0]==0
+      if reusable:
+        new_batch=dict(db.execute('SELECT * FROM workflow_batches WHERE id=?',(parent,)).fetchone())
+        rows=db.execute('SELECT * FROM workflow_cards WHERE batch_id=? ORDER BY position',(parent,)).fetchall()
+        snapshots={r['card_key']:{'card':json.loads(r['snapshot_json']),'final':json.loads(r['final_json'])} for r in rows}
+        previous_file=db.execute("SELECT * FROM workflow_files WHERE batch_id=? AND kind='semantic' ORDER BY version DESC LIMIT 1",(prior_sem['id'],)).fetchone()
+        approved=bool(previous_file and previous_file['status']=='approved' and all(json.loads(previous_file['snapshot_json'])['cards'].get(k)==v for k,v in snapshots.items()))
+        workflow_make_file(db,new_batch,'semantic',snapshots,user,'approved' if approved else 'review')
+        db.execute('UPDATE workflow_batches SET status=? WHERE id=?',('approved' if approved else 'review',parent))
+    new_ids={}
+    for task in tasks:
+      if task['key'] in WORKFLOW_SEMANTIC: continue
+      new_ids[task['key']]=workflow_insert_batch(db,portal,user,cards,assignee,'content' if task['key'] in WORKFLOW_FIELDS else 'work',task['label'],plan['period_id'],task['key'],parent,WORKFLOW_FIELDS.get(task['key']),version)
+    if parent: new_ids['semantic_core_collection']=parent
+    moved=0;released=0
+    for previous in old:
+      target=new_ids.get(previous['task_key'])
+      old_keys=[r[0] for r in db.execute('SELECT card_key FROM workflow_cards WHERE batch_id=? ORDER BY position',(previous['id'],))]
+      facts_match=target and not db.execute('SELECT 1 FROM workflow_cards a JOIN workflow_cards b ON a.card_key=b.card_key WHERE a.batch_id=? AND b.batch_id=? AND a.facts_hash!=b.facts_hash LIMIT 1',(previous['id'],target)).fetchone()
+      same_scope=target and facts_match and old_keys==data['cardKeys'] and previous['assignee']==assignee
+      if same_scope and previous['kind']=='content' and parent and db.execute("SELECT 1 FROM workflow_batches WHERE id=? AND status='approved'",(parent,)).fetchone():
+        for row in db.execute('SELECT * FROM workflow_cards WHERE batch_id=?',(previous['id'],)).fetchall():
+          if row['result_json'] and row['state'] in ('generated','reviewed'):
+            db.execute('UPDATE workflow_cards SET result_json=?,state=? WHERE batch_id=? AND card_key=?',(row['result_json'],row['state'],target,row['card_key']))
+        if db.execute("SELECT COUNT(*) FROM workflow_cards WHERE batch_id=? AND state NOT IN ('generated','reviewed')",(target,)).fetchone()[0]==0:
+          db.execute("UPDATE workflow_batches SET status='review' WHERE id=?",(target,))
+        source=db.execute("SELECT * FROM workflow_files WHERE batch_id=? AND kind='semantic' AND status='approved' ORDER BY version DESC LIMIT 1",(parent,)).fetchone() if parent else None
+        if source and previous['semantic_file_id']:
+          db.execute('UPDATE workflow_batches SET semantic_file_id=? WHERE id=?',(source['id'],target))
+          new_batch=dict(db.execute('SELECT * FROM workflow_batches WHERE id=?',(target,)).fetchone())
+          latest={}
+          for file in db.execute('SELECT * FROM workflow_files WHERE batch_id=? ORDER BY version DESC',(previous['id'],)):
+            latest.setdefault(file['kind'],file)
+          for kind,file in latest.items():
+            if file['status']=='approved': workflow_make_file(db,new_batch,kind,json.loads(file['snapshot_json'])['cards'],user,'approved')
+          if latest and all(f['status']=='approved' for f in latest.values()): workflow_sync_status(db,new_batch)
+      for slot in db.execute('SELECT * FROM workflow_schedule WHERE batch_id=?',(previous['id'],)).fetchall():
+        if same_scope and start<=slot['day']<=end:
+          db.execute('UPDATE workflow_schedule SET batch_id=? WHERE id=?',(target,slot['id']));moved+=1
+        else:
+          db.execute('DELETE FROM workflow_schedule WHERE id=?',(slot['id'],));released+=1
+    workflow_event(db,portal,user,'plan_revised',plan['period_id'],version=version,previousVersion=plan['version'],movedSlots=moved,releasedSlots=released)
+  start_workflow_worker()
+  return {'periodId':str(plan['period_id']),'version':version}
+
+
+def workflow_public_batch(db, row, detail=False):
+  value = dict(row)
+  cards = db.execute('SELECT card_key,position,state,error,job_id,final_json,result_json,snapshot_json FROM workflow_cards WHERE batch_id=? ORDER BY position',(row['id'],)).fetchall()
+  result = {'id':row['id'],'periodId':str(row['period_id'] or ''),'planVersion':row['plan_version'],'kind':row['kind'],
+    'title':row['title'],'status':row['status'],'assignee':row['assignee'],'createdBy':row['created_by'],
+    'generation':row['generation'],'fields':json.loads(row['fields_json']),'parentId':row['parent_id'],
+    'error':row['error'],'createdAt':row['created_at'],'taskKey':row['task_key'],'cards':[]}
+  for card in cards:
+    item = {'cardKey':card['card_key'],'state':card['state'],'error':card['error'],'reviewed':bool(card['final_json']) if row['kind']=='semantic' else card['state']=='reviewed'}
+    snapshot = json.loads(card['snapshot_json'])
+    item['title'] = snapshot.get('title') or card['card_key']
+    if card['job_id']:
+      job = db.execute('SELECT status,completed,total,error FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
+      if job: item['job'] = dict(job)
+    if detail:
+      item['result'] = json.loads(card['result_json']) if card['result_json'] else None
+      item['final'] = json.loads(card['final_json']) if card['final_json'] else None
+    result['cards'].append(item)
+  result['files'] = [dict(r) for r in db.execute("SELECT id,kind,version,status,name,sha256,created_at,approved_at,json_extract(snapshot_json,'$.generation') AS generation FROM workflow_files WHERE batch_id=? ORDER BY created_at DESC,version DESC",(row['id'],))]
+  latest={}
+  for file in result['files']:
+    latest[file['kind']]=max(latest.get(file['kind'],0),file['version'])
+  for file in result['files']:
+    file['current']=file['version']==latest[file['kind']] and file['generation']==row['generation'] and row['status']!='archived'
+  result['schedule'] = [dict(r) for r in db.execute('SELECT id,day,minutes,assignee FROM workflow_schedule WHERE batch_id=? ORDER BY day',(row['id'],))]
+  return result
+
+
+def workflow_list(portal, user, batch_id=None):
+  with semantic_job_connection() as db:
+    record,current,manager = workflow_access(db,portal,user)
+    people = []
+    roles = portal_team_roles_from_db(db,portal)
+    # Finish this reader before permission checks open their own connections.
+    for row in db.execute('SELECT * FROM users WHERE is_active=1 ORDER BY full_name').fetchall():
+      if user_can_access_portal(row,portal):
+        people.append({'login':row['login'],'name':row['full_name'],'canExecute':row['user_role'] in ('tech','admin') or roles.get('tech')==row['login']})
+    if batch_id:
+      row = workflow_batch(db,portal,batch_id,current)
+      return {'batch':workflow_public_batch(db,row,True)}
+    batches = db.execute('SELECT * FROM workflow_batches WHERE portal_id=? ORDER BY created_at DESC,id',(portal,)).fetchall()
+    visible = [r for r in batches if manager or r['assignee']==current['login'] or user_has_global_portal_access(current)]
+    plans = []
+    for row in db.execute('SELECT * FROM workflow_plans WHERE portal_id=? ORDER BY period_id DESC',(portal,)):
+      data = json.loads(row['data_json']); approval = json.loads(row['approval_json'])
+      if approval.get('proof'): approval['proof'] = {k:v for k,v in approval['proof'].items() if k != 'dataUrl'}
+      versions=[]
+      for saved in db.execute('SELECT version,approval_json FROM workflow_plan_versions WHERE period_id=? ORDER BY version DESC',(row['period_id'],)):
+        proof=json.loads(saved['approval_json']).get('proof')
+        pdf=db.execute("SELECT id FROM workflow_files WHERE period_id=? AND kind='plan' AND version=?",(row['period_id'],saved['version'])).fetchone()
+        versions.append({'version':saved['version'],'proof':proof.get('name') if proof else None,'pdfId':pdf[0] if pdf else None})
+      plans.append({'versions':versions,'id':str(row['period_id']),'version':row['version'],'status':row['status'],**data,'approval':approval})
+    events = [dict(r) for r in db.execute('SELECT id,period_id,batch_id,actor,action,details_json,created_at FROM workflow_events WHERE portal_id=? ORDER BY id DESC LIMIT 100',(portal,))]
+    for event in events: event['details'] = json.loads(event.pop('details_json'))
+    deliveries=[dict(r) for r in db.execute('SELECT id,batch_id,kind,status,error,created_at FROM workflow_outbox WHERE portal_id=? ORDER BY created_at DESC LIMIT 100',(portal,))]
+    return {'deliveries':deliveries,'plans':plans,'batches':[workflow_public_batch(db,r) for r in visible],'people':people,'team':roles,
+            'canManage':manager,'canConfigure':current['user_role']=='admin','login':current['login'],'contact':client_contact_from_json(record['client_contact_json']),
+            'taskOptions':{**{k:v for k,v in WORK_PERIOD_TASK_LABELS.items() if k in DEFAULT_WORK_PERIOD_TASK_KEYS},'content':'Контент: наименование, характеристики и описание'},
+            'events':events,'mailConfigured':bool(get_service_integration(WORKFLOW_SMTP).get('connected'))}
+
+
+def workflow_schedule_task(portal, payload, user):
+  day = clean_report_date(payload.get('day'))
+  try: minutes = int(payload.get('minutes'))
+  except (ValueError,TypeError): raise workflow_error('workflow_duration_required')
+  if not day or not 1 <= minutes <= 480: raise workflow_error('workflow_duration_required')
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    batch = workflow_batch(db,portal,payload.get('batchId'),user,write=True)
+    assignee = batch['assignee']
+    settings = db.execute('SELECT weekdays_json FROM workflow_people WHERE login=?',(assignee,)).fetchone()
+    weekdays = json.loads(settings[0]) if settings else [0,1,2,3,4]
+    if dt.date.fromisoformat(day).weekday() not in weekdays: raise workflow_error('workflow_nonworking_day')
+    plan = db.execute('SELECT data_json FROM workflow_plans WHERE period_id=? AND portal_id=?',(batch['period_id'],portal)).fetchone() if batch['period_id'] else None
+    bounds = json.loads(plan[0]) if plan else None
+    if bounds and not bounds['start'] <= day <= bounds['end']: raise workflow_error('workflow_outside_period')
+    used = db.execute('SELECT COALESCE(SUM(minutes),0) FROM workflow_schedule WHERE assignee=? AND day=? AND batch_id!=?',(assignee,day,batch['id'])).fetchone()[0]
+    if used+minutes > 480:
+      suggestions = []
+      for offset in range(1,367):
+        alternative = (dt.date.fromisoformat(day)+dt.timedelta(days=offset)).isoformat()
+        if bounds and alternative > bounds['end']: break
+        if dt.date.fromisoformat(alternative).weekday() not in weekdays: continue
+        load = db.execute('SELECT COALESCE(SUM(minutes),0) FROM workflow_schedule WHERE assignee=? AND day=? AND batch_id!=?',(assignee,alternative,batch['id'])).fetchone()[0]
+        if load+minutes<=480: suggestions.append({'day':alternative,'used':load,'free':480-load})
+        if len(suggestions)==3: break
+      raise workflow_error('workflow_day_overloaded',409,used=used,requested=minutes,limit=480,suggestions=suggestions)
+    if payload.get('replace'):
+      db.execute('DELETE FROM workflow_schedule WHERE batch_id=?',(batch['id'],))
+    move_from=clean_report_date(payload.get('moveFrom'))
+    if move_from and move_from!=day:
+      db.execute('DELETE FROM workflow_schedule WHERE batch_id=? AND day=?',(batch['id'],move_from))
+    db.execute('INSERT INTO workflow_schedule(id,batch_id,portal_id,assignee,day,minutes) VALUES(?,?,?,?,?,?) ON CONFLICT(batch_id,day) DO UPDATE SET minutes=excluded.minutes',
+               (uuid.uuid4().hex,batch['id'],portal,assignee,day,minutes))
+    workflow_event(db,portal,user,'task_scheduled',batch['period_id'],batch['id'],day=day,minutes=minutes)
+  return {'scheduled':True}
+
+
+def workflow_calendar(user, assignee, start, end):
+  start,end = validate_work_period_dates(start,end)
+  if (dt.date.fromisoformat(end)-dt.date.fromisoformat(start)).days>93: raise workflow_error('work_period_too_long')
+  login = user_login_value(user)
+  with semantic_job_connection() as db:
+    target = db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(assignee or login,)).fetchone()
+    if not target: raise workflow_error('workflow_assignee_required')
+    if target['login']!=login and not user_is_admin(user):
+      common = db.execute("SELECT 1 FROM portal_members a JOIN portal_members b ON a.portal_id=b.portal_id WHERE a.user_login=? AND a.project_role='manager' AND b.user_login=?",(login,target['login'])).fetchone()
+      if not common: raise PermissionError('forbidden')
+    days = {}
+    for row in db.execute('SELECT s.*,b.title,b.status FROM workflow_schedule s JOIN workflow_batches b ON b.id=s.batch_id WHERE s.assignee=? AND s.day BETWEEN ? AND ? ORDER BY s.day',(target['login'],start,end)).fetchall():
+      day = days.setdefault(row['day'],{'day':row['day'],'used':0,'tasks':[]})
+      day['used'] += row['minutes']
+      if user_can_access_portal(user,row['portal_id']):
+        day['tasks'].append({key:row[key] for key in ('id','portal_id','batch_id','title','minutes','status')})
+    return {'assignee':target['login'],'days':list(days.values()),'limit':480,'timezone':'Europe/Moscow'}
+
+
+def workflow_semantic_lists(final):
+  core = final.get('semanticCore') or {}
+  def unique(rows):
+    output = {}
+    for row in rows if isinstance(rows,list) else []:
+      if isinstance(row,dict) and audit_str(row.get('query'),500):
+        output[audit_normalized(row['query'])] = row
+    return list(output.values())
+  selected = final.get('selected', final.get('semanticCoreSelected', core.get('selected',core.get('selectedKeywords',[]))))
+  current = final.get('current',core.get('current',core.get('currentContentKeywords',[])))
+  removed = final.get('removal',final.get('removed',core.get('removal',core.get('removeKeywords',[]))))
+  return unique(selected),unique(current),unique(removed)
+
+
+def workflow_canonical_final(final):
+  selected,current,removed=workflow_semantic_lists(final)
+  core=dict(final.get('semanticCore') or {})
+  for key in ('selectedKeywords','removed','toRemove','removeKeywords','currentKeywords','currentContentKeywords','contentKeywords','contentRows'):
+    core.pop(key,None)
+  core.update(current=current,selected=selected,removal=removed)
+  return {'selected':selected,'current':current,'removal':removed,'semanticCore':core,'period':final.get('period') or core.get('period') or {}}
+
+
+def workflow_final_from_card(db, portal, key, marketplace):
+  if marketplace == 'Ozon':
+    row = db.execute('SELECT payload_json FROM ozon_semantic_drafts WHERE portal_id=? AND card_key=?',(portal,key)).fetchone()
+    data = json.loads(row[0]) if row else {}
+    if not data.get('final'): raise workflow_error('semantic_final_missing')
+    snapshot = data.get('finalSelection')
+    if not isinstance(snapshot,dict): raise workflow_error('workflow_final_snapshot_required')
+    return workflow_canonical_final({**snapshot,'semanticCore':{'current':snapshot.get('current') or []}})
+  row = db.execute('SELECT payload_json FROM card_drafts WHERE portal_id=? AND card_key=?',(portal,key)).fetchone()
+  data = json.loads(row[0]) if row else {}
+  final = (data.get('meta') or {}).get('semanticCoreFinal')
+  if not isinstance(final,dict) or not semantic_core_final_exists(data.get('meta') or {}): raise workflow_error('semantic_final_missing')
+  return workflow_canonical_final(final)
+
+
+def workflow_review_card(portal, payload, user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    batch = workflow_batch(db,portal,payload.get('batchId'),user,write=True)
+    if not db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone():
+      raise workflow_error('workflow_schedule_required')
+    card = db.execute('SELECT * FROM workflow_cards WHERE batch_id=? AND card_key=?',(batch['id'],str(payload.get('cardKey')))).fetchone()
+    if not card: raise workflow_error('semantic_card_not_found')
+    if batch['status'] in ('approved','cancelled'): raise workflow_error('workflow_task_closed',409)
+    if payload.get('generation') is not None and int(payload['generation'])!=batch['generation']: raise workflow_error('workflow_version_conflict',409)
+    if card['state'] not in ('ready','generated','reviewed'): raise workflow_error('workflow_card_not_ready')
+    marketplace = db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
+    if batch['kind']=='semantic':
+      final = workflow_final_from_card(db,portal,card['card_key'],marketplace)
+      if card['state']=='reviewed' and json.loads(card['final_json'] or '{}')==final: return {'reviewed':True}
+      db.execute("UPDATE workflow_cards SET final_json=?,state='reviewed' WHERE batch_id=? AND card_key=?",(semantic_json(final),batch['id'],card['card_key']))
+    else:
+      content = payload.get('content')
+      if not isinstance(content,dict): raise workflow_error('invalid_content')
+      previous = json.loads(card['result_json'] or '{}')
+      clean = {}
+      for section in json.loads(batch['fields_json']):
+        if section == 'characteristics':
+          rows = content.get(section)
+          if not isinstance(rows,list) or len(rows)>100: raise workflow_error('invalid_content')
+          clean[section] = [{'name':audit_str(r.get('name'),120),'value':audit_str(r.get('value'),1000)} for r in rows if isinstance(r,dict) and audit_str(r.get('name'),120)]
+        else:
+          limit = 300 if section=='title' else 7000
+          value = audit_str(content.get(section),limit)
+          if not value: raise workflow_error('invalid_content')
+          clean[section] = value
+      if card['state']=='reviewed' and json.loads(card['result_json'] or '{}')==clean: return {'reviewed':True}
+      db.execute("UPDATE workflow_cards SET result_json=?,state='reviewed' WHERE batch_id=? AND card_key=?",(semantic_json(clean),batch['id'],card['card_key']))
+    # Existing immutable files remain in history; a changed review creates a new generation.
+    if db.execute('SELECT 1 FROM workflow_files WHERE batch_id=?',(batch['id'],)).fetchone():
+      db.execute("UPDATE workflow_batches SET generation=generation+1,status='review',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+    workflow_event(db,portal,user,'card_reviewed',batch['period_id'],batch['id'],cardKey=card['card_key'])
+  return {'reviewed':True}
+
+
+def workflow_workbook(file_id, batch, kind, version, snapshots):
+  from openpyxl import Workbook
+  from openpyxl.styles import Font,PatternFill,Alignment,Protection
+  from openpyxl.worksheet.datavalidation import DataValidation
+  book = Workbook()
+  guide = book.active;guide.title='Инструкция'
+  guide.append(['OptiCards · согласование '+('СЯ' if kind=='semantic' else 'контента')])
+  guide.append(['Набор',batch['id']]);guide.append(['Версия',version])
+  guide.append(['Изменяйте только выделенные ячейки. Да — принять; Нет — вернуть на доработку.'])
+  guide.append(['Каждый лист относится к одной карточке этого набора. Не удаляйте строки/листы/столбцы.'])
+  manifest = book.create_sheet('_OptiCards')
+  manifest.append([file_id,batch['id'],batch['generation'],kind,version])
+  manifest.sheet_state='veryHidden'
+  for index,(key,item) in enumerate(snapshots.items(),1):
+    sheet = book.create_sheet(('К'+str(index)+'-'+str(key))[:31])
+    manifest.append([sheet.title,key])
+    rows=[]
+    if kind=='semantic':
+      final = item['final'];selected,current,removed = workflow_semantic_lists(final)
+      ranked = (final.get('semanticCore') or {}).get('rankedKeywords') or []
+      sheet.append(['Ключи в карточке (действующие)','Ранжируемые ключи','Позиция ранжируемого ключа','Ключ к добавлению','Частота WB ключа к добавлению','Частота Ozon ключа к добавлению','Согласование добавления','Ключ к удалению из карточки','Причина удаления','Согласование удаления','Обоснование добавления'])
+      for pos in range(max(len(current),len(ranked),len(selected),len(removed),1)):
+        c=current[pos] if pos<len(current) else {};r=ranked[pos] if pos<len(ranked) else {}
+        add=selected[pos] if pos<len(selected) else {};remove=removed[pos] if pos<len(removed) else {}
+        rows.append([c.get('query',''),r.get('query',''),r.get('orgPos') or r.get('avgPos') or r.get('adPos') or '',add.get('query',''),add.get('wbCount',0) if add else '',add.get('ozonCount',0) if add else '','Да' if add else '',remove.get('query',''),remove.get('removalReason') or remove.get('reason') or '','Да' if remove else '',add.get('relevanceReason') or add.get('reason') or ''])
+      editable={7,10}
+    else:
+      sheet.append(['Карточка','Раздел','Поле','Было','Предложено','Согласовано'])
+      content=item['content'];original=item['card']
+      if kind=='main' and 'title' in content: rows.append([key,'title','Наименование',original.get('title') or '',content['title'],'Нет' if item.get('agreements',{}).get('title:Наименование') is False else 'Да'])
+      if kind=='main' and 'characteristics' in content:
+        old={r['name']: ', '.join(r.get('values') or []) for r in audit_card_characteristics(original)}
+        for char in content['characteristics']: rows.append([key,'characteristics',char['name'],old.get(char['name'],''),char['value'],'Нет' if item.get('agreements',{}).get('characteristics:'+char['name']) is False else 'Да'])
+      if kind=='description' and 'description' in content: rows.append([key,'description','Описание',original.get('description') or '',content['description'],'Нет' if item.get('agreements',{}).get('description:Описание') is False else 'Да'])
+      editable={5,6}
+    for row in rows:
+      sheet.append([str(v) if isinstance(v,(dict,list)) else v for v in row])
+    for row in sheet:
+      for cell in row:
+        if isinstance(cell.value,str) and cell.value.startswith(('=','+','-','@')):
+          cell.data_type='s'
+        cell.alignment=Alignment(vertical='top',wrap_text=True)
+        if cell.row==1:
+          cell.font=Font(color='FFFFFF',bold=True);cell.fill=PatternFill('solid',fgColor='5144AA')
+        elif cell.column in editable:
+          cell.fill=PatternFill('solid',fgColor='EDF6EA');cell.protection=Protection(locked=False)
+    from openpyxl.utils import get_column_letter
+    for column in range(1,sheet.max_column+1): sheet.column_dimensions[get_column_letter(column)].width=34 if column not in (3,5,6,7,10) else 20
+    if kind=='description': sheet.column_dimensions['E'].width=85;sheet.column_dimensions['D'].width=70
+    sheet.freeze_panes='A2';sheet.auto_filter.ref=sheet.dimensions;sheet.protection.sheet=True
+    choice=DataValidation(type='list',formula1='"Да,Нет"')
+    sheet.add_data_validation(choice)
+    for column in ([7,10] if kind=='semantic' else [6]): choice.add(get_column_letter(column)+'2:'+get_column_letter(column)+str(max(2,sheet.max_row)))
+  guide.column_dimensions['A'].width=95;guide.column_dimensions['B'].width=45
+  buffer=io.BytesIO();book.save(buffer)
+  return buffer.getvalue()
+
+
+def workflow_kind_snapshot(kind,snapshots):
+  if kind=='semantic': return snapshots
+  fields={'title','characteristics'} if kind=='main' else {'description'}
+  return {key:{**item,'content':{field:value for field,value in item['content'].items() if field in fields},
+               **({'agreements':{k:v for k,v in item['agreements'].items() if k.split(':',1)[0] in fields}} if item.get('agreements') else {})} for key,item in snapshots.items()}
+
+
+def workflow_make_file(db, batch, kind, snapshots, user, status='review'):
+  snapshots=workflow_kind_snapshot(kind,snapshots)
+  version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM workflow_files WHERE batch_id=? AND kind=?',(batch['id'],kind)).fetchone()[0]
+  file_id=uuid.uuid4().hex
+  body=workflow_workbook(file_id,batch,kind,version,snapshots)
+  name={'semantic':'СЯ','main':'Наименования-характеристики','description':'Описания'}[kind]+'_'+batch['id'][:8]+'_v'+str(version)+'.xlsx'
+  snapshot={'generation':batch['generation'],'cards':snapshots}
+  db.execute('INSERT INTO workflow_files(id,portal_id,period_id,batch_id,kind,version,status,name,sha256,body,snapshot_json,created_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+             (file_id,batch['portal_id'],batch['period_id'],batch['id'],kind,version,status,name,hashlib.sha256(body).hexdigest(),body,semantic_json(snapshot),user_login_value(user),utc_now().isoformat() if status=='approved' else None))
+  workflow_event(db,batch['portal_id'],user,'file_created',batch['period_id'],batch['id'],fileId=file_id,kind=kind,version=version)
+  return file_id
+
+
+def workflow_export_files(portal, payload, user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    batch=workflow_batch(db,portal,payload.get('batchId'),user,write=True)
+    rows=db.execute('SELECT * FROM workflow_cards WHERE batch_id=? ORDER BY position',(batch['id'],)).fetchall()
+    if not rows or any(r['state']!='reviewed' for r in rows): raise workflow_error('workflow_review_all_cards')
+    if batch['status']=='cancelled': raise workflow_error('workflow_task_closed',409)
+    kinds=['semantic'] if batch['kind']=='semantic' else [kind for kind,fields in [('main',{'title','characteristics'}),('description',{'description'})] if fields & set(json.loads(batch['fields_json']))]
+    if not kinds: raise workflow_error('workflow_no_files')
+    snapshots={r['card_key']:{'card':json.loads(r['snapshot_json']),**({'final':json.loads(r['final_json'])} if batch['kind']=='semantic' else {'content':json.loads(r['result_json'])})} for r in rows}
+    ids=[]
+    for kind in kinds:
+      existing=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? AND json_extract(snapshot_json,\'$.generation\')=? ORDER BY version DESC LIMIT 1',(batch['id'],kind,batch['generation'])).fetchone()
+      if existing:
+        ids.append(existing[0])
+      else:
+        previous=db.execute('SELECT * FROM workflow_files WHERE batch_id=? AND kind=? ORDER BY version DESC LIMIT 1',(batch['id'],kind)).fetchone()
+        prior=json.loads(previous['snapshot_json'])['cards'] if previous else {}
+        comparable=lambda values:{k:{'card':v['card'],'content':v.get('content'),'final':v.get('final')} for k,v in values.items()}
+        unchanged=previous and previous['status']=='approved' and comparable(prior)==comparable(workflow_kind_snapshot(kind,snapshots))
+        ids.append(workflow_make_file(db,batch,kind,snapshots,user,'approved' if unchanged else 'review'))
+    db.execute("UPDATE workflow_batches SET status='account_review',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('review','partial','changes_requested','account_review')",(batch['id'],))
+    if all(db.execute('SELECT status FROM workflow_files WHERE id=?',(key,)).fetchone()[0]=='approved' for key in ids): workflow_sync_status(db,batch)
+  return {'fileIds':ids}
+
+
+def workflow_file_context(db, portal, file_id, user, manage=False, current=True):
+  workflow_access(db,portal,user,manage)
+  row=db.execute('SELECT * FROM workflow_files WHERE id=? AND portal_id=?',(file_id,portal)).fetchone()
+  if not row: raise workflow_error('workflow_file_not_found',404)
+  snapshot=json.loads(row['snapshot_json'])
+  if row['kind']=='plan':
+    plan=db.execute('SELECT version FROM workflow_plans WHERE period_id=? AND portal_id=?',(row['period_id'],portal)).fetchone()
+    if not plan or current and plan['version']!=row['version']: raise workflow_error('workflow_version_conflict',409)
+    return dict(row),None,snapshot
+  batch=workflow_batch(db,portal,row['batch_id'],user,manage)
+  if current and snapshot['generation']!=batch['generation']: raise workflow_error('workflow_version_conflict',409)
+  if current and manage:
+    latest=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? ORDER BY version DESC LIMIT 1',(batch['id'],row['kind'])).fetchone()
+    if latest[0]!=row['id']: raise workflow_error('workflow_version_conflict',409)
+    if batch['period_id']:
+      plan=db.execute('SELECT version FROM workflow_plans WHERE period_id=?',(batch['period_id'],)).fetchone()
+      if not plan or plan[0]!=batch['plan_version']: raise workflow_error('workflow_version_conflict',409)
+  return dict(row),batch,snapshot
+
+
+def workflow_import_preview(db, file, batch, snapshot, encoded):
+  from openpyxl import load_workbook
+  try: raw=base64.b64decode(encoded,validate=True)
+  except (ValueError,binascii.Error): raise workflow_error('semantic_import_invalid_file')
+  if not 1<=len(raw)<=SEMANTIC_IMPORT_MAX_FILE_BYTES: raise workflow_error('semantic_import_file_too_large')
+  try:
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+      if sum(r.file_size for r in archive.infolist())>SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES: raise workflow_error('semantic_import_file_too_large')
+    book=load_workbook(io.BytesIO(raw),data_only=False);old=load_workbook(io.BytesIO(file['body']),data_only=False)
+  except (zipfile.BadZipFile,ValueError,KeyError,ET.ParseError): raise workflow_error('semantic_import_invalid_file')
+  if book.sheetnames!=old.sheetnames: raise workflow_error('workflow_file_scope_mismatch')
+  cards=json.loads(semantic_json(snapshot['cards']));changes=[];rejected=False
+  mapping={row[0]:str(row[1]) for row in old['_OptiCards'].iter_rows(min_row=2,values_only=True)}
+  if list(book['_OptiCards'].values)!=list(old['_OptiCards'].values): raise workflow_error('workflow_version_conflict',409)
+  for sheet_name in mapping:
+    key=mapping[sheet_name];sheet=book[sheet_name];expected=old[sheet_name]
+    if sheet.max_row!=expected.max_row or sheet.max_column!=expected.max_column: raise workflow_error('workflow_file_scope_mismatch')
+    selected,current,removed=workflow_semantic_lists(cards[key].get('final') or {})
+    accepted_add={};accepted_remove={}
+    for row in range(1,expected.max_row+1):
+      for col in range(1,expected.max_column+1):
+        value=sheet.cell(row,col).value;before=expected.cell(row,col).value
+        mutable=row>1 and col in ({7,10} if file['kind']=='semantic' else {5,6})
+        if sheet.cell(row,col).data_type=='f': raise workflow_error('workflow_formulas_forbidden')
+        if value!=before and not mutable: raise workflow_error('workflow_file_scope_mismatch')
+        if mutable and value!=before: changes.append({'cardKey':key,'row':row,'column':col,'before':audit_str(before,7000),'after':audit_str(value,7000)})
+      if row==1: continue
+      if file['kind']=='semantic':
+        for query_col,decision_col,target in [(4,7,accepted_add),(8,10,accepted_remove)]:
+          query=expected.cell(row,query_col).value
+          if query:
+            decision=audit_normalized(sheet.cell(row,decision_col).value)
+            if decision not in ('да','нет'): raise workflow_error('workflow_decision_required')
+            target[audit_normalized(query)]=decision=='да'
+      else:
+        decision=audit_normalized(sheet.cell(row,6).value)
+        if decision not in ('да','нет'): raise workflow_error('workflow_decision_required')
+        if decision=='нет': rejected=True
+        section=expected.cell(row,2).value;field=expected.cell(row,3).value
+        cards[key].setdefault('agreements',{})[section+':'+str(field)]=decision=='да'
+        value=audit_str(sheet.cell(row,5).value,7000)
+        if not value: raise workflow_error('invalid_content')
+        if section=='characteristics':
+          for char in cards[key]['content'].get('characteristics',[]):
+            if char['name']==field: char['value']=value
+        else: cards[key]['content'][section]=value
+    if file['kind']=='semantic':
+      final=cards[key]['final']
+      final['selected']=[r for r in selected if accepted_add.get(audit_normalized(r['query']),False)]
+      final['removal']=[r for r in removed if accepted_remove.get(audit_normalized(r['query']),False)]
+      if 'semanticCore' in final: final['semanticCore']={**final['semanticCore'],'selected':final['selected'],'removal':final['removal']}
+  return {'changes':changes[:1000],'changeCount':len(changes),'hash':hashlib.sha256(raw+file['sha256'].encode()).hexdigest(),'cards':cards,'rejected':rejected,'raw':raw}
+
+
+def workflow_sync_status(db, batch):
+  files=db.execute('SELECT * FROM workflow_files WHERE batch_id=? AND json_extract(snapshot_json,\'$.generation\')=? ORDER BY version DESC',(batch['id'],batch['generation'])).fetchall()
+  latest={}
+  for file in files: latest.setdefault(file['kind'],file)
+  required={'semantic'} if batch['kind']=='semantic' else {kind for kind,fields in [('main',{'title','characteristics'}),('description',{'description'})] if fields & set(json.loads(batch['fields_json']))}
+  done=bool(required) and required==set(latest) and all(f['status']=='approved' for f in latest.values())
+  status='approved' if done else 'changes_requested' if any(f['status']=='changes_requested' for f in latest.values()) else 'client_review'
+  db.execute('UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(status,batch['id']))
+  workflow_sync_plan_task(db,batch,'done' if done else 'in_progress' if status=='changes_requested' else 'review')
+
+
+def workflow_sync_plan_task(db,batch,status):
+  if batch['period_id']:
+    row=db.execute('SELECT w.tasks_json FROM portal_work_periods w JOIN workflow_plans p ON p.period_id=w.id WHERE w.id=? AND w.portal_id=? AND p.version=?',(batch['period_id'],batch['portal_id'],batch['plan_version'])).fetchone()
+    if not row: return
+    tasks=json.loads(row[0]) if row else []
+    for task in tasks:
+      if task['key']==batch['task_key'] or batch['kind']=='semantic' and task['key'] in WORKFLOW_SEMANTIC:
+        task.update(status=status,statusUpdatedAt=utc_now().isoformat())
+    db.execute("UPDATE portal_work_periods SET tasks_json=?,report_json='{}',status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND portal_id=?",(semantic_json(tasks),batch['period_id'],batch['portal_id']))
+
+
+def workflow_approve_file(portal,payload,user,edited=False,preview_only=False):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    file,batch,snapshot=workflow_file_context(db,portal,payload.get('fileId'),user,True)
+    if batch is None: raise workflow_error('workflow_plan_approval_required')
+    if file['status']=='approved' and not preview_only: return {'approved':True}
+    latest=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? ORDER BY version DESC LIMIT 1',(batch['id'],file['kind'])).fetchone()
+    if latest[0]!=file['id']: raise workflow_error('workflow_version_conflict',409)
+    if edited:
+      preview=workflow_import_preview(db,file,batch,snapshot,payload.get('body') or '')
+      if preview_only: return {k:preview[k] for k in ('changes','changeCount','hash','rejected')}
+      if preview['hash']!=payload.get('previewHash'): raise workflow_error('workflow_version_conflict',409)
+      file_id=workflow_make_file(db,batch,file['kind'],preview['cards'],user,'changes_requested' if preview['rejected'] else 'approved')
+      db.execute('INSERT INTO workflow_returns(id,file_id,source_file_id,body,sha256,actor) VALUES(?,?,?,?,?,?)',
+                 (uuid.uuid4().hex,file_id,file['id'],preview['raw'],hashlib.sha256(preview['raw']).hexdigest(),user_login_value(user)))
+      db.execute("UPDATE workflow_files SET status='superseded' WHERE id=?",(file['id'],))
+      for key,item in preview['cards'].items():
+        if batch['kind']=='semantic':
+          db.execute('UPDATE workflow_cards SET final_json=? WHERE batch_id=? AND card_key=?',(semantic_json(item['final']),batch['id'],key))
+        else:
+          latest_content=json.loads(db.execute('SELECT result_json FROM workflow_cards WHERE batch_id=? AND card_key=?',(batch['id'],key)).fetchone()[0] or '{}')
+          db.execute("UPDATE workflow_cards SET result_json=?,state=? WHERE batch_id=? AND card_key=?",(semantic_json({**latest_content,**item['content']}),'generated' if preview['rejected'] else 'reviewed',batch['id'],key))
+    else:
+      file_id=file['id']
+      db.execute("UPDATE workflow_files SET status='approved',approved_at=? WHERE id=?",(utc_now().isoformat(),file_id))
+    workflow_event(db,portal,user,'file_returned' if edited else 'file_approved',batch['period_id'],batch['id'],fileId=file_id,version=file['version'])
+    workflow_sync_status(db,batch)
+  start_workflow_worker()
+  return {'approved':True,'fileId':file_id}
+
+
+def workflow_start_batch(portal,payload,user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    batch=workflow_batch(db,portal,payload.get('batchId'),user,write=True)
+    regenerate=payload.get('action')=='regenerate' and batch['kind']=='content'
+    if batch['status']=='archived' or batch['status']=='approved' and not regenerate: raise workflow_error('workflow_task_closed',409)
+    if payload.get('action')=='cancel':
+      db.execute("UPDATE workflow_batches SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+      db.execute("UPDATE workflow_cards SET state='cancelled' WHERE batch_id=? AND state NOT IN ('ready','reviewed','failed')",(batch['id'],))
+      db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE status IN ('queued','collecting','classifying','saving') AND portal_id=? AND json_extract(request_json,'$.workflowBatch')=?",(time.time(),portal,batch['id']))
+      db.execute('DELETE FROM workflow_schedule WHERE batch_id=?',(batch['id'],))
+      workflow_sync_plan_task(db,batch,'planned')
+      workflow_event(db,portal,user,'task_cancelled',batch['period_id'],batch['id'])
+      return {'cancelled':True}
+    if batch['status'] in ('collecting','generating','awaiting_semantic'):
+      return {'started':True}
+    if regenerate:
+      if batch['period_id']:
+        plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=?',(batch['period_id'],)).fetchone()
+        if not plan or plan['status']!='approved' or plan['version']!=batch['plan_version']: raise workflow_error('workflow_plan_approval_required')
+      db.execute("UPDATE workflow_batches SET generation=generation+1,status='awaiting_semantic',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+      db.execute("UPDATE workflow_cards SET state='queued',result_json=NULL,error='' WHERE batch_id=?",(batch['id'],))
+      workflow_sync_plan_task(db,batch,'in_progress')
+      workflow_event(db,portal,user,'content_regenerated',batch['period_id'],batch['id'],generation=batch['generation']+1)
+      start_workflow_worker()
+      return {'started':True}
+    if batch['kind'] in ('semantic','content') and not db.execute("SELECT 1 FROM workflow_cards WHERE batch_id=? AND state IN ('queued','failed','cancelled')",(batch['id'],)).fetchone():
+      return {'started':False}
+    if batch['kind']=='semantic':
+      db.execute("UPDATE workflow_cards SET state='queued',error='' WHERE batch_id=? AND state IN ('failed','cancelled')",(batch['id'],))
+      db.execute("UPDATE workflow_batches SET generation=generation+1 WHERE id=? AND status IN ('partial','cancelled')",(batch['id'],))
+      db.execute("UPDATE workflow_batches SET status='collecting',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+    else:
+      if batch['period_id']:
+        plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=? AND portal_id=?',(batch['period_id'],portal)).fetchone()
+        if not plan or plan['status']!='approved' or plan['version']!=batch['plan_version']: raise workflow_error('workflow_plan_approval_required')
+      if batch['kind']=='work':
+        if payload.get('complete') and not db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone(): raise workflow_error('workflow_schedule_required')
+        db.execute("UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",('approved' if payload.get('complete') else 'in_progress',batch['id']))
+      else:
+        db.execute("UPDATE workflow_batches SET status='awaiting_semantic',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+        db.execute("UPDATE workflow_cards SET state='queued',error='' WHERE batch_id=? AND state IN ('failed','cancelled')",(batch['id'],))
+    workflow_event(db,portal,user,'task_started',batch['period_id'],batch['id'])
+    workflow_sync_plan_task(db,batch,'done' if batch['kind']=='work' and payload.get('complete') else 'in_progress')
+  start_workflow_worker()
+  return {'started':True}
+
+
+def workflow_create_standalone(portal,payload,user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    record,current,manager=workflow_access(db,portal,user)
+    if not manager and portal_team_roles_from_db(db,portal).get('tech')!=current['login']: raise PermissionError('forbidden')
+    cards=workflow_cards_scope(db,portal,payload.get('cardKeys'))
+    assignee=workflow_assignee(db,portal,payload.get('assignee') or portal_team_roles_from_db(db,portal).get('tech') or current['login'])
+    # requestId is an idempotent task key for the standalone path too.
+    request_key=audit_str(payload.get('requestId'),80)
+    if not request_key: raise workflow_error('workflow_request_id_required')
+    existing=db.execute('SELECT id FROM workflow_batches WHERE portal_id=? AND period_id IS NULL AND task_key=?',(portal,'standalone:'+request_key)).fetchone()
+    if existing: return {'batchId':existing[0]}
+    batch=workflow_insert_batch(db,portal,current,cards,assignee,'semantic',audit_str(payload.get('title'),180) or 'СЯ · выбранный набор',task_key='standalone:'+request_key)
+  start_workflow_worker()
+  return {'batchId':batch}
+
+
+def workflow_content_task(portal,payload,user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    parent=workflow_batch(db,portal,payload.get('parentId'),user,True)
+    if parent['kind']!='semantic': raise workflow_error('workflow_semantic_required')
+    fields=content_reoptimization_sections(payload.get('fields'))
+    assignee=workflow_assignee(db,portal,payload.get('assignee') or parent['assignee'])
+    key='content:'+audit_str(payload.get('requestId'),80)
+    if key=='content:': raise workflow_error('workflow_request_id_required')
+    old=db.execute('SELECT id FROM workflow_batches WHERE portal_id=? AND parent_id=? AND task_key=?',(portal,parent['id'],key)).fetchone()
+    if old: return {'batchId':old[0]}
+    cards=[json.loads(r[0]) for r in db.execute('SELECT snapshot_json FROM workflow_cards WHERE batch_id=? ORDER BY position',(parent['id'],))]
+    batch=workflow_insert_batch(db,portal,user,cards,assignee,'content',audit_str(payload.get('title'),180) or 'Контент по СЯ',parent['period_id'],key,parent['id'],fields,parent['plan_version'])
+  return {'batchId':batch}
+
+
+def workflow_current_user(db,batch):
+  portal,user,_=workflow_access(db,batch['portal_id'],{'login':batch['created_by']})
+  workflow_assignee(db,batch['portal_id'],batch['assignee'])
+  return portal,user
+
+
+def workflow_notify(db,batch,good,total):
+  person=db.execute('SELECT bitrix_id FROM workflow_people WHERE login=?',(batch['assignee'],)).fetchone()
+  recipient=int(person[0]) if person and person[0] else None
+  key='semantic:'+batch['id']+':'+str(batch['generation'])+':'+batch['assignee']
+  body={'login':batch['assignee'],'userId':recipient,'good':good,'total':total,'generation':batch['generation']}
+  db.execute('INSERT OR IGNORE INTO workflow_outbox(id,portal_id,batch_id,kind,dedup_key,status,payload_json,error) VALUES(?,?,?,?,?,?,?,?)',
+             (uuid.uuid4().hex,batch['portal_id'],batch['id'],'bitrix',key,'pending' if recipient else 'blocked',semantic_json(body),'' if recipient else 'workflow_bitrix_mapping_required'))
+
+
+def workflow_process_batch(batch_id):
+  with semantic_job_connection() as db:
+    row=db.execute('SELECT * FROM workflow_batches WHERE id=?',(batch_id,)).fetchone()
+    if not row or row['status'] not in ('collecting','awaiting_semantic','generating'): return
+    batch=dict(row)
+    portal,user=workflow_current_user(db,batch)
+    cards=db.execute('SELECT * FROM workflow_cards WHERE batch_id=? ORDER BY position',(batch_id,)).fetchall()
+    if batch['status']=='awaiting_semantic':
+      if batch['period_id']:
+        plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=?',(batch['period_id'],)).fetchone()
+        if not plan or plan['status']!='approved' or plan['version']!=batch['plan_version']: return
+      if batch['semantic_file_id']:
+        file=db.execute("SELECT * FROM workflow_files WHERE id=? AND portal_id=? AND status='approved'",(batch['semantic_file_id'],batch['portal_id'])).fetchone()
+      else:
+        parent=db.execute('SELECT * FROM workflow_batches WHERE id=? AND portal_id=?',(batch['parent_id'],batch['portal_id'])).fetchone()
+        if not parent or parent['status']!='approved': return
+        file=db.execute("SELECT * FROM workflow_files WHERE batch_id=? AND kind='semantic' AND status='approved' AND json_extract(snapshot_json,'$.generation')=? ORDER BY version DESC LIMIT 1",(parent['id'],parent['generation'])).fetchone()
+      if not file: return
+      db.execute("UPDATE workflow_batches SET status='generating',semantic_file_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='awaiting_semantic'",(file['id'],batch_id))
+      return
+  if batch['kind']=='semantic':
+    for card in cards:
+      if card['state'] in ('ready','reviewed','failed'): continue
+      if card['job_id']:
+        with semantic_job_connection() as db:
+          job=db.execute('SELECT status,error FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
+        if job and job['status'] in ('failed','cancelled') and card['state']=='queued':
+          try:
+            semantic_job_action(card['job_id'],batch['portal_id'],user,'retry')
+            with semantic_job_connection() as db:
+              db.execute("UPDATE workflow_cards SET state='collecting',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
+          except ValueError as exc:
+            if str(exc) in ('semantic_relevance_busy','semantic_card_busy'): continue
+            with semantic_job_connection() as db:
+              db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(str(exc) if str(exc)=='semantic_report_creation_unknown' else 'semantic_relevance_failed',batch_id,card['card_key']))
+          continue
+        with semantic_job_connection() as db:
+          if job and job['status']=='ready': db.execute("UPDATE workflow_cards SET state='ready',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
+          elif not job or job['status'] in ('failed','cancelled'):
+            db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(job['error'] if job else 'semantic_relevance_job_not_found',batch_id,card['card_key']))
+        continue
+      try:
+        snapshot=json.loads(card['snapshot_json'])
+        # Facts are authoritative; a changed card requires an explicit new task.
+        current=workflow_cards_scope_for_worker(batch['portal_id'],card['card_key'])
+        if semantic_facts_hash(current)!=card['facts_hash']: raise workflow_error('semantic_card_changed')
+        job=semantic_create_job(batch['portal_id'],snapshot,'',user,workflow_batch=batch_id)
+      except ValueError as exc:
+        if str(exc) in ('semantic_relevance_busy','semantic_card_busy'): continue
+        with semantic_job_connection() as db:
+          db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(str(exc) if str(exc) in {'semantic_card_changed','semantic_card_content_missing','semantic_relevance_not_configured','semantic_card_not_found'} else 'semantic_relevance_failed',batch_id,card['card_key']))
+        continue
+      with semantic_job_connection() as db:
+        db.execute("UPDATE workflow_cards SET job_id=?,state='collecting' WHERE batch_id=? AND card_key=?",(job['jobId'],batch_id,card['card_key']))
+      return
+    with semantic_job_connection() as db:
+      db.execute('BEGIN IMMEDIATE')
+      counts={r[0]:r[1] for r in db.execute('SELECT state,COUNT(*) FROM workflow_cards WHERE batch_id=? GROUP BY state',(batch_id,))}
+      if counts and all(key in ('ready','reviewed','failed') for key in counts):
+        status='partial' if counts.get('failed') else 'review'
+        updated=db.execute("UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='collecting'",(status,batch_id)).rowcount
+        if updated:
+          workflow_sync_plan_task(db,batch,'in_progress' if status=='partial' else 'review')
+          workflow_notify(db,batch,counts.get('ready',0)+counts.get('reviewed',0),sum(counts.values()))
+    return
+  card=next((r for r in cards if r['state']=='queued'),None)
+  if not card:
+    with semantic_job_connection() as db:
+      errors=db.execute("SELECT COUNT(*) FROM workflow_cards WHERE batch_id=? AND state='failed'",(batch_id,)).fetchone()[0]
+      db.execute("UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='generating'",('partial' if errors else 'review',batch_id))
+      workflow_sync_plan_task(db,batch,'in_progress' if errors else 'review')
+    return
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    current=db.execute('SELECT * FROM workflow_batches WHERE id=?',(batch_id,)).fetchone()
+    if not current or current['status']!='generating': return
+    if current['period_id']:
+      plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=?',(current['period_id'],)).fetchone()
+      if not plan or plan['status']!='approved' or plan['version']!=current['plan_version']: return
+    file=db.execute("SELECT * FROM workflow_files WHERE id=? AND portal_id=? AND status='approved'",(current['semantic_file_id'],batch['portal_id'])).fetchone()
+    if not file: raise workflow_error('workflow_semantic_required')
+    frozen=json.loads(file['snapshot_json'])['cards'].get(card['card_key'])
+    if not frozen: raise workflow_error('workflow_file_scope_mismatch')
+    db.execute("UPDATE workflow_cards SET state='running' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
+  try:
+    raw=workflow_cards_scope_for_worker(batch['portal_id'],card['card_key'])
+    if semantic_facts_hash(raw)!=card['facts_hash']: raise workflow_error('semantic_card_changed')
+    fields=json.loads(batch['fields_json'])
+    selected,current,removed=semantic_final_keyword_lists(frozen['final'])
+    if portal['marketplace']=='Ozon':
+      sem={'cardKey':card['card_key'],'current':current,'selected':selected,'removal':removed,'final':[ *current,*selected]}
+      result=build_ozon_card_content_reoptimization_result(raw,sem)
+    else:
+      result=build_card_content_reoptimization(batch['portal_id'],card['card_key'],raw,selected,current,removed,sections=fields,frozen_semantic=True)
+    content=result['draftContent'];output={}
+    for field in fields:
+      value=content.get(field)
+      if field=='characteristics':
+        output[field]=[{'name':audit_str(r['name'],120),'value':audit_str(r['value'],1000)} for r in ozon_content_characteristics_list(value,limit=100)]
+        if value and not output[field]: raise workflow_error('invalid_content')
+      else:
+        output[field]=audit_str(value.get('value') if isinstance(value,dict) else value,300 if field=='title' else 7000)
+        if not output[field]: raise workflow_error('invalid_content')
+    with semantic_job_connection() as db:
+      db.execute('BEGIN IMMEDIATE')
+      workflow_current_user(db,batch)
+      if semantic_facts_hash(workflow_cards_scope_for_worker(batch['portal_id'],card['card_key']))!=card['facts_hash']: raise workflow_error('semantic_card_changed')
+      db.execute("UPDATE workflow_cards SET state='generated',result_json=?,error='' WHERE batch_id=? AND card_key=? AND EXISTS(SELECT 1 FROM workflow_batches WHERE id=? AND status='generating' AND generation=?)",
+                 (semantic_json(output),batch_id,card['card_key'],batch_id,batch['generation']))
+  except Exception as exc:
+    code=str(exc) if isinstance(exc,ValueError) and str(exc) in {'semantic_card_changed','llm_key_missing','missing_semantic_keywords'} else 'workflow_generation_failed'
+    with semantic_job_connection() as db:
+      db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=? AND state='running'",(code,batch_id,card['card_key']))
+
+
+def workflow_cards_scope_for_worker(portal,key):
+  with semantic_job_connection() as db:
+    return workflow_cards_scope(db,portal,[key])[0]
+
+
+class ContentWorkflowWorker:
+  def __init__(self,path):
+    self.path=Path(path);self.stop=threading.Event();self.wake=threading.Event()
+    self.thread=threading.Thread(target=self.run,name='content-workflow',daemon=True)
+
+  def run(self):
+    with self.path.with_suffix('.workflow.lock').open('a') as leader:
+      os.chmod(leader.name,0o600)
+      while not self.stop.is_set() and self.path==DB_PATH.resolve():
+        try: fcntl.flock(leader,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+        except BlockingIOError: self.stop.wait(1)
+      else: return
+      with semantic_job_connection(self.path) as db:
+        db.execute("UPDATE workflow_cards SET state='queued' WHERE state='running' AND batch_id IN(SELECT id FROM workflow_batches WHERE status='generating')")
+        db.execute("UPDATE workflow_outbox SET status='uncertain',error='workflow_delivery_unknown' WHERE status='sending'")
+      while not self.stop.is_set() and self.path==DB_PATH.resolve():
+        try:
+          workflow_deliver_one()
+          with semantic_job_connection(self.path) as db:
+            rows=db.execute("SELECT id FROM workflow_batches WHERE status IN ('collecting','awaiting_semantic','generating') ORDER BY updated_at,id").fetchall()
+          for row in rows:
+            if self.stop.is_set(): break
+            try: workflow_process_batch(row['id'])
+            except Exception as exc:
+              code='forbidden' if isinstance(exc,PermissionError) else 'workflow_processing_failed'
+              print('workflow batch='+row['id']+' failed kind='+type(exc).__name__,file=sys.stderr)
+              with semantic_job_connection(self.path) as db:
+                db.execute("UPDATE workflow_batches SET status='partial',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('collecting','generating')",(code,row['id']))
+          self.wake.wait(1);self.wake.clear()
+        except sqlite3.OperationalError: self.stop.wait(3)
+        except Exception as exc:
+          print('workflow worker error kind='+type(exc).__name__,file=sys.stderr);self.stop.wait(3)
+
+
+def start_workflow_worker():
+  path=DB_PATH.resolve()
+  with WORKFLOW_WORKERS_LOCK:
+    worker=WORKFLOW_WORKERS.get(str(path))
+    if not worker or not worker.thread.is_alive():
+      worker=ContentWorkflowWorker(path);WORKFLOW_WORKERS[str(path)]=worker;worker.thread.start()
+    worker.wake.set()
+  return worker
+
+
+def workflow_plan_pdf(data,version,marketplace):
+  import font_roboto
+  from reportlab.pdfbase import pdfmetrics
+  from reportlab.pdfbase.ttfonts import TTFont
+  from reportlab.lib import colors
+  from reportlab.lib.styles import ParagraphStyle
+  from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
+  from reportlab.lib.pagesizes import A4
+  fonts=Path(font_roboto.__file__).parent/'files'
+  with WORKFLOW_WORKERS_LOCK:
+    if 'OptiRoboto' not in pdfmetrics.getRegisteredFontNames():
+      pdfmetrics.registerFont(TTFont('OptiRoboto',str(fonts/'Roboto-Regular.ttf')))
+      pdfmetrics.registerFont(TTFont('OptiRobotoBold',str(fonts/'Roboto-Bold.ttf')))
+  text=ParagraphStyle('text',fontName='OptiRoboto',fontSize=10,leading=15,textColor=colors.HexColor('#30364b'))
+  title=ParagraphStyle('title',parent=text,fontName='OptiRobotoBold',fontSize=24,leading=30,spaceAfter=15)
+  small=ParagraphStyle('small',parent=text,fontSize=8,leading=12)
+  def p(value,style=text): return Paragraph(html.escape(str(value)),style)
+  buffer=io.BytesIO()
+  document=SimpleDocTemplate(buffer,pagesize=A4,leftMargin=38,rightMargin=38,topMargin=38,bottomMargin=38,title='План работ · '+data['title'])
+  story=[p('OptiCards / '+marketplace,small),Spacer(1,20),p('План работ на отчётный период',title),
+    p(data['title']),p(data['start']+' — '+data['end']+' · версия '+str(version)),Spacer(1,20)]
+  contact=data['contact']
+  story.extend([p('Контактное лицо: '+contact['name']),p(contact['email']+' · '+contact['phone']),p('Карточек в плане: '+str(len(data['cardKeys']))),Spacer(1,20)])
+  rows=[[p('РАБОТЫ',small),p('РЕЗУЛЬТАТ',small)]]
+  for task in data['tasks']:
+    kind='Согласованное СЯ набора' if task['key'] in WORKFLOW_SEMANTIC else 'Файл по выбранным карточкам' if task['key'] in WORKFLOW_FIELDS else 'Результат по плану'
+    rows.append([p(task['label']),p(kind)])
+  table=Table(rows,colWidths=[340,179],repeatRows=1,hAlign='LEFT')
+  table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#EDE9FB')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),12),('BOTTOMPADDING',(0,0),(-1,-1),12),('LINEBELOW',(0,0),(-1,-1),.5,colors.HexColor('#E1E3EB'))]))
+  story.extend([table,Spacer(1,25),p('Согласование фиксирует аккаунт с подтверждением клиента.',small)])
+  document.build(story)
+  return buffer.getvalue()
+
+
+def workflow_export_plan(portal,payload,user):
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    record,_,_=workflow_access(db,portal,user)
+    plan=db.execute('SELECT * FROM workflow_plans WHERE period_id=? AND portal_id=?',(payload.get('periodId'),portal)).fetchone()
+    if not plan: raise workflow_error('invalid_work_period',404)
+    old=db.execute("SELECT id FROM workflow_files WHERE period_id=? AND kind='plan' AND version=?",(plan['period_id'],plan['version'])).fetchone()
+    if old: return {'fileId':old[0]}
+    body=workflow_plan_pdf(json.loads(plan['data_json']),plan['version'],record['marketplace'])
+    file_id=uuid.uuid4().hex
+    db.execute("INSERT INTO workflow_files(id,portal_id,period_id,kind,version,name,sha256,body,snapshot_json,created_by) VALUES(?,?,?,'plan',?,?,?,?,?,?)",
+       (file_id,portal,plan['period_id'],plan['version'],'План_'+str(plan['period_id'])+'_v'+str(plan['version'])+'.pdf',hashlib.sha256(body).hexdigest(),body,semantic_json({'planVersion':plan['version']}),user_login_value(user)))
+    workflow_event(db,portal,user,'plan_pdf_created',plan['period_id'],version=plan['version'],fileId=file_id)
+  return {'fileId':file_id}
+
+
+def workflow_mail_draft(portal,payload,user):
+  with semantic_job_connection() as db:
+    record,_,_=workflow_access(db,portal,user,True)
+    file,batch,snapshot=workflow_file_context(db,portal,payload.get('fileId'),user,True)
+    contact=client_contact_from_json(record['client_contact_json'])
+    if file['period_id']:
+      plan=db.execute('SELECT data_json FROM workflow_plans WHERE period_id=?',(file['period_id'],)).fetchone()
+      contact=json.loads(plan[0])['contact']
+  secret=get_service_integration_secret(WORKFLOW_SMTP)
+  config=json.loads(secret) if secret else {}
+  return {'fileId':file['id'],'fileSha':file['sha256'],'fileName':file['name'],'to':contact.get('email') or '',
+          'subject':'На согласование · '+file['name'],'body':'Добрый день!\n\nНаправляем материалы на согласование. Пожалуйста, подтвердите принятие или верните файл с правками.\n\n'+config.get('signature',''),
+          'from':config.get('from',''),'configured':bool(secret)}
+
+
+def workflow_email(value):
+  value=audit_str(value,180)
+  if not re.fullmatch(r'[^@\s<>\r\n]+@[^@\s<>\r\n]+\.[^@\s<>\r\n]+',value): raise workflow_error('workflow_invalid_email')
+  return value
+
+
+def workflow_enqueue_mail(portal,payload,user):
+  request_key=audit_str(payload.get('requestId'),80)
+  if not request_key: raise workflow_error('workflow_request_id_required')
+  config=get_service_integration(WORKFLOW_SMTP)
+  if not config.get('connected'): raise workflow_error('workflow_mail_not_configured')
+  recipient=workflow_email(payload.get('to'));subject=audit_str(payload.get('subject'),300)
+  if not subject or '\r' in subject or '\n' in subject: raise workflow_error('workflow_invalid_email')
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    file,batch,snapshot=workflow_file_context(db,portal,payload.get('fileId'),user,True)
+    if file['sha256']!=payload.get('fileSha'): raise workflow_error('workflow_version_conflict',409)
+    values={'fileId':file['id'],'sha256':file['sha256'],'to':recipient,'subject':subject,'body':audit_str(payload.get('body'),14000),'actor':user_login_value(user)}
+    key='mail:'+str(portal)+':'+request_key
+    old=db.execute('SELECT id,payload_json FROM workflow_outbox WHERE dedup_key=?',(key,)).fetchone()
+    if old:
+      if json.loads(old['payload_json'])!=values: raise workflow_error('workflow_version_conflict',409)
+      return {'deliveryId':old['id']}
+    outbox=uuid.uuid4().hex
+    db.execute("INSERT INTO workflow_outbox(id,portal_id,batch_id,kind,dedup_key,payload_json) VALUES(?,?,?,'email',?,?)",(outbox,portal,batch['id'] if batch else None,key,semantic_json(values)))
+    workflow_event(db,portal,user,'mail_queued',file['period_id'],file['batch_id'],fileId=file['id'],deliveryId=outbox,to=recipient)
+  start_workflow_worker()
+  return {'deliveryId':outbox}
+
+
+def workflow_settings(user,payload=None):
+  if not user or user['user_role']!='admin': raise PermissionError('forbidden')
+  if payload:
+    action=payload.get('action')
+    if action=='smtp':
+      old_secret=get_service_integration_secret(WORKFLOW_SMTP)
+      old=json.loads(old_secret) if old_secret else {}
+      host=audit_str(payload.get('host'),200)
+      mode=payload.get('tls');port=int(payload.get('port') or 0)
+      if not re.fullmatch(r'[A-Za-z0-9.-]+',host) or mode not in ('ssl','starttls') or not 1<=port<=65535: raise workflow_error('workflow_invalid_smtp')
+      password=str(payload.get('password') or '')
+      if not password and host==old.get('host') and payload.get('login')==old.get('login'): password=old.get('password','')
+      if not password: raise workflow_error('workflow_smtp_password_required')
+      values={'host':host,'port':port,'tls':mode,'login':audit_str(payload.get('login'),200),'password':password,
+        'from':workflow_email(payload.get('from')),'fromName':audit_str(payload.get('fromName'),160),
+        'replyTo':workflow_email(payload['replyTo']) if payload.get('replyTo') else '',
+        'cc':workflow_email(payload['cc']) if payload.get('cc') else '','signature':audit_str(payload.get('signature'),3000)}
+      if any(ch in values['fromName'] for ch in ('\r','\n')): raise workflow_error('workflow_invalid_email')
+      save_service_integration(WORKFLOW_SMTP,semantic_json(values),user)
+    elif action=='person':
+      login=audit_str(payload.get('login'),120)
+      try: bitrix=int(payload.get('bitrixId')) if payload.get('bitrixId') else None
+      except (TypeError,ValueError): raise workflow_error('workflow_invalid_bitrix_id')
+      days=payload.get('weekdays')
+      if not isinstance(days,list) or not days or any(type(d) is not int or not 0<=d<=6 for d in days): raise workflow_error('workflow_invalid_workdays')
+      with semantic_job_connection() as db:
+        if not db.execute('SELECT 1 FROM users WHERE login=? AND is_active=1',(login,)).fetchone(): raise workflow_error('workflow_assignee_required')
+        if bitrix is not None and bitrix<=0: raise workflow_error('workflow_invalid_bitrix_id')
+        db.execute('INSERT INTO workflow_people(login,bitrix_id,weekdays_json) VALUES(?,?,?) ON CONFLICT(login) DO UPDATE SET bitrix_id=excluded.bitrix_id,weekdays_json=excluded.weekdays_json',(login,bitrix,semantic_json(sorted(set(days)))))
+        if bitrix:
+          for row in db.execute("SELECT id,payload_json FROM workflow_outbox WHERE kind='bitrix' AND status='blocked' AND json_extract(payload_json,'$.login')=?",(login,)).fetchall():
+            data=json.loads(row['payload_json']);data['userId']=bitrix
+            db.execute("UPDATE workflow_outbox SET payload_json=?,status='pending',error='' WHERE id=?",(semantic_json(data),row['id']))
+      start_workflow_worker()
+    elif action=='retry_blocked_bitrix':
+      with semantic_job_connection() as db:
+        db.execute("UPDATE workflow_outbox SET status='pending',error='' WHERE kind='bitrix' AND status='blocked' AND json_extract(payload_json,'$.userId') IS NOT NULL")
+      start_workflow_worker()
+    elif action=='disconnect_smtp':
+      with semantic_job_connection() as db: db.execute('DELETE FROM service_integrations WHERE provider=?',(WORKFLOW_SMTP,))
+    else: raise workflow_error('invalid_action')
+  secret=get_service_integration_secret(WORKFLOW_SMTP)
+  config=json.loads(secret) if secret else {}
+  config.pop('password',None)
+  with semantic_job_connection() as db:
+    people=[{'login':r['login'],'name':r['full_name'],'bitrixId':r['bitrix_id'],'weekdays':json.loads(r['weekdays_json'] or '[0,1,2,3,4]')} for r in db.execute("SELECT u.login,u.full_name,p.bitrix_id,p.weekdays_json FROM users u LEFT JOIN workflow_people p ON p.login=u.login WHERE u.is_active=1 ORDER BY u.full_name")]
+  return {'smtp':config,'configured':bool(secret),'people':people}
+
+
+def workflow_send_smtp(config,envelope,file):
+  message=EmailMessage()
+  message['From']=Address(display_name=config.get('fromName',''),addr_spec=config['from'])
+  message['To']=envelope['to'];message['Subject']=envelope['subject']
+  message['Message-ID']='<'+envelope['deliveryId']+'@opticards.weboptai.ru>'
+  if config.get('replyTo'): message['Reply-To']=config['replyTo']
+  if config.get('cc'): message['Cc']=config['cc']
+  message.set_content(envelope['body'])
+  message.add_attachment(file['body'],maintype='application',subtype='pdf' if file['kind']=='plan' else 'vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename=file['name'])
+  client=smtplib.SMTP_SSL(config['host'],config['port'],timeout=20,context=ssl.create_default_context()) if config['tls']=='ssl' else smtplib.SMTP(config['host'],config['port'],timeout=20)
+  try:
+    if config['tls']=='starttls': client.ehlo();client.starttls(context=ssl.create_default_context());client.ehlo()
+    client.login(config['login'],config['password'])
+    refused=client.send_message(message)
+    if refused: raise workflow_error('workflow_mail_partial_delivery')
+  finally:
+    try: client.quit()
+    except (OSError,smtplib.SMTPException): client.close()
+
+
+def workflow_deliver_one():
+  with semantic_job_connection() as db:
+    db.execute('BEGIN IMMEDIATE')
+    row=db.execute("SELECT * FROM workflow_outbox WHERE status='pending' ORDER BY created_at,id LIMIT 1").fetchone()
+    if not row: return
+    row=dict(row);data=json.loads(row['payload_json'])
+    if row['kind']=='bitrix':
+      batch=db.execute('SELECT * FROM workflow_batches WHERE id=? AND portal_id=?',(row['batch_id'],row['portal_id'])).fetchone()
+      if not batch or batch['status'] in ('cancelled','archived') or batch['assignee']!=data['login']:
+        db.execute("UPDATE workflow_outbox SET status='cancelled' WHERE id=?",(row['id'],));return
+      try: workflow_assignee(db,row['portal_id'],data['login'])
+      except ValueError:
+        db.execute("UPDATE workflow_outbox SET status='cancelled',error='forbidden' WHERE id=?",(row['id'],));return
+      configured=db.execute("SELECT 1 FROM service_integrations WHERE provider='bitrix-notifications' AND status='verified'").fetchone()
+      if not configured:
+        db.execute("UPDATE workflow_outbox SET status='blocked',error='workflow_bitrix_not_configured' WHERE id=?",(row['id'],));return
+    else:
+      actor=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(data['actor'],)).fetchone()
+      try:
+        file,batch,_=workflow_file_context(db,row['portal_id'],data['fileId'],actor,True)
+        if file['sha256']!=data['sha256']: raise workflow_error('workflow_version_conflict')
+      except (PermissionError,ValueError):
+        db.execute("UPDATE workflow_outbox SET status='failed',error='workflow_version_conflict' WHERE id=?",(row['id'],));return
+    db.execute("UPDATE workflow_outbox SET status='sending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",(row['id'],))
+  try:
+    if row['kind']=='bitrix':
+      from automatic_seo_host import bitrix_notification_request
+      key=get_service_integration_secret('bitrix-notifications')
+      url='https://opticards.weboptai.ru/?portal='+str(row['portal_id'])+'&tab=tasks&workflow='+row['batch_id']
+      message=('Подбор СЯ готов к проверке.' if data['good']==data['total'] else 'Подбор СЯ завершён с ошибками.')+' Готово '+str(data['good'])+' из '+str(data['total'])+'.\n[URL='+url+']Открыть набор карточек[/URL]'
+      result=bitrix_notification_request(key,'im.notify.system.add',{'USER_ID':data['userId'],'MESSAGE':message,'TAG':'OPTICARDS_WORKFLOW_'+row['dedup_key'],'SUB_TAG':'OPTICARDS_WORKFLOW_'+str(row['portal_id'])})
+      if not result: raise workflow_error('workflow_delivery_unknown')
+    else:
+      secret=get_service_integration_secret(WORKFLOW_SMTP)
+      if not secret: raise workflow_error('workflow_mail_not_configured')
+      workflow_send_smtp(json.loads(secret),{**data,'deliveryId':row['id']},file)
+    with semantic_job_connection() as db:
+      db.execute("UPDATE workflow_outbox SET status='sent',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(row['id'],))
+      workflow_event(db,row['portal_id'],{'login':data.get('actor')} if data.get('actor') else None,'mail_sent' if row['kind']=='email' else 'bitrix_sent',
+                     file['period_id'] if row['kind']=='email' else batch['period_id'],row['batch_id'],deliveryId=row['id'])
+      if row['kind']=='email' and batch:
+        db.execute("UPDATE workflow_batches SET status='client_review' WHERE id=? AND status='account_review'",(batch['id'],))
+  except Exception as exc:
+    certain=isinstance(exc,(smtplib.SMTPAuthenticationError,smtplib.SMTPRecipientsRefused,smtplib.SMTPDataError))
+    if isinstance(exc,ValueError) and str(exc) in ('workflow_mail_not_configured','workflow_version_conflict'): certain=True
+    with semantic_job_connection() as db:
+      db.execute("UPDATE workflow_outbox SET status=?,error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",('failed' if certain else 'uncertain','workflow_delivery_failed' if certain else 'workflow_delivery_unknown',row['id']))
+
+
 class OpticardsHandler(BaseHTTPRequestHandler):
   server_version = "OpticardsServer/0.1"
 
@@ -23761,8 +24997,11 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     if extra_headers:
       for key, value in extra_headers.items():
         self.send_header(key, value)
-    self.end_headers()
-    self.wfile.write(body)
+    try:
+      self.end_headers()
+      self.wfile.write(body)
+    except (BrokenPipeError,ConnectionResetError):
+      pass
 
   def read_json(self, max_bytes=MAX_JSON_BYTES):
     try:
@@ -23865,6 +25104,88 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "seo_service_unavailable"})
     return True
 
+  def handle_content_workflow(self,path,method):
+    if not path.startswith('/api/content-workflow'):
+      return False
+    user=self.require_user()
+    if not user: return True
+    try:
+      if method=='POST':
+        origin=self.headers.get('Origin')
+        if origin and urlparse(origin).netloc!=self.headers.get('Host'): raise PermissionError('forbidden')
+        now=time.monotonic()
+        with WORKFLOW_REQUESTS_LOCK:
+          recent=[stamp for stamp in WORKFLOW_REQUESTS.get(user['login'],[]) if now-stamp<60]
+          if len(recent)>=120: raise workflow_error('workflow_rate_limited',429)
+          WORKFLOW_REQUESTS[user['login']]=[*recent,now]
+      if method=='GET':
+        data={k:v[0] for k,v in parse_qs(urlparse(self.path).query).items()}
+      else:
+        data=self.read_json(MAX_OZON_SEMANTIC_JSON_BYTES)
+        if not isinstance(data,dict):
+          self.send_json(413 if int(self.headers.get('Content-Length') or 0)>MAX_OZON_SEMANTIC_JSON_BYTES else 400,{'error':'invalid_json'})
+          return True
+      if path=='/api/content-workflow/settings':
+        result=workflow_settings(user,data if method=='POST' else None)
+      elif path=='/api/content-workflow/calendar' and method=='GET':
+        result=workflow_calendar(user,data.get('assignee'),data.get('start'),data.get('end'))
+      else:
+        try: portal=int(data.get('portalId') or data.get('portal_id'))
+        except (TypeError,ValueError): raise workflow_error('invalid_portal_id')
+        if path=='/api/content-workflow/file' and method=='GET':
+          with semantic_job_connection() as db:
+            file,batch,_=workflow_file_context(db,portal,data.get('id'),user,current=False)
+            _,_,manager=workflow_access(db,portal,user)
+            workflow_event(db,portal,user,'account_downloaded' if manager else 'file_downloaded',file['period_id'],file['batch_id'],fileId=file['id'],name=file['name'],version=file['version'],sha256=file['sha256'])
+          self.send_response(200);self.send_header('Content-Type','application/pdf' if file['kind']=='plan' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+          self.send_header('Content-Length',str(len(file['body'])));self.send_header('Cache-Control','no-store')
+          self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(file['name']))
+          self.end_headers();self.wfile.write(file['body']);return True
+        if path=='/api/content-workflow/proof' and method=='GET':
+          with semantic_job_connection() as db:
+            workflow_access(db,portal,user)
+            row=db.execute('SELECT v.approval_json FROM workflow_plan_versions v JOIN workflow_plans p ON p.period_id=v.period_id WHERE p.portal_id=? AND p.period_id=? AND v.version=COALESCE(?,p.version)',(portal,data.get('periodId'),data.get('version'))).fetchone()
+            proof=json.loads(row[0]).get('proof') if row else None
+            if not proof: raise workflow_error('workflow_file_not_found',404)
+            body=base64.b64decode(proof['dataUrl'].split(';base64,',1)[1])
+          self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(proof['name']));self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return True
+        if path!='/api/content-workflow': raise workflow_error('not_found',404)
+        if method=='GET':
+          result=workflow_list(portal,user,data.get('batchId') or data.get('batch_id'))
+        else:
+          action=data.get('action')
+          actions={'create_plan':workflow_create_plan,'revise_plan':workflow_revise_plan,'approve_plan':workflow_approve_plan,'standalone':workflow_create_standalone,
+                   'content_task':workflow_content_task,'schedule':workflow_schedule_task,'start':workflow_start_batch,'cancel':workflow_start_batch,'regenerate':workflow_start_batch,
+                   'review_card':workflow_review_card,'export_files':workflow_export_files,'export_plan':workflow_export_plan,
+                   'mail_draft':workflow_mail_draft,'send_mail':workflow_enqueue_mail}
+          if action in actions: result=actions[action](portal,data,user)
+          elif action in ('approve_file','import_preview','import_apply'):
+            result=workflow_approve_file(portal,data,user,edited=action!='approve_file',preview_only=action=='import_preview')
+          elif action=='unschedule':
+            with semantic_job_connection() as db:
+              db.execute('BEGIN IMMEDIATE');batch=workflow_batch(db,portal,data.get('batchId'),user,write=True)
+              db.execute('DELETE FROM workflow_schedule WHERE batch_id=? AND id=?',(batch['id'],data.get('scheduleId')))
+              workflow_event(db,portal,user,'schedule_removed',batch['period_id'],batch['id'])
+            result={'removed':True}
+          else: raise workflow_error('invalid_action')
+      self.send_json(200,result)
+    except PermissionError:
+      self.send_json(403,{'error':'forbidden'})
+    except (ValueError,TypeError) as exc:
+      code=str(exc) if isinstance(exc,ValueError) else 'invalid_request'
+      if not re.fullmatch(r'[a-z][a-z0-9_]{0,100}',code): code='invalid_request'
+      self.send_json(getattr(exc,'status',400),{'error':code,**getattr(exc,'details',{})})
+    except (BrokenPipeError,ConnectionResetError):
+      return True
+    except Exception as exc:
+      trace=[];frame=exc.__traceback__
+      while frame:
+        trace.append(frame.tb_frame.f_code.co_name+':'+str(frame.tb_lineno));frame=frame.tb_next
+      print('workflow request failed kind='+type(exc).__name__+' trace='+','.join(trace),file=sys.stderr)
+      self.send_json(500,{'error':'workflow_service_unavailable'})
+    return True
+
+
   def handle_semantic_jobs(self, path, method):
     if path != "/api/semantic-jobs":
       return False
@@ -23910,6 +25231,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
   def do_GET(self):
     parsed = urlparse(self.path)
     path = parsed.path
+    if self.handle_content_workflow(path, "GET"):
+      return
     if self.handle_semantic_jobs(path, "GET"):
       return
     if self.handle_automatic_seo(path, "GET"):
@@ -24590,6 +25913,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
 
   def do_POST(self):
     path = urlparse(self.path).path
+    if self.handle_content_workflow(path, "POST"):
+      return
     if self.handle_semantic_jobs(path, "POST"):
       return
     if self.handle_automatic_seo(path, "POST"):
@@ -24720,6 +26045,14 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_mode"})
         return
 
+      try:
+        client_contact=workflow_contacts(payload.get('clientContact')) if 'clientContact' in payload else None
+      except ValueError as exc:
+        self.send_json(400,{'error':str(exc)});return
+      def save_contact(portal_id):
+        if client_contact:
+          with connect_db() as db: db.execute('UPDATE portals SET client_contact_json=? WHERE id=?',(semantic_json(client_contact),portal_id))
+
       team = clean_portal_team(payload.get("teamRoles"))
       name = str(payload.get("name", "")).strip() or "Кабинет WB"
       if len(name) > 120:
@@ -24736,6 +26069,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if mode == "api" and marketplace == "Ozon":
         try:
           portal_id, result = create_connected_ozon_portal(name, scope, user, team, payload, store_url, manual_source, client_name)
+          save_contact(portal_id)
           self.send_json(HTTPStatus.CREATED, {"portal": public_portal_from_row(get_portal_row(portal_id, user)), **result})
         except PermissionError:
           self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
@@ -24809,6 +26143,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
           return
 
+        save_contact(portal_id)
         self.send_json(
           HTTPStatus.CREATED,
           {"portal": public_portal_from_row(get_portal_row(portal_id, user))},
@@ -24820,6 +26155,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
+      save_contact(portal_id)
       bootstrap = {"status": "skipped", "cardCount": 0, "warnings": []}
       if marketplace != "Ozon" and (store_url or manual_source):
         try:
@@ -25189,7 +26525,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       with connect_db() as db:
         portal = db.execute("SELECT marketplace FROM portals WHERE id=?", (portal_id,)).fetchone()
-      if portal and portal["marketplace"] == "Ozon" and not user_can_edit_portal(user, portal_id):
+      if portal and portal["marketplace"] == "Ozon" and not user_can_edit_card_content(user, portal_id):
         self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         return
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
@@ -26292,6 +27628,7 @@ def run_server(host, port):
   init_db()
   recover_automatic_seo_handoffs()
   start_semantic_worker()
+  start_workflow_worker()
   bitrix_seo_notifier().start()
   start_competitor_auto_check_worker()
   server = ThreadingHTTPServer((host, port), OpticardsHandler)
