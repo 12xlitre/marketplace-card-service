@@ -81,3 +81,11 @@ Dockerfile/compose/wrappers. Перед выпуском backup SQLite; посл
 start_minute в обеих таблицах календаря, без изменения обвязки. Production
 acceptance на временных обычных задачах WB/Ozon с полным cleanup PASS;
 повторять выкладку ради документационного follow-up не нужно.
+
+09.11.2026 выпускc32a075: день аккаунта хранится в additive
+workflow_day_assignments без фиктивных минут; оценки остаются в прежних двух
+таблицах. Новая calendar-window API приватна. Native deploy без изменения
+инфраструктуры/зависимостей;48backend/14frontend и production native mouse
+WB/Ozon/30мин/mobile390 PASS, fixtures полностью удалены. Перед выпуском
+консистентный backup и idle guard, после — исходные количества/state/Excel SHA.
+Документационный follow-up не требует повторного перезапуска.
