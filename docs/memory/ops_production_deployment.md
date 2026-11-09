@@ -62,3 +62,12 @@ sudo opticards-ps
 - на рабочей машине Chromium для Playwright можно запускать без sudo: сам браузер установлен в `~/.cache/ms-playwright`, недостающие системные библиотеки распакованы в `/home/dmitriy/.local/chromium-deps/root`; перед запуском нужен `LD_LIBRARY_PATH=/home/dmitriy/.local/chromium-deps/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH`.
 
 С 20.10.2026 для автоматической оптимизации Ozon серверный Dockerfile включает в `COPY` также `automatic_seo.py`, `automatic_seo_host.py`, `automatic_seo_xlsx.py`; `requirements.txt` включает openpyxl. Изменение согласовано и применено при штатной выкладке; точный патч хранится в `docs/automatic-seo-runtime.patch`. При добавлении Python-модулей проверять состав серверного образа: файлы репозитория вне `COPY` в контейнер не попадают. Текущий релиз и резервные копии — в `WORK.md`.
+
+09.11.2026 выпуск eca3580: новый процесс план/задачи/календарь/клиентские
+файлы WB/Ozon находится в server.py, отдельный Python-модуль образу не нужен.
+Добавлены ReportLab и packaged Roboto; настоящий кириллический PDF проверен
+на production. Новые таблицы мигрируются приложением, без изменения root-owned
+Dockerfile/compose/wrappers. Перед выпуском backup SQLite; после — временные
+изолированные кабинеты с обычным пунктом плана (без автоподбора СЯ, оплат и
+уведомлений), полное удаление fixtures и сравнение прежних файлов/состояний.
+Документационный follow-up после приёмки не требует повторной выкладки образа.
