@@ -35,3 +35,14 @@ test("a new rejection removes a previous unconfirmed selection while keeping ano
   const other = { query: "другой подбор", wbCount: 20 };
   assert.deepEqual(reconcileSemanticRelevance(core, [other, disputed, irrelevant]).selected, [other, relevant]);
 });
+
+test("Ozon requires Ozon frequency and retains manual decisions across different seeds", () => {
+  const ozon = { ...core, marketplace: "Ozon", allKeywords: [{ ...relevant, ozonCount: 40 }, disputed, irrelevant] };
+  assert.equal(reconcileSemanticRelevance({ ...core, marketplace: "Ozon" }).selected.length, 0);
+  const excluded = setSemanticRelevanceDecision(ozon, relevant, "excluded");
+  const anotherSeed = reconcileSemanticRelevance({ ...ozon, allKeywords: [disputed] }, [], [excluded]);
+  const returned = reconcileSemanticRelevance(ozon, [], [anotherSeed.core]);
+  assert.equal(returned.selected.length, 0);
+  const included = setSemanticRelevanceDecision(returned.core, disputed, "included");
+  assert.deepEqual(reconcileSemanticRelevance(included, [], [included]).selected.map(row => row.query), [disputed.query]);
+});

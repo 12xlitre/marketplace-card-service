@@ -8,9 +8,13 @@ export function hasSemanticRelevance(core) {
   return core?.relevanceVersion === semanticRelevanceVersion;
 }
 
+export function hasSemanticDemand(row, core) {
+  return Number(row.ozonCount) > 0 || (core?.marketplace !== "Ozon" && Number(row.wbCount) > 0);
+}
+
 export function reconcileSemanticRelevance(core, selected = [], previousCores = [], existingKeys = new Set(), removal = []) {
   if (!hasSemanticRelevance(core)) return { core, selected };
-  const decisions = new Map(previousCores.flatMap((previous) => previous?.allKeywords || [])
+  const decisions = new Map(previousCores.flatMap((previous) => [...(previous?.decisions || []), ...(previous?.allKeywords || [])])
     .filter((row) => ["included", "excluded"].includes(row.manualDecision))
     .map((row) => [relevanceQueryKey(row), row.manualDecision]));
   const rows = (core.allKeywords || []).map((row) => ({
@@ -23,11 +27,13 @@ export function reconcileSemanticRelevance(core, selected = [], previousCores = 
   const eligible = rows.filter((row) => {
     const key = relevanceQueryKey(row);
     return !existingKeys.has(key) && !removedKeys.has(key)
-      && (Number(row.wbCount) > 0 || Number(row.ozonCount) > 0)
+      && hasSemanticDemand(row, core)
       && row.manualDecision !== "excluded"
       && (row.relevance === "relevant" || (row.relevance === "disputed" && row.manualDecision === "included"));
   });
-  return { core: { ...core, allKeywords: rows }, selected: [...keep, ...eligible] };
+  return { core: { ...core, allKeywords: rows,
+    decisions: [...decisions].map(([query, manualDecision]) => ({ query, manualDecision })),
+  }, selected: [...keep, ...eligible] };
 }
 
 export function setSemanticRelevanceDecision(core, row, decision) {

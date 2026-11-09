@@ -87,6 +87,31 @@ class SemanticRelevanceTest(unittest.TestCase):
         self.assertEqual(len(value["semanticCore"]["allKeywords"]), 4)
         self.assertEqual(value["semanticCore"]["allKeywords"][-1]["wbCount"], 0)
 
+    def test_ozon_expansion_uses_ozon_market_and_separate_cache(self):
+        raw = {"words": [{"word": "спрей от моли", "wb_count": 9999, "count": 0},
+                         {"word": "средство от моли", "wb_count": 0, "count": 50}]}
+        with patch.object(server, "get_service_integration_secret", return_value="test"), \
+             patch.object(server, "mpstats_post_body_json", return_value={"reportHash": "report"}) as create, \
+             patch.object(server, "mpstats_get_json", return_value=raw):
+            wb = server.fetch_mpstats_semantic_expansion(CARD, query="от моли")
+            ozon = server.fetch_mpstats_semantic_expansion(CARD, query="от моли", marketplace="Ozon")
+            cached = server.fetch_mpstats_semantic_expansion(CARD, query="от моли", marketplace="Ozon")
+        self.assertEqual([call.kwargs["body"]["mp"] for call in create.call_args_list], [0, 1])
+        self.assertTrue(cached["cached"])
+        self.assertEqual(wb["semanticCore"]["allKeywords"][0]["wbCount"], 9999)
+        self.assertEqual(ozon["semanticCore"]["marketplace"], "Ozon")
+        self.assertEqual(ozon["semanticCore"]["allKeywords"][0]["ozonCount"], 50)
+
+    def test_ozon_current_contains_only_actual_queries_with_ozon_demand(self):
+        rows = [{"query": "спрей", "ozonCount": 20, "relevance": "relevant"},
+                {"query": "одежду от моли", "wbCount": 500, "relevance": "relevant"},
+                {"query": "защищает одежду", "ozonCount": 100, "relevance": "irrelevant"}]
+        result = result_for(rows)
+        result["semanticCore"]["marketplace"] = "Ozon"
+        core = server.semantic_relevance_result(result, CARD, rows)["semanticCore"]
+        self.assertEqual([row["query"] for row in core["current"]], ["спрей"])
+        self.assertEqual(len(core["allKeywords"]), 3)
+
     def test_partial_job_is_not_returned_as_complete_and_scope_is_checked(self):
         started, release = threading.Event(), threading.Event()
         rows = [{"query": "от моли", "wbCount": 20}]
@@ -146,6 +171,7 @@ class SemanticRelevanceHttpTest(unittest.TestCase):
             self.session = server.create_session(db, uid)
         self.portal = server.create_portal("Test", "Wildberries", "full", "owner", {"lead": "owner", "tech": "owner"})
         self.foreign = server.create_portal("Other", "Wildberries", "full", "other", {"lead": "other"})
+        self.ozon = server.create_portal("Ozon", "Ozon", "full", "owner", {"lead": "owner"})
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.OpticardsHandler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
@@ -179,6 +205,57 @@ class SemanticRelevanceHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "classifying")
         self.assertEqual(poll.call_args.args[:2], ("missing", str(self.portal)))
+
+    def test_marketplace_is_taken_from_portal_instead_of_client_card(self):
+        with patch.object(server, "content_reoptimization_configured", return_value=True), \
+             patch.object(server, "fetch_mpstats_semantic_expansion", return_value=result_for([])) as fetch, \
+             patch.object(server, "start_semantic_relevance_job", return_value={"status": "empty"}):
+            for portal, expected in ((self.ozon, "Ozon"), (self.portal, "Wildberries")):
+                status, payload = self.request({"portalId": str(portal), "marketplace": "untrusted", "card": CARD, "query": "от моли"})
+                self.assertEqual(status, 200)
+                self.assertEqual(fetch.call_args.kwargs["marketplace"], expected)
+
+    def test_ozon_readonly_cannot_start_paid_queries(self):
+        with server.connect_db() as db:
+            db.execute("UPDATE users SET role='Tech',user_role='tech',access_level='readonly_wb' WHERE login='owner'")
+        with patch.object(server, "fetch_mpstats_semantic_expansion", side_effect=AssertionError("no network")):
+            self.assertEqual(self.request({"portalId": str(self.ozon), "card": CARD, "query": "от моли"})[0], 403)
+
+    def test_missing_model_and_card_content_fail_before_mpstats(self):
+        with patch.object(server, "fetch_mpstats_semantic_expansion", side_effect=AssertionError("no network")):
+            with patch.object(server, "content_reoptimization_configured", return_value=False):
+                status, payload = self.request({"portalId": str(self.ozon), "card": CARD, "query": "от моли"})
+                self.assertEqual((status, payload["error"]), (400, "semantic_relevance_not_configured"))
+            with patch.object(server, "content_reoptimization_configured", return_value=True):
+                status, payload = self.request({"portalId": str(self.ozon), "card": {}, "query": "от моли"})
+                self.assertEqual((status, payload["error"]), (400, "semantic_card_content_missing"))
+
+    def test_large_ozon_draft_persists_all_decisions_and_keeps_final_separate(self):
+        rows = [{"query": f"от моли {index}", "ozonCount": index + 1, "wbCount": 10,
+                 "relevance": "relevant", "relevanceReason": "Назначение " * 45,
+                 "manualDecision": "excluded" if index == 0 else "included",
+                 "relevanceEvidence": [{"factId": "description", "quote": "защищает одежду от моли"}]}
+                for index in range(650)]
+        core = {"relevanceVersion": server.SEMANTIC_RELEVANCE_VERSION, "allKeywords": rows,
+                "current": [], "decisions": [rows[0]], "period": {"d1": "2026-10-01", "d2": "2026-10-30"}}
+        draft = {"cardKey": "1001", "sku": "1001", "selected": rows[1:], "semanticCore": core,
+                 "final": [{"query": "прежнее итоговое СЯ"}],
+                 "finalSelection": {"selected": [{"query": "прежнее итоговое СЯ"}]}}
+        self.assertGreater(len(json.dumps(draft, ensure_ascii=False).encode()), server.MAX_JSON_BYTES)
+        client = http.client.HTTPConnection(*self.httpd.server_address, timeout=5)
+        client.request("POST", f"/api/portals/{self.ozon}/ozon-semantic-draft", json.dumps(draft),
+                       {"Cookie": server.SESSION_COOKIE + "=" + self.session, "Content-Type": "application/json"})
+        response = client.getresponse()
+        saved = json.loads(response.read())
+        client.close()
+        self.assertEqual(response.status, 200)
+        readback = server.get_ozon_semantic_draft(self.ozon, "1001", {"login": "owner", "role": "Manager", "user_role": "manager", "access_level": "overview"})["draft"]["draft"]
+        self.assertEqual(len(readback["semanticCore"]["allKeywords"]), 650)
+        self.assertEqual(len(readback["selected"]), 649)
+        self.assertEqual(readback["semanticCore"]["allKeywords"][0]["manualDecision"], "excluded")
+        self.assertEqual(readback["semanticCore"]["allKeywords"][1]["relevanceEvidence"], rows[1]["relevanceEvidence"])
+        self.assertEqual(readback["final"][0]["query"], "прежнее итоговое СЯ")
+        self.assertEqual(readback["finalSelection"]["selected"][0]["query"], "прежнее итоговое СЯ")
 
 
 if __name__ == "__main__":

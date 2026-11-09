@@ -112,6 +112,26 @@ class MarketplaceGuardTest(unittest.TestCase):
     self.assertEqual(payload["recommendations"][0]["source"], "MPStats keyword-база")
     self.assertEqual(payload["selected"][0]["source"], "MPStats keyword-база")
 
+  def test_ozon_agreement_keeps_relevance_and_rejections_on_repeat(self):
+    rows = [{"query": "спрей от моли", "wbCount": 20, "ozonCount": 50, "relevance": "relevant",
+             "relevanceReason": "Назначение подтверждено"},
+            {"query": "антимоль", "ozonCount": 30, "relevance": "disputed", "relevanceReason": "Проверить"}]
+    previous = {"cardKey": "1001", "selected": rows,
+                "semanticCore": {"relevanceVersion": server.SEMANTIC_RELEVANCE_VERSION, "allKeywords": rows}}
+    payload = server.ozon_semantic_import_payload_with_final(previous,
+      {"cardKey": "1001", "selected": [rows[1]], "rejectedSelected": [rows[0]]}, "agreement.csv", self.manager)
+    self.assertEqual([row["query"] for row in payload["selected"]], ["антимоль"])
+    self.assertEqual(payload["selected"][0]["relevanceReason"], "Проверить")
+    self.assertEqual(payload["semanticCore"]["allKeywords"][0]["manualDecision"], "excluded")
+    self.assertEqual(payload["semanticCore"]["allKeywords"][1]["manualDecision"], "included")
+    self.assertEqual(payload["finalSelection"]["selected"], payload["selected"])
+
+  def test_ozon_classification_rejects_malformed_or_oversized_rows(self):
+    for rows in (42, [{}] * 5001):
+      with self.assertRaises(ValueError):
+        server.normalize_ozon_semantic_payload({"cardKey": "1001", "semanticCore": {
+          "relevanceVersion": server.SEMANTIC_RELEVANCE_VERSION, "allKeywords": rows}})
+
   def test_ozon_semantic_import_applies_agreement_by_sku(self):
     with server.connect_db() as db:
       db.execute(

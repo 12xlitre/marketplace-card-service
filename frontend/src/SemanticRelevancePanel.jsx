@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { relevanceQueryKey } from "./semanticRelevance";
+import { hasSemanticDemand, relevanceQueryKey } from "./semanticRelevance";
 
 const groups = [
   ["relevant", "Релевантные", "Включены в СЯ. Можно исключить отдельные запросы."],
@@ -32,7 +32,7 @@ export default function SemanticRelevancePanel({ core, selected = [], existingKe
                 const key = relevanceQueryKey(row);
                 const existing = existingKeys.has(key);
                 const included = existing ? !removalKeys.has(key) : selectedKeys.has(key);
-                const demand = Number(row.wbCount) > 0 || Number(row.ozonCount) > 0;
+                const demand = hasSemanticDemand(row, core);
                 return (
                   <div className={"semantic-keyword " + (included ? "selected" : "")} key={key}>
                     <div className="semantic-keyword-main">

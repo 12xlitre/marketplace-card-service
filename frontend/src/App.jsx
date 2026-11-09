@@ -52,7 +52,7 @@ const hardcodedDirectoryFallback = [
 
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
-const appScreens = new Set(["cabinets", "client", "seller", "card", "settings", "admin", "guide"]);
+const appScreens = new Set(["cabinets", "client", "seller", "card", "ozon-card", "settings", "admin", "guide"]);
 const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods"]);
 const sellerWorkspaceTabs = [
   { key: "cabinet", label: "Кабинет", Icon: LayoutDashboard },
@@ -3641,10 +3641,12 @@ function buildSemanticCoreExportSheet(name, core, selectedRows, removalRows = []
 }
 
 function buildSemanticCoreInstructionSheet(card = null) {
-  const hasCard = Boolean(card?.nmID || card?.vendorCode || card?.title);
+  const isOzon = card?.marketplace === "Ozon";
+  const hasCard = Boolean(card?.nmID || card?.sku || card?.vendorCode || card?.title);
   const target = hasCard
-    ? `карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}`
-    : "по выбранным карточкам кабинета";
+    ? isOzon ? `карточки Ozon SKU ${card?.sku || card?.id || ""}, артикул ${card?.offerId || card?.vendorCode || ""}`
+      : `карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}`
+    : `по выбранным карточкам кабинета${isOzon ? " Ozon" : ""}`;
   return {
     name: "Инструкция",
     widths: [34, 100],
@@ -3661,7 +3663,7 @@ function buildSemanticCoreInstructionSheet(card = null) {
       ["Обоснование добавления", "Почему запрос соответствует названию, описанию и характеристикам. Спорные запросы включаются только после решения специалиста."],
       ["Ключ к удалению из карточки", "Действующий ключ или ранжирующийся запрос, который специалист предлагает исключить перед переоптимизацией."],
       ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
-      ["Согласование удаления", "Да - после согласования специалист вручную удаляет ключ в SEO карточки WB и переоптимизирует текст без него. Нет - ключ оставить."],
+      ["Согласование удаления", `Да - после согласования специалист вручную удаляет ключ в SEO карточки ${isOzon ? "Ozon" : "WB"} и переоптимизирует текст без него. Нет - ключ оставить.`],
       ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбцах согласования. Дополнительные ключи можно дописать в пустые строки блоков добавления или удаления."],
     ],
   };
@@ -7584,6 +7586,7 @@ export default function App() {
             key={cardDraftKey(selectedCardFromPortal)}
             card={selectedCardFromPortal}
             portal={currentPortal}
+            canManage={canManagePortals || canManageOzon}
             onBack={backFromCard}
             backLabel={cardReturnTarget.label}
             helpEnabled={helpEnabled}
@@ -9870,54 +9873,6 @@ function ozonWorkStateForCard(card, selectedSet, tasks = []) {
   return ozonCardWorkState(card);
 }
 
-function ozonKeywordTokens(...values) {
-  const stopWords = new Set(["для", "или", "это", "как", "без", "при", "над", "под", "что", "the", "and", "with", "ozon", "mpstats"]);
-  const seen = new Set();
-  const tokens = [];
-  values
-    .join(" ")
-    .toLowerCase()
-    .replace(/[^0-9a-zа-яё\s-]+/gi, " ")
-    .split(/\s+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 2 && !stopWords.has(item))
-    .forEach((item) => {
-      if (!seen.has(item)) {
-        seen.add(item);
-        tokens.push(item);
-      }
-    });
-  return tokens;
-}
-
-function ozonSemanticDraftRows(card, seedQuery = "") {
-  const rawFields = rawFieldsForCard(card);
-  const title = card?.title || rawFields.title || rawFields.name || "";
-  const description = card?.description || rawFields.description || "";
-  const brand = card?.brand || rawFields.brand || "";
-  const category = ozonCardCategory(card);
-  const currentTokens = ozonKeywordTokens(title, description).slice(0, 12);
-  const seedTokens = ozonKeywordTokens(seedQuery, brand, category).slice(0, 10);
-  const current = currentTokens.map((query, index) => ({
-    query,
-    status: "selected",
-    frequency: "",
-    position: index < 4 ? index + 1 : "",
-    source: "Ozon карточка",
-  }));
-  const recommendations = [...new Set([...seedTokens, ...ozonKeywordTokens(category, brand, title).slice(0, 10)])]
-    .filter((query) => !currentTokens.includes(query))
-    .slice(0, 16)
-    .map((query, index) => ({
-      query,
-      status: "recommended",
-      frequency: "",
-      position: "",
-      source: index < seedTokens.length ? "MPStats keyword-база" : "Ozon snapshot",
-    }));
-  return { current, recommendations };
-}
-
 function ozonSemanticRowKey(item) {
   return semanticQueryKey(item?.query || item);
 }
@@ -10054,51 +10009,19 @@ function ozonTaskGroupProgress(group) {
 }
 
 function buildOzonSemanticCoreSheets(cards, drafts) {
-  const cardsByKey = new Map((Array.isArray(cards) ? cards : []).map((card) => [ozonCardStableKey(card), card]));
   const usedNames = new Set();
   const sheets = (Array.isArray(drafts) ? drafts : [])
     .filter(ozonSemanticDraftHasFinal)
     .map((draft) => {
-      const card = cardsByKey.get(draft.cardKey) || {};
       const data = draft.draft || {};
-      const rows = [
-        ["SKU", "Offer ID", "Название", "Текущий ключ", "К добавлению", "К исключению", "Итоговое СЯ"],
-      ];
-      const current = Array.isArray(data.current) ? data.current : [];
-      const selected = Array.isArray(data.selected) ? data.selected : [];
-      const removal = Array.isArray(data.removal) ? data.removal : [];
-      const finalRows = Array.isArray(data.final) ? data.final : [];
-      const maxRows = Math.max(current.length, selected.length, removal.length, finalRows.length, 1);
-      for (let index = 0; index < maxRows; index += 1) {
-        rows.push([
-          draft.sku || data.sku || "",
-          draft.offerId || data.offerId || "",
-          draft.title || data.title || card.title || "",
-          current[index]?.query || "",
-          selected[index]?.query || "",
-          removal[index]?.query || "",
-          finalRows[index]?.query || "",
-        ]);
-      }
-      return {
-        name: cardExportSheetName({ vendorCode: draft.offerId || draft.sku, nmID: draft.sku, title: draft.title }, draft, usedNames),
-        freezeRows: 1,
-        widths: [22, 22, 52, 34, 34, 34, 34],
-        rows,
-      };
-    });
-  return sheets.length ? [
-    {
-      name: "Инструкция",
-      widths: [32, 96],
-      rows: [
-        ["Раздел", "Описание"],
-        ["Ozon СЯ", "Файл собран из сохраненных итоговых СЯ Ozon-карточек. Таблицы и API других маркетплейсов не используются."],
-        ["Итоговое СЯ", "Финальный набор ключей, сохраненный во вкладке Семантическое ядро Ozon."],
-      ],
-    },
-    ...sheets,
-  ] : [];
+      const final = data.finalSelection || data;
+      const core = { marketplace: "Ozon", current: final.current || [], period: final.period || data.semanticCore?.period };
+      return buildSemanticCoreExportSheet(
+        cardExportSheetName({ vendorCode: draft.offerId || draft.sku, nmID: draft.sku, title: draft.title }, draft, usedNames),
+        core, final.selected || [], final.removal || [],
+      );
+    }).filter(Boolean);
+  return sheets.length ? [buildSemanticCoreInstructionSheet({ marketplace: "Ozon" }), ...sheets] : [];
 }
 
 function buildOzonContentSheets(cards, drafts) {
@@ -11655,7 +11578,7 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
   );
 }
 
-function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточки Ozon", helpEnabled = false }) {
+function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLabel = "Карточки Ozon", helpEnabled = false }) {
   const [activeTab, setActiveTab] = useState("card");
   const [ozonCardDraft, setOzonCardDraft] = useState(null);
   const [ozonCardDraftStatus, setOzonCardDraftStatus] = useState("idle");
@@ -11884,7 +11807,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
             ) : null}
 
             {activeTab === "semantic" ? (
-              <OzonSemanticDraftPanel card={card} portal={portal} />
+              <OzonSemanticDraftPanel card={card} portal={portal} canManage={canManage} />
             ) : null}
 
             {activeTab === "audit" ? (
@@ -11915,7 +11838,7 @@ function OzonCardDetailScreen({ card, portal, onBack, backLabel = "Карточ�
   );
 }
 
-function OzonSemanticDraftPanel({ card, portal }) {
+function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
   const rawFields = rawFieldsForCard(card);
   const defaultSeed = [card?.brand || rawFields.brand, ozonCardCategory(card), card?.title || rawFields.title || rawFields.name]
     .filter((item) => item && item !== "Не указано")
@@ -11928,25 +11851,35 @@ function OzonSemanticDraftPanel({ card, portal }) {
   const [removalQueries, setRemovalQueries] = useState([]);
   const [savedSelectedRows, setSavedSelectedRows] = useState([]);
   const [savedRemovalRows, setSavedRemovalRows] = useState([]);
+  const [savedCurrentRows, setSavedCurrentRows] = useState([]);
+  const [savedRecommendations, setSavedRecommendations] = useState([]);
+  const [savedFinalRows, setSavedFinalRows] = useState([]);
+  const [savedFinalSelection, setSavedFinalSelection] = useState(null);
+  const [semanticCore, setSemanticCore] = useState(null);
+  const [semanticStatus, setSemanticStatus] = useState("idle");
+  const [semanticError, setSemanticError] = useState("");
+  const [progress, setProgress] = useState(null);
+  const [search, setSearch] = useState("");
+  const [excludeWords, setExcludeWords] = useState("");
+  const [selectedLimit, setSelectedLimit] = useState(100);
+  const [dirty, setDirty] = useState(false);
+  const requestSequence = useRef(0);
   const [draftStatus, setDraftStatus] = useState("idle");
   const [draftUpdatedAt, setDraftUpdatedAt] = useState("");
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
   const [semanticImportError, setSemanticImportError] = useState("");
   const [semanticImportPreview, setSemanticImportPreview] = useState(null);
   const [semanticImportFile, setSemanticImportFile] = useState(null);
-  const semanticDraft = ozonSemanticDraftRows(card, seedQuery);
-  const recommendationRows = mergeOzonSemanticRows(semanticDraft.recommendations, savedSelectedRows);
+  const recommendationRows = mergeOzonSemanticRows(semanticCore?.allKeywords || savedRecommendations, savedSelectedRows);
   const selectedSet = new Set(selectedQueries.map(semanticQueryKey).filter(Boolean));
   const removalSet = new Set(removalQueries.map(semanticQueryKey).filter(Boolean));
-  const selectedRows = mergeOzonSemanticRows(savedSelectedRows, recommendationRows)
+  const selectedRows = mergeOzonSemanticRows(recommendationRows, savedSelectedRows)
     .filter((item) => selectedSet.has(semanticQueryKey(item)));
-  const currentRows = semanticDraft.current;
+  const currentRows = semanticCore?.current || savedCurrentRows;
   const removalRows = mergeOzonSemanticRows(savedRemovalRows, currentRows)
     .filter((item) => removalSet.has(semanticQueryKey(item)));
-  const finalRows = [
-    ...currentRows.filter((item) => !removalSet.has(semanticQueryKey(item))),
-    ...selectedRows,
-  ];
+  const finalRows = mergeOzonSemanticRows(currentRows, selectedRows)
+    .filter((item) => !removalSet.has(semanticQueryKey(item)));
   const finalCount = finalRows.length;
 
   function applySavedOzonSemanticDraft(saved, updatedAt = "") {
@@ -11955,9 +11888,17 @@ function OzonSemanticDraftPanel({ card, portal }) {
     setSeedQuery(saved?.seedQuery || defaultSeed);
     setSavedSelectedRows(selected);
     setSavedRemovalRows(removal);
+    setSavedCurrentRows(normalizeOzonSemanticRows(saved?.current));
+    setSavedRecommendations(normalizeOzonSemanticRows(saved?.recommendations));
+    setSavedFinalRows(normalizeOzonSemanticRows(saved?.final));
+    setSavedFinalSelection(saved?.finalSelection || (saved?.final?.length ? {
+      current: saved.current || [], selected: saved.selected || [], removal: saved.removal || [], period: saved.semanticCore?.period,
+    } : null));
+    setSemanticCore(hasSemanticRelevance(saved?.semanticCore) ? saved.semanticCore : null);
     setSelectedQueries(selected.map((item) => item.query));
     setRemovalQueries(removal.map((item) => item.query));
     setDraftUpdatedAt(updatedAt || "");
+    setDirty(false);
   }
 
   useEffect(() => {
@@ -11967,6 +11908,16 @@ function OzonSemanticDraftPanel({ card, portal }) {
     setRemovalQueries([]);
     setSavedSelectedRows([]);
     setSavedRemovalRows([]);
+    setSavedCurrentRows([]);
+    setSavedRecommendations([]);
+    setSavedFinalRows([]);
+    setSavedFinalSelection(null);
+    setSemanticCore(null);
+    setSemanticStatus("idle");
+    setSemanticError("");
+    setProgress(null);
+    setDirty(false);
+    requestSequence.current += 1;
     setDraftUpdatedAt("");
     setSemanticImportStatus("");
     setSemanticImportError("");
@@ -11992,14 +11943,16 @@ function OzonSemanticDraftPanel({ card, portal }) {
       })
       .catch(() => {
         if (!active) return;
-        setDraftStatus("error");
+        setDraftStatus("load-error");
       });
     return () => {
       active = false;
+      requestSequence.current += 1;
     };
   }, [portal?.id, portal?.isDemo, cardKey, defaultSeed]);
 
   function toggleSelected(query) {
+    setDirty(true);
     const key = semanticQueryKey(query);
     setSelectedQueries((current) => (
       current.some((item) => semanticQueryKey(item) === key)
@@ -12009,6 +11962,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
   }
 
   function toggleRemoval(query) {
+    setDirty(true);
     const key = semanticQueryKey(query);
     setRemovalQueries((current) => (
       current.some((item) => semanticQueryKey(item) === key)
@@ -12017,8 +11971,8 @@ function OzonSemanticDraftPanel({ card, portal }) {
     ));
   }
 
-  async function saveSemanticDraft() {
-    if (!portal?.id || portal.isDemo || !cardKey || draftStatus === "saving") {
+  async function saveSemanticDraft({ finalize = false } = {}) {
+    if (saveDisabled) {
       return;
     }
     setDraftStatus("saving");
@@ -12032,11 +11986,13 @@ function OzonSemanticDraftPanel({ card, portal }) {
           title,
           seedQuery,
           current: currentRows,
-          recommendations: recommendationRows,
+          recommendations: semanticCore ? [] : recommendationRows,
           selected: selectedRows,
           removal: removalRows,
-          final: finalRows,
-          meta: { source: "ozon-semantic-beta" },
+          final: finalize ? finalRows : savedFinalRows,
+          finalSelection: finalize ? { current: currentRows, selected: selectedRows, removal: removalRows, period: semanticCore?.period } : savedFinalSelection,
+          semanticCore,
+          meta: { source: "ozon-semantic-relevance" },
         }),
       });
       applySavedOzonSemanticDraft(payload?.draft?.draft || {}, payload?.draft?.updatedAt || new Date().toISOString());
@@ -12044,6 +12000,77 @@ function OzonSemanticDraftPanel({ card, portal }) {
     } catch {
       setDraftStatus("error");
     }
+  }
+
+  async function collectQueries() {
+    if (saveDisabled || !seedQuery.trim()) return;
+    const sequence = ++requestSequence.current;
+    setSemanticStatus("loading");
+    setSemanticError("");
+    setProgress(null);
+    try {
+      let payload = await apiRequest("/api/mpstats/semantic-expansion", {
+        method: "POST",
+        body: JSON.stringify({ portalId: portal.id, card, query: seedQuery.trim() }),
+      });
+      const started = Date.now();
+      while (payload.status === "classifying") {
+        if (sequence !== requestSequence.current) return;
+        setProgress({ completed: payload.completed, total: payload.total });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (sequence !== requestSequence.current) return;
+        if (Date.now() - started > 35 * 60 * 1000) throw new Error("semantic_relevance_timeout");
+        payload = await apiRequest("/api/mpstats/semantic-expansion", {
+          method: "POST", body: JSON.stringify({ portalId: portal.id, relevanceJobId: payload.jobId }),
+        });
+      }
+      if (sequence !== requestSequence.current) return;
+      if (payload.status === "failed") throw new Error(payload.error || "semantic_relevance_failed");
+      if (!hasSemanticRelevance(payload.semanticCore)) throw new Error("semantic_relevance_failed");
+      const core = payload.semanticCore;
+      const next = reconcileSemanticRelevance(core, selectedRows, [semanticCore].filter(Boolean),
+        new Set((core.current || []).map(semanticQueryKey)), removalRows);
+      setSemanticCore(next.core);
+      setSavedSelectedRows(next.selected);
+      setSelectedQueries(next.selected.map((item) => item.query));
+      setDirty(true);
+      setSemanticStatus("loaded");
+    } catch (error) {
+      if (sequence !== requestSequence.current) return;
+      const code = error.payload?.message || error.message || "";
+      const errors = {
+        semantic_relevance_not_configured: "Для проверки запросов подключите языковую модель.",
+        semantic_card_content_missing: "Для проверки нужны название, описание или характеристики карточки.",
+        semantic_relevance_busy: "Проверка занята другими подборками. Повторите позже.",
+        semantic_relevance_failed: "Проверка не завершена. Повторите подбор: готовые части будут использованы повторно.",
+        semantic_relevance_timeout: "Проверка не уложилась в отведённое время. Повторите подбор.",
+        semantic_relevance_job_not_found: "Проверка недоступна после перезапуска сервера. Повторите подбор.",
+        semantic_relevance_too_many_queries: "Больше 5 000 запросов. Уточните стартовую фразу.",
+        mpstats_expanding_report_not_ready: "MPStats ещё готовит отчёт. Повторите подбор через минуту.",
+        mpstats_key_missing: "Подключите ключ MPStats в настройках интеграций.",
+        forbidden: "Нет прав на подбор СЯ в этом кабинете.",
+      };
+      setSemanticError(errors[code] || "Не удалось получить запросы MPStats. Проверьте подключение и повторите подбор.");
+      setSemanticStatus("error");
+    } finally {
+      if (sequence === requestSequence.current) setProgress(null);
+    }
+  }
+
+  function decideQuery(row, decision) {
+    if (saveDisabled) return;
+    const edited = setSemanticRelevanceDecision(semanticCore, row, decision);
+    if (!edited.allKeywords.some((item) => semanticQueryKey(item) === semanticQueryKey(row))) {
+      edited.decisions = [...(edited.decisions || []).filter((item) => semanticQueryKey(item) !== semanticQueryKey(row)),
+        { query: row.query, manualDecision: decision }];
+    }
+    const selection = decision === "excluded" ? selectedRows.filter((item) => semanticQueryKey(item) !== semanticQueryKey(row)) : selectedRows;
+    const next = reconcileSemanticRelevance(edited, selection, [edited],
+      new Set(currentRows.map(semanticQueryKey)), removalRows);
+    setSemanticCore(next.core);
+    setSavedSelectedRows(next.selected);
+    setSelectedQueries(next.selected.map((item) => item.query));
+    setDirty(true);
   }
 
   async function previewOzonSemanticImport(file) {
@@ -12104,22 +12131,23 @@ function OzonSemanticDraftPanel({ card, portal }) {
     }
   }
 
-  const saveDisabled = !portal?.id || portal.isDemo || draftStatus === "saving";
+  const saveDisabled = !canManage || !portal?.id || portal.isDemo || ["loading", "saving", "load-error"].includes(draftStatus)
+    || semanticStatus === "loading" || ["reading", "previewing", "applying"].includes(semanticImportStatus);
   const importDisabled = saveDisabled || ["reading", "previewing", "applying"].includes(semanticImportStatus);
   const statusLabel = draftStatus === "loading"
     ? "загружаем"
     : draftStatus === "saving"
       ? "сохраняем"
-      : draftStatus === "saved"
+      : dirty ? "не сохранено" : draftStatus === "saved"
         ? "сохранено"
         : draftStatus === "loaded"
           ? "черновик"
-          : draftStatus === "error"
+          : ["error", "load-error"].includes(draftStatus)
             ? "ошибка"
             : draftStatus === "local"
               ? "локально"
               : "новый";
-  const statusTone = draftStatus === "error" ? "red" : ["saved", "loaded"].includes(draftStatus) ? "green" : "amber";
+  const statusTone = ["error", "load-error"].includes(draftStatus) ? "red" : dirty ? "amber" : ["saved", "loaded"].includes(draftStatus) ? "green" : "amber";
   const savedAtLabel = draftUpdatedAt ? new Date(draftUpdatedAt).toLocaleString("ru-RU") : "";
 
   return (
@@ -12127,7 +12155,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
       <div className="strip-head">
         <div>
           <h2>Семантическое ядро Ozon</h2>
-          <p>Полный workflow СЯ как в основном кабинете: текущие ключи, запросы к добавлению, исключения и итоговый набор сохраняются в Ozon-контуре.</p>
+          <p>MPStats подбирает запросы Ozon. Модель проверяет их по названию, описанию и характеристикам карточки.</p>
         </div>
         <Tag tone={statusTone}>{statusLabel}</Tag>
       </div>
@@ -12135,15 +12163,33 @@ function OzonSemanticDraftPanel({ card, portal }) {
       <div className="semantic-seed-row">
         <label className="search-field card-search">
           <Search size={16} />
-          <input value={seedQuery} onChange={(event) => setSeedQuery(event.target.value)} placeholder="Стартовая фраза для Ozon-СЯ" />
+          <input aria-label="Стартовый запрос" value={seedQuery} disabled={saveDisabled} onChange={(event) => { setSeedQuery(event.target.value); setDirty(true); }}
+            onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); collectQueries(); } }} placeholder="Стартовая фраза для Ozon-СЯ" />
         </label>
-        <button className={loadingButtonClass("btn primary", draftStatus === "saving")} type="button" onClick={saveSemanticDraft} disabled={saveDisabled} aria-busy={draftStatus === "saving" || undefined}>
-          <Save size={16} />{draftStatus === "saving" ? "Сохраняем" : "Сохранить СЯ"}
+        <button className={loadingButtonClass("btn primary", semanticStatus === "loading")} type="button" onClick={collectQueries} disabled={saveDisabled || !seedQuery.trim()} aria-busy={semanticStatus === "loading" || undefined}>
+          <Search size={16} />{semanticStatus === "loading" ? "Проверяем запросы" : semanticCore ? "Собрать еще" : "Подобрать запросы"}
+        </button>
+        <button className={loadingButtonClass("btn", draftStatus === "saving")} type="button" onClick={() => saveSemanticDraft()} disabled={saveDisabled} aria-busy={draftStatus === "saving" || undefined}>
+          <Save size={16} />{draftStatus === "saving" ? "Сохраняем" : "Сохранить текущий выбор"}
+        </button>
+        <button className="btn" type="button" onClick={() => saveSemanticDraft({ finalize: true })} disabled={saveDisabled || dirty || !finalCount}>
+          <CheckSquare size={16} />Добавить в итоговое СЯ
+        </button>
+        <button className="btn" type="button" disabled={saveDisabled || dirty || !finalCount} onClick={() => {
+          const core = { ...semanticCore, current: currentRows };
+          const sheet = buildSemanticCoreExportSheet(cardExportSheetName({ vendorCode: offerId, nmID: sku, title }, {}, new Set()), core, selectedRows, removalRows);
+          if (sheet) downloadXlsx(`Ozon-СЯ-${safeFilePart(sku)}.xlsx`, [buildSemanticCoreInstructionSheet({ ...card, marketplace: "Ozon" }), sheet]);
+        }}>
+          <Download size={16} />Скачать файл карточки
         </button>
         <Tag tone="blue">Ozon</Tag>
       </div>
+      {semanticStatus === "loading" ? <p className="status-note" role="status">{progress ? `Проверено ${progress.completed} из ${progress.total} запросов` : "Получаем запросы MPStats…"}</p> : null}
+      {semanticError ? <p className="status-note" role="alert">{semanticError}</p> : null}
+      {dirty ? <p className="status-note">Текущий выбор СЯ не сохранён. Сохраните его перед выгрузкой или добавлением в итоговое СЯ.</p> : null}
+      {semanticCore?.period?.d1 ? <p className="status-note">MPStats · Ozon · {semanticPeriodLabel(semanticCore.period)}</p> : null}
       {savedAtLabel ? <p className="status-note">Последнее сохранение: {savedAtLabel}</p> : null}
-      {draftStatus === "error" ? <p className="status-note">Не удалось загрузить или сохранить Ozon-СЯ. Проверьте доступ к кабинету и повторите действие.</p> : null}
+      {["error", "load-error"].includes(draftStatus) ? <p className="status-note">Не удалось загрузить или сохранить Ozon-СЯ. Проверьте доступ к кабинету и повторите действие.</p> : null}
 
       <SemanticCoreImportPanel
         status={semanticImportStatus}
@@ -12206,7 +12252,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
         <div>
           <span>Итоговый черновик</span>
           <strong>{formatNumber(finalCount)}</strong>
-          <em>сохраняется в Ozon-кабинете</em>
+          <em>в итоговом СЯ сохранено {savedFinalRows.length}</em>
         </div>
       </div>
 
@@ -12225,7 +12271,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
                   <em>{marked ? "к исключению" : item.source}</em>
                 </div>
                 <div className="semantic-keyword-actions">
-                  <button className="btn mini" type="button" onClick={() => toggleRemoval(item.query)}>
+                  <button className="btn mini" type="button" disabled={saveDisabled} onClick={() => toggleRemoval(item.query)}>
                     {marked ? <RotateCcw size={14} /> : <Trash2 size={14} />}{marked ? "Оставить" : "Исключить"}
                   </button>
                 </div>
@@ -12234,7 +12280,7 @@ function OzonSemanticDraftPanel({ card, portal }) {
           }) : <div className="empty-state compact"><span>В текущем Ozon-контенте ключей не найдено.</span></div>}
         </div>
 
-        <div className="semantic-keyword-list">
+        {!semanticCore ? <div className="semantic-keyword-list">
           <div className="semantic-list-head">
             <strong>Кандидаты к добавлению</strong>
             <span>{formatNumber(recommendationRows.length)}</span>
@@ -12249,15 +12295,36 @@ function OzonSemanticDraftPanel({ card, portal }) {
                 </div>
                 <div className="semantic-keyword-actions">
                   <Tag tone={selected ? "green" : "blue"}>{selected ? "в работе" : "кандидат"}</Tag>
-                  <button className="btn mini" type="button" onClick={() => toggleSelected(item.query)}>
+                  <button className="btn mini" type="button" disabled={saveDisabled} onClick={() => toggleSelected(item.query)}>
                     {selected ? <X size={14} /> : <Plus size={14} />}{selected ? "Убрать" : "Добавить"}
                   </button>
                 </div>
               </div>
             );
-          }) : <div className="empty-state compact"><span>Добавьте стартовую фразу или загрузите согласованное СЯ.</span></div>}
-        </div>
+          }) : <div className="empty-state compact"><span>Укажите стартовую фразу и нажмите «Подобрать запросы» или загрузите согласованное СЯ.</span></div>}
+        </div> : null}
       </div>
+      {semanticCore ? <>
+        <details className="semantic-relevance-group">
+          <summary>В работу · {selectedRows.length}</summary>
+          <div className="semantic-keyword-list">
+            {selectedRows.slice(0, selectedLimit).map((row) => <div className="semantic-keyword selected" key={semanticQueryKey(row)}>
+              <div className="semantic-keyword-main"><strong>{row.query}</strong><em>{row.ozonCount ? `Частота Ozon: ${formatNumber(row.ozonCount)}` : row.source}</em><span>{row.relevanceReason}</span></div>
+              <button className="btn mini danger" type="button" disabled={saveDisabled} onClick={() => decideQuery(row, "excluded")}>Исключить</button>
+            </div>)}
+            {selectedRows.length > selectedLimit ? <button className="btn mini" type="button" onClick={() => setSelectedLimit((value) => value + 100)}>Показать ещё</button> : null}
+          </div>
+        </details>
+        <div className="semantic-seed-row">
+          <label className="search-field card-search"><Search size={16} /><input aria-label="Поиск по запросам" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по запросам" /></label>
+          <label className="search-field card-search"><input aria-label="Слова исключения" value={excludeWords} onChange={(event) => setExcludeWords(event.target.value)} placeholder="Слова исключения, до 10" /></label>
+        </div>
+        <SemanticRelevancePanel core={semanticCore} selected={selectedRows} existingKeys={new Set(currentRows.map(semanticQueryKey))}
+          removalKeys={removalSet} search={search} excludeWords={excludeWords} readOnly={saveDisabled}
+          onInclude={(row) => decideQuery(row, "included")} onExclude={(row) => decideQuery(row, "excluded")}
+          onToggleRemoval={(row) => toggleRemoval(row.query)}
+          formatMeta={(row) => Number(row.ozonCount) > 0 ? `Частота Ozon: ${formatNumber(row.ozonCount)}` : "Частота Ozon не подтверждена"} />
+      </> : null}
     </section>
   );
 }

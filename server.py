@@ -64,6 +64,7 @@ SESSION_TTL_REMEMBER_SECONDS = 7 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 240_000
 MAX_JSON_BYTES = 512 * 1024
 MAX_DRAFT_JSON_BYTES = int(os.environ.get("OPTICARDS_MAX_DRAFT_JSON_BYTES", str(4 * 1024 * 1024)))
+MAX_OZON_SEMANTIC_JSON_BYTES = 16 * 1024 * 1024
 SEMANTIC_IMPORT_MAX_FILE_BYTES = int(os.environ.get("OPTICARDS_SEMANTIC_IMPORT_MAX_FILE_BYTES", str(8 * 1024 * 1024)))
 SEMANTIC_IMPORT_MAX_JSON_BYTES = int(SEMANTIC_IMPORT_MAX_FILE_BYTES * 4 / 3) + 64 * 1024
 SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES = int(os.environ.get("OPTICARDS_SEMANTIC_IMPORT_MAX_UNZIPPED_BYTES", str(32 * 1024 * 1024)))
@@ -4447,12 +4448,27 @@ def normalize_ozon_semantic_keyword(item, fallback_source=""):
       payload["wbCount"] = wb_count
     if removal_reason:
       payload["removalReason"] = removal_reason
+    for key, limit in (("relevanceReason", 1200), ("field", 80), ("prioritySubject", 160)):
+      value = audit_str(item.get(key), limit)
+      if value:
+        payload[key] = value
+    if item.get("relevance") in ("relevant", "disputed", "irrelevant"):
+      payload["relevance"] = item["relevance"]
+    if item.get("manualDecision") in ("included", "excluded"):
+      payload["manualDecision"] = item["manualDecision"]
+    evidence = item.get("relevanceEvidence")
+    if isinstance(evidence, list):
+      payload["relevanceEvidence"] = [
+        {"factId": value["factId"], "quote": audit_str(value.get("quote"), 500)}
+        for value in evidence[:3] if isinstance(value, dict)
+        and value.get("factId") in ("title", "description", "characteristics")
+      ]
   if source:
     payload["source"] = source
   return payload
 
 
-def normalize_ozon_semantic_keywords(items, limit=500, fallback_source=""):
+def normalize_ozon_semantic_keywords(items, limit=5000, fallback_source=""):
   if not isinstance(items, list):
     return []
   output = []
@@ -4529,6 +4545,33 @@ def normalize_ozon_semantic_payload(payload):
     "final": final_keywords,
     "meta": normalized_meta,
   }
+  core = payload.get("semanticCore")
+  if isinstance(core, dict) and core.get("relevanceVersion") == SEMANTIC_RELEVANCE_VERSION:
+    core_rows = core.get("allKeywords", [])
+    decisions = core.get("decisions", [])
+    if not isinstance(core_rows, list) or not isinstance(decisions, list):
+      raise ValueError("invalid_ozon_semantic_draft")
+    if len(core_rows) > 5000 or len(decisions) > 5000:
+      raise ValueError("semantic_relevance_too_many_queries")
+    rows = normalize_ozon_semantic_keywords(core_rows)
+    period = core.get("period") if isinstance(core.get("period"), dict) else {}
+    normalized["semanticCore"] = {
+      "marketplace": "Ozon", "source": "mpstats-expanding",
+      "relevanceVersion": SEMANTIC_RELEVANCE_VERSION,
+      "seedQuery": audit_str(core.get("seedQuery"), 240),
+      "period": {key: audit_str(period.get(key), 10) for key in ("d1", "d2")},
+      "allKeywords": rows, "current": current,
+      "decisions": normalize_ozon_semantic_keywords(core.get("decisions")),
+      "totalKeywords": len(rows),
+      "relevanceCounts": {status: sum(row.get("relevance") == status for row in rows)
+                          for status in ("relevant", "disputed", "irrelevant")},
+    }
+  final_selection = payload.get("finalSelection")
+  if isinstance(final_selection, dict):
+    normalized["finalSelection"] = {key: normalize_ozon_semantic_keywords(final_selection.get(key))
+                                    for key in ("current", "selected", "removal")}
+    period = final_selection.get("period") if isinstance(final_selection.get("period"), dict) else {}
+    normalized["finalSelection"]["period"] = {key: audit_str(period.get(key), 10) for key in ("d1", "d2")}
   return normalized if card_key else None
 
 
@@ -17989,7 +18032,13 @@ def semantic_classify_query_batch(card, rows):
 
 def semantic_relevance_result(result, card, rows):
   core = dict(result["semanticCore"])
-  current = semantic_current_rows_from_card_and_mpstats(card, [row for row in rows if row["relevance"] == "relevant"], limit=5000)
+  if core.get("marketplace") == "Ozon":
+    texts = semantic_card_content_texts(card)
+    current = [{**row, "field": field, "status": "current"} for row in rows
+               if row["relevance"] == "relevant" and audit_int(row.get("ozonCount"), 0) > 0
+               and (field := semantic_content_field_for_query(texts, row["query"]))]
+  else:
+    current = semantic_current_rows_from_card_and_mpstats(card, [row for row in rows if row["relevance"] == "relevant"], limit=5000)
   current_keys = {audit_normalized(row["query"]) for row in current}
   recommended = [row for row in rows if row["relevance"] == "relevant" and audit_normalized(row["query"]) not in current_keys]
   core.update(
@@ -18080,7 +18129,9 @@ def start_semantic_relevance_job(result, card, portal_id, user):
   return {"status": "classifying", "jobId": job_id, "completed": 0, "total": len(rows), "error": ""}
 
 
-def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
+def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False, marketplace="Wildberries"):
+  if marketplace not in ("Wildberries", "Ozon"):
+    raise ValueError("invalid_semantic_marketplace")
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
@@ -18092,7 +18143,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   period = mpstats_semantic_period_default()
   body = {
     "type": "keyword",
-    "mp": 0,
+    "mp": 1 if marketplace == "Ozon" else 0,
     "queryData": seed_queries,
     "d1": period["d1"],
     "d2": period["d2"],
@@ -18137,7 +18188,8 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
     rows.append(normalized)
   if len(rows) > 5000:
     raise ValueError("semantic_relevance_too_many_queries")
-  rows.sort(key=lambda item: (audit_int(item.get("wbCount"), 0), audit_int(item.get("ozonCount"), 0)), reverse=True)
+  frequency_field = "ozonCount" if marketplace == "Ozon" else "wbCount"
+  rows.sort(key=lambda item: (audit_int(item.get(frequency_field), 0), audit_int(item.get("ozonCount"), 0)), reverse=True)
 
   texts = semantic_card_content_texts(card)
   current = semantic_current_rows_from_card_and_mpstats(card, rows, limit=1000)
@@ -18147,7 +18199,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
   for row in rows:
     target = {
       **row,
-      "priority": semantic_frequency_priority(row.get("wbCount")),
+      "priority": semantic_frequency_priority(row.get(frequency_field)),
     }
     all_keywords.append(target)
     key = audit_normalized(row.get("query") or "")
@@ -18176,6 +18228,7 @@ def fetch_mpstats_semantic_expansion(card, query="", force_refresh=False):
     "period": period,
     "cached": cached_flag,
     "semanticCore": {
+      "marketplace": marketplace,
       "source": "mpstats-expanding",
       "seedQuery": seed_query,
       "seedQueries": seed_queries,
@@ -19915,7 +19968,7 @@ def semantic_import_normalize_items(items, kind, limit=4000):
     seen.add(key)
     item = semantic_import_keyword_item(query, kind, source if isinstance(source, dict) else {})
     if isinstance(source, dict):
-      for field in ("cluster", "prioritySubject", "prioritySubjectId", "frequency365", "priority", "orgPos", "adPos", "avgPos", "totalFound", "rankPeriod", "ozonCount"):
+      for field in ("cluster", "prioritySubject", "prioritySubjectId", "frequency365", "priority", "orgPos", "adPos", "avgPos", "totalFound", "rankPeriod", "wbCount", "ozonCount", "relevance", "relevanceReason", "relevanceEvidence", "manualDecision"):
         if source.get(field) not in (None, ""):
           item[field] = source.get(field)
     output.append(item)
@@ -20742,10 +20795,10 @@ def ozon_semantic_import_payload_with_final(previous_payload, group, filename, u
   previous_payload = normalize_ozon_semantic_payload(previous_payload) or {}
   existing_selected = previous_payload.get("selected") if isinstance(previous_payload.get("selected"), list) else []
   existing_removal = previous_payload.get("removal") if isinstance(previous_payload.get("removal"), list) else []
-  current = normalize_ozon_semantic_keywords(previous_payload.get("current"), limit=1200, fallback_source="Ozon карточка")
-  recommendations = normalize_ozon_semantic_keywords(previous_payload.get("recommendations"), limit=1200, fallback_source="MPStats keyword-база")
-  selected = semantic_import_merge_items(existing_selected, group.get("selected"), group.get("rejectedSelected"), kind="selected", limit=1200)
-  removal = semantic_import_merge_items(existing_removal, group.get("removal"), group.get("rejectedRemoval"), kind="removal", limit=1200)
+  current = normalize_ozon_semantic_keywords(previous_payload.get("current"), limit=5000, fallback_source="Ozon карточка")
+  recommendations = normalize_ozon_semantic_keywords(previous_payload.get("recommendations"), limit=5000, fallback_source="MPStats keyword-база")
+  selected = semantic_import_merge_items(existing_selected, group.get("selected"), group.get("rejectedSelected"), kind="selected", limit=5000)
+  removal = semantic_import_merge_items(existing_removal, group.get("removal"), group.get("rejectedRemoval"), kind="removal", limit=5000)
   removal_keys = {semantic_import_keyword_key(item) for item in removal}
   selected = [item for item in selected if semantic_import_keyword_key(item) not in removal_keys]
   final_keywords = semantic_import_merge_items(
@@ -20753,8 +20806,19 @@ def ozon_semantic_import_payload_with_final(previous_payload, group, filename, u
     selected,
     [],
     kind="selected",
-    limit=2000,
+    limit=5000,
   )
+  core = previous_payload.get("semanticCore")
+  if isinstance(core, dict):
+    decisions = {semantic_import_keyword_key(item): item for item in [*core.get("decisions", []), *core.get("allKeywords", [])]
+                 if item.get("manualDecision") in ("included", "excluded")}
+    for items, decision in ((group.get("selected"), "included"), (group.get("rejectedSelected"), "excluded")):
+      for item in items or []:
+        key = semantic_import_keyword_key(item)
+        decisions[key] = {"query": item["query"], "manualDecision": decision}
+    core = {**core, "decisions": list(decisions.values()), "allKeywords": [
+      {**row, **({"manualDecision": decisions[semantic_import_keyword_key(row)]["manualDecision"]}
+                if semantic_import_keyword_key(row) in decisions else {})} for row in core.get("allKeywords", [])]}
   now = utc_now().isoformat()
   user_login = user_login_value(user)
   previous_meta = previous_payload.get("meta") if isinstance(previous_payload.get("meta"), dict) else {}
@@ -20776,10 +20840,13 @@ def ozon_semantic_import_payload_with_final(previous_payload, group, filename, u
     "offerId": group.get("offerId") or group.get("vendorCode") or previous_payload.get("offerId") or "",
     "title": group.get("title") or previous_payload.get("title") or "",
     "current": current,
-    "recommendations": semantic_import_merge_items(recommendations, selected, [], kind="selected", limit=1200),
+    "recommendations": semantic_import_merge_items(recommendations, selected, [], kind="selected", limit=5000),
     "selected": selected,
     "removal": removal,
     "final": final_keywords,
+    "semanticCore": core,
+    "finalSelection": {"current": current, "selected": selected, "removal": removal,
+                       "period": core.get("period", {}) if core else {}},
     "meta": {
       **previous_meta,
       "source": "ozon-semantic-import",
@@ -24582,6 +24649,12 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           return
         self.send_json(HTTPStatus.OK, result)
         return
+      with connect_db() as db:
+        portal = db.execute("SELECT marketplace FROM portals WHERE id = ?", (portal_id,)).fetchone()
+      marketplace = portal["marketplace"] if portal else "Wildberries"
+      if marketplace == "Ozon" and not user_can_edit_portal(user, portal_id):
+        self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+        return
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
       force_refresh = bool(payload.get("refresh"))
       try:
@@ -24592,7 +24665,9 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         try:
           if not content_reoptimization_configured():
             raise ValueError("semantic_relevance_not_configured")
-          result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh)
+          if not semantic_relevance_facts(raw_card):
+            raise ValueError("semantic_card_content_missing")
+          result = fetch_mpstats_semantic_expansion(raw_card, query=payload.get("query"), force_refresh=force_refresh, marketplace=marketplace)
           result = start_semantic_relevance_job(result, raw_card, portal_id, user)
         finally:
           mpstats_call_context_stop(context_token)
@@ -25348,7 +25423,15 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       if not user:
         return
       portal_id_text = path[len("/api/portals/"):-len("/ozon-semantic-draft")].strip("/")
-      payload = self.read_json() or {}
+      payload = self.read_json(MAX_OZON_SEMANTIC_JSON_BYTES)
+      if payload is None:
+        try:
+          too_large = int(self.headers.get("Content-Length", "0")) > MAX_OZON_SEMANTIC_JSON_BYTES
+        except ValueError:
+          too_large = False
+        self.send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE if too_large else HTTPStatus.BAD_REQUEST,
+                       {"error": "draft_payload_too_large" if too_large else "invalid_ozon_semantic_draft"})
+        return
       try:
         result = save_ozon_semantic_draft(portal_id_text, payload, user)
       except PermissionError:
