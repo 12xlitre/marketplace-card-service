@@ -45,6 +45,7 @@ class SemanticRelevanceTest(unittest.TestCase):
             patch.object(server, "content_reoptimization_configured", return_value=True),
             patch.object(server, "audit_cache_get", side_effect=lambda key: self.cache.get(key)),
             patch.object(server, "audit_cache_set", side_effect=lambda key, value, ttl: self.cache.setdefault(key, value)),
+            patch.object(server, "fetch_mpstats_keywords_core", return_value={"keywords": [], "source": "mpstats", "period": {}}),
         ]
         for item in self.patches:
             item.start()

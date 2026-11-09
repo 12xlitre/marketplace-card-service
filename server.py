@@ -17804,7 +17804,7 @@ def audit_build_semantic_core(card, keywords):
   }
 
 
-def fetch_mpstats_keywords_core(card, force_refresh=False):
+def fetch_mpstats_keywords_core(card, force_refresh=False, period=None):
   nm_id = audit_str(card.get("nmID") or card.get("nmId") or card.get("id") or "")
   if not nm_id:
     raise ValueError("missing_nm_id")
@@ -17812,7 +17812,7 @@ def fetch_mpstats_keywords_core(card, force_refresh=False):
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
 
-  period = mpstats_semantic_period_default()
+  period = period or mpstats_semantic_period_default()
   path = f"/analytics/v1/wb/items/{nm_id}/keywords"
   params = {"d1": period["d1"], "d2": period["d2"]}
   body = {"startRow": 0, "endRow": 500, "filterModel": {}, "sortModel": []}
@@ -18281,8 +18281,8 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
                'period': mpstats_semantic_period_default(), 'seedQueries': seeds}
     request['sourceKey'] = hashlib.sha256(semantic_json({'seeds': seeds, 'period': request['period'], 'marketplace': portal['marketplace']}).encode()).hexdigest()
     if source is None and not refresh:
-      previous_source = db.execute("SELECT source_json FROM semantic_jobs WHERE portal_id=? AND user_login=? AND marketplace=? AND json_extract(request_json,'$.sourceKey')=? AND source_json IS NOT NULL AND updated_at>? ORDER BY updated_at DESC LIMIT 1",
-        (portal_id, user_login_value(user), portal['marketplace'], request['sourceKey'], now-AUDIT_MARKET_CACHE_TTL_SECONDS)).fetchone()
+      previous_source = db.execute("SELECT source_json FROM semantic_jobs WHERE portal_id=? AND user_login=? AND card_key=? AND marketplace=? AND json_extract(request_json,'$.sourceKey')=? AND source_json IS NOT NULL AND updated_at>? ORDER BY updated_at DESC LIMIT 1",
+        (portal_id, user_login_value(user), key, portal['marketplace'], request['sourceKey'], now-AUDIT_MARKET_CACHE_TTL_SECONDS)).fetchone()
       if previous_source:
         source = json.loads(previous_source['source_json'])
     if source is not None:
@@ -18456,6 +18456,35 @@ class SemanticJobWorker:
         job['source_json'] = semantic_json(source)
       else:
         source = json.loads(job['source_json'])
+      if job['marketplace'] == 'Wildberries' and not source.get('rankingCaptured'):
+        with semantic_job_connection(self.path) as db:
+          latest = db.execute('SELECT status,run_token FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
+          if not latest or latest['status'] not in SEMANTIC_JOB_ACTIVE or latest['run_token'] != token:
+            return
+          draft = db.execute('SELECT payload_json FROM card_drafts WHERE portal_id=? AND card_key=?', (job['portal_id'], job['card_key'])).fetchone()
+        saved = json.loads(draft['payload_json']) if draft else {}
+        reports = (saved.get('meta') or {}).get('semanticCoreReports') or []
+        ranking = next((item['semanticCore'] for item in reports if (item.get('semanticCore') or {}).get('rankingSource')), None)
+        if ranking:
+          source['semanticCore'].update({key: ranking[key] for key in ('rankedKeywords','rankingSource','rankingPeriod') if key in ranking})
+        else:
+          context = mpstats_call_context_start(user, 'СЯ: позиции фонового подбора', portal_id=job['portal_id'], card_key=job['card_key'])
+          try:
+            payload = fetch_mpstats_keywords_core(card, force_refresh=False, period=request['period'])
+            ranked = {audit_normalized(row['query']): row for row in payload.get('keywords') or []
+                      if audit_position_value(row.get('orgPos'), row.get('adPos'), row.get('avgPos'))}
+            source['semanticCore'].update(rankedKeywords=list(ranked.values()), rankingSource=payload.get('source') or 'mpstats', rankingPeriod=payload.get('period') or {})
+            for row in source['semanticCore']['allKeywords']:
+              if audit_normalized(row['query']) in ranked:
+                row.update({key: value for key, value in ranked[audit_normalized(row['query'])].items() if key in ('orgPos','adPos','avgPos','totalFound')})
+          except (MpstatsApiError, ValueError):
+            source['rankingWarning'] = 'mpstats_rankings_unavailable'
+          finally:
+            mpstats_call_context_stop(context)
+        source['rankingCaptured'] = True
+        with semantic_job_connection(self.path) as db:
+          if not db.execute("UPDATE semantic_jobs SET source_json=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'", (semantic_json(source), time.time(), job_id, token)).rowcount:
+            return
       rows = source['semanticCore']['allKeywords']
       scope = (job['portal_id'], job['user_login'], job['facts_hash'], job['model_key'])
       with semantic_job_connection(self.path) as db:

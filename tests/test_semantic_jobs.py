@@ -38,6 +38,7 @@ class SemanticJobsTest(unittest.TestCase):
                         patch.object(server, 'start_semantic_worker'),
                         patch.object(server, 'audit_cache_get', return_value=None),
                         patch.object(server, 'audit_cache_set'),
+                        patch.object(server, 'fetch_mpstats_keywords_core', return_value={'keywords': [], 'source': 'mpstats', 'period': {}}),
                         patch.object(server, 'semantic_classify_query_batch', side_effect=classify)]
         for item in self.patches: item.start()
         server.init_db()
@@ -253,6 +254,27 @@ class SemanticJobsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'semantic_relevance_busy'):
             server.semantic_job_action(job['jobId'], self.wb, USER, 'retry')
         self.assertEqual(server.semantic_get_job(job['jobId'], self.wb, USER)['status'], 'cancelled')
+
+    def test_wb_rankings_are_persisted_before_first_model_batch_and_reused_after_restart(self):
+        row = {**source(1)['semanticCore']['allKeywords'][0], 'orgPos': 7}
+        job = self.create(result=source(2))
+        with patch.object(server, 'fetch_mpstats_keywords_core', return_value={'source': 'mpstats', 'keywords': [row], 'period': {'d1': '2026-10-01','d2': '2026-10-30'}}) as ranks:
+            self.worker.step(job['jobId'])
+        ranks.assert_called_once()
+        with server.connect_db() as db:
+            captured = json.loads(db.execute('SELECT source_json FROM semantic_jobs WHERE id=?', (job['jobId'],)).fetchone()[0])
+            request = json.loads(db.execute('SELECT request_json FROM semantic_jobs WHERE id=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual(ranks.call_args.kwargs['period'], request['period'])
+        self.assertEqual(captured['semanticCore']['rankedKeywords'], [row])
+        self.worker = server.SemanticJobWorker(self.path)
+        with patch.object(server, 'fetch_mpstats_keywords_core', side_effect=AssertionError('rankings must be durable')):
+            self.assertEqual(self.finish(job)['status'], 'ready')
+        saved = server.get_card_draft(self.wb, '1001', USER)['draft']['meta']
+        self.assertEqual(saved['semanticCoreReports'][0]['semanticCore']['rankedKeywords'], [row])
+        self.assertEqual([item['query'] for item in saved['semanticCoreSelected']], ['средство от моли 1'])
+        another = server.semantic_create_job(self.wb, {**CARD, 'nmID': '1002'}, 'от моли', USER)
+        with server.connect_db() as db:
+            self.assertIsNone(db.execute('SELECT source_json FROM semantic_jobs WHERE id=?', (another['jobId'],)).fetchone()[0], 'card rankings cannot be copied to another card')
 
     def test_legacy_ozon_final_freezes_old_selection_before_autosave(self):
         previous = {'cardKey': '1001', 'final': [{'query': 'старый итог'}],
