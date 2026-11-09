@@ -34,7 +34,18 @@ HTTP/SQLite/worker и transport fixtures: «Почта», письма/точн�
 WB/Ozon, mobile390, инструкция/изоляция, JS errors0 PASS. В regression runner
 ключи пустые и сеть запрещена;14живых GPT completions ограничены syntheticfacts.
 SQLitebackup/idle guard PASS, путь:/opt/opticards/var/backups/openai-adapter-release-20261109T151039Z/opticards.sqlite3.
-Готовится выпуск адаптера и названия без изменения production provider/env.
+Код **aef46fe** выложен штатным `sudo -n opticards-deploy`. Production
+WB/Ozon «Почта»/mobile390/guide/tech403 PASS, JS errors0. /api/admin-status
+подтвердил provider=gigachat, model=GigaChat, classifier=GigaChat-2-Max; production
+env/ключ GPT не менялись, региональная403 не нарушает текущий процесс.
+Публичный bundle совпадает с root index; health/session200, private API401,
+source/docs/git/tests404. Временные acceptance кабинеты/пользователь/сессии
+удалены, auth-файл уничтожен. Все прежние rowCounts/3state.json/workflowcounts
+и пользовательские calendar/event1 совпали с guard; WBv14/Ozonv4 SHA сохранены.
+Технический выпуск/переименование завершены. Переключение GPT ожидает внешнего
+решения по региональному доступу; read-only probe и готовый текст Сергею в
+production-api-probe.json / sergey-handoff.txt каталога артефактов. Повторный
+рестарт ради этого documentation follow-up не нужен.
 
 ## Переписка кабинета через сделку Б24 — 09.11.2026
 

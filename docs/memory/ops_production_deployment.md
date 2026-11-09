@@ -98,3 +98,16 @@ Production WB/Ozon mail-tab/CRM-needed state/tech403/guide/mobile390 PASS;
 календарная запись/event1, paid states и Excel SHA сохранены. Последний scope
 пока без CRM; это внешняя настройка, не повод повторять выкладку. Docs follow-up
 после приёмки не требует повторного перезапуска.
+
+09.11.2026 выпускaef46fe: подготовлен OpenAI adapter + отдельный classifier
+model/effort, вкладка «Почта». Production env НЕ переключён: api.openai.com
+с46.19.66.244 вернул403 unsupported_country_region_territory, хотя локальные
+model/completion вызовы успешны. После native deploy admin-status подтвердил
+GigaChat/GigaChat-2-Max; региональную проблему Дмитрий передаёт Сергею.
+SQLitebackup openai-adapter-release-20261109T151039Z quickcheck OK;
+165 backend/14 frontend/live synthetic schema/both marketplaces/mobile PASS,
+fixtures удалены, прежние states/rows/calendar/Excel SHA сохранены. Новых
+runtime dependencies/infra config changes нет, .env.local в образ не копируется.
+Для GPT позже нужны доступный регион, живой smoke с места исполнения и явная
+смена backend env с настоящим пересозданием контейнера. Docs follow-up не требует
+повторной выкладки.
