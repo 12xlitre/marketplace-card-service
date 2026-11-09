@@ -14,7 +14,7 @@ const messages={workflow_rate_limited:'Слишком много действи�
   semantic_final_missing:'Сначала сохраните итоговое СЯ в карточке.',workflow_final_snapshot_required:'Откройте карточку и заново сохраните итоговое СЯ.',
   workflow_card_not_ready:'Карточка ещё не готова к проверке.',workflow_review_all_cards:'Проверьте и подтвердите все карточки набора.',
   workflow_day_overloaded:'На этот день не хватает рабочего времени.',workflow_duration_required:'Выделите от 1 до 480 минут на один день. Большую работу разделите по дням.',
-  workflow_nonworking_day:'Это нерабочий день специалиста.',workflow_outside_period:'Дата находится за границами периода.',
+  workflow_time_overlap:'Выбранное время пересекается с другой задачей. Измените длительность или время в общем календаре.',workflow_nonworking_day:'Это нерабочий день специалиста.',workflow_outside_period:'Дата находится за границами периода.',
   workflow_mail_not_configured:'Для отправки администратор должен подключить почту. Файл можно скачать и передать клиенту вручную.',
   workflow_file_scope_mismatch:'Состав или защищённые поля файла изменены. Загрузите файл из этой задачи.',
   workflow_decision_required:'В согласовании укажите «Да» или «Нет».',workflow_formulas_forbidden:'Формулы в файле согласования запрещены.',
@@ -40,7 +40,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [selected,setSelected]=useState(()=>new URLSearchParams(location.search).get('workflow')||sessionStorage.getItem('workflow:'+portal.id)||''),[detail,setDetail]=useState(null);
   const [create,setCreate]=useState(null),[approval,setApproval]=useState(null),[editor,setEditor]=useState(null),[mail,setMail]=useState(null),[incoming,setIncoming]=useState(null);
-  const [calendar,setCalendar]=useState(false),[suggestions,setSuggestions]=useState(null);
+  const [suggestions,setSuggestions]=useState(null);
   const generation=useRef(0);
   useEffect(()=>{if(selected)sessionStorage.setItem('workflow:'+portal.id,selected)},[portal.id,selected]);
   const base=endpoint+'?portal_id='+encodeURIComponent(portal.id);
@@ -80,11 +80,10 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   </div></div>;
   return <section className="workspace-strip cw-workspace">
     <div className="strip-head"><div><h2>{mode==='periods'?'Периоды, план и задачи':'Наборы СЯ и контента'}</h2><p>План → подготовка СЯ → проверка → клиентское согласование → контент.</p></div>
-      <div className="task-batch-actions"><button className="btn" onClick={()=>setCalendar(v=>!v)}>Календарь нагрузки</button>
+      <div className="task-batch-actions"><button className="btn" onClick={()=>location.assign('/?screen=calendar')}>Календарь нагрузки</button>
       {data.canManage&&mode==='periods'?<button className="btn primary" onClick={()=>setCreate({kind:'plan'})}>Создать период и план</button>:null}
-      {data.canManage||data.team.tech===data.login?<button className="btn" onClick={()=>setCreate({kind:'standalone'})}>Набор СЯ без периода</button>:null}</div></div>
+      </div></div>
     <ErrorNote error={error}/>
-    {calendar?<WorkflowCalendar portal={portal} people={data.people} login={data.team.tech||data.login} apiRequest={apiRequest} refreshKey={data.events[0]?.id} onOpen={(batch,portalId)=>{if(String(portalId)===String(portal.id))setSelected(batch);else location.assign('/?portal='+portalId+'&tab=tasks&workflow='+batch)}}/>:null}
     {mode==='periods'&&plans.length?<div className="cw-plans">{plans.map(plan=><article className="cw-plan" key={plan.id}>
       <div className="strip-head"><div><h3>{plan.title}</h3><p>{plan.start} — {plan.end} · {plan.cardKeys.length} карточек · версия {plan.version}</p></div><Status value={plan.status} label={plan.status==='approved'?'Клиент согласовал план':'План ждёт подтверждения'}/></div>
       <p>{plan.tasks.map(t=>t.label).join(' · ')}</p><div className="task-batch-actions">
@@ -100,7 +99,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     <div className="cw-task-grid">{batches.filter(b=>b.status!=='archived'&&(mode!=='periods'||!b.periodId)).map(b=><button key={b.id} className={'cw-task '+(selected===b.id?'selected':'')} onClick={()=>choose(b)}>
       <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span><Status value={b.status}/><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
     </button>)}</div>
-    {!batches.length?<p className="cw-empty">Создайте период с выбранными карточками или отдельный набор СЯ. Прежние задачи остаются в своих разделах.</p>:null}
+    {!batches.length?<p className="cw-empty">Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.</p>:null}
     {current?<article className="cw-detail"><div className="strip-head"><div><h2>{current.title}</h2><p>{current.cards.length} карточек · исполнитель {current.assignee}</p></div><Status value={current.status}/></div>
       {current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
       <div className="task-batch-actions">
@@ -153,8 +152,8 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
 }
 
 function Modal({title,onClose,children}){return <div className="modal-backdrop" role="dialog" aria-modal="true"><section className="modal cw-modal"><div className="modal-head"><h2>{title}</h2><button className="btn mini" onClick={onClose} aria-label="Закрыть">×</button></div><div className="modal-body">{children}</div></section></div>}
-function CreateWorkflow({data,cards,initial,error,busy,onClose,onSubmit}){
-  const [form,setForm]=useState({requestId:id(),title:'',start:today(),end:shift(today(),29),tasks:['semantic_core_collection','content'],cardKeys:[],assignee:data.team.tech||(data.people.find(p=>p.login===data.login&&p.canExecute)||data.people.find(p=>p.canExecute))?.login||'',contact:data.contact,parentId:initial.parentId,fields:['title','characteristics','description'],...(initial.plan?{...initial.plan,periodId:initial.plan.id,tasks:initial.plan.tasks.map(t=>t.key)}:{})});
+function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit}){
+  const [form,setForm]=useState({requestId:id(),title:'',customerTitle:initial.plan?.presentation?.customer||portal.name||'',taskDescriptions:Object.fromEntries((initial.plan?.tasks||[]).map(t=>[t.key,t.description||''])),start:today(),end:shift(today(),29),tasks:['semantic_core_collection','content'],cardKeys:[],assignee:data.team.tech||(data.people.find(p=>p.login===data.login&&p.canExecute)||data.people.find(p=>p.canExecute))?.login||'',contact:data.contact,parentId:initial.parentId,fields:['title','characteristics','description'],...(initial.plan?{...initial.plan,periodId:initial.plan.id,tasks:initial.plan.tasks.map(t=>t.key)}:{})});
   const [search,setSearch]=useState('');
   const set=(key,value)=>setForm(f=>({...f,[key]:value}));
   const toggle=(key,value)=>{
@@ -162,12 +161,12 @@ function CreateWorkflow({data,cards,initial,error,busy,onClose,onSubmit}){
     if(key==='tasks'&&!form.tasks.includes(value)){if(value==='content')next=next.filter(v=>!['optimized_product_title','optimized_characteristics','optimized_description'].includes(v));else if(['optimized_product_title','optimized_characteristics','optimized_description'].includes(value))next=next.filter(v=>v!=='content')}
     set(key,next);
   };
-  return <Modal title={initial.kind==='plan'?(initial.plan?'Новая версия плана':'Новый период и план'):initial.kind==='content'?'Контент по этому набору СЯ':'Набор СЯ без периода'} onClose={onClose}><form onSubmit={e=>{e.preventDefault();onSubmit(form)}}>
+  return <Modal title={initial.kind==='plan'?(initial.plan?'Новая версия плана':'Новый период и план'):initial.kind==='content'?'Контент по этому набору СЯ':'Набор СЯ без периода'} onClose={onClose}><form onSubmit={e=>{e.preventDefault();onSubmit({...form,tasks:form.tasks.map(key=>({key,description:form.taskDescriptions[key]||''}))})}}>
     <label className="field-label">Название<input value={form.title} onChange={e=>set('title',e.target.value)} placeholder="Работы на отчётный период"/></label>
     <label className="field-label">Исполнитель<select required value={form.assignee} onChange={e=>set('assignee',e.target.value)}>{data.people.filter(p=>p.canExecute).map(p=><option key={p.login} value={p.login}>{p.name}</option>)}</select></label>
-    {initial.kind==='plan'?<><div className="form-two"><label className="field-label">Начало<input type="date" required value={form.start} onChange={e=>set('start',e.target.value)}/></label><label className="field-label">Окончание<input type="date" required value={form.end} min={form.start} onChange={e=>set('end',e.target.value)}/></label></div>
+    {initial.kind==='plan'?<><label className="field-label">Название клиента в PDF<input value={form.customerTitle} onChange={e=>set('customerTitle',e.target.value)} placeholder="Организация или имя клиента" maxLength="180"/></label><div className="form-two"><label className="field-label">Начало<input type="date" required value={form.start} onChange={e=>set('start',e.target.value)}/></label><label className="field-label">Окончание<input type="date" required value={form.end} min={form.start} onChange={e=>set('end',e.target.value)}/></label></div>
       <fieldset><legend>Контакты клиента</legend>{[['name','Контактное лицо'],['email','Email'],['phone','Телефон']].map(([key,label])=><label className="field-label" key={key}>{label}<input required type={key==='email'?'email':'text'} value={form.contact?.[key]||''} onChange={e=>set('contact',{...form.contact,[key]:e.target.value})}/></label>)}</fieldset>
-      <details open><summary>Работы на период</summary><div className="cw-options">{Object.entries(data.taskOptions).map(([key,label])=><label key={key}><input type="checkbox" checked={form.tasks.includes(key)} onChange={()=>toggle('tasks',key)}/>{label}</label>)}</div></details></>:null}
+      <details open><summary>Работы на период</summary><div className="cw-options">{Object.entries(data.taskOptions).map(([key,label])=><label key={key}><input type="checkbox" checked={form.tasks.includes(key)} onChange={()=>toggle('tasks',key)}/>{label}</label>)}</div></details><details><summary>Пояснения к работам для PDF</summary><p className="status-note">Заполните «Зачем нужно» своими словами. Пустое поле использует стандартное пояснение.</p>{form.tasks.map(key=><label className="field-label" key={key}>{data.taskOptions[key]||key}<textarea value={form.taskDescriptions[key]||''} maxLength="1600" onChange={e=>set('taskDescriptions',{...form.taskDescriptions,[key]:e.target.value})} placeholder="Зачем нужна работа и какой результат готовим"/></label>)}</details></>:null}
     {initial.kind==='content'?<div className="cw-options">{[['title','Наименование'],['characteristics','Характеристики'],['description','Описание']].map(([key,label])=><label key={key}><input type="checkbox" checked={form.fields.includes(key)} onChange={()=>toggle('fields',key)}/>{label}</label>)}</div>:<>
       <h3>Карточки набора · выбрано {form.cardKeys.length}</h3><input aria-label="Поиск карточек для плана" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Артикул или название"/>
       <div className="task-batch-actions"><button className="btn mini" type="button" onClick={()=>set('cardKeys',cards.slice(0,200).map(keyOf))}>{cards.length>200?'Выбрать первые 200':'Выбрать все'}</button><button className="btn mini" type="button" onClick={()=>set('cardKeys',[])}>Снять выбор</button></div>
@@ -185,14 +184,6 @@ function ScheduleForm({batch,busy,onSave,onRemove}){
     <p className="status-note">Работу больше 8 часов распределите на несколько дней. Учитываются все проекты исполнителя.</p>
     {batch.schedule.map(s=><p key={s.id}>{s.day} · {s.minutes} мин <button className="btn mini" disabled={busy} onClick={()=>onRemove({batchId:batch.id,scheduleId:s.id})}>Убрать</button></p>)}
   </details>;
-}
-
-function WorkflowCalendar({portal,people,login,apiRequest,onOpen,refreshKey}){
-  const [assignee,setAssignee]=useState(login),[start,setStart]=useState(today()),[data,setData]=useState(null),[error,setError]=useState('');
-  useEffect(()=>{let active=true;apiRequest(endpoint+'/calendar?assignee='+encodeURIComponent(assignee)+'&start='+start+'&end='+shift(start,6)).then(r=>{if(active){setData(r);setError('')}}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[assignee,start,portal.id,refreshKey]);
-  return <section className="cw-calendar"><div className="strip-head"><h3>Нагрузка по всем клиентам · МСК</h3><div className="task-batch-actions"><select aria-label="Исполнитель в календаре" value={assignee} onChange={e=>setAssignee(e.target.value)}>{people.filter(p=>p.canExecute).map(p=><option key={p.login} value={p.login}>{p.name}</option>)}</select><input type="date" aria-label="Начало недели" value={start} onChange={e=>setStart(e.target.value)}/></div></div><ErrorNote error={error}/>
-    <div className="cw-week">{Array.from({length:7},(_,i)=>{const day=shift(start,i),value=data?.days.find(d=>d.day===day);return <div className="cw-day" key={day}><strong>{day.slice(5)}</strong><p>{value?.used||0} / 480 мин</p><progress value={value?.used||0} max={480}/>{value?.tasks.map(t=><button className="cw-calendar-task" key={t.id} onClick={()=>onOpen(t.batch_id,t.portal_id)}>{t.title}<small>{t.minutes} мин</small></button>)}{value&&value.used>value.tasks.reduce((n,t)=>n+t.minutes,0)?<p>Другая занятость: {value.used-value.tasks.reduce((n,t)=>n+t.minutes,0)} мин</p>:null}</div>})}</div>
-  </section>;
 }
 
 const eventLabel=action=>({content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
@@ -219,10 +210,11 @@ export function LegacySemanticBatchButton({portalId,group,apiRequest}){
       const cardKeys=[...new Set((group.tasks||[]).map(task=>String(task.cardKey||task.nmID||task.sku||'')).filter(Boolean))];
       const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(cardKeys.slice().sort().join('|')+'|'+(group.batchId||group.key)));
       const requestId='legacy-'+[...new Uint8Array(bytes)].map(v=>v.toString(16).padStart(2,'0')).join('');
-      const value=await apiRequest(endpoint,{method:'POST',body:JSON.stringify({action:'standalone',portalId,requestId,cardKeys,title:group.title||group.batchTitle||'СЯ по набору карточек'})});
+      const value=await apiRequest(endpoint,{method:'POST',body:JSON.stringify({action:'standalone',portalId,requestId,legacyGroupKey:group.key,cardKeys,title:group.title||group.batchTitle||'СЯ по набору карточек'})});
       window.dispatchEvent(new CustomEvent('opticards-open-workflow',{detail:{portalId,batchId:value.batchId}}));
       document.querySelector('.cw-workspace')?.scrollIntoView({behavior:'smooth',block:'start'});
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
+  if(group.type!=='semantic')return null;
   return <div><button className="btn" disabled={busy||!group.tasks?.length} onClick={start}>{busy?'Ставим в очередь…':'Подобрать запросы по всем карточкам'}</button><ErrorNote error={error}/></div>;
 }

@@ -5,6 +5,7 @@ import CabinetFilesDialog from "./CabinetFilesDialog";
 import SemanticRelevancePanel from "./SemanticRelevancePanel";
 import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJobs";
 import ServiceGuide from "./ServiceGuide";
+import WorkCalendar, {CalendarTaskFocus} from "./WorkCalendar";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
@@ -54,7 +55,7 @@ const hardcodedDirectoryFallback = [
 
 const appViewStorageKey = "opticards-active-view";
 const helpModeStorageKey = "opticards-help-mode";
-const appScreens = new Set(["cabinets", "client", "seller", "card", "ozon-card", "settings", "admin", "guide"]);
+const appScreens = new Set(["cabinets", "client", "seller", "card", "ozon-card", "settings", "admin", "guide", "calendar"]);
 const sellerTabs = new Set(["cabinet", "tasks", "reports", "work-periods"]);
 const sellerWorkspaceTabs = [
   { key: "cabinet", label: "Кабинет", Icon: LayoutDashboard },
@@ -262,10 +263,11 @@ function safeSheetName(value, fallback = "Лист", usedNames = new Set()) {
 function readSavedAppView() {
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("screen") === "guide") {
+    if (["guide", "calendar"].includes(params.get("screen"))) {
+      const requestedScreen = params.get("screen");
       params.delete("screen");
       window.history.replaceState(window.history.state, "", `${window.location.pathname}${params.size ? `?${params}` : ""}${window.location.hash}`);
-      return { screen: "guide" };
+      return { screen: requestedScreen };
     }
     const portalId = params.get("portal");
     if (portalId && /^[1-9]\d*$/.test(portalId)) {
@@ -7603,6 +7605,8 @@ export default function App() {
           <CardRecoveryScreen loading={cardScreenLoading} onBack={backFromCard} />
         ) : null}
 
+        {displayScreen === "calendar" ? <WorkCalendar apiRequest={apiRequest} /> : null}
+        {displayScreen === "seller" ? <CalendarTaskFocus key={selectedPortalId} /> : null}
         {displayScreen === "guide" ? <ServiceGuide onNavigate={setScreen} /> : null}
         {displayScreen === "audit" ? <PlaceholderScreen title="Рыночный аудит" copy="MPStats и полноценный рыночный аудит подключим отдельным этапом. Сейчас активна загрузка данных WB и ручная проверка карточек." /> : null}
         {(displayScreen === "admin" || displayScreen === "settings") && canManagePortals ? (
@@ -7720,6 +7724,7 @@ function LoginScreen({ onLogin }) {
 function Rail({ user, screen, canManage = false, helpEnabled, onHelpToggle, onNavigate, onLogout }) {
   const nav = [
     { key: "cabinets", label: "Клиенты", Icon: LayoutDashboard },
+    { key: "calendar", label: user?.user_role === "tech" ? "Мой график" : "Календарь команды", Icon: CalendarDays },
     { key: "guide", label: "Как работать", Icon: HelpCircle },
     { key: "audit", label: "Рыночный аудит", Icon: ClipboardList, disabled: true, status: "скоро" },
     canManage ? { key: "admin", label: "Администрирование", Icon: Settings } : null,
@@ -11388,7 +11393,7 @@ function OzonTasksPanel({ portalId, onAutomaticTasksUpdated, cards, workState, w
                   const firstCard = cardsByKey.get(firstOpenableTask?.cardKey);
                   const automatic = group.tasks.some((task) => task.optimizationMode === "automatic");
                   return (
-                    <article className="task-batch-card" key={group.key}>
+                    <article className="task-batch-card" key={group.key} id={"calendar-task-" + group.key}>
                       <div className="task-batch-main">
                         <div>
                           <strong>{taskBatchGroupTitle(group)}</strong>
@@ -15374,7 +15379,7 @@ function WorkPackageModal({ selectedCount, value, workPeriods = [], workPeriodsS
               onChange={updateWorkPeriodLinks}
               disabled={workPeriodsStatus === "loading"}
               allowEmpty
-              emptyLabel="Не привязывать к плану"
+              emptyLabel="Не добавлять в план работ"
             />
           </div>
           {!periodTaskOptions.length ? (
@@ -16201,7 +16206,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
                         : "Подготовить первичные черновики заголовка, описания и характеристик.";
                       const smartContentCanRun = smartContentTasks.some(taskHasCard);
 	                      return (
-                        <article className="task-batch-card" key={group.key}>
+                        <article className="task-batch-card" key={group.key} id={"calendar-task-" + group.key}>
                           <div className="task-batch-main">
                             <div>
                               <strong>{taskBatchGroupTitle(group)}</strong>
