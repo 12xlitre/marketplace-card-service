@@ -168,8 +168,8 @@ class WorkCalendarTest(unittest.TestCase):
         data={'title':'План на ноябрь','start':'2026-11-09','end':'2026-11-30','contact':fixture.CONTACT,'cardKeys':['1001'],'tasks':[{'key':'content','label':'Контент'}],'presentation':{'customer':'Общество с ограниченной ответственностью «Очень длинное название компании заказчика»','team':[]}}
         body=server.workflow_plan_pdf(data,1,'Ozon');pdf=pymupdf.open(stream=body,filetype='pdf');page=pdf[0]
         spans=[span for block in page.get_text('dict')['blocks'] if 'lines' in block for line in block['lines'] for span in line['spans']]
-        customer=[s for s in spans if s['color']==0xed1c24]
-        subtitle=next(s for s in spans if s['text'].startswith('Ozon'))
+        customer=[s for s in spans if s['color']==0xe21e23]
+        subtitle=next(s for s in spans if s['text'].startswith('Ноябрь'))
         self.assertTrue(customer)
         self.assertLess(max(s['bbox'][3] for s in customer),subtitle['bbox'][1])
         pixel=page.get_pixmap().pixel(368,572)

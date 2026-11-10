@@ -3,3 +3,4 @@ openpyxl>=3.1.5,<4
 pymorphy3==2.0.6
 reportlab>=4.4.4,<5
 font-roboto==0.0.1
+pypdf>=6.21.4,<7
