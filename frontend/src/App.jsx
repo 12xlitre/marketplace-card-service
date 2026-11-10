@@ -6665,6 +6665,9 @@ export default function App() {
   }
 
   function replaceUserPortal(portal) {
+    if (portal.clientName !== undefined && String(portal.id) === String(selectedPortalId)) {
+      setSelectedClientId(portalClientKey(portal));
+    }
     setUserPortals((items) => {
       const normalized = normalizePortal(portal);
       const index = items.findIndex((item) => String(item.id) === String(normalized.id));
@@ -7185,14 +7188,14 @@ export default function App() {
       const portal = normalizePortal(response.portal);
       setUserPortals((items) => [...items, portal]);
       setOzonModalOpen(false);
-      setSelectedClientId(client.id);
+      setSelectedClientId(portalClientKey(portal));
       setSelectedPortalId(portal.id);
       setSellerTab("cabinet");
       setScreen("seller");
       setNotice(useApi ? `Ozon-кабинет создан. Через Seller API загружено ${formatNumber(response.saved?.total || 0)} карточек.` : "Ozon-кабинет создан с источником. Нажмите «Обновить из MPStats», чтобы посмотреть доступные данные.");
       return true;
     } catch (error) {
-      if (useApi) throw error;
+      if (useApi || error.message?.startsWith('crm_') || error.message==='workflow_contacts_required') throw error;
       if (error.message === "client_name_too_long") {
         setNotice("Название клиента слишком длинное для Ozon-кабинета.");
       } else if (error.message === "store_url_too_long") {
