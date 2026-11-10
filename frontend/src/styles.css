@@ -1859,6 +1859,9 @@ tr.selected-row td {
 }
 
 .client-card .card-actions { flex-wrap: wrap; }
+.client-card .card-head { flex-wrap: wrap; }
+.client-card .seller, .client-card .seller > div { min-width: 0; }
+.client-card h2 { overflow-wrap: anywhere; }
 
 .client-marketplace-badges {
   display: flex;
