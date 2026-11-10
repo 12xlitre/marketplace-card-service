@@ -7,7 +7,7 @@ const labels={planned:'В плане',collecting:'Подбор СЯ в фоне'
   awaiting_semantic:'Ожидает согласованного СЯ',generating:'Переоптимизация',account_review:'Передано аккаунту',
   client_review:'На согласовании клиента',approved:'Выполнено',changes_requested:'На доработке',cancelled:'Отменено',
   archived:'Архив плана',sending:'Отправляется',pending:'В очереди',sent:'Отправлено',blocked:'Ожидает настройки',uncertain:'Требует проверки доставки',superseded:'В истории',in_progress:'В работе',queued:'В очереди',ready:'Подбор готов',generated:'Проверить контент',reviewed:'Проверено',running:'Готовим',failed:'Ошибка'};
-const messages={crm_deal_required:'Привяжите сделку в кабинете → Переписка.',crm_scope_required:'Добавьте вебхуку Б24 право CRM.',workflow_rate_limited:'Слишком много действий. Подождите минуту и повторите.',forbidden:'Нет прав на это действие.',workflow_contacts_required:'Заполните контактное лицо, email и телефон клиента.',
+const messages={crm_deal_required:'Привяжите сделку в кабинете → Почта.',crm_scope_required:'Добавьте вебхуку Б24 право CRM.',workflow_rate_limited:'Слишком много действий. Подождите минуту и повторите.',forbidden:'Нет прав на это действие.',workflow_contacts_required:'Заполните контактное лицо, email и телефон клиента.',
   workflow_schedule_required:'Сначала назначьте плановую длительность задачи в календаре.',workflow_cards_required:'Выберите от 1 до 200 карточек.',workflow_assignee_required:'Выберите исполнителя с доступом к кабинету.',
   workflow_approval_proof_required:'Укажите дату и приложите подтверждение клиента (до 2 МБ).',
   workflow_version_conflict:'Версия изменилась. Обновите задачу и проверьте актуальный файл.',
@@ -191,7 +191,7 @@ export function ContentWorkflowSettings({apiRequest}){
   useEffect(()=>{apiRequest(endpoint+'/settings').then(setData).catch(e=>setError(e.message))},[]);
   async function save(payload){setBusy(true);setError('');try{setData(await apiRequest(endpoint+'/settings',{method:'POST',body:JSON.stringify(payload)}))}catch(e){setError(e.message)}finally{setBusy(false)}}
   return <section className="panel cw-settings"><h2>Клиентские письма и исполнители</h2><p>Почта работает через существующий вебхук Б24 с правом «CRM». Пароли SMTP/IMAP в сервисе не нужны. Ящик подключается к CRM в самом Б24; сделка выбирается в кабинете → «Почта».</p><ErrorNote error={error}/>
-    <details><summary>Б24 и рабочие дни исполнителей</summary><button className="btn" disabled={busy} onClick={()=>save({action:'retry_blocked_bitrix'})}>Повторить уведомления, ожидавшие настройки</button><p>Укажите действительный ID сотрудника в Б24. Рабочая неделя по умолчанию — понедельник–пятница.</p>{data?.people.map(person=><PersonSettings key={person.login} person={person} busy={busy} onSave={p=>save({action:'person',...p})}/>)}</details>
+    <details><summary>Б24 и рабочие дни команды</summary><button className="btn" disabled={busy} onClick={()=>save({action:'retry_blocked_bitrix'})}>Повторить уведомления, ожидавшие настройки</button><p>Укажите действительный ID сотрудника в Б24. По этому ID аккаунт видит свои сделки воронки «Аккаунтинг», а специалист получает уведомления. Рабочая неделя по умолчанию — понедельник–пятница.</p>{data?.people.map(person=><PersonSettings key={person.login} person={person} busy={busy} onSave={p=>save({action:'person',...p})}/>)}</details>
   </section>;
 }
 function PersonSettings({person,busy,onSave}){

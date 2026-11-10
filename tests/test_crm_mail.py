@@ -19,7 +19,7 @@ class CrmMailTest(unittest.TestCase):
 
     def fake(self,method,payload=None):
         self.calls.append((method,payload))
-        values={'scope':['crm','im'],'crm.deal.get':{'ID':'123','TITLE':'Клиент WB/Ozon','CONTACT_ID':'99','ASSIGNED_BY_ID':'8'},
+        values={'scope':['crm','im'],'crm.deal.get':{'ID':'123','TITLE':'Клиент WB/Ozon','CATEGORY_ID':'11','CONTACT_ID':'99','ASSIGNED_BY_ID':'8'},
                 'crm.contact.get':{'EMAIL':[{'VALUE':'client@example.invalid'}]},'crm.activity.list':[], 'crm.activity.add':801}
         return {'result':values[method]}
 

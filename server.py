@@ -25185,6 +25185,7 @@ def workflow_export_plan(portal,payload,user):
 # CRM correspondence uses the existing, host-restricted Bitrix webhook.
 CRM_MAIL_LOCK = threading.Lock()
 CRM_MAIL_NEXT_CALL = 0
+CRM_ACCOUNTING_CATEGORY_ID = 11
 
 
 def workflow_crm_hook():
@@ -25200,7 +25201,7 @@ def workflow_crm_request(method,payload=None):
   from urllib.request import Request,build_opener,HTTPRedirectHandler
   from urllib.error import HTTPError,URLError
   global CRM_MAIL_NEXT_CALL
-  allowed={'scope','crm.deal.get','crm.contact.get','crm.company.get','crm.activity.list','crm.activity.get','crm.activity.add'}
+  allowed={'scope','crm.deal.list','crm.deal.get','crm.contact.get','crm.company.get','crm.activity.list','crm.activity.get','crm.activity.add'}
   if method not in allowed: raise workflow_error('crm_invalid_method')
   hook=workflow_crm_hook()
   class NoRedirect(HTTPRedirectHandler):
@@ -25266,6 +25267,59 @@ def workflow_crm_check_link(link):
   if link['origin']!=origin: raise workflow_error('crm_portal_changed',409)
 
 
+def workflow_crm_responsible(db,user):
+  actor=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(user_login_value(user),)).fetchone()
+  if not actor: raise PermissionError('forbidden')
+  if actor['user_role']=='admin': return None
+  person=db.execute('SELECT bitrix_id FROM workflow_people WHERE login=?',(actor['login'],)).fetchone()
+  if not person or not person[0] or int(person[0])<=0:
+    raise workflow_error('crm_account_mapping_required',409)
+  return int(person[0])
+
+
+def workflow_crm_deals(portal,user,query='',start='0',closed='0'):
+  with semantic_job_connection() as db:
+    workflow_crm_access(db,portal,user,True)
+    responsible=workflow_crm_responsible(db,user)
+  query=str(query or '').strip()
+  if len(query)>160 or any(ord(ch)<32 for ch in query): raise workflow_error('crm_invalid_search')
+  if not re.fullmatch(r'\d{1,7}',str(start)) or int(start)%50 or int(start)>1000000 or str(closed) not in ('0','1'):
+    raise workflow_error('crm_invalid_search')
+  start=int(start)
+  filters={'CATEGORY_ID':CRM_ACCOUNTING_CATEGORY_ID}
+  if responsible is not None: filters['ASSIGNED_BY_ID']=responsible
+  if str(closed)!='1': filters['CLOSED']='N'
+  if query:
+    if query.isascii() and query.isdigit():
+      if not 0<int(query)<2**53: raise workflow_error('crm_invalid_search')
+      filters['ID']=int(query)
+    else: filters['%TITLE']=query
+  value=workflow_crm_request('crm.deal.list',{'filter':filters,'order':{'ID':'DESC'},
+    'select':['ID','TITLE','CATEGORY_ID','ASSIGNED_BY_ID','CLOSED','STAGE_SEMANTIC_ID'],'start':start})
+  rows=value.get('result')
+  if not isinstance(rows,list) or len(rows)>50: raise workflow_error('crm_invalid_response',502)
+  deals=[]
+  for row in rows:
+    if not isinstance(row,dict): raise workflow_error('crm_invalid_response',502)
+    if str(row.get('CATEGORY_ID'))!=str(CRM_ACCOUNTING_CATEGORY_ID): continue
+    if responsible is not None and str(row.get('ASSIGNED_BY_ID'))!=str(responsible): continue
+    if str(closed)!='1' and row.get('CLOSED')!='N': continue
+    identifier=str(row.get('ID') or '')
+    if not identifier.isascii() or not identifier.isdigit() or not 0<int(identifier)<2**53:
+      raise workflow_error('crm_invalid_response',502)
+    deals.append({'dealId':int(identifier),'title':audit_str(row.get('TITLE'),300),
+                  'status':'active' if row.get('CLOSED')=='N' else 'won' if row.get('STAGE_SEMANTIC_ID')=='S' else 'closed'})
+  with semantic_job_connection() as db:
+    workflow_crm_access(db,portal,user,True)
+    if workflow_crm_responsible(db,user)!=responsible: raise workflow_error('workflow_version_conflict',409)
+  next_start=value.get('next')
+  if next_start is not None and (not re.fullmatch(r'\d{1,7}',str(next_start)) or
+      not start<int(next_start)<=1000000 or int(next_start)%50):
+    raise workflow_error('crm_invalid_response',502)
+  return {'deals':deals,'next':int(next_start) if next_start is not None else None,
+          'categoryId':CRM_ACCOUNTING_CATEGORY_ID,'categoryName':'Аккаунтинг','ownOnly':responsible is not None}
+
+
 def workflow_crm_deal(value,user=None):
   value=str(value or '').strip()
   if value.isdigit(): deal_id=int(value)
@@ -25277,13 +25331,12 @@ def workflow_crm_deal(value,user=None):
   if not 0<deal_id<2**53: raise workflow_error('crm_invalid_deal')
   deal=workflow_crm_request('crm.deal.get',{'id':deal_id}).get('result')
   if not isinstance(deal,dict) or str(deal.get('ID'))!=str(deal_id): raise workflow_error('crm_deal_not_found',404)
+  if str(deal.get('CATEGORY_ID'))!=str(CRM_ACCOUNTING_CATEGORY_ID): raise workflow_error('crm_deal_category_required',409)
   # A service webhook can see more CRM than the OptiCards account. An account
   # may only establish its own CRM deal; admins can explicitly approve other links.
   with semantic_job_connection() as db:
-    actor=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(user_login_value(user),)).fetchone()
-    person=db.execute('SELECT bitrix_id FROM workflow_people WHERE login=?',(user_login_value(user),)).fetchone()
-    if not actor or (actor['user_role']!='admin' and not user_has_global_portal_access(actor) and
-                     (not person or not person[0] or str(person[0])!=str(deal.get('ASSIGNED_BY_ID')))):
+    responsible=workflow_crm_responsible(db,user)
+    if responsible is not None and str(responsible)!=str(deal.get('ASSIGNED_BY_ID')):
       raise workflow_error('crm_deal_owner_required',403)
   contact_id=int(deal.get('CONTACT_ID') or 0);company_id=int(deal.get('COMPANY_ID') or 0)
   recipient=''
@@ -25292,7 +25345,7 @@ def workflow_crm_deal(value,user=None):
     entity=workflow_crm_request(method,{'id':entity_id}).get('result') or {}
     recipient=next((audit_str(e.get('VALUE'),180) for e in (entity.get('EMAIL') or []) if e.get('VALUE')),'')
     if recipient: break
-  return {'dealId':deal_id,'title':audit_str(deal.get('TITLE'),300),'contactId':contact_id,'companyId':company_id,
+  return {'dealId':deal_id,'title':audit_str(deal.get('TITLE'),300),'categoryId':CRM_ACCOUNTING_CATEGORY_ID,'contactId':contact_id,'companyId':company_id,
           'responsibleId':int(deal.get('ASSIGNED_BY_ID') or 0),'email':recipient,
           'origin':'https://'+urlparse(workflow_crm_hook()).hostname}
 
@@ -25305,6 +25358,9 @@ def workflow_crm_bind(portal,payload,user):
   deal=workflow_crm_deal(payload.get('dealId'),user) if payload.get('action')!='unlink_deal' else None
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE');workflow_crm_access(db,portal,user,True)
+    if deal:
+      responsible=workflow_crm_responsible(db,user)
+      if responsible is not None and responsible!=deal['responsibleId']: raise workflow_error('crm_deal_owner_required',403)
     current=workflow_crm_link(db,portal)
     if (current['id'] if current else '')!=payload.get('previousLinkId',''): raise workflow_error('workflow_version_conflict',409)
     if db.execute("SELECT 1 FROM workflow_outbox WHERE portal_id=? AND kind='crm_email' AND status IN ('pending','sending','uncertain')",(portal,)).fetchone():
@@ -25822,6 +25878,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           return True
         if path=='/api/content-workflow/mail' and method=='GET':
           self.send_json(200,workflow_crm_mailbox(portal,user,data.get('before')));return True
+        if path=='/api/content-workflow/crm-deals' and method=='GET':
+          self.send_json(200,workflow_crm_deals(portal,user,data.get('q',''),data.get('start','0'),data.get('closed','0')));return True
         if path!='/api/content-workflow': raise workflow_error('not_found',404)
         if method=='GET':
           result=workflow_list(portal,user,data.get('batchId') or data.get('batch_id'))
