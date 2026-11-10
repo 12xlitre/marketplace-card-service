@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import './contentWorkflow.css';
 import {MailComposer} from './ClientMail';
+import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'В плане',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
@@ -27,7 +28,7 @@ const messages={crm_deal_required:'Привяжите сделку в кабин
   workflow_invalid_smtp:'Укажите SMTP-сервер, порт и защищённый режим подключения.'};
 messages.workflow_pdf_text_too_long='Название клиента или контакты менеджера не помещаются в PDF. Сократите их и повторите.';
 messages.workflow_pdf_unsupported_character='В данных для PDF есть неподдерживаемый символ. Уберите эмодзи или необычные знаки и повторите.';
-const keyOf=c=>String(c.cardKey||c.nmID||c.sku||c.id||'');
+const keyOf=workflowCardKey;
 const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow'}).format(new Date());
 const shift=(day,n)=>{const date=new Date(day+'T12:00:00Z');date.setUTCDate(date.getUTCDate()+n);return date.toISOString().slice(0,10)};
 const id=()=>crypto.randomUUID();
@@ -154,13 +155,17 @@ function Modal({title,onClose,children}){return <div className="modal-backdrop" 
 function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit}){
   const [form,setForm]=useState({requestId:id(),title:'',customerTitle:initial.plan?.presentation?.customer||portal.name||'',managerName:initial.plan?.presentation?.manager?.name||(data.people.find(p=>p.login===data.team.manager)?.name)||'',managerPhone:initial.plan?.presentation?.manager?.phone||'',managerEmail:initial.plan?.presentation?.manager?.email||'',taskDescriptions:Object.fromEntries((initial.plan?.tasks||[]).map(t=>[t.key,t.description||''])),start:today(),end:shift(today(),29),tasks:['semantic_core_collection','content'],cardKeys:[],assignee:data.team.tech||(data.people.find(p=>p.login===data.login&&p.canExecute)||data.people.find(p=>p.canExecute))?.login||'',contact:data.contact,parentId:initial.parentId,fields:['title','characteristics','description'],...(initial.plan?{...initial.plan,periodId:initial.plan.id,tasks:initial.plan.tasks.map(t=>t.key)}:{})});
   const [search,setSearch]=useState('');
+  const [cardNumbers,setCardNumbers]=useState('');
+  const matching=matchWorkflowCards(cards,cardNumbers);
+  const combinedKeys=[...new Set([...form.cardKeys,...matching.cardKeys])];
+  const unresolved=initial.kind!=='content'&&matching.tokens.length>0&&(matching.missing.length>0||matching.ambiguous.length>0||matching.cardKeys.some(key=>!form.cardKeys.includes(key)));
   const set=(key,value)=>setForm(f=>({...f,[key]:value}));
   const toggle=(key,value)=>{
     let next=form[key].includes(value)?form[key].filter(v=>v!==value):[...form[key],value];
     if(key==='tasks'&&!form.tasks.includes(value)){if(value==='content')next=next.filter(v=>!['optimized_product_title','optimized_characteristics','optimized_description'].includes(v));else if(['optimized_product_title','optimized_characteristics','optimized_description'].includes(value))next=next.filter(v=>v!=='content')}
     set(key,next);
   };
-  return <Modal title={initial.kind==='plan'?(initial.plan?'Новая версия плана':'Новый период и план'):initial.kind==='content'?'Контент по этому набору СЯ':'Набор СЯ без периода'} onClose={onClose}><form onSubmit={e=>{e.preventDefault();onSubmit({...form,tasks:form.tasks.map(key=>({key,description:form.taskDescriptions[key]||''}))})}}>
+  return <Modal title={initial.kind==='plan'?(initial.plan?'Новая версия плана':'Новый период и план'):initial.kind==='content'?'Контент по этому набору СЯ':'Набор СЯ без периода'} onClose={onClose}><form onSubmit={e=>{e.preventDefault();if(!unresolved)onSubmit({...form,tasks:form.tasks.map(key=>({key,description:form.taskDescriptions[key]||''}))})}}>
     <label className="field-label">Название<input value={form.title} onChange={e=>set('title',e.target.value)} placeholder="Работы на отчётный период"/></label>
     <label className="field-label">Исполнитель<select required value={form.assignee} onChange={e=>set('assignee',e.target.value)}>{data.people.filter(p=>p.canExecute).map(p=><option key={p.login} value={p.login}>{p.name}</option>)}</select></label>
     {initial.kind==='plan'?<><label className="field-label">Название клиента в PDF<input value={form.customerTitle} onChange={e=>set('customerTitle',e.target.value)} placeholder="Организация или имя клиента" maxLength="180"/></label><div className="form-two"><label className="field-label">Начало<input type="date" required value={form.start} onChange={e=>set('start',e.target.value)}/></label><label className="field-label">Окончание<input type="date" required value={form.end} min={form.start} onChange={e=>set('end',e.target.value)}/></label></div>
@@ -169,11 +174,21 @@ function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit})
       <details open><summary>Работы на период</summary><div className="cw-options">{Object.entries(data.taskOptions).map(([key,label])=><label key={key}><input type="checkbox" checked={form.tasks.includes(key)} onChange={()=>toggle('tasks',key)}/>{label}</label>)}</div></details><details><summary>Пояснения к работам для PDF</summary><p className="status-note">Заполните «Зачем нужно» своими словами. Пустое поле использует стандартное пояснение.</p>{form.tasks.map(key=><label className="field-label" key={key}>{data.taskOptions[key]||key}<textarea value={form.taskDescriptions[key]||''} maxLength="1600" onChange={e=>set('taskDescriptions',{...form.taskDescriptions,[key]:e.target.value})} placeholder="Зачем нужна работа и какой результат готовим"/></label>)}</details></>:null}
     {initial.kind==='content'?<div className="cw-options">{[['title','Наименование'],['characteristics','Характеристики'],['description','Описание']].map(([key,label])=><label key={key}><input type="checkbox" checked={form.fields.includes(key)} onChange={()=>toggle('fields',key)}/>{label}</label>)}</div>:<>
       <h3>Карточки набора · выбрано {form.cardKeys.length}</h3><input aria-label="Поиск карточек для плана" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Артикул или название"/>
+      <div className="cw-card-numbers"><label className="field-label">Номера или артикулы карточек<textarea aria-label="Номера или артикулы карточек" rows={3} maxLength={30000} value={cardNumbers} onChange={e=>setCardNumbers(e.target.value)} placeholder="Вставьте столбец из Excel или список через запятую"/></label>
+        <p className="status-note">WB: nmID или артикул продавца. Ozon: SKU, Ozon ID или offer ID. Разделяйте номера переносом строки, запятой или точкой с запятой.</p>
+        {matching.tokens.length?<div aria-live="polite"><p>Найдено карточек: {matching.cardKeys.length}. Номеров в списке: {matching.tokens.length}.</p>
+          {matching.missing.length?<p className="form-error">Не найдены в этом кабинете: {matching.missing.join(', ')}. Проверьте номера или удалите их из списка.</p>:null}
+          {matching.ambiguous.length?<p className="form-error">Несколько карточек с одним артикулом: {matching.ambiguous.join(', ')}. Выберите нужные галочками и удалите эти артикулы из списка.</p>:null}
+          {combinedKeys.length>200?<p className="form-error">Получается {combinedKeys.length} карточек. В одном плане можно выбрать до 200. Сократите список.</p>:null}
+          <div className="task-batch-actions"><button className="btn mini" type="button" disabled={!matching.cardKeys.length||combinedKeys.length>200} onClick={()=>set('cardKeys',combinedKeys)}>Добавить найденные в набор</button><button className="btn mini" type="button" onClick={()=>setCardNumbers('')}>Очистить список номеров</button></div>
+          {unresolved?<p className="status-note">Перед созданием добавьте найденные карточки и исправьте список. Подбор запустится только по отмеченному набору.</p>:<p className="status-note">Все найденные карточки отмечены. Проверьте набор перед созданием плана.</p>}
+        </div>:null}
+      </div>
       <div className="task-batch-actions"><button className="btn mini" type="button" onClick={()=>set('cardKeys',cards.slice(0,200).map(keyOf))}>{cards.length>200?'Выбрать первые 200':'Выбрать все'}</button><button className="btn mini" type="button" onClick={()=>set('cardKeys',[])}>Снять выбор</button></div>
-      <div className="cw-card-picker">{cards.filter(c=>(c.title+' '+keyOf(c)).toLowerCase().includes(search.toLowerCase())).map(card=><label key={keyOf(card)}><input type="checkbox" checked={form.cardKeys.includes(keyOf(card))} disabled={form.cardKeys.length>=200&&!form.cardKeys.includes(keyOf(card))} onChange={()=>toggle('cardKeys',keyOf(card))}/><span>{card.title}<small>{keyOf(card)}</small></span></label>)}</div></>}
+      <div className="cw-card-picker">{cards.filter(c=>(c.title+' '+[...workflowCardIdentifiers(c)].join(' ')).toLowerCase().includes(search.toLowerCase())).map(card=><label key={keyOf(card)}><input type="checkbox" checked={form.cardKeys.includes(keyOf(card))} disabled={form.cardKeys.length>=200&&!form.cardKeys.includes(keyOf(card))} onChange={()=>toggle('cardKeys',keyOf(card))}/><span>{card.title}<small>{[...new Set([keyOf(card),card.vendorCode,card.offerId,card.offer_id].filter(Boolean))].join(' · ')}</small></span></label>)}</div></>}
     <p className="status-note">{initial.kind==='content'?'Будет использован согласованный файл СЯ этого набора.':'Подбор запросов начнётся на сервере для выбранного набора после создания. Можно закрыть страницу.'}</p>
     {initial.plan?<p className="status-note">Новая версия потребует повторного подтверждения клиента. Результаты и файлы сохранятся в истории. Подходящие записи календаря перенесутся, остальные освободятся.</p>:null}
-    <ErrorNote error={error}/><button className="btn primary" disabled={busy||(initial.kind!=='content'&&!form.cardKeys.length)||(initial.kind==='plan'&&!form.tasks.length)||(initial.kind==='content'&&!form.fields.length)}>{busy?'Сохраняем…':initial.plan?'Сохранить новую версию':'Создать'}</button>
+    <ErrorNote error={error}/><button className="btn primary" disabled={busy||unresolved||(initial.kind!=='content'&&!form.cardKeys.length)||(initial.kind==='plan'&&!form.tasks.length)||(initial.kind==='content'&&!form.fields.length)}>{busy?'Сохраняем…':initial.plan?'Сохранить новую версию':'Создать'}</button>
   </form></Modal>;
 }
 

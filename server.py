@@ -1543,7 +1543,7 @@ def wb_snapshot_cards_from_row(row):
   return cards if isinstance(cards, list) else []
 
 
-def create_portal(name, marketplace, scope, created_by, team, store_url="", manual_source="", client_name=""):
+def create_portal(name, marketplace, scope, created_by, team, store_url="", manual_source="", client_name="", client_contact=None, crm_deal=None):
   init_db()
   with connect_db() as db:
     cursor = db.execute(
@@ -1565,12 +1565,12 @@ def create_portal(name, marketplace, scope, created_by, team, store_url="", manu
           """,
           (portal_id, user_login, project_role),
         )
+    save_portal_onboarding(db, portal_id, created_by, client_contact, crm_deal)
   record_admin_event({"login": created_by or ""}, "portal_created", "portal", portal_id, portal_id=portal_id, details={
     "portalName": name,
     "marketplace": marketplace,
     "scope": scope,
     "mode": "manual",
-    "clientName": client_name,
   })
   return portal_id
 
@@ -1639,7 +1639,7 @@ def fetch_wb_cards_for_portal(token, portal_id, max_cards=100):
   return fetch_wb_cards(token, max_cards=max_cards)
 
 
-def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot, client_name="", selected_nm_ids=None):
+def create_connected_wb_portal(name, marketplace, scope, created_by, team, token, snapshot, client_name="", selected_nm_ids=None, client_contact=None, crm_deal=None):
   selected = clean_wb_selected_ids(selected_nm_ids) if scope == 'selected' else []
   if selected:
     snapshot = scope_wb_snapshot(snapshot, selected)
@@ -1684,6 +1684,7 @@ def create_connected_wb_portal(name, marketplace, scope, created_by, team, token
           (portal_id, user_login, project_role),
         )
 
+    save_portal_onboarding(db, portal_id, created_by, client_contact, crm_deal)
     aad = integration_aad(portal_id, WB_PROVIDER)
     nonce, ciphertext = encrypt_secret(token, aad)
     db.execute(
@@ -4091,7 +4092,7 @@ def update_ozon_connection(portal_id, payload, user):
       OZON_CONNECTION_INFLIGHT.discard(numeric_id)
 
 
-def create_connected_ozon_portal(name, scope, user, team, payload, store_url="", manual_source="", client_name=""):
+def create_connected_ozon_portal(name, scope, user, team, payload, store_url="", manual_source="", client_name="", client_contact=None, crm_deal=None):
   if not user_can_create_portals(user, "Ozon"):
     raise PermissionError("forbidden")
   init_db()
@@ -4122,6 +4123,7 @@ def create_connected_ozon_portal(name, scope, user, team, payload, store_url="",
       for project_role, user_login in team.items():
         if user_login:
           db.execute("INSERT INTO portal_members (portal_id, user_login, project_role) VALUES (?, ?, ?)", (portal_id, user_login, project_role))
+      save_portal_onboarding(db, portal_id, user_login_value(user), client_contact, crm_deal)
       nonce, ciphertext = encrypt_secret(json.dumps(credentials), integration_aad(portal_id, "ozon"))
       db.execute("""
         INSERT INTO portal_integrations (portal_id, provider, status, token_nonce, token_ciphertext, token_digest, external_key, last_checked_at)
@@ -23895,6 +23897,15 @@ def workflow_error(code, status=400, **details):
   return exc
 
 
+def workflow_request_guard(user,origin,host):
+  if origin and urlparse(origin).netloc!=host: raise PermissionError('forbidden')
+  now=time.monotonic()
+  with WORKFLOW_REQUESTS_LOCK:
+    recent=[stamp for stamp in WORKFLOW_REQUESTS.get(user['login'],[]) if now-stamp<60]
+    if len(recent)>=120: raise workflow_error('workflow_rate_limited',429)
+    WORKFLOW_REQUESTS[user['login']]=[*recent,now]
+
+
 def workflow_access(db, portal_id, user, manage=False):
   current = db.execute('SELECT * FROM users WHERE login=? AND is_active=1', (user_login_value(user),)).fetchone()
   portal = db.execute('SELECT * FROM portals WHERE id=? AND is_active=1', (portal_id,)).fetchone()
@@ -25335,10 +25346,43 @@ def workflow_crm_responsible(db,user):
   return int(person[0])
 
 
+def workflow_crm_selection_access(db, user, portal=None):
+  if portal is not None:
+    workflow_crm_access(db,portal,user,True)
+  else:
+    current=db.execute('SELECT * FROM users WHERE login=? AND is_active=1',(user_login_value(user),)).fetchone()
+    if not current or current['user_role'] not in ('admin','manager') or not user_can_create_portals(current):
+      raise PermissionError('forbidden')
+  return workflow_crm_responsible(db,user)
+
+
+def workflow_crm_preview(portal,payload,user):
+  with semantic_job_connection() as db:
+    responsible=workflow_crm_selection_access(db,user,portal)
+  deal=workflow_crm_deal(payload.get('dealId'),user)
+  with semantic_job_connection() as db:
+    if workflow_crm_selection_access(db,user,portal)!=responsible:
+      raise workflow_error('workflow_version_conflict',409)
+  return deal
+
+
+def save_portal_onboarding(db,portal,creator,contact=None,deal=None):
+  """Runs inside the cabinet INSERT transaction; no network or separate commit."""
+  if deal:
+    user={'login':creator}
+    responsible=workflow_crm_selection_access(db,user)
+    if responsible is not None and responsible!=deal['responsibleId']:
+      raise workflow_error('crm_deal_owner_required',403)
+    db.execute('INSERT INTO workflow_crm_links(portal_id,id,origin,deal_id,title,data_json,created_by) VALUES(?,?,?,?,?,?,?)',
+               (portal,uuid.uuid4().hex,deal['origin'],deal['dealId'],deal['title'],semantic_json(deal),creator))
+    workflow_event(db,portal,user,'crm_deal_linked',dealId=deal['dealId'])
+  if contact is not None:
+    db.execute('UPDATE portals SET client_contact_json=? WHERE id=?',(semantic_json(contact),portal))
+
+
 def workflow_crm_deals(portal,user,query='',start='0',closed='0'):
   with semantic_job_connection() as db:
-    workflow_crm_access(db,portal,user,True)
-    responsible=workflow_crm_responsible(db,user)
+    responsible=workflow_crm_selection_access(db,user,portal)
   query=str(query or '').strip()
   if len(query)>160 or any(ord(ch)<32 for ch in query): raise workflow_error('crm_invalid_search')
   if not re.fullmatch(r'\d{1,7}',str(start)) or int(start)%50 or int(start)>1000000 or str(closed) not in ('0','1'):
@@ -25368,8 +25412,7 @@ def workflow_crm_deals(portal,user,query='',start='0',closed='0'):
     deals.append({'dealId':int(identifier),'title':audit_str(row.get('TITLE'),300),
                   'status':'active' if row.get('CLOSED')=='N' else 'won' if row.get('STAGE_SEMANTIC_ID')=='S' else 'closed'})
   with semantic_job_connection() as db:
-    workflow_crm_access(db,portal,user,True)
-    if workflow_crm_responsible(db,user)!=responsible: raise workflow_error('workflow_version_conflict',409)
+    if workflow_crm_selection_access(db,user,portal)!=responsible: raise workflow_error('workflow_version_conflict',409)
   next_start=value.get('next')
   if next_start is not None and (not re.fullmatch(r'\d{1,7}',str(next_start)) or
       not start<int(next_start)<=1000000 or int(next_start)%50):
@@ -25397,14 +25440,26 @@ def workflow_crm_deal(value,user=None):
     if responsible is not None and str(responsible)!=str(deal.get('ASSIGNED_BY_ID')):
       raise workflow_error('crm_deal_owner_required',403)
   contact_id=int(deal.get('CONTACT_ID') or 0);company_id=int(deal.get('COMPANY_ID') or 0)
-  recipient=''
+  entities={}
   for method,entity_id in [('crm.contact.get',contact_id),('crm.company.get',company_id)]:
     if not entity_id: continue
-    entity=workflow_crm_request(method,{'id':entity_id}).get('result') or {}
-    recipient=next((audit_str(e.get('VALUE'),180) for e in (entity.get('EMAIL') or []) if e.get('VALUE')),'')
-    if recipient: break
+    entity=workflow_crm_request(method,{'id':entity_id}).get('result')
+    if not isinstance(entity,dict): raise workflow_error('crm_invalid_response',502)
+    entities[method]=entity
+  contact=entities.get('crm.contact.get',{});company=entities.get('crm.company.get',{})
+  def first_value(field,limit):
+    for entity in (contact,company):
+      values=entity.get(field) or []
+      if not isinstance(values,list): raise workflow_error('crm_invalid_response',502)
+      for item in values:
+        if isinstance(item,dict) and item.get('VALUE'):
+          return audit_str(item['VALUE'],limit)
+    return ''
+  client_contact={'name':audit_str(' '.join(str(contact.get(key) or '').strip() for key in ('NAME','SECOND_NAME','LAST_NAME') if str(contact.get(key) or '').strip()),120),
+                  'phone':first_value('PHONE',80),'email':first_value('EMAIL',160),'comment':''}
   return {'dealId':deal_id,'title':audit_str(deal.get('TITLE'),300),'categoryId':CRM_ACCOUNTING_CATEGORY_ID,'contactId':contact_id,'companyId':company_id,
-          'responsibleId':int(deal.get('ASSIGNED_BY_ID') or 0),'email':recipient,
+          'responsibleId':int(deal.get('ASSIGNED_BY_ID') or 0),'email':client_contact['email'],
+          'clientName':audit_str(company.get('TITLE'),120),'clientContact':client_contact,
           'origin':'https://'+urlparse(workflow_crm_hook()).hostname}
 
 
@@ -25428,6 +25483,12 @@ def workflow_crm_bind(portal,payload,user):
       link_id=uuid.uuid4().hex
       db.execute('INSERT INTO workflow_crm_links(portal_id,id,origin,deal_id,title,data_json,created_by) VALUES(?,?,?,?,?,?,?)',
                  (portal,link_id,deal['origin'],deal['dealId'],deal['title'],semantic_json(deal),user_login_value(user)))
+      if payload.get('importContacts'):
+        contact=workflow_contacts(payload.get('clientContact'))
+        client_name=clean_portal_manual_text(payload.get('clientName'),120,'client_name_too_long')
+        if not client_name: raise workflow_error('crm_company_name_required')
+        db.execute('UPDATE portals SET client_name=?,client_contact_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                   (client_name,semantic_json(contact),portal))
     workflow_event(db,portal,user,'crm_deal_linked' if deal else 'crm_deal_unlinked',dealId=deal['dealId'] if deal else old['deal_id'] if old else None)
   return {'linked':bool(deal)}
 
@@ -25893,13 +25954,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
     if not user: return True
     try:
       if method=='POST':
-        origin=self.headers.get('Origin')
-        if origin and urlparse(origin).netloc!=self.headers.get('Host'): raise PermissionError('forbidden')
-        now=time.monotonic()
-        with WORKFLOW_REQUESTS_LOCK:
-          recent=[stamp for stamp in WORKFLOW_REQUESTS.get(user['login'],[]) if now-stamp<60]
-          if len(recent)>=120: raise workflow_error('workflow_rate_limited',429)
-          WORKFLOW_REQUESTS[user['login']]=[*recent,now]
+        workflow_request_guard(user,self.headers.get('Origin'),self.headers.get('Host'))
       if method=='GET':
         data={k:v[0] for k,v in parse_qs(urlparse(self.path).query).items()}
       else:
@@ -25911,6 +25966,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         result=workflow_settings(user,data if method=='POST' else None)
       elif path=='/api/content-workflow/calendar' and method=='GET':
         result=workflow_calendar(user,data.get('assignee'),data.get('start'),data.get('end'))
+      elif path=='/api/content-workflow/crm-deals' and method=='GET' and not (data.get('portalId') or data.get('portal_id')):
+        result=workflow_crm_deals(None,user,data.get('q',''),data.get('start','0'),data.get('closed','0'))
+      elif path=='/api/content-workflow/crm-preview' and method=='POST':
+        result=workflow_crm_preview(None,data,user)
       else:
         try: portal=int(data.get('portalId') or data.get('portal_id'))
         except (TypeError,ValueError): raise workflow_error('invalid_portal_id')
@@ -25936,6 +25995,12 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           return True
         if path=='/api/content-workflow/mail' and method=='GET':
           self.send_json(200,workflow_crm_mailbox(portal,user,data.get('before')));return True
+        if path=='/api/content-workflow/crm-binding' and method=='GET':
+          with semantic_job_connection() as db:
+            record,_,manager=workflow_crm_access(db,portal,user)
+            result={'link':workflow_crm_public_link(workflow_crm_link(db,portal)),
+                    'clientName':record['client_name'],'clientContact':client_contact_from_json(record['client_contact_json']),'canManage':manager}
+          self.send_json(200,result);return True
         if path=='/api/content-workflow/crm-deals' and method=='GET':
           self.send_json(200,workflow_crm_deals(portal,user,data.get('q',''),data.get('start','0'),data.get('closed','0')));return True
         if path!='/api/content-workflow': raise workflow_error('not_found',404)
@@ -25950,8 +26015,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
                    'review_card':workflow_review_card,'export_files':workflow_export_files,'export_plan':workflow_export_plan,
                    'mail_draft':workflow_mail_draft,'send_mail':workflow_enqueue_mail,'link_deal':workflow_crm_bind,'unlink_deal':workflow_crm_bind,'reconcile_mail':workflow_crm_reconcile}
           if action=='preview_deal':
-            with semantic_job_connection() as db: workflow_crm_access(db,portal,user,True)
-            result=workflow_crm_deal(data.get('dealId'),user)
+            result=workflow_crm_preview(portal,data,user)
           elif action in actions: result=actions[action](portal,data,user)
           elif action in ('approve_file','import_preview','import_apply'):
             result=workflow_approve_file(portal,data,user,edited=action!='approve_file',preview_only=action=='import_preview')
@@ -26840,12 +26904,16 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
 
       try:
-        client_contact=workflow_contacts(payload.get('clientContact')) if 'clientContact' in payload else None
+        if payload.get('crmDealId'): workflow_request_guard(user,self.headers.get('Origin'),self.headers.get('Host'))
+        crm_deal=workflow_crm_preview(None,{'dealId':payload['crmDealId']},user) if payload.get('crmDealId') else None
+        contact_source=payload.get('clientContact') if 'clientContact' in payload else crm_deal.get('clientContact') if crm_deal else None
+        client_contact=workflow_contacts(contact_source) if contact_source is not None else None
+      except PermissionError:
+        self.send_json(403,{'error':'forbidden'});return
       except ValueError as exc:
-        self.send_json(400,{'error':str(exc)});return
-      def save_contact(portal_id):
-        if client_contact:
-          with connect_db() as db: db.execute('UPDATE portals SET client_contact_json=? WHERE id=?',(semantic_json(client_contact),portal_id))
+        self.send_json(getattr(exc,'status',400),{'error':str(exc)});return
+      except RuntimeError:
+        self.send_json(500,{'error':'secret_storage_unavailable'});return
 
       team = clean_portal_team(payload.get("teamRoles"))
       name = str(payload.get("name", "")).strip() or "Кабинет WB"
@@ -26856,21 +26924,23 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         store_url = clean_portal_manual_text(payload.get("storeUrl") or payload.get("store_url"), 500, "store_url_too_long")
         manual_source = clean_portal_manual_text(payload.get("manualSource") or payload.get("manual_source"), 1200, "manual_source_too_long")
         client_name = clean_portal_manual_text(payload.get("clientName") or payload.get("client_name"), 120, "client_name_too_long")
+        if crm_deal and not client_name:
+          client_name=crm_deal['clientName']
+          if not client_name: raise workflow_error('crm_company_name_required')
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "manual_portal_field_too_long"})
         return
 
       if mode == "api" and marketplace == "Ozon":
         try:
-          portal_id, result = create_connected_ozon_portal(name, scope, user, team, payload, store_url, manual_source, client_name)
-          save_contact(portal_id)
+          portal_id, result = create_connected_ozon_portal(name, scope, user, team, payload, store_url, manual_source, client_name, client_contact=client_contact, crm_deal=crm_deal)
           self.send_json(HTTPStatus.CREATED, {"portal": public_portal_from_row(get_portal_row(portal_id, user)), **result})
         except PermissionError:
           self.send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
         except OzonSellerError as exc:
           self.send_json(exc.status, {"error": exc.code})
         except ValueError as exc:
-          self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+          self.send_json(getattr(exc,'status',400), {"error": str(exc)})
         except RuntimeError:
           self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
         except sqlite3.IntegrityError:
@@ -26912,6 +26982,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
             snapshot,
             client_name,
             selected_nm_ids=selected,
+            client_contact=client_contact,
+            crm_deal=crm_deal,
           )
         except WbSelectionError as exc:
           self.send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc), 'missingNmIds': exc.missing_nm_ids})
@@ -26930,6 +27002,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
             },
           )
           return
+        except PermissionError:
+          self.send_json(403,{'error':'forbidden'});return
+        except ValueError as exc:
+          self.send_json(getattr(exc,'status',400),{'error':str(exc)});return
         except RuntimeError:
           self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "secret_storage_unavailable"})
           return
@@ -26937,7 +27013,6 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
           return
 
-        save_contact(portal_id)
         self.send_json(
           HTTPStatus.CREATED,
           {"portal": public_portal_from_row(get_portal_row(portal_id, user))},
@@ -26945,11 +27020,14 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
 
       try:
-        portal_id = create_portal(name, marketplace, scope, user["login"], team, store_url, manual_source, client_name)
+        portal_id = create_portal(name, marketplace, scope, user["login"], team, store_url, manual_source, client_name, client_contact=client_contact, crm_deal=crm_deal)
+      except PermissionError:
+        self.send_json(403,{'error':'forbidden'});return
+      except ValueError as exc:
+        self.send_json(getattr(exc,'status',400),{'error':str(exc)});return
       except sqlite3.IntegrityError:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_portal_team"})
         return
-      save_contact(portal_id)
       bootstrap = {"status": "skipped", "cardCount": 0, "warnings": []}
       if marketplace != "Ozon" and (store_url or manual_source):
         try:

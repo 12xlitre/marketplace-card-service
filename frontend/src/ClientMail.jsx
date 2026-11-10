@@ -6,15 +6,15 @@ export const mailError=error=>({forbidden:'Переписка доступна �
 const statusLabel={pending:'В очереди',sending:'Передаём в Б24',sent:'Передано в Б24',failed:'Ошибка отправки',uncertain:'Нужно проверить отправку'};
 const date=value=>{const d=new Date(value?.includes('T')?value:value?.replace(' ','T')+'Z');return isNaN(d)?value:d.toLocaleString('ru-RU',{dateStyle:'short',timeStyle:'short'})};
 const newId=()=>globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);
-const dealError=error=>({crm_account_mapping_required:'Для вашего профиля ещё не указан ID Б24. Попросите администратора указать его в разделе «Клиентские письма и исполнители». После настройки здесь появятся ваши сделки.',crm_deal_category_required:'Выберите сделку из воронки «Аккаунтинг». Возможно, выбранную сделку перенесли в другую воронку.',crm_invalid_search:'Введите название или номер сделки, не более 160 символов.'})[error]||mailError(error);
+const dealError=error=>({crm_account_mapping_required:'Для вашего профиля ещё не указан ID Б24. Попросите администратора указать его в разделе «Клиентские письма и исполнители». После настройки здесь появятся ваши сделки.',crm_deal_category_required:'Выберите сделку из воронки «Аккаунтинг». Возможно, выбранную сделку перенесли в другую воронку.',crm_invalid_search:'Введите название или номер сделки, не более 160 символов.',crm_company_name_required:'В сделке нет названия компании. Заполните его перед сохранением.',workflow_contacts_required:'Заполните контактное лицо, телефон и корректный email клиента.'})[error]||mailError(error);
 
-function CrmDealPicker({portalId,apiRequest,busy,onChoose}){
+export function CrmDealPicker({portalId,apiRequest,busy,onChoose,confirmLabel='Привязать эту сделку'}){
  const [query,setQuery]=useState(''),[closed,setClosed]=useState(false),[result,setResult]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState(''),[preview,setPreview]=useState(null),[choosing,setChoosing]=useState(false),[selected,setSelected]=useState(null);
  const sequence=useRef(0),selectionSequence=useRef(0);
  async function load(start=0,append=false,stamp=++sequence.current){
   setLoading(true);setError('');
   try{
-   const params=new URLSearchParams({portalId:String(portalId),q:query,start:String(start),closed:closed?'1':'0'});
+   const params=new URLSearchParams({...(portalId?{portalId:String(portalId)}:{}),q:query,start:String(start),closed:closed?'1':'0'});
    const next=await apiRequest(endpoint+'/crm-deals?'+params);
    if(stamp!==sequence.current)return;
    setResult(prev=>append&&prev?{...next,deals:[...new Map([...prev.deals,...next.deals].map(v=>[v.dealId,v])).values()]}:next);
@@ -29,12 +29,12 @@ function CrmDealPicker({portalId,apiRequest,busy,onChoose}){
  async function choose(deal){
   const stamp=++selectionSequence.current;setSelected(deal.dealId);setPreview(null);setChoosing(true);setError('');
   try{
-   const next=await apiRequest(endpoint,{method:'POST',body:JSON.stringify({portalId,action:'preview_deal',dealId:deal.dealId})});
+   const next=await apiRequest(portalId?endpoint:endpoint+'/crm-preview',{method:'POST',body:JSON.stringify({portalId,action:'preview_deal',dealId:deal.dealId})});
    if(stamp===selectionSequence.current)setPreview(next);
   }catch(e){if(stamp===selectionSequence.current){setError(e.message);setSelected(null)}}finally{if(stamp===selectionSequence.current)setChoosing(false)}
  }
  return <div className="cm-deal-picker">
-  <div className="cm-deal-heading"><div><strong>Сделки · Аккаунтинг</strong><p>{result?.ownOnly===false?'Администратору доступны все сделки этой воронки.':'Здесь только сделки, где вы ответственный в Б24.'}</p></div><button className="btn mini" disabled={busy||loading||choosing} onClick={()=>{selectionSequence.current++;setPreview(null);setSelected(null);setResult(null);load()}}><RefreshCw size={14}/>Обновить сделки</button></div>
+  <div className="cm-deal-heading"><div><strong>Сделки · Аккаунтинг</strong><p>{result?.ownOnly===false?'Администратору доступны все сделки этой воронки.':'Здесь только сделки, где вы ответственный в Б24.'}</p></div><button type="button" className="btn mini" disabled={busy||loading||choosing} onClick={()=>{selectionSequence.current++;setPreview(null);setSelected(null);setResult(null);load()}}><RefreshCw size={14}/>Обновить сделки</button></div>
   <label className="cm-deal-search"><Search size={18}/><input type="search" aria-label="Найти сделку в Аккаунтинге" placeholder="Название или номер сделки" maxLength={160} value={query} disabled={busy} onChange={e=>changeSearch(e.target.value)}/></label>
   <label className="cm-deal-closed"><input type="checkbox" checked={closed} disabled={busy} onChange={e=>{selectionSequence.current++;sequence.current++;setPreview(null);setSelected(null);setResult(null);setChoosing(false);setClosed(e.target.checked)}}/>Показать также завершённые сделки</label>
   {error?<p className="cm-error" role="alert">{dealError(error)}</p>:null}
@@ -42,10 +42,42 @@ function CrmDealPicker({portalId,apiRequest,busy,onChoose}){
    {result?.deals.map(deal=><button type="button" key={deal.dealId} className={'cm-deal-card '+(selected===deal.dealId?'selected':'')} aria-pressed={selected===deal.dealId} disabled={busy||loading||choosing} onClick={()=>choose(deal)}><span className="cm-deal-number">№{deal.dealId}{selected===deal.dealId?<Check size={16}/>:<Link2 size={15}/>}</span><strong>{deal.title||'Сделка без названия'}</strong><span className={'cm-deal-status '+deal.status}>{({active:'В работе',won:'Успешно завершена',closed:'Завершена'})[deal.status]}</span></button>)}
   </div>
   {loading?<p className="cm-muted" role="status">Загружаем сделки…</p>:!error&&!result?.deals.length?<div className="cm-deal-empty">{query?'По этому запросу сделок не найдено. Попробуйте другое название или номер.':'Активных сделок пока нет. Можно включить завершённые или проверить ответственного в Б24.'}</div>:null}
-  {result?.next!=null?<button className="btn cm-older" disabled={busy||loading||choosing} onClick={()=>load(result.next,true)}>Показать ещё сделки</button>:null}
+  {result?.next!=null?<button type="button" className="btn cm-older" disabled={busy||loading||choosing} onClick={()=>load(result.next,true)}>Показать ещё сделки</button>:null}
   {choosing?<p className="cm-muted" role="status">Проверяем выбранную сделку…</p>:null}
-  {preview?<div className="cm-preview"><span className="cm-muted">Связать с кабинетом</span><strong>{preview.title} · №{preview.dealId}</strong><p>{preview.email||'Адрес клиента возьмём из контактов кабинета.'}</p><div className="cm-actions"><button className="btn primary" disabled={busy||loading||choosing} onClick={()=>onChoose(preview)}><Link2 size={16}/>Привязать эту сделку</button><button className="btn" disabled={busy} onClick={()=>{selectionSequence.current++;setPreview(null);setSelected(null)}}>Отмена</button></div></div>:null}
+  {preview?<div className="cm-preview"><span className="cm-muted">Связать с кабинетом</span><strong>{preview.title} · №{preview.dealId}</strong><dl className="cm-contact-preview"><div><dt>Компания</dt><dd>{preview.clientName||'Не указана в сделке'}</dd></div><div><dt>Контактное лицо</dt><dd>{preview.clientContact?.name||'Не указано в сделке'}</dd></div><div><dt>Телефон</dt><dd>{preview.clientContact?.phone||'Не указан в сделке'}</dd></div><div><dt>Email</dt><dd>{preview.email||'Не указан в сделке'}</dd></div></dl><div className="cm-actions"><button type="button" className="btn primary" disabled={busy||loading||choosing} onClick={()=>onChoose(preview)}><Link2 size={16}/>{confirmLabel}</button><button type="button" className="btn" disabled={busy} onClick={()=>{selectionSequence.current++;setPreview(null);setSelected(null)}}>Отмена</button></div></div>:null}
  </div>
+}
+
+export function PortalCrmSelection({value,onChange,apiRequest,busy}){
+ const [choosing,setChoosing]=useState(false);
+ return <section className="cm-onboarding"><strong>Сделка Б24</strong><p className="cm-muted">Выберите сделку из «Аккаунтинга»: название компании и контакты подставятся в поля кабинета. Проверьте и дополните их перед созданием.</p>
+  {value.crmDealId?<div className="cm-binding"><div><strong>{value.crmDealTitle} · №{value.crmDealId}</strong><span>Привязка сохранится при создании кабинета.</span></div><button type="button" className="btn mini" disabled={busy} onClick={()=>{onChange({...value,crmDealId:null,crmDealTitle:''});setChoosing(false)}}>Убрать выбор сделки</button></div>:null}
+  <button type="button" className="btn" disabled={busy} onClick={()=>setChoosing(v=>!v)}>{choosing?'Закрыть список сделок':value.crmDealId?'Выбрать другую сделку':'Выбрать сделку из Б24'}</button>
+  {choosing?<CrmDealPicker apiRequest={apiRequest} busy={busy} confirmLabel="Выбрать и заполнить данные" onChoose={deal=>{onChange({...value,crmDealId:deal.dealId,crmDealTitle:deal.title,clientName:deal.clientName||'',clientContact:deal.clientContact});setChoosing(false)}}/>:null}
+ </section>
+}
+
+export function CrmBindingSettings({portal,apiRequest,onUpdated}){
+ const [open,setOpen]=useState(false),[data,setData]=useState(null),[choosing,setChoosing]=useState(false),[choice,setChoice]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ useEffect(()=>{let active=true;if(open)apiRequest(endpoint+'/crm-binding?portalId='+encodeURIComponent(portal.id)).then(value=>{if(active)setData(value)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false}},[portal.id,open]);
+ async function save(){
+  setBusy(true);setError('');
+  try{
+   await apiRequest(endpoint,{method:'POST',body:JSON.stringify({portalId:portal.id,action:'link_deal',dealId:choice.dealId,previousLinkId:data?.link?.id||'',importContacts:true,clientName:choice.clientName,clientContact:choice.clientContact})});
+   const saved=await apiRequest(endpoint+'/crm-binding?portalId='+encodeURIComponent(portal.id));setChoice(null);setChoosing(false);setData(saved);await onUpdated?.({...portal,clientName:saved.clientName,clientContact:saved.clientContact});
+  }catch(e){setError(e.message)}finally{setBusy(false)}
+ }
+ return <details className="management-subpanel" onToggle={e=>setOpen(e.currentTarget.open)}><summary><Link2 size={16}/>Сделка Б24 и контакты клиента</summary><div className="management-subpanel-body">
+  {error?<p className="cm-error" role="alert">{dealError(error)}</p>:null}
+  {data?.link?<p>Связанная сделка: <a href={data.link.url} target="_blank" rel="noopener noreferrer">{data.link.title} · №{data.link.dealId}</a></p>:<p>Свяжите кабинет со сделкой из «Аккаунтинга», чтобы заполнить название компании и контакты.</p>}
+  {data?.canManage?<button type="button" className="btn" disabled={busy} onClick={()=>{setChoosing(v=>!v);setChoice(null);setError('')}}>{choosing?'Закрыть список сделок':data.link?'Изменить сделку или обновить контакты':'Выбрать сделку из Б24'}</button>:null}
+  {open&&choosing&&!choice?<CrmDealPicker portalId={portal.id} apiRequest={apiRequest} busy={busy} confirmLabel="Проверить данные кабинета" onChoose={deal=>setChoice({...deal,clientName:deal.clientName||''})}/>:null}
+  {choice?<div className="cm-preview"><strong>{choice.title} · №{choice.dealId}</strong><p>Эти данные заменят название клиента и контакты только этого кабинета. Проверьте и дополните поля.</p>
+   <label className="field-label">Название компании<input maxLength={120} value={choice.clientName} onChange={e=>setChoice({...choice,clientName:e.target.value})}/></label>
+   {['name','phone','email'].map((key,i)=><label className="field-label" key={key}>{['Контактное лицо','Телефон','Email'][i]}<input type={key==='email'?'email':'text'} value={choice.clientContact?.[key]||''} onChange={e=>setChoice({...choice,clientContact:{...choice.clientContact,[key]:e.target.value}})}/></label>)}
+   <div className="cm-actions"><button type="button" className="btn primary" disabled={busy||!choice.clientName.trim()||!choice.clientContact?.name?.trim()||!choice.clientContact?.phone?.trim()||! /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(choice.clientContact?.email||'')} onClick={save}>Сохранить привязку и данные</button><button type="button" className="btn" disabled={busy} onClick={()=>setChoice(null)}>Отмена</button></div>
+  </div>:null}
+ </div></details>
 }
 
 export function MailComposer({draft,portalId,apiRequest,onClose,onSent}){

@@ -1855,7 +1855,10 @@ tr.selected-row td {
 
 .client-card {
   grid-template-rows: auto auto auto 1fr auto;
+  min-width: 0;
 }
+
+.client-card .card-actions { flex-wrap: wrap; }
 
 .client-marketplace-badges {
   display: flex;

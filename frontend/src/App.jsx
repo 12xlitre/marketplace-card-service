@@ -4,7 +4,7 @@ import BitrixNotificationsSettings from "./BitrixNotificationsSettings";
 import CabinetFilesDialog from "./CabinetFilesDialog";
 import SemanticRelevancePanel from "./SemanticRelevancePanel";
 import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJobs";
-import ClientMail from "./ClientMail";
+import ClientMail, {PortalCrmSelection, CrmBindingSettings, mailError} from "./ClientMail";
 import ServiceGuide from "./ServiceGuide";
 import WorkCalendar, {CalendarTaskFocus} from "./WorkCalendar";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
@@ -7131,7 +7131,7 @@ export default function App() {
   async function createPortal(payload) {
     const response = await apiRequest("/api/portals", {
       method: "POST",
-      body: JSON.stringify({ ...payload, ...(displayScreen === "client" && currentClient ? { clientName: currentClient.name } : {}) }),
+      body: JSON.stringify({ ...payload, ...(displayScreen === "client" && currentClient ? { clientName: payload.clientName || currentClient.name } : {}) }),
     });
     const portal = normalizePortal(response.portal);
     setUserPortals((items) => [...items, portal]);
@@ -7173,7 +7173,8 @@ export default function App() {
           marketplace: "Ozon",
           scope,
           name: cabinetName || `${client.name} Ozon`,
-          clientName: client.name,
+          clientName: source.clientName || client.name,
+          ...(source.crmDealId ? {crmDealId:source.crmDealId} : {}),
           clientContact: source.clientContact || clientContactFromClient(client),
           teamRoles,
           storeUrl,
@@ -7638,6 +7639,7 @@ export default function App() {
             users={displayUsers}
             currentUser={currentUser}
             initialContact={currentClient?clientContactFromClient(currentClient):null}
+            initialClientName={currentClient?.name||''}
             allowOzon={userCanSeeOzon(currentUser)}
             targetPortal={portalModalTarget}
             onMode={setPortalModalMode}
@@ -7655,6 +7657,7 @@ export default function App() {
       {ozonModalOpen && currentClient ? (
         <OzonPortalModal
           client={currentClient}
+          currentUser={currentUser}
           onClose={() => setOzonModalOpen(false)}
           onSubmit={(payload) => createOzonPortal(currentClient, payload)}
         />
@@ -9277,10 +9280,11 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
                   <div>
                     <Settings size={17} />
                     <strong>Настройки кабинета</strong>
-                    <span>Название, источники и API</span>
+                    <span>Название, сделка Б24, контакты и API</span>
                   </div>
                 </summary>
                 <div className="cabinet-management-body">
+                  <CrmBindingSettings portal={portal} apiRequest={apiRequest} onUpdated={onPortalUpdated}/>
                   <div className="management-row">
                     <div>
                       <strong>Название кабинета</strong>
@@ -13429,10 +13433,11 @@ function SellerScreen({ portal, cards, cardsLoading = false, mpstatsIntegration 
                   <div>
                     <Settings size={17} />
                     <strong>Настройки кабинета</strong>
-                    <span>Название WB-кабинета</span>
+                    <span>Название, сделка Б24 и контакты</span>
                   </div>
                 </summary>
                 <div className="cabinet-management-body">
+                  <CrmBindingSettings portal={portal} apiRequest={apiRequest} onUpdated={onPortalUpdated}/>
                   <div className="management-row">
                     <div>
                       <strong>Название кабинета</strong>
@@ -22478,11 +22483,13 @@ function ClientContactFields({value,onChange}){
   return <fieldset><legend>Обязательные контакты клиента</legend>{[["name","Контактное лицо"],["phone","Телефон"],["email","Email"]].map(([key,label])=><label className="field-label" key={key}>{label}<input required type={key==="email"?"email":key==="phone"?"tel":"text"} value={value?.[key]||""} onChange={e=>onChange({...value,[key]:e.target.value})}/></label>)}</fieldset>;
 }
 
-function PortalModal({ mode, users, currentUser, initialContact, allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
+function PortalModal({ mode, users, currentUser, initialContact, initialClientName='', allowOzon = false, targetPortal = null, onMode, onClose, onSubmit }) {
   const isReplacement = Boolean(targetPortal);
   const initialTeam = currentUser?.login === "anastasia.tech" ? { ...defaultTeamFromUsers(users), tech: currentUser.login } : {};
   const [form, setForm] = useState({
     clientContact: normalizeClientContact(initialContact),
+    clientName: initialClientName,
+    crmDealId: null,
     name: "",
     marketplace: "",
     scope: "",
@@ -22504,6 +22511,8 @@ function PortalModal({ mode, users, currentUser, initialContact, allowOzon = fal
   }
 
   function errorText(errorObject) {
+    if (errorObject.message==='crm_company_name_required') return 'В сделке нет названия компании. Заполните название компании / клиента.';
+    if (errorObject.message?.startsWith('crm_')||errorObject.message==='workflow_version_conflict') return mailError(errorObject.message);
     if (errorObject.message === "workflow_contacts_required") return "Заполните контактное лицо, email и телефон клиента.";
     if (isOzon) return ozonPortalErrorText(errorObject);
     if (errorObject.message === "portal_already_connected") {
@@ -22556,7 +22565,7 @@ function PortalModal({ mode, users, currentUser, initialContact, allowOzon = fal
     try {
       await onSubmit({
         name: isOzon ? (form.name.trim() || "Кабинет Ozon") : (mode === "api" || isReplacement ? "" : form.name.trim()),
-        ...(!isReplacement?{clientContact:form.clientContact}:{}),
+        ...(!isReplacement?{clientContact:form.clientContact,clientName:form.clientName,...(form.crmDealId?{crmDealId:form.crmDealId}:{})}:{}),
         marketplace: form.marketplace,
         mode: isReplacement ? "api" : mode,
         scope: form.scope,
@@ -22597,9 +22606,11 @@ function PortalModal({ mode, users, currentUser, initialContact, allowOzon = fal
           <IconButton icon={X} label="Закрыть" onClick={onClose} />
         </div>
         <div className="modal-body">
+          {!isReplacement&&currentUser?.user_role!=='tech'?<PortalCrmSelection value={form} onChange={setForm} apiRequest={apiRequest} busy={loading}/>:null}
+          {!isReplacement?<label className="field-label">Название компании / клиента<input required={Boolean(form.crmDealId)} maxLength={120} value={form.clientName} onChange={e=>update('clientName',e.target.value)}/></label>:null}
           {!isReplacement ? <label className="field-label">
             Маркетплейс
-            <select className="select" value={form.marketplace} disabled={loading} onChange={(event) => {
+            <select className="select" aria-label="Маркетплейс" value={form.marketplace} disabled={loading} onChange={(event) => {
               setForm((current) => ({ ...current, marketplace: event.target.value, apiKey: "", clientId: "", storeUrl: "", manualSource: "", testSkus: "" }));
               setError("");
             }} required>
@@ -22627,7 +22638,7 @@ function PortalModal({ mode, users, currentUser, initialContact, allowOzon = fal
           {!isReplacement ? <div className="form-two">
             <label className="field-label">
               Охват
-              <select className="select" value={form.scope} onChange={(event) => update("scope", event.target.value)} required>
+              <select className="select" aria-label="Охват" value={form.scope} onChange={(event) => update("scope", event.target.value)} required>
                 <option value="" disabled>Выберите охват</option>
                 <option value="full">Полный магазин</option>
                 <option value="selected">Выбранные карточки</option>
@@ -22676,9 +22687,11 @@ function PortalModal({ mode, users, currentUser, initialContact, allowOzon = fal
   );
 }
 
-function OzonPortalModal({ client, onClose, onSubmit }) {
+function OzonPortalModal({ client, currentUser, onClose, onSubmit }) {
   const [form, setForm] = useState({
     clientContact: clientContactFromClient(client),
+    clientName: client.name,
+    crmDealId: null,
     mode: "manual",
     clientId: "",
     apiKey: "",
@@ -22715,6 +22728,8 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
     try {
       const saved = await onSubmit({
         clientContact: form.clientContact,
+        clientName: form.clientName,
+        ...(form.crmDealId?{crmDealId:form.crmDealId}:{}),
         mode: form.mode,
         ...(form.mode === "api" ? { clientId: form.clientId.trim(), apiKey: form.apiKey.trim() } : {}),
         name: form.name.trim(),
@@ -22726,7 +22741,7 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
         setError("Не удалось создать Ozon-кабинет. Проверьте источник и попробуйте еще раз.");
       }
     } catch (submitError) {
-      setError(ozonPortalErrorText(submitError));
+      setError(submitError.message?.startsWith('crm_')?mailError(submitError.message):ozonPortalErrorText(submitError));
     } finally {
       setLoading(false);
     }
@@ -22743,6 +22758,8 @@ function OzonPortalModal({ client, onClose, onSubmit }) {
           <IconButton icon={X} label="Закрыть" onClick={onClose} disabled={loading} />
         </div>
         <div className="modal-body">
+          {currentUser?.user_role!=='tech'?<PortalCrmSelection value={form} onChange={setForm} apiRequest={apiRequest} busy={loading}/>:null}
+          <label className="field-label">Название компании / клиента<input required={Boolean(form.crmDealId)} maxLength={120} value={form.clientName} onChange={e=>update('clientName',e.target.value)}/></label>
           <ClientContactFields value={form.clientContact} onChange={value=>update("clientContact",value)}/>
           <div className="ozon-connect-mode" role="group" aria-label="Способ подключения Ozon">
             <button type="button" className={form.mode === "manual" ? "active" : ""} aria-pressed={form.mode === "manual"} disabled={loading} onClick={() => { setForm((current) => ({ ...current, mode: "manual", scope: "selected" })); setError(""); }}>
@@ -22813,7 +22830,7 @@ function UserSelect({ label, value, users, onChange }) {
   return (
     <label className="field-label">
       {label}
-      <select className="select" value={value} onChange={(event) => onChange(event.target.value)} required>
+      <select className="select" aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} required>
         <option value="" disabled>Выберите сотрудника</option>
         {users.map((user) => <option value={user.login} key={user.login}>{user.full_name}</option>)}
       </select>
