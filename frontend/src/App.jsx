@@ -7,6 +7,7 @@ import { useSemanticJob, SemanticJobStatus, SemanticJobsList } from "./SemanticJ
 import ClientMail, {PortalCrmSelection, CrmBindingSettings, mailError} from "./ClientMail";
 import ServiceGuide from "./ServiceGuide";
 import WorkCalendar, {CalendarTaskFocus} from "./WorkCalendar";
+import CardMetrics from "./CardMetrics";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
@@ -11628,10 +11629,6 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
   const sizes = card?.sizes || rawFields.sizes || [];
   const price = firstDefined(card?.price, rawFields.price, rawFields.finalPrice, rawFields.final_price);
   const stock = firstDefined(card?.stock, rawFields.stock, rawFields.balance, rawFields.available_stock);
-  const sales = firstDefined(card?.sales, mpstats.sales, rawFields.sales);
-  const revenue = firstDefined(card?.revenue, mpstats.revenue, rawFields.revenue);
-  const rating = firstDefined(card?.rating, rawFields.rating);
-  const feedbacks = firstDefined(card?.feedbacks, rawFields.feedbacks, rawFields.reviews, rawFields.comments);
   const status = card?.status || "MPStats";
   const externalUrl = safeHttpsUrl(card?.url || rawFields.url || rawFields.productUrl || rawFields.link);
   const sourceLabel = card?.source === "ozon-seller-api" ? "Ozon Seller API" : mpstats.source || rawFields.source || "Ozon MPStats";
@@ -11798,21 +11795,19 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
                   <CharacteristicsBlock items={characteristics} />
                 </section>
 
+                <CardMetrics portal={portal} card={card} apiRequest={apiRequest} />
+
                 <section className="workspace-strip commerce-strip">
                   <div className="strip-head">
                     <div>
-                      <h2>Цены, остатки и метрики</h2>
-                      <p>{card?.source === "ozon-seller-api" ? "Цены и остатки из Ozon Seller API. Продажи и рыночные метрики собираются отдельно." : "Доступные коммерческие данные из Ozon MPStats snapshot."}</p>
+                      <h2>Цены и остатки</h2>
+                      <p>{card?.source === "ozon-seller-api" ? "Цены и остатки из Ozon Seller API." : "Доступные коммерческие данные из Ozon MPStats snapshot."}</p>
                     </div>
                     <Tag tone="blue">{card?.source === "ozon-seller-api" ? "Ozon Seller API" : "MPStats"}</Tag>
                   </div>
                   <div className="commerce-summary">
                     <div><span>Цена</span><strong>{valueSummary(price)}</strong></div>
                     <div><span>Остаток</span><strong>{valueSummary(stock)}</strong></div>
-                    <div><span>Продажи</span><strong>{valueSummary(sales)}</strong></div>
-                    <div><span>Выручка</span><strong>{valueSummary(revenue)}</strong></div>
-                    <div><span>Рейтинг</span><strong>{valueSummary(rating)}</strong></div>
-                    <div><span>Отзывы</span><strong>{valueSummary(feedbacks)}</strong></div>
                     <div><span>SKU</span><strong>{sku}</strong></div>
                     <div><span>Offer ID</span><strong>{offerId}</strong></div>
                   </div>
@@ -20007,6 +20002,8 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </div>
                   <CharacteristicsBlock items={characteristics} />
                 </section>
+
+                <CardMetrics portal={portal} card={card} apiRequest={apiRequest} />
 
                 <section className="workspace-strip commerce-strip">
                   <div className="strip-head">

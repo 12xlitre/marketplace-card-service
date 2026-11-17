@@ -3835,6 +3835,11 @@ tr.selected-row td {
   line-height: 1.5;
 }
 
+.card-metrics .strip-head { flex-wrap: wrap; }
+.card-metrics .strip-head > div { flex: 1 1 260px; min-width: 0; }
+.card-metrics .strip-head > .btn { flex: none; white-space: normal; }
+.card-metrics .commerce-summary small { display: block; font-size: 11px; color: var(--muted, #737c91); }
+
 .commerce-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

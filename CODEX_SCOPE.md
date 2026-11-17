@@ -55,6 +55,8 @@ rg "term" -g '!node_modules' -g '!var' -g '!.git' -g '!docs/memory' -g '!docs/ar
 Keep this section compact. Add only stable locations that help avoid future searches.
 
 - Frontend app: `frontend/src/`
+- Пояснения PDF/постановка дня из плана: `frontend/src/ContentWorkflow.jsx`, `DayDialog` в `WorkCalendar.jsx`, `workflow_task_explanations`/`workflow_calendar_assign_day` в `server.py`.
+- Показатели карточки WB/Ozon: `frontend/src/CardMetrics.jsx`, `get_card_metrics`/`fetch_card_metrics`/`fetch_ozon_card_review_count` в `server.py`; контракт в `docs/ozon-seller-cards.md`.
 - In-app workflow diagram and printable guide: `frontend/src/ServiceGuide.jsx`, menu «Как работать», deep link `/?screen=guide`.
 - Manual WB/Ozon semantic collection: `server.py` (SQLite semantic_jobs/query cache, semantic-expansion), `frontend/src/SemanticJobs.jsx` / `semanticRelevance.js` / `SemanticRelevancePanel.jsx`; contract: `docs/semantic-relevance.md`.
 - Final content XLSX builders: `frontend/src/App.jsx` (`buildFinalContentCardSheets`, `buildPortalContentSheets`)

@@ -93,6 +93,7 @@ POST /api/portals/<portal_id>/ozon-connection
 POST /api/portals/<portal_id>/archive
 POST /api/portals/<portal_id>/restore
 GET /api/wb/cards?portal_id=demo-wb&limit=100
+GET /api/portals/<portal_id>/card-metrics?card_key=<snapshot key>
 GET /api/wb/characteristics?portal_id=1&subject_id=123
 GET /api/mpstats/characteristics?portal_id=1&type=subject&value=123
 GET /api/portals/<portal_id>/wb-client-report?start=2026-07-01&end=2026-07-07
