@@ -18533,7 +18533,8 @@ class SemanticJobWorker:
       delay = max(5 * 2 ** failures, retry_after or 0)
       db.execute("UPDATE semantic_jobs SET provider_json=?,run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
                  (semantic_json(provider), time.time() + delay, time.time(), job['id'], token))
-    print('semantic-job=' + job['id'] + ' retry kind=' + type(exc).__name__ + ' batch=' + str(len(batch)) +
+    code = str(exc) if isinstance(exc, ValueError) and str(exc) in ('semantic_relevance_incomplete', 'semantic_relevance_invalid_response') else type(exc).__name__
+    print('semantic-job=' + job['id'] + ' retry kind=' + type(exc).__name__ + ' code=' + code + ' batch=' + str(len(batch)) +
           ' nextBatch=' + str(size) + ' attempt=' + str(failures + 1), file=sys.stderr)
     return True
 
