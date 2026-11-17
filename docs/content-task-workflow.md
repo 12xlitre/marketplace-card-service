@@ -462,3 +462,11 @@ Read retry3 только transient, backoff и Retry-After cap2с; crm.activity.
 и https://apidocs.bitrix24.ru/tutorials/crm/how-to-get-lists/get-activity-list-by-deals.html
 и https://apidocs.bitrix24.ru/api-reference/crm/timeline/activities/activity-base/crm-activity-add.html
 и https://apidocs.bitrix24.ru/api-reference/crm/deals/crm-deal-list.html
+
+
+Уточнение17.11.2026: завершённый пустой источник СЯ отображается отдельно как
+«MPStats не нашёл запросов» (включая прежние ready/total0), набор требует внимания,
+а не подтверждения готового подбора. Новый пустой ответ не стирает прежнее СЯ.
+Продолжение из карточки синхронизирует её состояние с существующей работой плана.
+Явный повтор набора сохраняет готовые карточки и продолжает прерванные по тем же
+отчётам/кешам; только пустые источники получают новый автоматический поиск.

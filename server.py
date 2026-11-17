@@ -17958,6 +17958,16 @@ def mpstats_expanding_seed_queries(card, query):
     mpstats_expanding_add_seed(seeds, seen, f"{base} поляризационные")
   if "авиатор" in content:
     mpstats_expanding_add_seed(seeds, seen, f"{base} авиаторы")
+  if not manual_query and not primary_is_lozenges and not card_is_glasses:
+    # A title's first three words may be an over-specific or unfinished phrase.
+    # Keep that seed, adding only adjacent pairs of the product's own title words.
+    brand_words = set(re.findall(r"[^\W\d_]+", audit_normalized(card.get('brand') or ''), flags=re.UNICODE))
+    title_words = re.findall(r"[^\W\d_]+", audit_normalized(card.get('title') or ''), flags=re.UNICODE)[:5]
+    title_words = [word for word in title_words if word not in brand_words]
+    stop = {'для','от','с','со','и','в','на','по','из','к','до','под','без','за','шт','гр','мл'}
+    for left, right in zip(title_words,title_words[1:]):
+      if left not in stop and right not in stop and len(left)>1 and len(right)>1:
+        mpstats_expanding_add_seed(seeds,seen,left+' '+right)
   return seeds[:12 if primary_is_lozenges else 6]
 
 
@@ -18180,7 +18190,7 @@ def semantic_job_public(row, include_result=False):
   eta = round(remaining * row['model_seconds'] / row['model_queries']) if row['model_queries'] and remaining else None
   value = {'jobId': row['id'], 'portalId': str(row['portal_id']), 'cardKey': row['card_key'],
            'marketplace': row['marketplace'], 'query': row['query_text'],
-           'status': row['status'], 'completed': row['completed'], 'total': row['total'],
+           'status': 'empty' if row['status']=='ready' and row['total']==0 else row['status'], 'completed': row['completed'], 'total': row['total'],
            'error': row['error'], 'autoSaved': bool(row['auto_saved']),
            'createdAt': dt.datetime.fromtimestamp(row['created_at'], dt.timezone.utc).isoformat(),
            'updatedAt': dt.datetime.fromtimestamp(row['updated_at'], dt.timezone.utc).isoformat(),
@@ -18372,6 +18382,7 @@ def semantic_job_action(job_id, portal_id, user, action):
         raise ValueError('semantic_report_creation_unknown')
       provider['pollAttempts'] = 0
       db.execute("UPDATE semantic_jobs SET status='queued',error='',run_token='',provider_json=?,scheduled_at=?,updated_at=? WHERE id=?", (semantic_json(provider), time.time(), time.time(), job_id))
+      semantic_sync_workflow_card(db,row,'collecting')
     else:
       raise ValueError('invalid_semantic_job_action')
   start_semantic_worker()
@@ -18445,6 +18456,19 @@ def semantic_autosave(db, job, result):
                'ON CONFLICT(portal_id,card_key) DO UPDATE SET payload_json=excluded.payload_json,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP',
                (job['portal_id'], job['card_key'], str(current_card.get('nmID') or ''), str(current_card.get('vendorCode') or ''), semantic_json(payload), payload.get('auditStatus') or 'idle', job['user_login'], job['user_login']))
   return {**result, 'semanticCore': core, 'selected': selected, 'removal': removal}
+
+
+def semantic_sync_workflow_card(db, job, state):
+  """A retry from the product card also updates its existing plan task."""
+  batches = db.execute("SELECT b.* FROM workflow_batches b JOIN workflow_cards c ON c.batch_id=b.id WHERE b.portal_id=? AND b.kind='semantic' AND b.status IN ('collecting','partial','review') AND c.job_id=? AND c.card_key=? AND c.final_json IS NULL AND c.state!='reviewed'",(job['portal_id'],job['id'],job['card_key'])).fetchall()
+  for batch in batches:
+    db.execute("UPDATE workflow_cards SET state=?,error=? WHERE batch_id=? AND job_id=? AND card_key=? AND final_json IS NULL AND state!='reviewed'",(state,job['error'] if state=='failed' else '',batch['id'],job['id'],job['card_key']))
+    if batch['status']=='partial':
+      counts={r[0]:r[1] for r in db.execute('SELECT state,COUNT(*) FROM workflow_cards WHERE batch_id=? GROUP BY state',(batch['id'],))}
+      if counts and all(key in ('ready','reviewed','failed','empty') for key in counts):
+        status='partial' if counts.get('failed') or counts.get('empty') else 'review'
+        db.execute('UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',(status,batch['id']))
+        workflow_sync_plan_task(db,batch,'in_progress' if status=='partial' else 'review')
 
 
 class SemanticJobCancelled(Exception):
@@ -18570,8 +18594,14 @@ class SemanticJobWorker:
         current = db.execute('SELECT * FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
         if not current or current['status'] not in SEMANTIC_JOB_ACTIVE or current['run_token'] != token:
           return
-        result = semantic_autosave(db, current, result)
-        db.execute("UPDATE semantic_jobs SET status='ready',completed=total,result_json=?,auto_saved=1,error='',run_token='',updated_at=? WHERE id=?", (semantic_json(result), time.time(), job_id))
+        if rows:
+          result = semantic_autosave(db, current, result)
+        else:
+          # A completed empty provider report is not a successful saved selection.
+          semantic_job_context(db,current)
+        db.execute("UPDATE semantic_jobs SET status=?,completed=total,result_json=?,auto_saved=?,error='',run_token='',updated_at=? WHERE id=?",
+                   ('ready' if rows else 'empty',semantic_json(result),int(bool(rows)),time.time(),job_id))
+        semantic_sync_workflow_card(db,current,'ready' if rows else 'empty')
     except SemanticJobCancelled:
       return
     except Exception as exc:
@@ -18580,8 +18610,13 @@ class SemanticJobWorker:
           db.execute("UPDATE semantic_jobs SET status='collecting',run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='collecting'", (time.time()+5, time.time(), job_id, token))
         return
       allowed = {'semantic_card_changed', 'semantic_card_not_found', 'semantic_model_changed', 'semantic_report_creation_unknown',
-                 'semantic_relevance_not_configured', 'semantic_relevance_too_many_queries', 'semantic_card_content_missing', 'semantic_report_timeout'}
+                 'semantic_relevance_not_configured', 'semantic_relevance_too_many_queries', 'semantic_card_content_missing', 'semantic_report_timeout',
+                 'semantic_relevance_incomplete', 'semantic_relevance_invalid_response'}
       code = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else 'forbidden' if isinstance(exc, PermissionError) else 'semantic_relevance_failed'
+      if isinstance(exc,MpstatsApiError):
+        code='semantic_source_rate_limited' if exc.status==429 else 'semantic_source_access_denied' if exc.status in (401,403) else 'semantic_source_unavailable'
+      elif isinstance(exc,urlerror.HTTPError):
+        code='semantic_model_rate_limited' if exc.code==429 else 'semantic_model_access_denied' if exc.code in (401,403) else 'semantic_model_unavailable'
       with semantic_job_connection(self.path) as db:
         state = db.execute('SELECT provider_json FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
         provider = json.loads(state['provider_json']) if state else {}
@@ -18590,7 +18625,8 @@ class SemanticJobWorker:
       print('semantic-job=' + job_id + ' failed kind=' + type(exc).__name__ + ' code=' + code, file=sys.stderr)
       with semantic_job_connection(self.path) as db:
         finished = locals().get('result')
-        db.execute("UPDATE semantic_jobs SET status='failed',error=?,result_json=COALESCE(?,result_json),run_token='',updated_at=? WHERE id=? AND run_token=? AND status IN ('collecting','classifying','saving')", (code, semantic_json(finished) if isinstance(finished, dict) else None, time.time(), job_id, token))
+        changed=db.execute("UPDATE semantic_jobs SET status='failed',error=?,result_json=COALESCE(?,result_json),run_token='',updated_at=? WHERE id=? AND run_token=? AND status IN ('collecting','classifying','saving')", (code, semantic_json(finished) if isinstance(finished, dict) else None, time.time(), job_id, token)).rowcount
+        if changed: semantic_sync_workflow_card(db,{**job,'error':code},'failed')
 
   def run(self):
     handle = None
@@ -18606,7 +18642,7 @@ class SemanticJobWorker:
       else:
         return
       with semantic_job_connection(self.path) as db:
-        db.execute("DELETE FROM semantic_jobs WHERE status IN ('ready','cancelled','failed') AND updated_at<?", (time.time()-30*86400,))
+        db.execute("DELETE FROM semantic_jobs WHERE status IN ('ready','empty','cancelled','failed') AND updated_at<?", (time.time()-30*86400,))
         db.execute("DELETE FROM semantic_query_cache WHERE updated_at<? AND NOT EXISTS (SELECT 1 FROM semantic_jobs j WHERE j.portal_id=semantic_query_cache.portal_id AND j.user_login=semantic_query_cache.user_login AND j.facts_hash=semantic_query_cache.facts_hash AND j.model_key=semantic_query_cache.model_key AND j.status IN ('queued','collecting','classifying','saving'))", (time.time()-90*86400,))
       while not self.stop.is_set() and self.path == DB_PATH.resolve():
         try:
@@ -24343,11 +24379,16 @@ def workflow_public_batch(db, row, detail=False):
     item['title'] = snapshot.get('title') or card['card_key']
     if card['job_id']:
       job = db.execute('SELECT status,completed,total,error FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
-      if job: item['job'] = dict(job)
+      if job:
+        item['job'] = dict(job)
+        if job['status']=='empty' or job['status']=='ready' and job['total']==0:
+          item['job']['status']='empty'
+          if card['state']!='reviewed' and row['kind']=='semantic': item.update(state='empty',error='')
     if detail:
       item['result'] = json.loads(card['result_json']) if card['result_json'] else None
       item['final'] = json.loads(card['final_json']) if card['final_json'] else None
     result['cards'].append(item)
+  if result['status']=='review' and any(c['state']=='empty' for c in result['cards']): result['status']='partial'
   result['files'] = [dict(r) for r in db.execute("SELECT id,kind,version,status,name,sha256,created_at,approved_at,json_extract(snapshot_json,'$.generation') AS generation FROM workflow_files WHERE batch_id=? ORDER BY created_at DESC,version DESC",(row['id'],))]
   latest={}
   for file in result['files']:
@@ -25035,6 +25076,10 @@ def workflow_start_batch(portal,payload,user):
       workflow_event(db,portal,user,'content_regenerated',batch['period_id'],batch['id'],generation=batch['generation']+1)
       start_workflow_worker()
       return {'started':True}
+    if batch['kind']=='semantic':
+      db.execute("UPDATE workflow_cards SET state='empty' WHERE batch_id=? AND state='ready' AND final_json IS NULL AND job_id IN (SELECT id FROM semantic_jobs WHERE portal_id=? AND (status='empty' OR status='ready' AND total=0))",(batch['id'],portal))
+      # Only an explicit restart of an empty source starts a fresh automatic search.
+      db.execute("UPDATE workflow_cards SET state='queued',job_id=NULL,error='' WHERE batch_id=? AND state='empty'",(batch['id'],))
     if batch['kind'] in ('semantic','content') and not db.execute("SELECT 1 FROM workflow_cards WHERE batch_id=? AND state IN ('queued','failed','cancelled')",(batch['id'],)).fetchone():
       return {'started':False}
     if batch['kind']=='semantic':
@@ -25138,10 +25183,10 @@ def workflow_process_batch(batch_id):
       return
   if batch['kind']=='semantic':
     for card in cards:
-      if card['state'] in ('ready','reviewed','failed'): continue
+      if card['state'] in ('ready','reviewed','failed','empty'): continue
       if card['job_id']:
         with semantic_job_connection() as db:
-          job=db.execute('SELECT status,error FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
+          job=db.execute('SELECT status,error,total FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
         if job and job['status'] in ('failed','cancelled') and card['state']=='queued':
           try:
             semantic_job_action(card['job_id'],batch['portal_id'],user,'retry')
@@ -25153,7 +25198,9 @@ def workflow_process_batch(batch_id):
               db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(str(exc) if str(exc)=='semantic_report_creation_unknown' else 'semantic_relevance_failed',batch_id,card['card_key']))
           continue
         with semantic_job_connection() as db:
-          if job and job['status']=='ready': db.execute("UPDATE workflow_cards SET state='ready',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
+          if job and (job['status']=='empty' or job['status']=='ready' and job['total']==0):
+            db.execute("UPDATE workflow_cards SET state='empty',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
+          elif job and job['status']=='ready': db.execute("UPDATE workflow_cards SET state='ready',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
           elif not job or job['status'] in ('failed','cancelled'):
             db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(job['error'] if job else 'semantic_relevance_job_not_found',batch_id,card['card_key']))
         continue
@@ -25174,8 +25221,8 @@ def workflow_process_batch(batch_id):
     with semantic_job_connection() as db:
       db.execute('BEGIN IMMEDIATE')
       counts={r[0]:r[1] for r in db.execute('SELECT state,COUNT(*) FROM workflow_cards WHERE batch_id=? GROUP BY state',(batch_id,))}
-      if counts and all(key in ('ready','reviewed','failed') for key in counts):
-        status='partial' if counts.get('failed') else 'review'
+      if counts and all(key in ('ready','reviewed','failed','empty') for key in counts):
+        status='partial' if counts.get('failed') or counts.get('empty') else 'review'
         updated=db.execute("UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='collecting'",(status,batch_id)).rowcount
         if updated:
           workflow_sync_plan_task(db,batch,'in_progress' if status=='partial' else 'review')

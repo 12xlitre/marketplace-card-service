@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 
 export const semanticJobActive = job => ['queued', 'collecting', 'classifying', 'saving'].includes(job?.status);
-const messages = {
+const messages = {semantic_source_rate_limited:'MPStats ограничил частоту запросов. Продолжите позже.',semantic_source_access_denied:'MPStats не разрешил получить запросы. Проверьте доступ.',semantic_source_unavailable:'MPStats временно недоступен. Продолжите позже.',semantic_model_rate_limited:'Модель ограничила частоту запросов. Продолжите позже; проверенные части сохранены.',semantic_model_access_denied:'Нет доступа к подключённой модели. Проверьте подключение.',semantic_model_unavailable:'Модель временно недоступна. Проверенные части сохранены.',
   semantic_relevance_not_configured: 'Для проверки подключите языковую модель.',
   semantic_relevance_busy: 'Очередь заполнена. Повторите позже.',
   semantic_card_busy: 'Для этой карточки уже выполняется подбор.',
+  semantic_relevance_incomplete: 'Модель вернула решения не для всех запросов. Проверенные части сохранены; продолжите подбор.',
+  semantic_relevance_invalid_response: 'Модель вернула некорректный ответ. Проверенные части сохранены; продолжите подбор.',
   semantic_relevance_failed: 'Подбор прервался. Продолжите его: проверенные запросы сохранены.',
   semantic_card_content_missing: 'Для проверки нужны название, описание или характеристики.',
   semantic_card_not_found: 'Карточка больше не найдена в кабинете.',
@@ -87,6 +89,7 @@ export function useSemanticJob({ portalId, cardKey, enabled = true, onReady }) {
 }
 
 const labels = { queued: 'В очереди', collecting: 'Получаем запросы MPStats', classifying: 'Проверяем запросы', saving: 'Сохраняем черновик',
+  empty: 'MPStats не нашёл запросов по стартовой фразе',
   ready: 'Подбор завершён и сохранён в рабочий черновик', failed: 'Подбор остановился', cancelled: 'Подбор отменён' };
 
 export function SemanticJobStatus({ controller }) {
@@ -96,7 +99,7 @@ export function SemanticJobStatus({ controller }) {
     {job ? <><strong>{labels[job.status] || job.status}</strong>
       <span>{job.total ? `${job.completed} из ${job.total} запросов проверено. ` : ''}
         {semanticJobActive(job) ? 'Можно перейти к другим карточкам или закрыть браузер — задание продолжится.' : ''}
-        {job.status === 'ready' ? 'Итоговое СЯ формируется отдельной кнопкой.' : ''}</span>
+        {job.status === 'ready' ? 'Итоговое СЯ формируется отдельной кнопкой.' : job.status === 'empty' ? 'Укажите более общую стартовую фразу и запустите новый подбор.' : ''}</span>
       {job.etaHighSeconds ? <span>Осталось примерно {Math.max(1, Math.ceil(job.etaLowSeconds / 60))}–{Math.max(1, Math.ceil(job.etaHighSeconds / 60))} мин.</span>
         : semanticJobActive(job) ? <span>Оценка времени уточняется после первой проверенной порции.</span> : null}
       {semanticJobActive(job) ? <button type="button" className="btn mini" onClick={cancel}>Отменить подбор</button> : null}
