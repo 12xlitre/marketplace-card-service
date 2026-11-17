@@ -17920,10 +17920,11 @@ def mpstats_expanding_seed_queries(card, query):
     else:
       content_parts.append(str(values or ""))
   content = audit_normalized(" ".join(str(part or "") for part in content_parts))
-  primary_is_sunglasses = "солнцезащит" in content or "солнечн" in content
+  identity = audit_normalized(' '.join(str(card.get(key) or '') for key in ('title', 'subjectName', 'subject')))
+  card_is_glasses = bool(re.search(r'\b(?:очк\w*|оправ\w*)\b', identity))
+  primary_is_sunglasses = card_is_glasses and ("солнцезащит" in identity or "солнечн" in identity)
   primary_is_lozenges = "леденц" in content or "леденец" in content
   base = "солнцезащитные очки" if primary_is_sunglasses else "очки"
-  card_is_glasses = "очк" in audit_normalized(" ".join(str(part or "") for part in content_parts[1:]))
   primary_normalized = audit_normalized(primary)
   if manual_query and card_is_glasses and "очк" not in primary_normalized:
     mpstats_expanding_add_seed(seeds, seen, f"{base} {primary}")
@@ -17948,15 +17949,15 @@ def mpstats_expanding_seed_queries(card, query):
       mpstats_expanding_add_seed(seeds, seen, "амла")
     if "малин" in content:
       mpstats_expanding_add_seed(seeds, seen, "леденцы малина")
-  if re.search(r"\bкошк|\bкошач|cat\s*eye", content):
+  if card_is_glasses and re.search(r"\bкошк|\bкошач|cat\s*eye", content):
     mpstats_expanding_add_seed(seeds, seen, "очки кошачий глаз")
     if primary_is_sunglasses:
       mpstats_expanding_add_seed(seeds, seen, "солнцезащитные очки кошачий глаз")
-  if "квадрат" in content:
+  if card_is_glasses and "квадрат" in content:
     mpstats_expanding_add_seed(seeds, seen, f"{base} квадратные")
-  if "поляризац" in content or "поляризацион" in content:
+  if card_is_glasses and ("поляризац" in content or "поляризацион" in content):
     mpstats_expanding_add_seed(seeds, seen, f"{base} поляризационные")
-  if "авиатор" in content:
+  if card_is_glasses and "авиатор" in content:
     mpstats_expanding_add_seed(seeds, seen, f"{base} авиаторы")
   if not manual_query and not primary_is_lozenges and not card_is_glasses:
     # A title's first three words may be an over-specific or unfinished phrase.
@@ -18370,13 +18371,17 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
   return semantic_get_job(job_id, portal_id, user)
 
 
-def semantic_job_action(job_id, portal_id, user, action):
+def semantic_job_action(job_id, portal_id, user, action, workflow_batch=None):
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
     row = db.execute('SELECT * FROM semantic_jobs WHERE id=? AND portal_id=? AND user_login=?',
                      (job_id, portal_id, user_login_value(user))).fetchone()
     if not row:
       raise ValueError('semantic_relevance_job_not_found')
+    if workflow_batch:
+      parent = db.execute('SELECT status FROM workflow_batches WHERE id=? AND portal_id=?', (workflow_batch, portal_id)).fetchone()
+      if not parent or parent['status'] != 'collecting' or json.loads(row['request_json']).get('workflowBatch') != workflow_batch:
+        raise ValueError('workflow_task_closed')
     if action == 'cancel':
       if row['status'] in SEMANTIC_JOB_ACTIVE:
         db.execute("UPDATE semantic_jobs SET status='cancelled',run_token='',updated_at=? WHERE id=?", (time.time(), job_id))
@@ -25255,10 +25260,11 @@ def workflow_process_batch(batch_id):
           job=db.execute('SELECT status,error,total FROM semantic_jobs WHERE id=?',(card['job_id'],)).fetchone()
         if job and job['status'] in ('failed','cancelled') and card['state']=='queued':
           try:
-            semantic_job_action(card['job_id'],batch['portal_id'],user,'retry')
+            semantic_job_action(card['job_id'],batch['portal_id'],user,'retry',workflow_batch=batch_id)
             with semantic_job_connection() as db:
               db.execute("UPDATE workflow_cards SET state='collecting',error='' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
           except ValueError as exc:
+            if str(exc)=='workflow_task_closed': return
             if str(exc) in ('semantic_relevance_busy','semantic_card_busy'): continue
             with semantic_job_connection() as db:
               db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(str(exc) if str(exc)=='semantic_report_creation_unknown' else 'semantic_relevance_failed',batch_id,card['card_key']))
@@ -25277,6 +25283,7 @@ def workflow_process_batch(batch_id):
         if semantic_facts_hash(current)!=card['facts_hash']: raise workflow_error('semantic_card_changed')
         job=semantic_create_job(batch['portal_id'],snapshot,'',user,workflow_batch=batch_id)
       except ValueError as exc:
+        if str(exc)=='workflow_task_closed': return
         if str(exc) in ('semantic_relevance_busy','semantic_card_busy'): continue
         with semantic_job_connection() as db:
           db.execute("UPDATE workflow_cards SET state='failed',error=? WHERE batch_id=? AND card_key=?",(str(exc) if str(exc) in {'semantic_card_changed','semantic_card_content_missing','semantic_relevance_not_configured','semantic_card_not_found'} else 'semantic_relevance_failed',batch_id,card['card_key']))

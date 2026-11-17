@@ -59,6 +59,23 @@ class SemanticEmptyTest(unittest.TestCase):
         self.assertIn('герметик силиконовый',server.mpstats_expanding_seed_queries(card,''))
         self.assertEqual(server.mpstats_expanding_seed_queries(card,'герметик KOLT белый'),['герметик KOLT белый'])
 
+    def test_safety_glasses_and_application_dots_do_not_turn_foam_into_eyewear(self):
+        card={**jobs.CARD,'title':'Бытовая монтажная пена Kolt','brand':'Kolt',
+              'description':'Наносите пену точками. Используйте защитные очки.',
+              'characteristics':[{'name':'Меры предосторожности','value':['Использовать защитные очки']} ]}
+        with server.connect_db() as db:
+            db.execute('UPDATE portals SET cards_snapshot_json=? WHERE id=?',(json.dumps([card]),self.wb))
+        job=server.semantic_create_job(self.wb,card,'',jobs.USER)
+        with server.connect_db() as db:
+            request=json.loads(db.execute('SELECT request_json FROM semantic_jobs WHERE id=?',(job['jobId'],)).fetchone()[0])
+        self.assertIn('монтажная пена',request['seedQueries'])
+        self.assertEqual(server.mpstats_expanding_seed_queries(card,'точная фраза'),['точная фраза'])
+
+    def test_real_eyewear_keeps_its_existing_seed_rules(self):
+        for card in ({'title':'Солнцезащитные очки женские'}, {'title':'Оправа женская','subjectName':'Оправы для очков'}):
+            seeds=server.mpstats_expanding_seed_queries(card,'')
+            self.assertEqual(len(seeds),1)
+
 
 class WorkflowEmptyTest(unittest.TestCase):
     setUp=workflow.ContentWorkflowTest.setUp
@@ -78,6 +95,23 @@ class WorkflowEmptyTest(unittest.TestCase):
         with server.connect_db() as db:
             self.assertEqual(db.execute('SELECT job_id FROM workflow_cards WHERE batch_id=?',(batch['id'],)).fetchone()[0],job['jobId'])
         self.assertEqual(self.batch()['cards'][0]['error'],'semantic_model_refused')
+
+    def test_worker_cannot_resume_a_job_from_a_stale_collecting_batch(self):
+        self.plan();batch=self.batch()
+        job=server.semantic_create_job(self.portal,workflow.CARD,'',self.users['account'],workflow_batch=batch['id'],source=jobs.source(1))
+        with patch.object(server,'semantic_classify_query_batch',side_effect=RuntimeError('fixture')):
+            server.SemanticJobWorker(self.path).step(job['jobId'])
+        server.workflow_process_batch(batch['id'])
+        server.workflow_start_batch(self.portal,{'batchId':batch['id']},self.users['tech'])
+        original=server.semantic_job_action
+        def pause_before_retry(*args,**kwargs):
+            with server.connect_db() as db:
+                db.execute("UPDATE workflow_batches SET status='partial' WHERE id=?",(batch['id'],))
+            return original(*args,**kwargs)
+        with patch.object(server,'semantic_job_action',side_effect=pause_before_retry):
+            server.workflow_process_batch(batch['id'])
+        self.assertEqual(server.semantic_get_job(job['jobId'],self.portal,self.users['account'])['status'],'failed')
+        self.assertEqual(self.batch()['cards'][0]['state'],'queued')
 
     def test_empty_job_stops_batch_for_attention_instead_of_marking_ready(self):
         self.plan();batch=self.batch()
