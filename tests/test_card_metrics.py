@@ -109,7 +109,7 @@ class CardMetricsTest(unittest.TestCase):
             return {'result':{'data':[{'dimensions':[{'id':'1001'}],'metrics':[0,0]}]}}
         def backup(token,path,**kwargs):
             calls.append('MPStats')
-            self.assertFalse('/full?' in path)
+            self.assertIn('/full?',path)
             return {'id':1001,'rating':4.8,'comments':999,'sales':999,'revenue':999}
         with self.ozon_context(),patch.object(server,'get_service_integration_secret',return_value='mpstats-key'),patch.object(server,'ozon_request_json',side_effect=api),patch.object(server,'mpstats_get_json',side_effect=backup):
             result=self.read(self.ozon)
@@ -137,14 +137,32 @@ class CardMetricsTest(unittest.TestCase):
             calls.append(path)
             if '/full?' in path:
                 self.assertIn('d1=',path);self.assertIn('d2=',path)
-                return {'id':1001,'period_stats':{'sales':17,'revenue':170}}
+                return {'id':1001,'rating':4.8,'comments':5,'period_stats':{'sales':17,'revenue':170}}
             return {'id':1001,'rating':4.8,'comments':5}
         with self.ozon_context(),patch.object(server,'get_service_integration_secret',return_value='mpstats-key'),patch.object(server,'ozon_request_json',side_effect=server.OzonSellerError('ozon_auth_error',409)),patch.object(server,'mpstats_get_json',side_effect=backup):
             result=self.read(self.ozon)
-            self.assertEqual(len(calls),2)
+            self.assertEqual(len(calls),1)
             self.assertEqual(result['metrics']['sales']['value'],17)
             self.assertTrue(result['metrics']['sales']['estimated'])
             self.assertIn('оценка MPStats',result['metrics']['revenue']['label'])
+
+    def test_mpstats_identity_endpoint_is_not_used_for_missing_review_metrics(self):
+        def api(client,key,path,payload,**kwargs):
+            if path=='/v2/review/list':raise server.OzonSellerError('ozon_auth_error',409)
+            return {'result':{'data':[{'dimensions':[{'id':'1001'}],'metrics':[0,0]}]}}
+        def backup(token,path,**kwargs):
+            self.assertIn('/items/1001/full?',path)
+            return {'id':1001,'rating':4.8,'comments':12,'period_stats':{'sales':99,'revenue':999}}
+        with self.ozon_context(),patch.object(server,'get_service_integration_secret',return_value='mpstats-key'),patch.object(server,'ozon_request_json',side_effect=api),patch.object(server,'mpstats_get_json',side_effect=backup) as call:
+            result=self.read(self.ozon)
+            self.assertEqual({k:v['value'] for k,v in result['metrics'].items()},{'sales':0,'revenue':0,'rating':4.8,'feedbacks':12})
+            self.assertEqual(call.call_count,1)
+
+    def test_mpstats_full_requires_exact_product_identity(self):
+        with self.ozon_context(),patch.object(server,'get_service_integration_secret',return_value='mpstats-key'),patch.object(server,'ozon_request_json',side_effect=server.OzonSellerError('ozon_auth_error',409)),patch.object(server,'mpstats_get_json',return_value={'id':9999,'rating':4.8,'comments':12,'period_stats':{'sales':1,'revenue':100}}):
+            result=self.read(self.ozon)
+            self.assertEqual(result['metrics'],{})
+            self.assertTrue(all(s['status']=='invalid_response' for s in result['sources'] if s['name'].startswith('MPStats')))
 
     def test_expired_fallback_cache_returns_to_primary_api(self):
         primary={'available':False}
@@ -153,7 +171,7 @@ class CardMetricsTest(unittest.TestCase):
             if path=='/v2/review/list':return {'reviews':[], 'has_next':False}
             return {'result':{'data':[{'dimensions':[{'id':'1001'}],'metrics':[0,0]}]}}
         def backup(token,path,**kwargs):
-            return {'id':1001,'period_stats':{'sales':100,'revenue':1000}} if '/full?' in path else {'id':1001,'rating':4.8,'comments':12}
+            return {'id':1001,'rating':4.8,'comments':12,'period_stats':{'sales':100,'revenue':1000}}
         with self.ozon_context(),patch.object(server,'get_service_integration_secret',return_value='mpstats-key'),patch.object(server,'ozon_request_json',side_effect=api),patch.object(server,'mpstats_get_json',side_effect=backup):
             self.assertEqual(self.read(self.ozon)['metrics']['sales']['source'],'MPStats')
             with server.CARD_METRICS_CACHE_LOCK:

@@ -23451,33 +23451,31 @@ def fetch_card_metrics(row, card, credentials, period, user):
       marketplace = 'oz' if row['marketplace']=='Ozon' else 'wb'
       product_id = sku if marketplace=='oz' else nm
       context = mpstats_call_context_start(user, 'Метрики карточки · резервный источник', row['id'], card_key_from_snapshot_card(card))
+      source_names = (['MPStats · рейтинг и отзывы'] if missing & {'rating','feedbacks'} else []) + (['MPStats · продажи и выручка'] if missing & {'sales','revenue'} else [])
       try:
+        # The item endpoint contains identity only; current ratings/counts live in full.
+        query = urlencode({'d1':period['start'],'d2':period['end']})
+        result = mpstats_get_json(token, '/analytics/v1/'+marketplace+'/items/'+product_id+'/full?'+query, attempts=1)
+        if not isinstance(result,dict) or str(result.get('sku') or result.get('id') or result.get('nmID')) != product_id:
+          raise ValueError('invalid_metrics_response')
         if missing & {'rating','feedbacks'}:
-          try:
-            result = mpstats_get_json(token, '/analytics/v1/'+marketplace+'/items/'+product_id, attempts=1)
-            matched = next((r for r in ozon_mpstats_payload_rows(result) if str(r.get('sku') or r.get('id') or r.get('nmID'))==product_id), None)
-            if matched:
-              put('rating',first_present(matched.get('rating'),matched.get('commentsvaluation')),'MPStats',maximum=5)
-              put('feedbacks',first_present(matched.get('feedbacks'),matched.get('comments'),matched.get('reviews')),'MPStats',True)
-            status('MPStats · рейтинг и отзывы','ok' if matched else 'no_data')
-          except MpstatsApiError as exc: status('MPStats · рейтинг и отзывы','access_denied' if exc.status in (401,403) else 'rate_limited' if exc.status==429 else 'unavailable')
-          except (ValueError,TypeError,AttributeError): status('MPStats · рейтинг и отзывы','invalid_response')
+          before = set(output['metrics'])
+          put('rating',first_present(result.get('rating'),result.get('commentsvaluation')),'MPStats',maximum=5)
+          put('feedbacks',first_present(result.get('feedbacks'),result.get('comments'),result.get('reviews')),'MPStats',True)
+          status('MPStats · рейтинг и отзывы','ok' if set(output['metrics'])-before else 'no_data')
         if missing & {'sales','revenue'}:
-          try:
-            query = urlencode({'d1':period['start'],'d2':period['end']})
-            result = mpstats_get_json(token, '/analytics/v1/'+marketplace+'/items/'+product_id+'/full?'+query, attempts=1)
-            if not isinstance(result,dict): raise ValueError('invalid_metrics_response')
-            returned_id = result.get('sku') or result.get('id') or result.get('nmID')
-            if returned_id is not None and str(returned_id)!=product_id: raise ValueError('invalid_metrics_response')
-            stats = result.get('period_stats')
-            if not isinstance(stats,dict): raise ValueError('invalid_metrics_response')
+          stats = result.get('period_stats')
+          if not isinstance(stats,dict): status('MPStats · продажи и выручка','invalid_response')
+          else:
             before = set(output['metrics'])
             put('sales',stats.get('sales'),'MPStats',True);put('revenue',stats.get('revenue'),'MPStats')
             for key in set(output['metrics'])-before:
               output['metrics'][key].update(estimated=True,label=('Продажи' if key=='sales' else 'Выручка')+' · оценка MPStats')
             status('MPStats · продажи и выручка','ok' if set(output['metrics'])-before else 'no_data')
-          except MpstatsApiError as exc: status('MPStats · продажи и выручка','access_denied' if exc.status in (401,403) else 'rate_limited' if exc.status==429 else 'unavailable')
-          except (ValueError,TypeError,AttributeError): status('MPStats · продажи и выручка','invalid_response')
+      except MpstatsApiError as exc:
+        for name in source_names: status(name,'access_denied' if exc.status in (401,403) else 'rate_limited' if exc.status==429 else 'unavailable')
+      except (ValueError,TypeError,AttributeError):
+        for name in source_names: status(name,'invalid_response')
       finally: mpstats_call_context_stop(context)
   return output
 
