@@ -7,6 +7,8 @@ const messages = {semantic_source_rate_limited:'MPStats ограничил ча�
   semantic_card_busy: 'Для этой карточки уже выполняется подбор.',
   semantic_relevance_incomplete: 'Модель вернула решения не для всех запросов. Проверенные части сохранены; продолжите подбор.',
   semantic_relevance_invalid_response: 'Модель вернула некорректный ответ. Проверенные части сохранены; продолжите подбор.',
+  semantic_model_timeout: 'Модель несколько раз не успела ответить. Проверенные запросы сохранены; продолжите позже.',
+  semantic_model_refused: 'Подключённая модель отказалась проверять эти запросы. Источник MPStats и проверенные части сохранены.',
   semantic_relevance_failed: 'Подбор прервался. Продолжите его: проверенные запросы сохранены.',
   semantic_card_content_missing: 'Для проверки нужны название, описание или характеристики.',
   semantic_card_not_found: 'Карточка больше не найдена в кабинете.',
@@ -92,6 +94,35 @@ const labels = { queued: 'В очереди', collecting: 'Получаем за
   empty: 'MPStats не нашёл запросов по стартовой фразе',
   ready: 'Подбор завершён и сохранён в рабочий черновик', failed: 'Подбор остановился', cancelled: 'Подбор отменён' };
 
+function SemanticSourcePreview({ job }) {
+  const [source, setSource] = useState(null);
+  const [error, setError] = useState('');
+  const [pending, setPending] = useState(false);
+  const [limit, setLimit] = useState(50);
+  const load = async () => {
+    setPending(true); setError('');
+    try {
+      const data = await request(`/api/semantic-jobs?portal_id=${encodeURIComponent(job.portalId)}&job_id=${encodeURIComponent(job.jobId)}`);
+      setSource(data.job.sourcePreview || { rows: [] });
+    } catch { setError('Не удалось открыть сохранённый источник. Попробуйте ещё раз.'); }
+    finally { setPending(false); }
+  };
+  return <div className="semantic-source-preview">
+    {!source ? <button type="button" className="btn mini" disabled={pending} onClick={load}>
+      {pending ? 'Открываем источник…' : `Показать запросы MPStats · ${job.total}`}
+    </button> : <>
+      <p>Источник MPStats · {source.rows.length} запросов. Проверка релевантности не завершена; этот список автоматически не включается в СЯ.</p>
+      <div className="semantic-keyword-list">{source.rows.slice(0, limit).map(row => <div className="semantic-keyword" key={row.query}>
+        <div className="semantic-keyword-main"><strong>{row.query}</strong>
+          <span>Частотность {job.marketplace === 'Ozon' ? 'Ozon' : 'WB'}: {Number(job.marketplace === 'Ozon' ? row.ozonCount : row.wbCount) || 0}</span>
+        </div>
+      </div>)}</div>
+      {source.rows.length > limit ? <button type="button" className="btn mini" onClick={() => setLimit(value => value + 100)}>Показать ещё · осталось {source.rows.length - limit}</button> : null}
+    </>}
+    {error ? <span role="alert">{error}</span> : null}
+  </div>;
+}
+
 export function SemanticJobStatus({ controller }) {
   const { job, error, busy, cancel, retry } = controller;
   if (!job && !error) return null;
@@ -103,8 +134,9 @@ export function SemanticJobStatus({ controller }) {
       {job.etaHighSeconds ? <span>Осталось примерно {Math.max(1, Math.ceil(job.etaLowSeconds / 60))}–{Math.max(1, Math.ceil(job.etaHighSeconds / 60))} мин.</span>
         : semanticJobActive(job) ? <span>Оценка времени уточняется после первой проверенной порции.</span> : null}
       {semanticJobActive(job) ? <button type="button" className="btn mini" onClick={cancel}>Отменить подбор</button> : null}
-      {['failed','cancelled'].includes(job.status) && !['semantic_report_creation_unknown','semantic_card_changed','semantic_model_changed','semantic_card_not_found','forbidden'].includes(job.error)
+      {['failed','cancelled'].includes(job.status) && !['semantic_model_refused','semantic_report_creation_unknown','semantic_card_changed','semantic_model_changed','semantic_card_not_found','forbidden'].includes(job.error)
         ? <button type="button" className="btn mini" onClick={retry} disabled={busy}>Продолжить подбор</button> : null}
+      {job.status === 'failed' && job.total > 0 ? <SemanticSourcePreview key={job.jobId} job={job} /> : null}
     </> : null}
     {error ? <span role="alert">{error}</span> : null}
   </div>;

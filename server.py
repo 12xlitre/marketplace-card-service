@@ -18081,11 +18081,18 @@ def semantic_classify_query_batch(card, rows):
   ]
   options = {"model_override": OPTICARDS_SEO_GIGACHAT_MODEL} if OPTICARDS_LLM_PROVIDER == "gigachat" else {'model_override':OPTICARDS_LLM_CLASSIFIER_MODEL,'reasoning_effort':OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT}
   payload, _, _ = audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192, **options)
+  if isinstance(payload, dict) and payload.get('choices') and (
+      payload['choices'][0].get('finish_reason') in ('blacklist', 'content_filter') or
+      (payload['choices'][0].get('message') or {}).get('refusal')):
+    raise ValueError('semantic_model_refused')
   if not isinstance(payload, dict) or not payload.get("choices") or payload["choices"][0].get("finish_reason") == "length":
     raise ValueError("semantic_relevance_invalid_response")
   message = (payload or {}).get("choices", [{}])[0].get("message", {})
   arguments = (message.get("function_call") or {}).get("arguments")
-  parsed = arguments if isinstance(arguments, dict) else parse_llm_json_content(arguments or message.get("content") or "")
+  try:
+    parsed = arguments if isinstance(arguments, dict) else parse_llm_json_content(arguments or message.get("content") or "")
+  except (json.JSONDecodeError, TypeError):
+    raise ValueError("semantic_relevance_invalid_response") from None
   if not isinstance(parsed, dict) or set(parsed) != set(decisions):
     raise ValueError("semantic_relevance_incomplete")
   facts_by_id = {fact["id"]: fact["text"] for fact in facts}
@@ -18198,6 +18205,11 @@ def semantic_job_public(row, include_result=False):
            'title': row['title']}
   if include_result and row.get('result_json'):
     value['result'] = json.loads(row['result_json'])
+  if include_result and row['status'] == 'failed' and row.get('source_json'):
+    core = json.loads(row['source_json']).get('semanticCore') or {}
+    value['sourcePreview'] = {'period': core.get('period') or {}, 'rows': [
+      {key: item[key] for key in ('query', 'wbCount', 'ozonCount') if key in item}
+      for item in core.get('allKeywords') or []]}
   return value
 
 
@@ -18372,6 +18384,8 @@ def semantic_job_action(job_id, portal_id, user, action):
       semantic_job_context(db, row)
       if row['status'] not in ('failed', 'cancelled'):
         raise ValueError('semantic_job_not_retryable')
+      if row['error'] == 'semantic_model_refused':
+        raise ValueError('semantic_model_refused')
       conflict = db.execute("SELECT id FROM semantic_jobs WHERE portal_id=? AND card_key=? AND status IN ('queued','collecting','classifying','saving')", (portal_id, row['card_key'])).fetchone()
       if conflict:
         raise ValueError('semantic_card_busy')
@@ -18381,6 +18395,8 @@ def semantic_job_action(job_id, portal_id, user, action):
       if provider.get('creating') and not provider.get('reportHash'):
         raise ValueError('semantic_report_creation_unknown')
       provider['pollAttempts'] = 0
+      if provider.get('classifier'):
+        provider['classifier'] = {'batchSize': provider['classifier']['batchSize']}
       db.execute("UPDATE semantic_jobs SET status='queued',error='',run_token='',provider_json=?,scheduled_at=?,updated_at=? WHERE id=?", (semantic_json(provider), time.time(), time.time(), job_id))
       semantic_sync_workflow_card(db,row,'collecting')
     else:
@@ -18489,7 +18505,40 @@ class SemanticJobWorker:
     if not changed or self.stop.is_set():
       raise SemanticJobCancelled()
 
+  def retry_classification(self, job, token, batch, exc):
+    if not batch or self.stop.is_set():
+      return False
+    if isinstance(exc, urlerror.HTTPError):
+      retryable = exc.code in (429, 500, 502, 503, 504)
+    else:
+      retryable = isinstance(exc, (TimeoutError, ConnectionError, urlerror.URLError, json.JSONDecodeError)) or (
+        isinstance(exc, ValueError) and str(exc) in ('semantic_relevance_incomplete', 'semantic_relevance_invalid_response'))
+    if not retryable:
+      return False
+    key = hashlib.sha256(audit_normalized(batch[0]['query']).encode()).hexdigest()
+    with semantic_job_connection(self.path) as db:
+      db.execute('BEGIN IMMEDIATE')
+      current = db.execute("SELECT provider_json FROM semantic_jobs WHERE id=? AND run_token=? AND status='classifying'",
+                           (job['id'], token)).fetchone()
+      if not current:
+        return False
+      provider = json.loads(current['provider_json'])
+      state = provider.get('classifier') or {}
+      failures = state.get('failures', 0) if state.get('batchKey') == key else 0
+      if failures >= 2:
+        return False
+      size = max(1, len(batch) // 2)
+      provider['classifier'] = {'batchSize': size, 'batchKey': key, 'failures': failures + 1}
+      retry_after = parse_retry_after(exc.headers.get('Retry-After')) if isinstance(exc, urlerror.HTTPError) and exc.headers else None
+      delay = max(5 * 2 ** failures, retry_after or 0)
+      db.execute("UPDATE semantic_jobs SET provider_json=?,run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
+                 (semantic_json(provider), time.time() + delay, time.time(), job['id'], token))
+    print('semantic-job=' + job['id'] + ' retry kind=' + type(exc).__name__ + ' batch=' + str(len(batch)) +
+          ' nextBatch=' + str(size) + ' attempt=' + str(failures + 1), file=sys.stderr)
+    return True
+
   def step(self, job_id):
+    batch = None
     token = uuid.uuid4().hex
     with semantic_job_connection(self.path) as db:
       db.execute('BEGIN IMMEDIATE')
@@ -18561,7 +18610,12 @@ class SemanticJobWorker:
           'SELECT query_key,decision_json FROM semantic_query_cache WHERE portal_id=? AND user_login=? AND facts_hash=? AND model_key=?', scope)}
       missing = [row for row in rows if audit_normalized(row['query']) not in cached]
       if missing:
-        batch = missing[:SEMANTIC_RELEVANCE_BATCH_SIZE]
+        with semantic_job_connection(self.path) as db:
+          provider = json.loads(db.execute('SELECT provider_json FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()[0])
+        classifier = provider.get('classifier') or {}
+        default_size = 16 if OPTICARDS_LLM_PROVIDER == 'gigachat' else SEMANTIC_RELEVANCE_BATCH_SIZE
+        size = max(1, min(SEMANTIC_RELEVANCE_BATCH_SIZE, audit_int(classifier.get('batchSize'), default_size)))
+        batch = missing[:size]
         if self.stop.is_set():
           return
         with semantic_job_connection(self.path) as db:
@@ -18585,8 +18639,11 @@ class SemanticJobWorker:
             db.execute('INSERT OR REPLACE INTO semantic_query_cache VALUES(?,?,?,?,?,?,?)', (*scope, audit_normalized(row['query']), semantic_json(decision), time.time()))
             cached[audit_normalized(row['query'])] = decision
           completed = sum(audit_normalized(row['query']) in cached for row in rows)
-          db.execute("UPDATE semantic_jobs SET completed=?,model_seconds=model_seconds+?,model_queries=model_queries+?,scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
-                     (completed, elapsed, len(batch), time.time(), time.time(), job_id, token))
+          # Keep the learned size, but give the next unverified portion its own bounded retry budget.
+          if classifier:
+            provider['classifier'] = {'batchSize': size}
+          db.execute("UPDATE semantic_jobs SET completed=?,model_seconds=model_seconds+?,model_queries=model_queries+?,provider_json=?,scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
+                     (completed, elapsed, len(batch), semantic_json(provider), time.time(), time.time(), job_id, token))
         return
       result = semantic_relevance_result(source, card, [{**row, **cached[audit_normalized(row['query'])]} for row in rows])
       with semantic_job_connection(self.path) as db:
@@ -18605,18 +18662,26 @@ class SemanticJobWorker:
     except SemanticJobCancelled:
       return
     except Exception as exc:
+      if self.retry_classification(job, token, batch, exc):
+        return
       if isinstance(exc, MpstatsApiError) and exc.status == HTTPStatus.ACCEPTED:
         with semantic_job_connection(self.path) as db:
           db.execute("UPDATE semantic_jobs SET status='collecting',run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='collecting'", (time.time()+5, time.time(), job_id, token))
         return
       allowed = {'semantic_card_changed', 'semantic_card_not_found', 'semantic_model_changed', 'semantic_report_creation_unknown',
                  'semantic_relevance_not_configured', 'semantic_relevance_too_many_queries', 'semantic_card_content_missing', 'semantic_report_timeout',
-                 'semantic_relevance_incomplete', 'semantic_relevance_invalid_response'}
+                 'semantic_relevance_incomplete', 'semantic_relevance_invalid_response', 'semantic_model_refused'}
       code = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else 'forbidden' if isinstance(exc, PermissionError) else 'semantic_relevance_failed'
       if isinstance(exc,MpstatsApiError):
         code='semantic_source_rate_limited' if exc.status==429 else 'semantic_source_access_denied' if exc.status in (401,403) else 'semantic_source_unavailable'
       elif isinstance(exc,urlerror.HTTPError):
         code='semantic_model_rate_limited' if exc.code==429 else 'semantic_model_access_denied' if exc.code in (401,403) else 'semantic_model_unavailable'
+      elif isinstance(exc,TimeoutError):
+        code='semantic_model_timeout'
+      elif isinstance(exc,(urlerror.URLError,ConnectionError)):
+        code='semantic_model_unavailable'
+      elif isinstance(exc,json.JSONDecodeError):
+        code='semantic_relevance_invalid_response'
       with semantic_job_connection(self.path) as db:
         state = db.execute('SELECT provider_json FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
         provider = json.loads(state['provider_json']) if state else {}
@@ -25080,10 +25145,10 @@ def workflow_start_batch(portal,payload,user):
       db.execute("UPDATE workflow_cards SET state='empty' WHERE batch_id=? AND state='ready' AND final_json IS NULL AND job_id IN (SELECT id FROM semantic_jobs WHERE portal_id=? AND (status='empty' OR status='ready' AND total=0))",(batch['id'],portal))
       # Only an explicit restart of an empty source starts a fresh automatic search.
       db.execute("UPDATE workflow_cards SET state='queued',job_id=NULL,error='' WHERE batch_id=? AND state='empty'",(batch['id'],))
-    if batch['kind'] in ('semantic','content') and not db.execute("SELECT 1 FROM workflow_cards WHERE batch_id=? AND state IN ('queued','failed','cancelled')",(batch['id'],)).fetchone():
+    if batch['kind'] in ('semantic','content') and not db.execute("SELECT 1 FROM workflow_cards WHERE batch_id=? AND state IN ('queued','failed','cancelled') AND error<>'semantic_model_refused'",(batch['id'],)).fetchone():
       return {'started':False}
     if batch['kind']=='semantic':
-      db.execute("UPDATE workflow_cards SET state='queued',error='' WHERE batch_id=? AND state IN ('failed','cancelled')",(batch['id'],))
+      db.execute("UPDATE workflow_cards SET state='queued',error='' WHERE batch_id=? AND state IN ('failed','cancelled') AND error<>'semantic_model_refused'",(batch['id'],))
       db.execute("UPDATE workflow_batches SET generation=generation+1 WHERE id=? AND status IN ('partial','cancelled')",(batch['id'],))
       db.execute("UPDATE workflow_batches SET status='collecting',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
     else:

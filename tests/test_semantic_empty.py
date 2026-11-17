@@ -67,6 +67,18 @@ class WorkflowEmptyTest(unittest.TestCase):
     list=workflow.ContentWorkflowTest.list
     batch=workflow.ContentWorkflowTest.batch
 
+    def test_batch_restart_does_not_repeat_provider_refusal(self):
+        self.plan();batch=self.batch()
+        job=server.semantic_create_job(self.portal,workflow.CARD,'',self.users['account'],workflow_batch=batch['id'],source=jobs.source(1))
+        with patch.object(server,'semantic_classify_query_batch',side_effect=ValueError('semantic_model_refused')):
+            server.SemanticJobWorker(self.path).step(job['jobId'])
+        server.workflow_process_batch(batch['id'])
+        self.assertEqual(self.batch()['status'],'partial')
+        self.assertEqual(server.workflow_start_batch(self.portal,{'batchId':batch['id']},self.users['tech']),{'started':False})
+        with server.connect_db() as db:
+            self.assertEqual(db.execute('SELECT job_id FROM workflow_cards WHERE batch_id=?',(batch['id'],)).fetchone()[0],job['jobId'])
+        self.assertEqual(self.batch()['cards'][0]['error'],'semantic_model_refused')
+
     def test_empty_job_stops_batch_for_attention_instead_of_marking_ready(self):
         self.plan();batch=self.batch()
         job=server.semantic_create_job(self.portal,workflow.CARD,'',self.users['account'],workflow_batch=batch['id'],source=jobs.source(0))
@@ -79,7 +91,7 @@ class WorkflowEmptyTest(unittest.TestCase):
         job=server.semantic_create_job(self.portal,workflow.CARD,'',self.users['account'],workflow_batch=batch['id'],source=jobs.source(1))
         worker=server.SemanticJobWorker(self.path)
         with patch.object(server,'semantic_classify_query_batch',side_effect=ValueError('semantic_relevance_incomplete')):
-            worker.step(job['jobId'])
+            for _ in range(3): worker.step(job['jobId'])
         server.workflow_process_batch(batch['id']);self.assertEqual(self.batch()['status'],'partial')
         server.semantic_job_action(job['jobId'],self.portal,self.users['account'],'retry')
         self.assertEqual(self.batch()['cards'][0]['state'],'collecting')
