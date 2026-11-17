@@ -137,3 +137,19 @@ Production WB/Ozon UI/скачивание/контакты менеджера/m
 Настя91/Светлана93 сохранены. WB integration updated_at обновились при старте,
 остальные поля и ключи не менялись. Старые PDF версий не перезаписываются.
 Документационный follow-up не требует повторного выпуска/перезапуска.
+
+
+17.11.2026 выпуск bc5b08b/90bb699: постановка/перенос дня прямо из плана кабинета,
+общая загрузка/предупреждение полного дня, метрики WB/Ozon через API-first→MPStats.
+Без миграций/зависимостей/infra. Оба штатных deploy выполнены после idle guard0;
+backup plan-calendar-metrics-release-20261117T111742Z quick_check OK.
+Живая приёмка нашла отсутствие rating/comments в кратком MPStats item endpoint:
+исправлено на один full GET с точным ID, рейтинг/отзывы сверху, продажи/выручка
+из period_stats за тот же период. 22 финальных metrics tests и локальный браузер PASS.
+Production browser WB/Ozon: создание без перехода, исходное пояснение/PDF,
+полный скрытый проект/свободная дата/перенос/reload/mobile390 и все4метрики PASS.
+Ozon analytics OK, review/list access_denied→MPStats; WB rate_limited→MPStats.
+Временные кабинеты/планы/специалисты/сессии и auth-файл удалены. Исходные core/workflow
+hashes, people91/93,3states/7XLSX сохранены; foreign_keys OK, active0.
+Runtime90bb699; docs follow-up не требует повторного deploy. Полнота пояснений
+зависит от отсутствующего полного DOCX, не заполнять его выдуманными фразами.
