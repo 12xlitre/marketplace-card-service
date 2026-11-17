@@ -153,3 +153,17 @@ Ozon analytics OK, review/list access_denied→MPStats; WB rate_limited→MPStat
 hashes, people91/93,3states/7XLSX сохранены; foreign_keys OK, active0.
 Runtime90bb699; docs follow-up не требует повторного deploy. Полнота пояснений
 зависит от отсутствующего полного DOCX, не заполнять его выдуманными фразами.
+
+
+17.11.2026 выпуск a86f00b: empty-исход СЯ, сохранность прежнего черновика при новом
+пустом ответе, автофразы из собственного названия, причины ошибок и синхронизация
+retry из карточки с планом. Без миграций/зависимостей/infra. Перед native deploy
+active generation/recovery/semantic/workflow0 и backup semantic-empty-release-
+20261117T120542Z quick_check OK. 69server tests/local browser PASS. Production
+под Кристиной: только реальные GET и просмотр DeLux empty/failed/ready/плана;
+POST и посторонние metrics заблокированы. Новых LLM/MPStats вызовов/отчётов/повторов0,
+semantic_jobs/query_cache/core/workflow/people/states/XLSX SHA сохранены.
+Сессии удалены. Точная диагностика прежних обрывов осталась на разрешении Дмитрия:
+auto-review отклонил отдельную32-query пробу модели, она не выполнялась.
+Безопасная idle-публикация кода не выполняла этот отклонённый вызов.
+Docs follow-up не требует повторного выпуска.
