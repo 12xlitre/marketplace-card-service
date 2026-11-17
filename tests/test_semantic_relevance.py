@@ -93,7 +93,8 @@ class SemanticRelevanceTest(unittest.TestCase):
         with patch.object(server, "audit_llm_chat_completion", return_value=({"choices": [{"message": {"content": json.dumps(valid)}}]}, "model", "openai")) as model:
             result = server.semantic_classify_query_batch(CARD, [{"query": "средство от моли"}])
         self.assertEqual(result[0]["relevance"], "relevant")
-        self.assertEqual(set(model.call_args.kwargs["response_schema"]["properties"]["q0"]["properties"]), {"s", "r", "f", "q"})
+        self.assertEqual(model.call_args.kwargs["response_schema"]["properties"]["q0"],
+                         {"type":"array","items":{"type":"string"},"minItems":4,"maxItems":4})
         valid["q0"]["q"] = None
         with patch.object(server, "audit_llm_chat_completion", return_value=({"choices": [{"message": {"content": json.dumps(valid)}}]}, "model", "openai")):
             with self.assertRaisesRegex(ValueError, "invalid_response"):

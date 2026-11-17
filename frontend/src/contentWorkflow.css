@@ -10,3 +10,6 @@
 .cw-plan-task-list{display:grid;gap:12px;margin-top:16px}.cw-plan-task-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;border-top:1px solid #e6e8ef}.cw-plan-task-row>div{flex:1;min-width:min(100%,240px)}.cw-plan-task-row p{font-size:12px;color:#737c91;margin:8px 0 0}.lc-day-load{margin:16px 0;padding:12px;border:1px solid #e5dcee;border-radius:8px;font-size:12px;overflow-wrap:anywhere}
 
 .cw-modal .status-note{overflow-wrap:anywhere}
+
+.cw-plans{grid-template-columns:minmax(0,1fr)}
+.cw-plan-task-row>div>.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere;text-align:left}

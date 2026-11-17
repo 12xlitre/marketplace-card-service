@@ -174,6 +174,20 @@ class LlmConcurrencyTest(unittest.TestCase):
         self.assertEqual(server.llm_request_capacity('gigachat','GIGACHAT_API_B2B'),4)
         self.assertEqual(server.llm_request_capacity('gigachat','GIGACHAT_API_CORP'),4)
 
+    def test_structured_output_is_explicit_and_does_not_change_other_gigachat_calls(self):
+        response=unittest.mock.MagicMock();response.__enter__.return_value.read.return_value=b'{"choices":[]}'
+        schema={'type':'object','properties':{'groups':{'type':'array','items':{'type':'string'}}},'required':['groups']}
+        with patch.object(server,'OPTICARDS_LLM_PROVIDER','gigachat'),patch.object(server,'gigachat_access_token',return_value='test-only'),patch.object(server,'gigachat_urlopen',return_value=response) as call:
+            server.audit_llm_chat_completion([],response_schema=schema,structured_output=True)
+            body=json.loads(call.call_args.args[0].data)
+            self.assertEqual(body['response_format'],{'type':'json_schema','schema':schema,'strict':True})
+            self.assertNotIn('functions',body)
+            self.assertEqual(call.call_args.kwargs['timeout'],120)
+            server.audit_llm_chat_completion([],response_schema=schema)
+            body=json.loads(call.call_args.args[0].data)
+            self.assertIn('functions',body)
+            self.assertNotIn('response_format',body)
+
 
 class FullPlanRecoveryTest(unittest.TestCase):
     def test_truncated_full_plan_recovers_with_all_source_keywords_and_excel(self):

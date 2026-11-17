@@ -59,6 +59,8 @@ Keep this section compact. Add only stable locations that help avoid future sear
 - Показатели карточки WB/Ozon: `frontend/src/CardMetrics.jsx`, `get_card_metrics`/`fetch_card_metrics`/`fetch_ozon_card_review_count` в `server.py`; контракт в `docs/ozon-seller-cards.md`.
 - In-app workflow diagram and printable guide: `frontend/src/ServiceGuide.jsx`, menu «Как работать», deep link `/?screen=guide`.
 - Manual WB/Ozon semantic collection: `server.py` (SQLite semantic_jobs/query cache, semantic-expansion), `frontend/src/SemanticJobs.jsx` / `semanticRelevance.js` / `SemanticRelevancePanel.jsx`; contract: `docs/semantic-relevance.md`.
+- Plan title/mobile wrapping: `frontend/src/contentWorkflow.css` (`cw-plans`, `cw-plan-task-row`).
+- Semantic transport/evidence: `semantic_checked_decision`, `semantic_classify_query_batch`; durable portions and concurrency: `SemanticJobWorker` in `server.py`.
 - Final content XLSX builders: `frontend/src/App.jsx` (`buildFinalContentCardSheets`, `buildPortalContentSheets`)
 - Ozon content/SEO: `server.py` (`build_ozon_card_content_reoptimization_result`), `frontend/src/App.jsx` (`ozonSemanticDraftRows`, `buildOzonContentSheets`); BOSF analysis: `docs/bosf-mass-seo-analysis.md`
 - Ozon Seller connection: `server.py` (`update_ozon_connection`, `check_ozon_credentials`), `frontend/src/App.jsx` (`OzonConnectionPanel`), `docs/ozon-seller-connection.md`

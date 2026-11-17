@@ -27,6 +27,7 @@ import contextvars
 import unicodedata
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from email.utils import parsedate_to_datetime
 from email.message import EmailMessage
 from email.headerregistry import Address
@@ -18025,6 +18026,14 @@ def normalize_mpstats_expanding_query(item):
 
 SEMANTIC_RELEVANCE_VERSION = "card-relevance-v1"
 SEMANTIC_RELEVANCE_BATCH_SIZE = 32
+SEMANTIC_GIGACHAT_BATCH_SIZE = 64
+SEMANTIC_COMPACT_TRANSPORT = 'compact-arrays-v1'
+
+
+class SemanticClassificationIncomplete(ValueError):
+  def __init__(self, checked, code='semantic_relevance_incomplete'):
+    super().__init__(code)
+    self.checked = checked
 
 
 def semantic_relevance_facts(card):
@@ -18035,7 +18044,45 @@ def semantic_relevance_facts(card):
   return facts
 
 
+def semantic_checked_decision(row, decision, facts_by_id):
+  if isinstance(decision, list):
+    if len(decision) != 4 or any(not isinstance(value, str) for value in decision):
+      raise ValueError('semantic_relevance_invalid_response')
+    decision = dict(zip(('s', 'r', 'f', 'q'), decision))
+  if isinstance(decision, str):
+    parts = decision.split('|', 3)
+    if len(parts) != 4:
+      raise ValueError('semantic_relevance_invalid_response')
+    decision = dict(zip(('s', 'r', 'f', 'q'), parts))
+  if isinstance(decision, dict) and 's' in decision:
+    if set(decision) != {'s', 'r', 'f', 'q'} or any(not isinstance(decision[key], str) for key in decision):
+      raise ValueError('semantic_relevance_invalid_response')
+    decision = {'status': {'r': 'relevant', 'd': 'disputed', 'i': 'irrelevant'}.get(decision['s']),
+                'reason': decision['r'], 'evidence': [{'factId': decision['f'], 'quote': decision['q']}]
+                if decision['f'] or decision['q'] else []}
+  if not isinstance(decision, dict) or decision.get('status') not in {'relevant', 'disputed', 'irrelevant'}:
+    raise ValueError('semantic_relevance_invalid_response')
+  reason = audit_str(decision.get('reason') or '', 320)
+  evidence = decision.get('evidence')
+  if not reason or not isinstance(evidence, list):
+    raise ValueError('semantic_relevance_invalid_response')
+  checked = []
+  for item in evidence:
+    if not isinstance(item, dict):
+      raise ValueError('semantic_relevance_invalid_response')
+    quote_text = audit_str(item.get('quote') or '', 300)
+    source = facts_by_id.get(item.get('factId'), '')
+    if audit_normalized(quote_text) and source and audit_normalized(quote_text) in audit_normalized(source):
+      checked.append({'factId': item['factId'], 'quote': quote_text})
+  status = decision['status']
+  if status == 'relevant' and (not checked or len(checked) != len(evidence)):
+    status, reason = 'disputed', 'Не подтверждена опора решения на содержание карточки. ' + reason
+  return {**row, 'relevance': status, 'relevanceReason': reason, 'relevanceEvidence': checked[:3]}
+
+
 def semantic_classify_query_batch(card, rows):
+  if not rows:
+    return []
   facts = semantic_relevance_facts(card)
   if not facts:
     raise ValueError("semantic_card_content_missing")
@@ -18080,7 +18127,24 @@ def semantic_classify_query_batch(card, rows):
       "facts": facts, "queries": {key: rows[index]["query"] for index, key in enumerate(decisions)},
     }, ensure_ascii=False)},
   ]
-  options = {"model_override": OPTICARDS_SEO_GIGACHAT_MODEL} if OPTICARDS_LLM_PROVIDER == "gigachat" else {'model_override':OPTICARDS_LLM_CLASSIFIER_MODEL,'reasoning_effort':OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT}
+  # Keep an independent decision for every ID, without repeating four JSON property names.
+  item = {'type': 'array', 'items': {'type': 'string'}, 'minItems': 4, 'maxItems': 4}
+  schema = {'type': 'object', 'properties': {key: item for key in decisions},
+            'required': list(decisions), 'additionalProperties': False}
+  messages[0]['content'] += (
+      '\nЭкономный формат JSON: {"q0":["r","Подтверждено назначение","description","точная цитата"],'
+      '"q1":["d","Не подтверждён аромат лаванды","",""],"q2":["i","Секции вместо спрея","",""]}. '
+      'Каждый q должен встретиться ровно один раз, со СВОИМ независимым решением. Четыре строки '
+      'массива: статус, конкретная причина до 40 символов, factId, цитата. '
+      'Для disputed/irrelevant последние две строки пустые. У relevant обязательны factId и '
+      'кратчайшая достаточная дословная цитата, желательно до 60 символов. '
+      'Не склеивай фрагменты из разных мест; сохраняй HTML-разметку внутри цитаты. '
+      'Неизвестное свойство — disputed, а не irrelevant. Совпадение типа товара не подтверждает '
+      'дополнительные ограничения запроса, например иной цвет или санитарное назначение.')
+  if OPTICARDS_LLM_PROVIDER == 'gigachat':
+    options = {'model_override': OPTICARDS_SEO_GIGACHAT_MODEL, 'structured_output': True}
+  else:
+    options = {'model_override':OPTICARDS_LLM_CLASSIFIER_MODEL,'reasoning_effort':OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT}
   payload, _, _ = audit_llm_chat_completion(messages, response_schema=schema, max_output_tokens=8192, **options)
   if isinstance(payload, dict) and payload.get('choices') and (
       payload['choices'][0].get('finish_reason') in ('blacklist', 'content_filter') or
@@ -18094,36 +18158,22 @@ def semantic_classify_query_batch(card, rows):
     parsed = arguments if isinstance(arguments, dict) else parse_llm_json_content(arguments or message.get("content") or "")
   except (json.JSONDecodeError, TypeError):
     raise ValueError("semantic_relevance_invalid_response") from None
-  if not isinstance(parsed, dict) or set(parsed) != set(decisions):
+  if not isinstance(parsed, dict):
     raise ValueError("semantic_relevance_incomplete")
+  if set(parsed) - set(decisions):
+    raise ValueError('semantic_relevance_invalid_response')
   facts_by_id = {fact["id"]: fact["text"] for fact in facts}
   output = []
+  failure_code = 'semantic_relevance_incomplete'
   for index, row in enumerate(rows):
-    decision = parsed[f"q{index}"]
-    if isinstance(decision, dict) and "s" in decision:
-      if set(decision) != {'s', 'r', 'f', 'q'} or any(not isinstance(decision[key], str) for key in decision):
-        raise ValueError('semantic_relevance_invalid_response')
-      decision = {"status": {"r": "relevant", "d": "disputed", "i": "irrelevant"}.get(decision.get("s")),
-                  "reason": decision.get("r"), "evidence": [{"factId": decision.get("f"), "quote": decision.get("q")}]
-                  if decision.get("f") or decision.get("q") else []}
-    if not isinstance(decision, dict) or decision.get("status") not in {"relevant", "disputed", "irrelevant"}:
-      raise ValueError("semantic_relevance_invalid_response")
-    reason = audit_str(decision.get("reason") or "", 320)
-    evidence = decision.get("evidence")
-    if not reason or not isinstance(evidence, list):
-      raise ValueError("semantic_relevance_invalid_response")
-    checked = []
-    for item in evidence:
-      if not isinstance(item, dict):
-        raise ValueError("semantic_relevance_invalid_response")
-      quote_text = audit_str(item.get("quote") or "", 300)
-      source = facts_by_id.get(item.get("factId"), "")
-      if audit_normalized(quote_text) and source and audit_normalized(quote_text) in audit_normalized(source):
-        checked.append({"factId": item["factId"], "quote": quote_text})
-    status = decision["status"]
-    if status == "relevant" and (not checked or len(checked) != len(evidence)):
-      status, reason = "disputed", "Не подтверждена опора решения на содержание карточки. " + reason
-    output.append({**row, "relevance": status, "relevanceReason": reason, "relevanceEvidence": checked[:3]})
+    if f'q{index}' not in parsed:
+      continue
+    try:
+      output.append(semantic_checked_decision(row, parsed[f'q{index}'], facts_by_id))
+    except ValueError:
+      failure_code = 'semantic_relevance_invalid_response'
+  if len(output) != len(rows):
+    raise SemanticClassificationIncomplete(output, failure_code)
   return output
 
 
@@ -18401,7 +18451,7 @@ def semantic_job_action(job_id, portal_id, user, action, workflow_batch=None):
         raise ValueError('semantic_report_creation_unknown')
       provider['pollAttempts'] = 0
       if provider.get('classifier'):
-        provider['classifier'] = {'batchSize': provider['classifier']['batchSize']}
+        provider['classifier'] = {key: provider['classifier'][key] for key in ('batchSize', 'transport') if key in provider['classifier']}
       db.execute("UPDATE semantic_jobs SET status='queued',error='',run_token='',provider_json=?,scheduled_at=?,updated_at=? WHERE id=?", (semantic_json(provider), time.time(), time.time(), job_id))
       semantic_sync_workflow_card(db,row,'collecting')
     else:
@@ -18534,6 +18584,8 @@ class SemanticJobWorker:
         return False
       size = max(1, len(batch) // 2)
       provider['classifier'] = {'batchSize': size, 'batchKey': key, 'failures': failures + 1}
+      if OPTICARDS_LLM_PROVIDER == 'gigachat':
+        provider['classifier']['transport'] = SEMANTIC_COMPACT_TRANSPORT
       retry_after = parse_retry_after(exc.headers.get('Retry-After')) if isinstance(exc, urlerror.HTTPError) and exc.headers else None
       delay = max(5 * 2 ** failures, retry_after or 0)
       db.execute("UPDATE semantic_jobs SET provider_json=?,run_token='',scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
@@ -18619,8 +18671,13 @@ class SemanticJobWorker:
         with semantic_job_connection(self.path) as db:
           provider = json.loads(db.execute('SELECT provider_json FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()[0])
         classifier = provider.get('classifier') or {}
-        default_size = 16 if OPTICARDS_LLM_PROVIDER == 'gigachat' else SEMANTIC_RELEVANCE_BATCH_SIZE
-        size = max(1, min(SEMANTIC_RELEVANCE_BATCH_SIZE, audit_int(classifier.get('batchSize'), default_size)))
+        maximum_size = SEMANTIC_GIGACHAT_BATCH_SIZE if OPTICARDS_LLM_PROVIDER == 'gigachat' else SEMANTIC_RELEVANCE_BATCH_SIZE
+        # The old, verbose transport could permanently shrink a job to one query per call.
+        # Its cached decisions remain valid; the new transport starts with a fresh bounded portion.
+        learned_size = classifier.get('batchSize')
+        if OPTICARDS_LLM_PROVIDER == 'gigachat' and classifier.get('transport') != SEMANTIC_COMPACT_TRANSPORT:
+          learned_size = maximum_size
+        size = max(1, min(maximum_size, audit_int(learned_size, maximum_size)))
         batch = missing[:size]
         if self.stop.is_set():
           return
@@ -18632,9 +18689,17 @@ class SemanticJobWorker:
           if semantic_facts_hash(current_card) != job['facts_hash']:
             raise ValueError('semantic_card_changed')
         started = time.monotonic()
-        checked = semantic_classify_query_batch(card, batch)
+        try:
+          checked = semantic_classify_query_batch(card, batch)
+        except SemanticClassificationIncomplete as exc:
+          if not exc.checked:
+            raise
+          checked = exc.checked
         elapsed = time.monotonic() - started
-        if len(checked) != len(batch) or [audit_normalized(r['query']) for r in checked] != [audit_normalized(r['query']) for r in batch]:
+        checked_keys = [audit_normalized(r['query']) for r in checked]
+        checked_set = set(checked_keys)
+        if (not checked_keys or len(checked_set) != len(checked_keys) or
+            checked_keys != [audit_normalized(r['query']) for r in batch if audit_normalized(r['query']) in checked_set]):
           raise ValueError('semantic_relevance_incomplete')
         with semantic_job_connection(self.path) as db:
           db.execute('BEGIN IMMEDIATE')
@@ -18646,10 +18711,13 @@ class SemanticJobWorker:
             cached[audit_normalized(row['query'])] = decision
           completed = sum(audit_normalized(row['query']) in cached for row in rows)
           # Keep the learned size, but give the next unverified portion its own bounded retry budget.
-          if classifier:
-            provider['classifier'] = {'batchSize': size}
+          if classifier or OPTICARDS_LLM_PROVIDER == 'gigachat':
+            next_size = min(maximum_size, size * 2) if OPTICARDS_LLM_PROVIDER == 'gigachat' and len(checked) == len(batch) and elapsed < 20 else size
+            provider['classifier'] = {'batchSize': next_size}
+            if OPTICARDS_LLM_PROVIDER == 'gigachat':
+              provider['classifier']['transport'] = SEMANTIC_COMPACT_TRANSPORT
           db.execute("UPDATE semantic_jobs SET completed=?,model_seconds=model_seconds+?,model_queries=model_queries+?,provider_json=?,scheduled_at=?,updated_at=? WHERE id=? AND run_token=? AND status='classifying'",
-                     (completed, elapsed, len(batch), semantic_json(provider), time.time(), time.time(), job_id, token))
+                     (completed, elapsed, len(checked), semantic_json(provider), time.time(), time.time(), job_id, token))
         return
       result = semantic_relevance_result(source, card, [{**row, **cached[audit_normalized(row['query'])]} for row in rows])
       with semantic_job_connection(self.path) as db:
@@ -18715,18 +18783,41 @@ class SemanticJobWorker:
       with semantic_job_connection(self.path) as db:
         db.execute("DELETE FROM semantic_jobs WHERE status IN ('ready','empty','cancelled','failed') AND updated_at<?", (time.time()-30*86400,))
         db.execute("DELETE FROM semantic_query_cache WHERE updated_at<? AND NOT EXISTS (SELECT 1 FROM semantic_jobs j WHERE j.portal_id=semantic_query_cache.portal_id AND j.user_login=semantic_query_cache.user_login AND j.facts_hash=semantic_query_cache.facts_hash AND j.model_key=semantic_query_cache.model_key AND j.status IN ('queued','collecting','classifying','saving'))", (time.time()-90*86400,))
-      while not self.stop.is_set() and self.path == DB_PATH.resolve():
-        try:
-          with semantic_job_connection(self.path) as db:
-            row = db.execute("SELECT id FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving') AND scheduled_at<=? ORDER BY scheduled_at,created_at LIMIT 1", (time.time(),)).fetchone()
-          if row:
-            self.step(row['id'])
-          else:
-            self.wake.wait(1)
-            self.wake.clear()
-        except sqlite3.OperationalError:
-          print('semantic-worker database temporarily unavailable', file=sys.stderr)
-          self.stop.wait(5)
+      capacity = llm_request_capacity(OPTICARDS_LLM_PROVIDER, GIGACHAT_SCOPE)
+      with ThreadPoolExecutor(max_workers=capacity, thread_name_prefix='semantic-card') as pool:
+        pending = {}
+        while not self.stop.is_set() and self.path == DB_PATH.resolve():
+          try:
+            for future in [item for item in pending if item.done()]:
+              pending.pop(future)
+              try:
+                future.result()
+              except sqlite3.OperationalError:
+                print('semantic-worker database temporarily unavailable', file=sys.stderr)
+              except Exception as exc:
+                print('semantic-worker step failed kind=' + type(exc).__name__, file=sys.stderr)
+            if len(pending) < capacity:
+              active_ids = {value[0] for value in pending.values()}
+              active_scopes = {value[1] for value in pending.values()}
+              with semantic_job_connection(self.path) as db:
+                rows = db.execute("SELECT id,portal_id,user_login,facts_hash,model_key FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving') AND scheduled_at<=? ORDER BY scheduled_at,created_at LIMIT 64", (time.time(),)).fetchall()
+              for row in rows:
+                scope = (row['portal_id'], row['user_login'], row['facts_hash'], row['model_key'])
+                # Jobs with identical facts share a paid cache: never classify that scope twice at once.
+                if row['id'] in active_ids or scope in active_scopes:
+                  continue
+                pending[pool.submit(self.step, row['id'])] = (row['id'], scope)
+                active_ids.add(row['id']); active_scopes.add(scope)
+                if len(pending) == capacity:
+                  break
+            if pending:
+              wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            else:
+              self.wake.wait(1)
+              self.wake.clear()
+          except sqlite3.OperationalError:
+            print('semantic-worker database temporarily unavailable', file=sys.stderr)
+            self.stop.wait(5)
     except Exception as exc:
       print('semantic-worker failed kind=' + type(exc).__name__, file=sys.stderr)
     finally:
@@ -20070,7 +20161,7 @@ def automatic_seo_queue_seconds():
 
 
 def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                              model_override=None, native_functions=True, reasoning_effort=None):
+                              model_override=None, native_functions=True, reasoning_effort=None, structured_output=False):
   global LLM_COOLDOWN_UNTIL
   for attempt in range(3):
     try:
@@ -20091,6 +20182,8 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
             options['reasoning_effort'] = reasoning_effort
           if not native_functions:
             options['native_functions'] = False
+          if structured_output:
+            options['structured_output'] = True
           return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens, **options)
         except urlerror.HTTPError as exc:
           # Publish the pause before releasing the slot to another card worker.
@@ -20109,7 +20202,7 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
 
 
 def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                               model_override=None, native_functions=True, reasoning_effort=None):
+                               model_override=None, native_functions=True, reasoning_effort=None, structured_output=False):
   provider = OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
@@ -20123,7 +20216,9 @@ def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False,
     if max_output_tokens is not None:
       body["max_tokens"] = max(512, min(8192, int(max_output_tokens)))
     if response_schema is not None and not plain_text:
-      if native_functions:
+      if structured_output:
+        body['response_format'] = {'type': 'json_schema', 'schema': response_schema, 'strict': True}
+      elif native_functions:
         body["functions"] = [{"name": "prepare_seo_data", "description": "Вернуть SEO-данные по переданной схеме без выполнения внешних действий", "parameters": response_schema}]
         body["function_call"] = {"name": "prepare_seo_data"}
       else:

@@ -22,7 +22,8 @@ max_completion_tokens и reasoning_effort; sampling параметры убра�
 reasoning!=none. Для Sol/Astra none нормализуется в low, legacyGPT4без reasoning.
 Отдельный classifier работает и в semantic_classify_query_batch, и в fast stage
 automatic SEO host. semantic_model_key включает classifier+effort для OpenAI;
-GigaChat путь, native_functions/JSON prompts и его модель остаются прежними.
+GigaChat сохраняет модель; с17.11 классификатор СЯ запрашивает компактные массивы
+через официальный JSON Schema, остальные native_functions/JSON prompts прежние.
 Новые модели не запускают заново старые принятые версии/остановленные пачки.
 
 Обычный рабочий процесс перед deploy: idle/recovery guard, SQLitebackup,
@@ -31,3 +32,8 @@ Dockerfile/compose. env_file .env.prod уже используется compose; 
 образ не попадает. Изменение backend env требует настоящего пересоздания,
 opticards-restart сам по себе это не гарантирует. Фактический provider/model
 проверять /api/admin-status с правами и не отдавать ключи интерфейсу.
+
+17.11.2026 Дмитрий разрешил локально восстановить весь DeLux через OpenAI, но
+потребовал самостоятельный постоянный механизм. Это аварийное восстановление,
+не готовый production-маршрут:403 с сервера подтверждён повторно, Сергей пока
+не подготовил инфраструктуру. План и критерии: ../server-inference-plan.md.
