@@ -33,7 +33,7 @@ Production пока **c3c7502**, новый код НЕ выложен. Batch
 ответа, порции Giga64/OpenAI32, ограниченное уменьшение и рост. Менеджер использует
 прежние слоты провайдера (Giga personal1, OpenAI/B2B4), сериализует одинаковый
 portal/user/facts/model во избежание повторной оплаты. Ключ кеша/критерии прежние.
-Финальные44focused+64HTTP/jobs/workflow+1adaptive=109тестов PASS (включая возврат порции4→8 после уменьшения), py_compile/diff-check PASS.
+Финальные44focused+64HTTP/jobs/workflow+1adaptive+1source=110тестов PASS (включая возврат порции4→8 и последовательное получение источников при параллельной классификации), py_compile/diff-check PASS.
 Ранний эксперимент с группами решений отклонён, его не выпускать.
 
 Постоянный доступ пока НЕ готов: OpenAI с сервера снова403
@@ -70,6 +70,7 @@ Browser production-browser.cjs проверяет реальные734/278/240 и
 Мобильное переполнение844px в плане исправлено: grid minmax(0,1fr), перенос длинного названия кнопки. Точный rebuilt candidate index + реальные production API:734/278/240карточки,77строк плана,390px PASS, JS0/POST0 (browser-candidate-partial.json). frontend:build/root index готовы.
 Временная production-auth.json owner600 имеет90минTTL; удалить точную сессию в конце.
 drain-legacy.py НЕ выполнялся: auto-review снова отклонил отмену активных paid jobs, несмотря на доказанный late-response cache (deployed c3c7502 и существующий test_late_model_response...). Не повторять/не обходить БЕЗ нового явного разрешения. Отправлен async-вопрос на точную отмену продолжения3 старых заданий + ожидание paid reply + локальную допроверку. Пока ответа НЕТ — они продолжаются естественно; cancel/deploy запрещены. Если ДА: разрешено выполнить узкий drain, затем ОБЯЗАТЕЛЬНО проверить точный firstMissing в Max-кеше до экспорта/новой оплаты/рестарта. Если НЕТ/без ответа — естественный idle.
+Код3cb5859 закоммичен/pushed, НЕ deployed. Follow-up ограничивает одновременный source step до1, модельные слоты прежние; 4parallel tests повторены. verified-partial.json:74карточки/45590строк, все цитаты/частотности/периоды/current facts иmodel provenance PASS, FK OK; из них41167Luna+4423Max.
 Перед выпуском снова idle/recovery guard+backup+audit, штатный commit/push/deploy,
 production UI acceptance. После финала обновить этот раздел, docs/memory иmanifest.
 

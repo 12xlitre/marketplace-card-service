@@ -18799,15 +18799,20 @@ class SemanticJobWorker:
             if len(pending) < capacity:
               active_ids = {value[0] for value in pending.values()}
               active_scopes = {value[1] for value in pending.values()}
+              source_pending = any(value[2] for value in pending.values())
               with semantic_job_connection(self.path) as db:
-                rows = db.execute("SELECT id,portal_id,user_login,facts_hash,model_key FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving') AND scheduled_at<=? ORDER BY scheduled_at,created_at LIMIT 64", (time.time(),)).fetchall()
+                rows = db.execute("SELECT id,portal_id,user_login,facts_hash,model_key,(source_json IS NULL OR source_json='') AS needs_source FROM semantic_jobs WHERE status IN ('queued','collecting','classifying','saving') AND scheduled_at<=? ORDER BY scheduled_at,created_at LIMIT 64", (time.time(),)).fetchall()
               for row in rows:
                 scope = (row['portal_id'], row['user_login'], row['facts_hash'], row['model_key'])
                 # Jobs with identical facts share a paid cache: never classify that scope twice at once.
                 if row['id'] in active_ids or scope in active_scopes:
                   continue
-                pending[pool.submit(self.step, row['id'])] = (row['id'], scope)
+                # Parallel classification must not multiply the old MPStats source concurrency.
+                if row['needs_source'] and source_pending:
+                  continue
+                pending[pool.submit(self.step, row['id'])] = (row['id'], scope, row['needs_source'])
                 active_ids.add(row['id']); active_scopes.add(scope)
+                source_pending = source_pending or row['needs_source']
                 if len(pending) == capacity:
                   break
             if pending:

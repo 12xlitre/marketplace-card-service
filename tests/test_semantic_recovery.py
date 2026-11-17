@@ -252,6 +252,31 @@ class SemanticParallelWorkerTest(unittest.TestCase):
             self.worker.thread.start();self.wait_ready(created)
         self.assertEqual(call.call_count,1)
 
+    def test_source_collection_stays_serial_while_prepared_cards_can_classify(self):
+        cards=[dict(jobs.CARD,nmID=str(1001+i),title='Антимоль спрей '+str(i)) for i in range(4)]
+        with server.connect_db() as db:
+            db.execute('UPDATE portals SET cards_snapshot_json=? WHERE id=?',(json.dumps(cards),self.wb))
+        created=[self.create(card=card,result=jobs.source(1)) for card in cards]
+        with server.connect_db() as db:
+            for index,job in enumerate(created[:3]):
+                db.execute('UPDATE semantic_jobs SET source_json=?,total=0 WHERE id=?',('' if index==2 else None,job['jobId']))
+        entered=threading.Event();classified=threading.Event();release=threading.Event()
+        def fetch(card,**kwargs):
+            entered.set();release.wait(5);time.sleep(.05)
+            return jobs.source(1)
+        def model(card,rows):
+            if card['nmID']=='1004':classified.set()
+            return jobs.classify(card,rows)
+        with patch.object(server,'OPTICARDS_LLM_PROVIDER','openai'),patch.object(server,'fetch_mpstats_semantic_expansion',side_effect=fetch) as source_call,patch.object(server,'semantic_classify_query_batch',side_effect=model):
+            self.worker.thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(classified.wait(5),'a pending source must not block a prepared card')
+                self.assertEqual(source_call.call_count,1,'only one source request may be in flight')
+            finally:release.set()
+            self.wait_ready(created)
+            self.assertEqual(source_call.call_count,3)
+
     def test_shutdown_waits_for_paid_reply_and_restart_reuses_it(self):
         created=self.create(result=jobs.source(1));entered=threading.Event();release=threading.Event()
         def model(card,rows):entered.set();release.wait(5);return jobs.classify(card,rows)
