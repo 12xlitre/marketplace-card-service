@@ -2,7 +2,7 @@
 
 Обновлено: 2026-11-18. Текущий статус здесь; постоянные правила — в [памяти проекта](docs/memory/INDEX.md).
 
-## Выгрузка СЯ — доработана18.11.2026, ещё не выложена
+## Выгрузка СЯ — выложено 18.11.2026
 
 По поручению Дмитрия общий XLSX карточки/кабинета и файла workflow WB/Ozon
 переведён на10колонок: A–Cдействующие/ранжируемые/позиции (синий), D–Gдобавление/
@@ -25,7 +25,7 @@
 проверка использует сохранённый результат. Ошибки/429 различимы, не являются
 пустым успешным отчётом. Чужие SKU/периоды не подставляются.
 
-Production только прочитан: DeLux36 —77drafts, rankedInDrafts0/rankedInFinal0/
+До выпуска production только прочитан: DeLux36 —77drafts, rankedInDrafts0/rankedInFinal0/
 rankedExpansionRows0; прежний период18.10–16.11.2026. Никакие77карточки,
 оплаченные решения/источники/файлы не менялись и не пересобирались.
 
@@ -46,10 +46,31 @@ files-verified.json, backend-final.log, frontend-tests.log, review-final.log,
 4xlsx на тестовых данных, preview.png/html. Новый код вsemanticExport.js,
 App.jsx и существующемserver.py; новых runtime-модулей/зависимостей/схемы нет.
 Контракт обновлён вdocs/semantic-relevance.md/памяти/CODEX_SCOPE.md.
-Дмитрий18.11.2026 явно поручил «Деплой». Выпуск вместе с исправлениями задач
-и почты ниже: свежийidle guard/backup, commit/push, штатныйdeploy, production-приёмка.
+Дмитрий 18.11.2026 явно поручил «Деплой». Общий выпуск **a63026b**
+успешно выложен штатным opticards-deploy. Публичный index SHA256 совпал с
+локальным: 6a90eacfeaa2391492f0f01221acd9baef2e5441d9de3bf41e7688ba3ec7caf0.
+До выпуска semantic/workflow/generation/recovery active=0, consistent backup
+`/opt/opticards/var/backups/semantic-xlsx-tasks-mail-20261118T084931Z/opticards.sqlite3`
+(quick_check OK, mode600). Обвязка, зависимости и схема не менялись.
 
-## Задачи периода и HTML писем — подготовлено 18.11.2026, ещё не выложено
+Production acceptance: под dmitriy.admin и kristina.manager виден только
+1 набор СЯ в задачах, все12 пунктов остаются в плане. По11 реальных писем
+без HTML-разметки; мобильные390px без горизонтального выхода, JSerrors0.
+Живой MPStats GET своего Ozon SKU1769034988 за18.10–16.11.2026 вернул
+«монтажная пена с низким расширением», avgPos55. Новый подбор/классификация
+77 карточек не запускались. Из UI двух временных кабинетов скачаны настоящие
+workflow XLSX WB/Ozon:10 колонок, позиция12.5, частота150/70, полные причина
+и цитата,3 сплошных блока, перенос/изменение размеров/защита PASS.
+Временные кабинеты и сессии удалены; исходные business/workflow/semantic/cache
+hashes,3 automatic-seo states и7 XLSX совпали, foreign_keys OK, active0.
+Health200, private API anonymous401, служебные файлы404. Первые проверки
+задерживались из-за локального DNS/сетевого таймаута; итоговая приёмка прошла
+через TLS к известному IP с проверкой сертификата домена.
+Артефакты(owner-only/ignored):var/research/2026-11-18-release/ — deploy.log,
+backup.json,acceptance.json,live-ranking.json,xlsx-verified.json,
+preservation.json,cleanup.json. Docs-only follow-up не требует нового deploy.
+
+## Задачи периода и HTML писем — выложено 18.11.2026
 
 Дмитрий уточнил: после готовности подбора СЯ наименования ещё не должны
 появляться во вкладке «Задачи». Не запущенные пункты периода (`planned`)
@@ -85,12 +106,9 @@ JSerrors0PASS. ВнешнийCRM транспорт заменён, писем/�
 local-browser.json,production-before.json,real-mail-conversion.json,
 crm-tests.log,frontend-tests.log,review.json,локальные mobilePNG.
 
-Разрешение Дмитрия18.11.2026 «Деплой» получено на общий выпуск.
-Перед выпуском выполняются paid-work idle guard + consistent SQLite backup,
-штатныйopticards-deploy и production-браузерная приёмка тех же экранов.
-На сервере пока c1b0de0; в этой сессии deploy/restart/изменений рабочих данных
-не было. Предыдущие несохранённые изменения WORK.md/product_semantic_core.md
-сохранены, пользовательские файлы не добавлялись вgit.
+Общий выпуск a63026b и production-приёмка завершены, подробности выше.
+Предыдущие несохранённые изменения WORK.md/product_semantic_core.md сохранены
+отдельно; пользовательские файлы не добавлялись в git.
 
 ## DeLux Ozon — восстановлено77/77, runtime c1b0de0 (17.11.2026)
 
