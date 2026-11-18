@@ -231,6 +231,34 @@ class SemanticRelevanceHttpTest(unittest.TestCase):
         self.assertEqual(payload["status"], "classifying")
         self.assertEqual(poll.call_args.args[:2], ("missing", str(self.portal)))
 
+    def test_shortlist_preview_uses_stored_scope_and_is_readonly_without_paid_calls(self):
+        with server.connect_db() as db:
+            db.execute('UPDATE portals SET cards_snapshot_json=? WHERE id IN (?,?)', (json.dumps([CARD]), self.portal, self.ozon))
+            source = {'relevanceVersion':server.SEMANTIC_RELEVANCE_VERSION, 'marketplace':'untrusted',
+                      'allKeywords':[{'query':'средство от моли','ozonCount':20,'wbCount':30,'relevance':'relevant'}]}
+            db.execute('INSERT INTO card_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',
+                       (self.portal, '1001', json.dumps({'meta':{'semanticCoreReports':[{'id':'stored', 'semanticCore':source}]}})))
+            db.execute('INSERT INTO ozon_semantic_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',
+                       (self.ozon, '1001', json.dumps({'cardKey':'1001', 'semanticCore':source})))
+        data = {'action':'shortlist','portalId':self.portal,'cardKey':'1001','reportId':'stored',
+                'card':{'title':'Подменённый товар'}, 'semanticCore':{'allKeywords':[]}}
+        with patch.object(server, 'semantic_classify_query_batch', side_effect=AssertionError('model')), \
+             patch.object(server, 'fetch_mpstats_semantic_expansion', side_effect=AssertionError('MPStats')):
+            self.assertEqual(self.request(data, authenticated=False, path='/api/semantic-jobs')[0], 401)
+            self.assertEqual(self.request({**data,'portalId':self.foreign}, path='/api/semantic-jobs')[0], 403)
+            self.assertEqual(self.request({**data,'reportId':'foreign'}, path='/api/semantic-jobs')[0], 400)
+            for portal, market in [(self.portal,'Wildberries'),(self.ozon,'Ozon')]:
+                status, result = self.request({**data,'portalId':portal}, path='/api/semantic-jobs')
+                self.assertEqual(status, 200)
+                self.assertEqual(result['semanticCore']['marketplace'], market)
+                self.assertEqual(result['semanticCore']['allKeywords'][0]['query'], 'средство от моли')
+            with patch.dict(server.WORKFLOW_REQUESTS, {'owner':[time.monotonic()]*120}):
+                self.assertEqual(self.request(data, path='/api/semantic-jobs')[0], 429)
+        with server.connect_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM semantic_jobs').fetchone()[0], 0)
+            saved = json.loads(db.execute('SELECT payload_json FROM card_drafts WHERE portal_id=?', (self.portal,)).fetchone()[0])
+            self.assertNotIn('shortlist', saved['meta']['semanticCoreReports'][0]['semanticCore'])
+
     def test_durable_api_create_discover_cancel_and_resume_are_scoped(self):
         with server.connect_db() as db:
             db.execute("UPDATE portals SET cards_snapshot_json=? WHERE id=?", (json.dumps([CARD]), self.portal))

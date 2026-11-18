@@ -12,6 +12,7 @@ import io
 import html
 import http.client
 import json
+import math
 import mimetypes
 import os
 import re
@@ -27,6 +28,7 @@ import contextvars
 import unicodedata
 import uuid
 import zipfile
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from email.utils import parsedate_to_datetime
 from email.message import EmailMessage
@@ -4529,6 +4531,12 @@ def normalize_ozon_semantic_keyword(item, fallback_source=""):
       payload["relevance"] = item["relevance"]
     if item.get("manualDecision") in ("included", "excluded"):
       payload["manualDecision"] = item["manualDecision"]
+    if item.get('selectionStatus') in ('candidate', 'duplicate', 'review'):
+      payload['selectionStatus'] = item['selectionStatus']
+      for key, limit in (('selectionGroup', 40), ('selectionReason', 500), ('selectionRepresentative', 160)):
+        if item.get(key): payload[key] = audit_str(item[key], limit)
+      if audit_int(item.get('selectionRank'), 0) > 0:
+        payload['selectionRank'] = min(5000, audit_int(item['selectionRank'], 0))
     evidence = item.get("relevanceEvidence")
     if isinstance(evidence, list):
       payload["relevanceEvidence"] = [
@@ -4639,6 +4647,8 @@ def normalize_ozon_semantic_payload(payload):
       "relevanceCounts": {status: sum(row.get("relevance") == status for row in rows)
                           for status in ("relevant", "disputed", "irrelevant")},
     }
+    if shortlist := semantic_normalize_shortlist(core.get('shortlist')):
+      normalized['semanticCore']['shortlist'] = shortlist
     for key in ('rankedKeywords','rankingSource','rankingPeriod','rankingWarning'):
       if key in core:
         if key=='rankedKeywords': value=normalize_ozon_semantic_keywords(core[key])
@@ -12600,21 +12610,30 @@ def semantic_core_current_sources(core):
   return output
 
 
-def stored_semantic_reoptimization_keywords(portal_id, card_key):
+def semantic_has_working_shortlist(payload):
+  meta = payload.get('meta') if isinstance(payload.get('meta'), dict) else {}
+  return any(semantic_normalize_shortlist((report.get('semanticCore') or {}).get('shortlist'))
+             for report in meta.get('semanticCoreReports') or [] if isinstance(report, dict))
+
+
+def stored_semantic_reoptimization_keywords(portal_id, card_key, selected_override=None):
   payload = stored_card_draft_payload(portal_id, card_key)
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
   selected_sources = []
   current_sources = []
   removal_sources = []
+  short = semantic_has_working_shortlist(payload)
 
   final_export = meta.get("semanticCoreFinal") if isinstance(meta.get("semanticCoreFinal"), dict) else {}
-  if final_export:
+  if final_export and not short:
     final_selected, final_current, final_remove = semantic_final_keyword_lists(final_export)
     selected_sources.extend(final_selected)
     current_sources.extend(final_current)
     removal_sources.extend(final_remove)
 
-  if isinstance(meta.get("semanticCoreSelected"), list):
+  if isinstance(selected_override, list) and short:
+    selected_sources.extend(selected_override)
+  elif isinstance(meta.get("semanticCoreSelected"), list):
     selected_sources.extend(meta.get("semanticCoreSelected"))
   if isinstance(meta.get("semanticCoreRemoval"), list):
     removal_sources.extend(meta.get("semanticCoreRemoval"))
@@ -12622,7 +12641,7 @@ def stored_semantic_reoptimization_keywords(portal_id, card_key):
   for report in meta.get("semanticCoreReports") if isinstance(meta.get("semanticCoreReports"), list) else []:
     if not isinstance(report, dict):
       continue
-    if isinstance(report.get("selected"), list):
+    if isinstance(report.get("selected"), list) and not short:
       selected_sources.extend(report.get("selected"))
     core = report.get("semanticCore") if isinstance(report.get("semanticCore"), dict) else {}
     current_sources.extend(semantic_core_current_sources(core))
@@ -12643,6 +12662,9 @@ def stored_semantic_reoptimization_keywords(portal_id, card_key):
 def stored_semantic_title_keyword_rows(portal_id, card_key, limit=360):
   payload = stored_card_draft_payload(portal_id, card_key)
   meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  if semantic_has_working_shortlist(payload):
+    selected, current, _ = stored_semantic_reoptimization_keywords(portal_id, card_key)
+    return content_merge_keyword_rows(selected, current, limit=limit)
   sources = []
   removal_sources = []
 
@@ -18199,6 +18221,174 @@ def semantic_classify_query_batch(card, rows):
   return output
 
 
+SEMANTIC_SHORTLIST_VERSION = 'meaning-shortlist-v1'
+SEMANTIC_SHORTLIST_SIZE = 30
+
+
+@lru_cache(maxsize=50000)
+def semantic_shortlist_word(word):
+  from automatic_seo import russian_morphology
+  morph = russian_morphology()
+  parses = morph.parse(word)
+  # Prefer ordinary words over homonymous surnames (пена/Пен).
+  ordinary = [p for p in parses if not ({'Name', 'Surn', 'Patr', 'Geox'} & p.tag.grammemes)]
+  parsed = (ordinary or parses)[0]
+  return parsed.normal_form, parsed.tag.POS, morph.word_is_known(word), tuple(ordinary or parses)
+
+
+def semantic_shortlist_tokens(text):
+  return re.findall(r'\d+(?:[.,]\d+)?|[^\W\d_]+', str(text).casefold().replace('ё', 'е'))
+
+
+def semantic_prepare_shortlist(core, card):
+  """Local, reversible selection metadata; never rewrite queries or model decisions."""
+  rows = core.get('allKeywords') or []
+  facts = semantic_card_content_texts(card)
+  fact_words = set(semantic_shortlist_tokens(' '.join(facts.values())))
+  protected = set(semantic_shortlist_tokens(' '.join(str(card.get(k) or '') for k in
+                   ('brand', 'vendorCode', 'offerId', 'sku', 'nmID'))))
+  title_lemmas = {semantic_shortlist_word(w)[0] for w in semantic_shortlist_tokens(facts['title'])}
+  prepositions = {'для', 'от', 'без', 'с', 'со', 'из', 'к', 'ко', 'в', 'во', 'на', 'под', 'над', 'у', 'по', 'за', 'между'}
+  annotations, groups, features = {}, {}, {}
+  for row in rows:
+    if row.get('relevance') != 'relevant':
+      continue
+    key = audit_normalized(row['query'])
+    words = semantic_shortlist_tokens(row['query'])
+    parsed = [semantic_shortlist_word(w) for w in words]
+    lemmas = [p[0] if not re.fullmatch(r'\d+(?:[.,]\d+)?', w) else w.replace(',', '.')
+              for w, p in zip(words, parsed)]
+    nouns = [i for i, p in enumerate(parsed) if p[1] == 'NOUN']
+    relations = []
+    for i, word in enumerate(words):
+      if word in prepositions:
+        stop = next((j for j in range(i+1, len(words)) if words[j] in prepositions
+                     or re.fullmatch(r'\d+(?:[.,]\d+)?', words[j])), len(words))
+        relations.append((word, tuple(sorted(lemmas[j] for j in nouns if i < j < stop))))
+      if re.fullmatch(r'\d+(?:[.,]\d+)?', word):
+        head = next((j for j in nouns if i < j <= i+3), None)
+        relations.append(('number', lemmas[i], lemmas[head] if head is not None else ''))
+      if word in {'не', 'ни'}:
+        relations.append((word, lemmas[i+1] if i+1 < len(words) else ''))
+      # Dative recipients carry a different intent even without a preposition.
+      if parsed[i][1] == 'NOUN' and all(p.tag.case == 'datv' for p in parsed[i][3]):
+        relations.append(('recipient', lemmas[i]))
+    signature = semantic_json([sorted(lemmas), sorted(relations, key=str)])
+    group = hashlib.sha256(signature.encode()).hexdigest()[:24]
+    unknown = [w for w, p in zip(words, parsed) if not p[2] and not re.fullmatch(r'\d+(?:[.,]\d+)?', w)
+               and w not in protected and w not in fact_words]
+    # Proper-name-only dictionary parses are not proof that a truncated word is valid.
+    fragments = [w for w, p in zip(words, parsed) if w not in protected and w not in fact_words
+                 and p[3] and all({'Name', 'Surn', 'Patr'} & v.tag.grammemes for v in p[3])]
+    reason = ''
+    if unknown or fragments:
+      reason = 'Проверьте написание: ' + ', '.join(dict.fromkeys([*unknown, *fragments])) + '.'
+    if not nouns and not any(w in protected for w in words):
+      reason = reason or 'Неполный запрос: не указан товар или предмет назначения.'
+    if words and words[-1] in prepositions:
+      reason = reason or 'Неполный запрос: оборвано назначение или свойство.'
+    # Only reject unambiguous disagreement next to a noun; distant modifiers can bind another noun.
+    for i, p in enumerate(parsed):
+      if p[1] != 'ADJF':
+        continue
+      adjacent = [j for j in (i-1, i+1) if j in nouns]
+      if adjacent and not any(
+        (a.tag.number == n.tag.number or not a.tag.number or not n.tag.number)
+        and (a.tag.gender == n.tag.gender or a.tag.number == 'plur' or not a.tag.gender or not n.tag.gender)
+        and (a.tag.case == n.tag.case or not a.tag.case or not n.tag.case)
+        for j in nouns for a in p[3] if a.tag.POS == 'ADJF'
+        for n in parsed[j][3] if n.tag.POS == 'NOUN'):
+        reason = reason or 'Ненормальная словоформа: проверьте согласование слов.'
+    if any(words[i:i+2] == words[j:j+2] for i in range(len(words)-1) for j in range(i+2, len(words)-1)):
+      reason = reason or 'В запросе повторяется один и тот же оборот.'
+    annotations[key] = {'selectionGroup': group, 'selectionStatus': 'review' if reason else 'candidate',
+                        'selectionReason': reason}
+    content = {lemma for lemma, p in zip(lemmas, parsed) if p[1] not in ('PREP', 'CONJ', 'PRCL')}
+    frequency = audit_int(row.get('ozonCount' if core.get('marketplace') == 'Ozon' else 'wbCount'), 0)
+    first_relation = next((i for i, w in enumerate(words) if w in prepositions), len(words))
+    nominative = (any(any(p.tag.case == 'nomn' for p in parsed[i][3]) for i in nouns if i < first_relation)
+                  and all(any(v.tag.case == 'nomn' for v in p[3]) for i, p in enumerate(parsed)
+                          if i < first_relation and p[1] == 'ADJF'))
+    features[key] = (content, frequency, nominative)
+    if not reason:
+      groups.setdefault(group, []).append(row)
+  representatives = []
+  for group, variants in groups.items():
+    representative = max(variants, key=lambda row: (
+      features[audit_normalized(row['query'])][2],
+      features[audit_normalized(row['query'])][1], -len(row['query']), audit_normalized(row['query'])))
+    representatives.append(representative)
+    for row in variants:
+      key = audit_normalized(row['query'])
+      annotations[key]['selectionRepresentative'] = representative['query']
+      if row is not representative:
+        annotations[key].update(selectionStatus='duplicate', selectionReason='Тот же смысл: ' + representative['query'])
+  # Relevance is already verified. Product fit and new facets precede frequency;
+  # frequency is never summed across variants and never borrowed from another market.
+  max_demand = max((math.log1p(features[audit_normalized(r['query'])][1]) for r in representatives), default=1) or 1
+  covered, ranked = set(), []
+  def score(row):
+    content, frequency, _ = features[audit_normalized(row['query'])]
+    fit = min(3, len(content & title_lemmas)) / 3
+    novelty = len(content - covered - title_lemmas) / max(1, len(content))
+    return (fit + .35 * novelty + .3 * math.log1p(frequency) / max_demand
+            - .02 * max(0, len(content)-6), frequency, audit_normalized(row['query']))
+  # Bound the diverse prefix: expanding a 5000-row reserve must not cost O(n²).
+  while representatives and len(ranked) < 60:
+    row = max(representatives, key=score)
+    representatives.remove(row)
+    key = audit_normalized(row['query'])
+    covered.update(features[key][0])
+    annotations[key]['selectionRank'] = len(ranked) + 1
+    ranked.append(key)
+  for row in sorted(representatives, key=score, reverse=True):
+    key = audit_normalized(row['query'])
+    annotations[key]['selectionRank'] = len(ranked) + 1
+    ranked.append(key)
+  annotated = [{**row, **annotations.get(audit_normalized(row['query']), {})} for row in rows]
+  return {**core, 'allKeywords': annotated, 'shortlist': {
+    'version': SEMANTIC_SHORTLIST_VERSION, 'limit': SEMANTIC_SHORTLIST_SIZE,
+    'uniqueCount': len(ranked), 'duplicateCount': sum(a['selectionStatus']=='duplicate' for a in annotations.values()),
+    'reviewCount': sum(a['selectionStatus']=='review' for a in annotations.values()),
+  }}
+
+
+def semantic_normalize_shortlist(value):
+  if not isinstance(value, dict) or value.get('version') != SEMANTIC_SHORTLIST_VERSION:
+    return None
+  return {'version': SEMANTIC_SHORTLIST_VERSION,
+          'limit': min(5000, max(30, audit_int(value.get('limit'), 30))),
+          **{key: min(5000, max(0, audit_int(value.get(key), 0))) for key in ('uniqueCount','duplicateCount','reviewCount')}}
+
+
+def semantic_shortlist_preview(portal_id, card_key, report_id, user):
+  """Read only the authorized stored source. Client facts/query decisions are not used."""
+  if not user_can_access_portal(user, portal_id):
+    raise PermissionError('forbidden')
+  with connect_db() as db:
+    portal = db.execute('SELECT * FROM portals WHERE id=? AND is_active=1', (portal_id,)).fetchone()
+    if not portal:
+      raise ValueError('semantic_card_not_found')
+    if portal['marketplace'] == 'Ozon':
+      ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
+    card = next((c for c in wb_snapshot_cards_from_row(portal) if semantic_job_key(c) == card_key), None)
+    if not card:
+      raise ValueError('semantic_card_not_found')
+    table = 'ozon_semantic_drafts' if portal['marketplace'] == 'Ozon' else 'card_drafts'
+    draft = db.execute(f'SELECT payload_json FROM {table} WHERE portal_id=? AND card_key=?', (portal_id, card_key)).fetchone()
+    payload = json.loads(draft['payload_json']) if draft else {}
+    if portal['marketplace'] == 'Ozon':
+      core = payload.get('semanticCore') or {}
+    else:
+      core = next((r.get('semanticCore') or {} for r in (payload.get('meta') or {}).get('semanticCoreReports') or []
+                   if r.get('id') == report_id), {})
+    if core.get('relevanceVersion') != SEMANTIC_RELEVANCE_VERSION:
+      raise ValueError('semantic_shortlist_source_missing')
+    if len(core.get('allKeywords') or []) > 5000:
+      raise ValueError('semantic_relevance_too_many_queries')
+  return semantic_prepare_shortlist({**core, 'marketplace': portal['marketplace']}, card)
+
+
 def semantic_relevance_result(result, card, rows):
   core = dict(result["semanticCore"])
   if core.get("marketplace") == "Ozon":
@@ -18216,8 +18406,9 @@ def semantic_relevance_result(result, card, rows):
     allKeywords=rows, current=current, recommended=recommended, missing=[],
     totalKeywords=len(rows),
     coveragePercent=round(len(current) / len(rows) * 100) if rows else None,
-    reason="Запросы MPStats проверены по названию, описанию и характеристикам. Релевантные включены в подборку; спорные требуют решения специалиста.",
+    reason="Запросы MPStats проверены по содержанию карточки. Для работы отобраны до 30 разных запросов; список можно расширить из резерва.",
   )
+  core = semantic_prepare_shortlist(core, card)
   return {**result, "status": "loaded" if rows else "empty", "semanticCore": core}
 
 
@@ -18316,7 +18507,9 @@ def semantic_payload_state(payload, marketplace):
     for row in [*(core.get('decisions') or []), *(core.get('allKeywords') or [])]:
       if row.get('manualDecision') in ('included', 'excluded'):
         decisions[audit_normalized(row['query'])] = row['manualDecision']
-  return {'selected': selected, 'removal': removal, 'decisions': decisions}
+  active = next((core for core in reversed(cores) if semantic_normalize_shortlist(core.get('shortlist'))), {})
+  return {'selected': selected, 'removal': removal, 'decisions': decisions,
+          'shortlist': semantic_normalize_shortlist(active.get('shortlist')), 'seedQuery': active.get('seedQuery', '')}
 
 
 def semantic_compact_state(state):
@@ -18341,6 +18534,8 @@ def semantic_compact_state(state):
       elif kind == 'decisions':
         raise ValueError('invalid_semantic_selection')
       output[kind].append(clean)
+  if shortlist := semantic_normalize_shortlist(state.get('shortlist')):
+    output.update(shortlist=shortlist, seedQuery=audit_str(state.get('seedQuery'), 240))
   return output
 
 
@@ -18368,15 +18563,20 @@ def semantic_merge_working_state(payload, request, marketplace):
         if (key in current) == (key in before) and latest['decisions'].get(key) == (base.get('decisions') or {}).get(key):
           decisions[key] = 'excluded'
   decision_rows = [{'query': key, 'manualDecision': value} for key, value in decisions.items() if value in ('included', 'excluded')]
+  policy = {}
+  if initial.get('shortlist'):
+    current_policy = latest.get('shortlist')
+    changed = latest.get('seedQuery') == initial.get('seedQuery') and current_policy != base.get('shortlist')
+    policy = {'shortlist': current_policy if changed else initial['shortlist'], 'seedQuery': initial.get('seedQuery', '')}
   if marketplace == 'Ozon':
     core = payload.get('semanticCore') or {}
-    core = {**core, 'decisions': decision_rows, 'allKeywords': [
+    core = {**core, **policy, 'decisions': decision_rows, 'allKeywords': [
       {**row, **({'manualDecision': decisions[audit_normalized(row['query'])]} if audit_normalized(row['query']) in decisions else {})}
       for row in core.get('allKeywords') or []]}
     return {**payload, **merged, 'semanticCore': core}
   meta = payload.get('meta') or {}
   return {**payload, 'meta': {**meta, 'semanticCoreSelected': merged['selected'], 'semanticCoreRemoval': merged['removal'],
-          'semanticCoreReports': [{'semanticCore': {'decisions': decision_rows}}, *(meta.get('semanticCoreReports') or [])]}}
+          'semanticCoreReports': [{'semanticCore': {**policy, 'decisions': decision_rows}}, *(meta.get('semanticCoreReports') or [])]}}
 
 
 def semantic_create_job(portal_id, card, query, user, refresh=False, source=None, selection_state=None, workflow_batch=None):
@@ -18432,7 +18632,8 @@ def semantic_create_job(portal_id, card, query, user, refresh=False, source=None
       request['selectionState'] = semantic_compact_state(selection_state)
       base = semantic_payload_state(json.loads(draft['payload_json']) if draft else {}, portal['marketplace'])
       request['baseState'] = {'selected': [audit_normalized(row['query']) for row in base['selected']],
-                              'removal': [audit_normalized(row['query']) for row in base['removal']], 'decisions': base['decisions']}
+                              'removal': [audit_normalized(row['query']) for row in base['removal']], 'decisions': base['decisions'],
+                              'shortlist': base['shortlist']}
     db.execute('INSERT INTO semantic_jobs(id,portal_id,card_key,user_login,marketplace,title,query_text,request_json,source_json,facts_hash,model_key,created_at,updated_at,scheduled_at,total) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                (job_id, int(portal_id), key, user_login_value(user), portal['marketplace'], audit_str(stored_card.get('title'), 240), request['query'], semantic_json(request),
                 semantic_json(source) if source is not None else None, semantic_facts_hash(stored_card), semantic_model_key(),
@@ -18506,10 +18707,33 @@ def semantic_reconcile_result(core, payload, marketplace):
   existing = {audit_normalized(row['query']) for row in [*core.get('current', []), *core.get('rankedKeywords', [])]}
   removed = {audit_normalized(row['query']) for row in removal}
   chosen = [row for row in selected if audit_normalized(row['query']) not in source_keys and audit_normalized(row['query']) not in removed]
+  shortlist = semantic_normalize_shortlist(core.get('shortlist'))
+  automatic_keys = None
+  if shortlist:
+    # Expansion survives a new collection of the same seed; old cores are not migrated here.
+    old_policy = next((semantic_normalize_shortlist(old.get('shortlist')) for old in reversed(previous)
+                       if audit_normalized(old.get('seedQuery')) == audit_normalized(core.get('seedQuery'))
+                       and semantic_normalize_shortlist(old.get('shortlist'))), None)
+    if old_policy:
+      shortlist['limit'] = old_policy['limit']
+    occupied = {row.get('selectionGroup') for row in rows if audit_normalized(row['query']) in existing} - {None, ''}
+    manual_groups = {row.get('selectionGroup') for row in rows if row.get('manualDecision') == 'included'} - {None, ''}
+    pool = sorted((row for row in rows if row.get('selectionStatus') == 'candidate'
+                   and row.get('selectionGroup') not in occupied
+                   and audit_normalized(row['query']) not in existing | removed
+                   and audit_int(row.get('ozonCount' if marketplace == 'Ozon' else 'wbCount'), 0) > 0),
+                  key=lambda row: audit_int(row.get('selectionRank'), 5001))
+    automatic_keys = {audit_normalized(row['query']) for row in pool[:shortlist['limit']]}
   chosen.extend(row for row in rows if audit_normalized(row['query']) not in existing | removed
-                and (audit_int(row.get('ozonCount'), 0) > 0 or (marketplace != 'Ozon' and audit_int(row.get('wbCount'), 0) > 0))
+                and ((audit_int(row.get('ozonCount' if marketplace == 'Ozon' else 'wbCount'), 0) > 0) if shortlist else
+                     (audit_int(row.get('ozonCount'), 0) > 0 or (marketplace != 'Ozon' and audit_int(row.get('wbCount'), 0) > 0)))
                 and row.get('manualDecision') != 'excluded'
-                and (row['relevance'] == 'relevant' or row['relevance'] == 'disputed' and row.get('manualDecision') == 'included'))
+                and (row['relevance'] == 'relevant' or row['relevance'] == 'disputed' and row.get('manualDecision') == 'included')
+                and (automatic_keys is None or (audit_normalized(row['query']) in automatic_keys and row.get('selectionGroup') not in manual_groups)
+                     or row.get('manualDecision') == 'included'))
+  if shortlist:
+    core = {**core, 'shortlist': shortlist}
+    chosen.sort(key=lambda row: audit_int(row.get('selectionRank'), 5001))
   return {**core, 'allKeywords': rows, 'decisions': [{'query': key, 'manualDecision': value} for key, value in decisions.items()]}, chosen, removal
 
 
@@ -21706,7 +21930,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
   current = content_keywords_from_payload(current_keywords, limit=140)
   remove = content_keywords_from_payload(remove_keywords, limit=80)
   desired = content_keywords_from_payload(desired_keywords, limit=80)
-  stored_selected, stored_current, stored_remove = ([], [], []) if frozen_semantic else stored_semantic_reoptimization_keywords(portal_id, card_key)
+  stored_selected, stored_current, stored_remove = ([], [], []) if frozen_semantic else stored_semantic_reoptimization_keywords(portal_id, card_key, selected_override=selected_keywords)
   remove = content_merge_keyword_rows(remove, stored_remove, limit=100)
   remove_keys = {audit_normalized(item.get("query")) for item in remove}
   selected = [
@@ -26667,6 +26891,10 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       job_id = audit_str(payload.get("jobId") or payload.get("job_id"), 64)
       if method == "GET":
         result = {"job": semantic_get_job(job_id, portal_id, user)} if job_id else semantic_list_jobs(portal_id, user, draft_card_key(payload.get("cardKey") or payload.get("card_key")))
+      elif payload.get('action') == 'shortlist':
+        workflow_request_guard(user, self.headers.get('Origin'), self.headers.get('Host'))
+        result = {'semanticCore': semantic_shortlist_preview(portal_id,
+          draft_card_key(payload.get('cardKey')), audit_str(payload.get('reportId'), 160), user)}
       elif payload.get("action", "start") == "start":
         card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
         result = {"job": semantic_create_job(portal_id, card, audit_str(payload.get("query"), 240), user, bool(payload.get("refresh")), selection_state=payload.get("selectionState"))}
@@ -26677,7 +26905,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       return True
     except ValueError as exc:
       code = str(exc)
-      self.send_json(HTTPStatus.NOT_FOUND if code == "semantic_relevance_job_not_found" else HTTPStatus.CONFLICT if code == "semantic_card_busy" else HTTPStatus.BAD_REQUEST, {"error": code})
+      self.send_json(getattr(exc, 'status', HTTPStatus.NOT_FOUND if code == "semantic_relevance_job_not_found" else HTTPStatus.CONFLICT if code == "semantic_card_busy" else HTTPStatus.BAD_REQUEST), {"error": code})
       return True
     self.send_json(HTTPStatus.OK, result)
     return True

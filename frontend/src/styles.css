@@ -8182,6 +8182,9 @@ tr:last-child td {
 .semantic-relevance-panel .semantic-keyword-main > span { font-size: 13px; overflow-wrap: anywhere; }
 .semantic-relevance-panel .semantic-keyword-main > em { white-space: normal; overflow-wrap: anywhere; }
 .semantic-relevance-panel .semantic-keyword > button { flex-shrink: 0; }
+.semantic-shortlist-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; margin: 12px 0; border: 1px solid var(--line, #e2e8f0); border-radius: 12px; }
+.semantic-shortlist-controls > p { flex-basis: 100%; margin: 0 0 4px; color: var(--muted, #64748b); overflow-wrap: anywhere; }
+.semantic-shortlist-controls .btn { white-space: normal; }
 .service-guide { max-width: 1280px; margin: 0 auto; padding: 28px; color: #243247; }
 .guide-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
 .guide-header h1 { margin: 6px 0 12px; font-size: clamp(28px, 3vw, 40px); line-height: 1.15; letter-spacing: -.03em; }

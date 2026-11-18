@@ -230,6 +230,29 @@ class SemanticJobsTest(unittest.TestCase):
              patch.object(server, 'semantic_classify_query_batch', side_effect=AssertionError('persistent decision must be reused')):
             self.assertEqual(self.finish(new)['status'], 'ready')
 
+    def test_unsaved_shortlist_expansion_survives_worker_and_later_saved_expansion_wins(self):
+        self.assertEqual(self.finish(self.create(result=source(65)))['status'], 'ready')
+        payload = server.get_card_draft(self.wb, '1001', USER)['draft']
+        policy = payload['meta']['semanticCoreReports'][0]['semanticCore']['shortlist']
+        initial = {'selected':payload['meta']['semanticCoreSelected'], 'removal':[], 'decisions':[],
+                   'shortlist':{**policy,'limit':50}, 'seedQuery':'от моли'}
+        job = self.create(result=source(65), selection_state=initial)
+        self.assertEqual(self.finish(job)['status'], 'ready')
+        payload = server.get_card_draft(self.wb, '1001', USER)['draft']
+        self.assertEqual(len(payload['meta']['semanticCoreSelected']), 50)
+        self.assertEqual(payload['meta']['semanticCoreReports'][0]['semanticCore']['shortlist']['limit'], 50)
+        active = payload['meta']['semanticCoreReports'][0]['semanticCore']
+        initial['shortlist']['limit'] = 60
+        initial['selected'] = server.semantic_reconcile_result({**active, 'shortlist':initial['shortlist']}, {}, 'Wildberries')[1]
+        job = self.create(result=source(65), selection_state=initial)
+        active['shortlist']['limit'] = 65
+        payload['meta']['semanticCoreSelected'] = server.semantic_reconcile_result(active, {}, 'Wildberries')[1]
+        server.save_card_draft(self.wb, '1001', '1001', '', payload, USER)
+        self.assertEqual(self.finish(job)['status'], 'ready')
+        saved = server.get_card_draft(self.wb, '1001', USER)['draft']['meta']
+        self.assertEqual(saved['semanticCoreReports'][0]['semanticCore']['shortlist']['limit'], 65)
+        self.assertEqual(len(saved['semanticCoreSelected']), 65)
+
     def test_1660_queries_finish_without_truncation_and_repeat_uses_cache(self):
         job = self.create(result=source(1660))
         with patch.object(server, 'semantic_classify_query_batch', side_effect=classify) as model:
@@ -238,8 +261,9 @@ class SemanticJobsTest(unittest.TestCase):
         self.assertEqual([len(call.args[1]) for call in model.call_args_list], [32] * 51 + [28])
         self.assertEqual(done['completed'], 1660)
         saved = server.get_card_draft(self.wb, '1001', USER)['draft']['meta']
-        self.assertEqual(len(saved['semanticCoreSelected']), 1660)
+        self.assertEqual(len(saved['semanticCoreSelected']), 30)
         self.assertEqual(len(saved['semanticCoreReports'][0]['semanticCore']['allKeywords']), 1660)
+        self.assertEqual(saved['semanticCoreReports'][0]['semanticCore']['shortlist']['limit'], 30)
         with patch.object(server, 'semantic_classify_query_batch', side_effect=AssertionError('must reuse decisions')):
             self.assertEqual(self.finish(self.create(result=source(1660)))['status'], 'ready')
 

@@ -4613,6 +4613,10 @@ function compactSemanticCore(core) {
         ["relevance", item.relevance],
         ["relevanceReason", item.relevanceReason],
         ["manualDecision", item.manualDecision],
+        ["selectionGroup", item.selectionGroup],
+        ["selectionStatus", item.selectionStatus],
+        ["selectionReason", item.selectionReason],
+        ["selectionRepresentative", item.selectionRepresentative],
       ].forEach(([field, value]) => {
         const text = String(value || "").trim();
         if (text) compactItem[field] = text;
@@ -4623,6 +4627,7 @@ function compactSemanticCore(core) {
         ["results", Number(item.results || 0)],
         ["totalFound", Number(item.totalFound || 0)],
         ["uniqueDays", Number(item.uniqueDays || 0)],
+        ["selectionRank", Number(item.selectionRank || 0)],
       ].forEach(([field, value]) => {
         if (Number.isFinite(value) && value > 0) compactItem[field] = value;
       });
@@ -4659,6 +4664,7 @@ function compactSemanticCore(core) {
     source: core.source || "mpstats-expanding",
     marketplace: core.marketplace,
     decisions: core.decisions || [],
+    ...(core.shortlist ? { shortlist: core.shortlist } : {}),
     seedQuery: core.seedQuery || "",
     seedQueries: Array.isArray(core.seedQueries) ? core.seedQueries.slice(0, 6) : [],
     period: core.period || {},
@@ -12078,6 +12084,14 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false, taskRun = nul
     setDirty(true);
   }
 
+  function stageOzonShortlist(nextCore, nextSelected) {
+    if (saveDisabled) return;
+    setSemanticCore(nextCore);
+    setSavedSelectedRows(nextSelected);
+    setSelectedQueries(nextSelected.map(row => row.query));
+    setDirty(true);
+  }
+
   async function previewOzonSemanticImport(file) {
     if (!file || !portal?.id || portal.isDemo || !cardKey) return;
     setSemanticImportStatus("reading");
@@ -12339,6 +12353,9 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false, taskRun = nul
         </div>
         <SemanticRelevancePanel core={semanticCore} selected={selectedRows} existingKeys={new Set(currentRows.map(semanticQueryKey))}
           removalKeys={removalSet} search={search} excludeWords={excludeWords} readOnly={saveDisabled}
+          shortlistKey={`${portal?.id}:${cardKey}`}
+          onPrepareShortlist={async () => (await apiRequest("/api/semantic-jobs", { method: "POST", body: JSON.stringify({ action: "shortlist", portalId: portal.id, cardKey }) })).semanticCore}
+          onChangeShortlist={stageOzonShortlist}
           onInclude={(row) => decideQuery(row, "included")} onExclude={(row) => decideQuery(row, "excluded")}
           onToggleRemoval={(row) => toggleRemoval(row.query)}
           formatMeta={(row) => Number(row.ozonCount) > 0 ? `Частота Ozon: ${formatNumber(row.ozonCount)}` : "Частота Ozon не подтверждена"} />
@@ -17990,7 +18007,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
       return;
     }
     setSemanticCoreError("");
-    stageSemanticSelection([...semanticCoreSelected, item]);
+    const groupKeys = item.selectionGroup ? new Set((semanticCore?.allKeywords || [])
+      .filter(row => row.selectionGroup === item.selectionGroup).map(semanticQueryKey)) : new Set();
+    stageSemanticSelection([...semanticCoreSelected.filter(row => !groupKeys.has(semanticQueryKey(row))), item]);
     recordSemanticRelevanceDecision(item, "included");
   }
 
@@ -18086,6 +18105,18 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
     setSemanticCore(nextCore);
     setSemanticCoreReports((reports) => reports.map((report) => report.id === semanticActiveReportId
       ? { ...report, semanticCore: compactSemanticCore(nextCore) } : report));
+  }
+
+  function stageSemanticShortlist(nextCore, nextSelected) {
+    if (semanticReadOnly) return;
+    // The panel receives a display core with the working selection in current.
+    // Persist only actual current keys; otherwise the old 190 selections reappear.
+    const sourceCore = { ...nextCore, current: (nextCore.current || []).filter(row => row.status !== "selected") };
+    stageSemanticSelection(nextSelected);
+    setSemanticCore(sourceCore);
+    setSemanticCoreReports(reports => reports.map((report, index) =>
+      report.id === semanticActiveReportId || (!semanticActiveReportId && index === 0)
+        ? { ...report, semanticCore: compactSemanticCore(sourceCore), selected: normalizeSemanticSelection(nextSelected) } : report));
   }
 
   function toggleSemanticRemovalKeyword(item) {
@@ -19519,7 +19550,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   title="Порядок работы с СЯ"
                   items={[
                     "Введите стартовый запрос и нажмите Enter или Подобрать запросы: MPStats соберет новую выдачу именно по этому запросу.",
-                    "После подбора система проверит запросы по названию, описанию и характеристикам. Релевантные сразу включены: при необходимости исключите лишние. Спорные можно добавить вручную.",
+                    "После проверки по содержанию карточки система отберёт до 30 разных запросов без повторяющихся словоформ и сомнительного написания. Резерв можно добавить по одному или расширить список. Спорные требуют решения специалиста.",
                     "Когда выбор сохранен, можно переоптимизировать описание, сохранить подборку в архив или добавить версию в итоговое СЯ кабинета.",
                   ]}
                 />
@@ -19654,6 +19685,9 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
 	                    onTakeKeyword={takeSemanticKeyword}
 	                    onRemoveKeyword={removeSemanticKeyword}
 	                    onToggleRemoveKeyword={toggleSemanticRemovalKeyword}
+	                    shortlistKey={`${portal?.id}:${card?.nmID}:${semanticActiveReportId}`}
+	                    onPrepareShortlist={async () => (await apiRequest("/api/semantic-jobs", { method: "POST", body: JSON.stringify({ action: "shortlist", portalId: portal.id, cardKey: card.nmID, reportId: semanticActiveReportId }) })).semanticCore}
+	                    onChangeShortlist={stageSemanticShortlist}
 	                    readOnly={semanticReadOnly}
 	                  />
                 ) : (
@@ -19691,7 +19725,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </button> : null}
                   <span
                     className="semantic-help-icon"
-                    title="Подбор проверяет запросы по содержанию карточки. Релевантные включаются автоматически, спорные требуют решения специалиста. Затем сохраните текущий выбор."
+                    title="Подбор проверяет запросы по содержанию карточки и предлагает до 30 разных запросов. Список можно расширить из резерва. Затем сохраните текущий выбор."
                     aria-label="Как работает подбор запросов"
                   >
                     <HelpCircle size={15} />
@@ -21901,7 +21935,7 @@ function SemanticWorkSummary({ title, copy, items }) {
   );
 }
 
-function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", removalRows = [], onTakeKeyword = null, onRemoveKeyword = null, onToggleRemoveKeyword = null, readOnly = false }) {
+function SemanticCorePanel({ semanticCore, compact = false, standalone = false, subjectFilter = "", search = "", excludeWords = "", removalRows = [], onTakeKeyword = null, onRemoveKeyword = null, onToggleRemoveKeyword = null, readOnly = false, shortlistKey, onPrepareShortlist, onChangeShortlist }) {
   const classified = hasSemanticRelevance(semanticCore);
   const current = Array.isArray(semanticCore?.current) ? semanticCore.current : [];
   const selectedItems = semanticSelectedExportRows(current.filter((item) => item.status === "selected"), semanticCore);
@@ -22088,6 +22122,7 @@ function SemanticCorePanel({ semanticCore, compact = false, standalone = false, 
       {classified && standalone && metricFilter === "all" ? (
         <SemanticRelevancePanel core={semanticCore} selected={selectedItems} existingKeys={existingKeys}
           removalKeys={removalKeys} search={search} subjectFilter={subjectFilter} excludeWords={excludeWords}
+          shortlistKey={shortlistKey} onPrepareShortlist={onPrepareShortlist} onChangeShortlist={onChangeShortlist}
           readOnly={readOnly} onInclude={onTakeKeyword} onExclude={onRemoveKeyword} onToggleRemoval={onToggleRemoveKeyword}
           formatMeta={semanticKeywordMeta} />
       ) : (
