@@ -24596,6 +24596,25 @@ def workflow_public_batch(db, row, detail=False):
   return result
 
 
+def workflow_public_delivery(db, row, manager):
+  data=json.loads(row['payload_json'])
+  result={key:row[key] for key in ('id','batch_id','kind','status','error','created_at','updated_at')}
+  batch=db.execute('SELECT title,generation FROM workflow_batches WHERE id=? AND portal_id=?',(row['batch_id'],row['portal_id'])).fetchone()
+  result['batchTitle']=batch['title'] if batch else ''
+  if row['kind']=='bitrix':
+    login=audit_str(data.get('login'),120)
+    person=db.execute('SELECT full_name FROM users WHERE login=?',(login,)).fetchone()
+    result.update(automatic=True,recipient=login,recipientName=person[0] if person else login,
+                  bitrixUserId=data.get('userId'),good=data.get('good'),total=data.get('total'),generation=data.get('generation'),
+                  previousGeneration=bool(batch and data.get('generation') is not None and data['generation']!=batch['generation']))
+  elif manager:
+    actor=audit_str(data.get('actor'),120)
+    person=db.execute('SELECT full_name FROM users WHERE login=?',(actor,)).fetchone()
+    result.update(automatic=False,recipient=audit_str(data.get('to'),300),subject=audit_str(data.get('subject'),300),
+                  actor=actor,actorName=person[0] if person else actor)
+  return result
+
+
 def workflow_list(portal, user, batch_id=None):
   with semantic_job_connection() as db:
     record,current,manager = workflow_access(db,portal,user)
@@ -24622,7 +24641,7 @@ def workflow_list(portal, user, batch_id=None):
       plans.append({'versions':versions,'id':str(row['period_id']),'version':row['version'],'status':row['status'],**data,'approval':approval})
     events = [dict(r) for r in db.execute('SELECT id,period_id,batch_id,actor,action,details_json,created_at FROM workflow_events WHERE portal_id=? ORDER BY id DESC LIMIT 100',(portal,))]
     for event in events: event['details'] = json.loads(event.pop('details_json'))
-    deliveries=[dict(r) for r in db.execute('SELECT id,batch_id,kind,status,error,created_at FROM workflow_outbox WHERE portal_id=? ORDER BY created_at DESC LIMIT 100',(portal,))]
+    deliveries=[workflow_public_delivery(db,r,manager) for r in db.execute('SELECT * FROM workflow_outbox WHERE portal_id=? ORDER BY created_at DESC LIMIT 100',(portal,))]
     return {'deliveries':deliveries,'plans':plans,'batches':[workflow_public_batch(db,r) for r in visible],'people':people,'team':roles,
             'canManage':manager,'canConfigure':current['user_role']=='admin','login':current['login'],'contact':client_contact_from_json(record['client_contact_json']),
             'taskDescriptions':workflow_task_explanations(record['marketplace']),'taskDescriptionsSource':WORKFLOW_TASK_EXPLANATIONS_SOURCE,

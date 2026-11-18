@@ -7041,14 +7041,14 @@ export default function App() {
     setScreen("card");
   }
 
-  function openOzonCard(card) {
+  function openOzonCard(card, context = {}) {
     setSelectedCard(card);
     setSelectedCardKey(cardDraftKey(card));
     setCardReturnTarget({
-      sellerTab: "cabinet",
-      label: "Карточки Ozon",
+      sellerTab: normalizeSellerTab(context.sellerTab || 'cabinet'),
+      label: context.backLabel || "Карточки Ozon",
     });
-    setTaskRun(null);
+    setTaskRun(context.taskRun?.items?.length ? context.taskRun : null);
     setScreen("ozon-card");
   }
 
@@ -7062,7 +7062,8 @@ export default function App() {
   function openTaskRunIndex(nextTaskRun, nextIndex, notice = "") {
     const item = nextTaskRun.items[nextIndex];
     const cards = cardsForPortal(currentPortal);
-    const nextCard = cards.find((card) => cardMatchesDraftKey(card, item.cardKey)) || null;
+    const nextCard = cards.find((card) => cardMatchesDraftKey(card, item.cardKey)
+      || currentPortal?.marketplace==='Ozon' && ozonCardStableKey(card)===item.cardKey) || null;
     if (!nextCard) {
       setNotice("Карточка из пачки не найдена в текущем списке кабинета.");
       return false;
@@ -7581,6 +7582,8 @@ export default function App() {
             canManage={canManagePortals || canManageOzon || currentUser?.user_role === 'tech' || currentPortal?.teamRoles?.tech === currentUser?.login}
             onBack={backFromCard}
             backLabel={cardReturnTarget.label}
+            taskRun={taskRun}
+            onTaskRunNavigate={navigateTaskRun}
             helpEnabled={helpEnabled}
           />
         ) : null}
@@ -11599,8 +11602,11 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
   );
 }
 
-function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLabel = "Карточки Ozon", helpEnabled = false }) {
-  const [activeTab, setActiveTab] = useState("card");
+function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLabel = "Карточки Ozon", taskRun = null, onTaskRunNavigate, helpEnabled = false }) {
+  const [activeTab, setActiveTab] = useState(taskRun?.workType==='semantic' ? 'semantic' : 'card');
+  const [semanticDirty, setSemanticDirty] = useState(false);
+  const [semanticSaving, setSemanticSaving] = useState(false);
+  const mayLeave = () => !semanticSaving && (!semanticDirty || window.confirm('Текущий выбор СЯ не сохранён. Уйти без сохранения?'));
   const [ozonCardDraft, setOzonCardDraft] = useState(null);
   const [ozonCardDraftStatus, setOzonCardDraftStatus] = useState("idle");
   const rawFields = rawFieldsForCard(card);
@@ -11668,7 +11674,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
           <p>{title} · SKU {sku} · offer ID {offerId} · {category}</p>
         </div>
         <div className="toolbar">
-          <button className="btn ghost" type="button" onClick={onBack}><ArrowLeft size={17} />{backLabel}</button>
+          <button className="btn ghost" type="button" disabled={semanticSaving} onClick={()=>{if(mayLeave())onBack()}}><ArrowLeft size={17} />{backLabel}</button>
           {externalUrl ? <a className="btn" href={externalUrl} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть Ozon</a> : null}
           <Tag tone={issueCount ? "amber" : "green"}>{status}</Tag>
         </div>
@@ -11699,7 +11705,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
           </aside>
 
           <div className="detail-main">
-            <WorkspaceTabs items={ozonCardWorkspaceTabs} active={activeTab} onChange={setActiveTab} className="detail-tabs" ariaLabel="Разделы Ozon-карточки" />
+            <WorkspaceTabs items={ozonCardWorkspaceTabs} active={activeTab} onChange={tab=>{if(tab!==activeTab&&mayLeave()){setSemanticDirty(false);setActiveTab(tab)}}} className="detail-tabs" ariaLabel="Разделы Ozon-карточки" />
             <HelpHint enabled={helpEnabled} title="Ozon-карточка">
               Экран использует сохраненный Ozon snapshot. Аудит, черновики и экспорты Ozon здесь не запускают логику других маркетплейсов.
             </HelpHint>
@@ -11822,7 +11828,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
             ) : null}
 
             {activeTab === "semantic" ? (
-              <OzonSemanticDraftPanel card={card} portal={portal} canManage={canManage} />
+              <OzonSemanticDraftPanel card={card} portal={portal} canManage={canManage} taskRun={taskRun} onTaskRunNavigate={onTaskRunNavigate} onDirtyChange={setSemanticDirty} onSavingChange={setSemanticSaving} />
             ) : null}
 
             {activeTab === "audit" ? (
@@ -11853,7 +11859,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
   );
 }
 
-function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
+function OzonSemanticDraftPanel({ card, portal, canManage = false, taskRun = null, onTaskRunNavigate, onDirtyChange, onSavingChange }) {
   const rawFields = rawFieldsForCard(card);
   const defaultSeed = [card?.brand || rawFields.brand, ozonCardCategory(card), card?.title || rawFields.title || rawFields.name]
     .filter((item) => item && item !== "Не указано")
@@ -11878,6 +11884,7 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
   const [dirty, setDirty] = useState(false);
   const [draftStatus, setDraftStatus] = useState("idle");
   const [draftUpdatedAt, setDraftUpdatedAt] = useState("");
+  const semanticSaveInFlight = useRef(false);
   const [semanticImportStatus, setSemanticImportStatus] = useState("");
   const [semanticImportError, setSemanticImportError] = useState("");
   const [semanticImportPreview, setSemanticImportPreview] = useState(null);
@@ -11893,6 +11900,20 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
   const finalRows = mergeOzonSemanticRows(currentRows, selectedRows)
     .filter((item) => !removalSet.has(semanticQueryKey(item)));
   const finalCount = finalRows.length;
+  const runTotal = taskRun?.items?.length || 0;
+  const runIndex = taskRun?.currentIndex || 0;
+  const runHasNext = runIndex < runTotal - 1;
+  useEffect(()=>{onDirtyChange?.(dirty)},[dirty,onDirtyChange]);
+  useEffect(()=>{onSavingChange?.(draftStatus==='saving')},[draftStatus,onSavingChange]);
+  useEffect(()=>{
+    if(!dirty)return;
+    const warn=event=>{event.preventDefault();event.returnValue=''};
+    window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);
+  },[dirty]);
+  function navigateSemanticCard(delta){
+    if(draftStatus==='saving'||dirty&&!window.confirm('Текущий выбор СЯ не сохранён. Уйти без сохранения?'))return;
+    onTaskRunNavigate?.(delta);
+  }
 
   function applySavedOzonSemanticDraft(saved, updatedAt = "") {
     const selected = normalizeOzonSemanticRows(saved?.selected, "Согласованное СЯ");
@@ -11994,9 +12015,10 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
   }
 
   async function saveSemanticDraft({ finalize = false } = {}) {
-    if (saveDisabled) {
-      return;
+    if (saveDisabled || semanticSaveInFlight.current) {
+      return false;
     }
+    semanticSaveInFlight.current=true;
     setDraftStatus("saving");
     try {
       const exportCore = finalize ? await ensureOzonSemanticRankings(semanticCore,portal.id,card) : semanticCore;
@@ -12020,10 +12042,15 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
           meta: { source: "ozon-semantic-relevance" },
         }),
       });
-      applySavedOzonSemanticDraft(payload?.draft?.draft || {}, payload?.draft?.updatedAt || new Date().toISOString());
+      if(!payload?.draft?.draft || finalize&&!payload.draft.draft.final?.length)throw Error('semantic_save_not_confirmed');
+      applySavedOzonSemanticDraft(payload.draft.draft, payload.draft.updatedAt || new Date().toISOString());
       setDraftStatus("saved");
+      return true;
     } catch {
       setDraftStatus("error");
+      return false;
+    } finally {
+      semanticSaveInFlight.current=false;
     }
   }
 
@@ -12130,6 +12157,16 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
 
   return (
     <section className="workspace-strip ozon-semantic-workspace">
+      {runTotal?<section className="task-run-strip">
+        <div className="task-run-copy"><span>Проверка СЯ · {runIndex+1} из {runTotal}</span><strong>{taskRun.title}</strong></div>
+        <div className="task-run-progress" aria-label={`Карточка ${runIndex+1} из ${runTotal}`}><span style={{width:`${Math.round((runIndex+1)/runTotal*100)}%`}}/></div>
+        <div className="task-run-actions">
+          <button className="btn primary" disabled={saveDisabled||!finalCount} onClick={async()=>{if(await saveSemanticDraft({finalize:true})){if(runHasNext)onTaskRunNavigate?.(1)}}}>{runHasNext?'Добавить в итоговое СЯ и следующая':'Добавить в итоговое СЯ · последняя карточка'}</button>
+          <button className="btn" disabled={!runIndex||draftStatus==='saving'} onClick={()=>navigateSemanticCard(-1)}><ChevronLeft size={17}/>Предыдущая</button>
+          <button className="btn" disabled={!runHasNext||draftStatus==='saving'} onClick={()=>navigateSemanticCard(1)}>Следующая<ChevronRight size={17}/></button>
+        </div>
+        <p className="status-note">Итог сохраняется в карточке. Проверку набора подтвердите в задаче.</p>
+      </section>:null}
       <SemanticJobStatus controller={semanticJob} />
       <div className="strip-head">
         <div>
@@ -16473,7 +16510,7 @@ function ApprovalWorkflowPanel({ portalId, workflow, status, cards, findUser, on
 }
 
 function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Карточки", taskRun = null, onTaskRunNavigate, onDraftSaved, onDraftActivity, onDraftReset, helpEnabled = false }) {
-  const [activeTab, setActiveTab] = useState("card");
+  const [activeTab, setActiveTab] = useState(taskRun?.workType==='semantic' ? 'semantic' : 'card');
   const [changesTab, setChangesTab] = useState("content");
   const [auditStatus, setAuditStatus] = useState("idle");
   const [draftTitle, setDraftTitle] = useState("");
@@ -17455,6 +17492,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
   }
 
   async function completeTaskRunWork(reason = "") {
+    if(taskRun?.workflowBatchId)return true;
     if (!backendDraftEnabled || !taskRunTotal || !taskRunWorkType) {
       logTaskRunEvent("quick_completed", reason);
       return true;

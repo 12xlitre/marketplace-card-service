@@ -4,9 +4,10 @@ import {MailComposer} from './ClientMail';
 import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 import {visibleWorkflowBatches} from './workflowTaskVisibility';
+import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText} from './workflowPresentation';
 
 const endpoint='/api/content-workflow';
-const labels={planned:'В плане',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
+const labels={planned:'Не начата',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
   awaiting_semantic:'Ожидает согласованного СЯ',generating:'Переоптимизация',account_review:'Передано аккаунту',
   client_review:'На согласовании клиента',approved:'Выполнено',changes_requested:'На доработке',cancelled:'Отменено',
   archived:'Архив плана',sending:'Отправляется',pending:'В очереди',sent:'Отправлено',blocked:'Ожидает настройки',uncertain:'Требует проверки доставки',superseded:'В истории',in_progress:'В работе',queued:'В очереди',empty:'MPStats не нашёл запросов',ready:'Подбор готов',generated:'Проверить контент',reviewed:'Проверено',running:'Готовим',failed:'Ошибка'};
@@ -79,6 +80,11 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const current=detail?.id===selected&&selectedBatch?detail:null;
   const canWork=current && (data.canManage||current.assignee===data.login) && current.status!=='archived';
   const choose=batch=>{setDetail(null);setSelected(batch.id)};
+  const openWorkflowCard=card=>{
+    const source=cards.find(c=>keyOf(c)===card.cardKey);
+    if(source)onOpenCard?.(source,{sellerTab:mode==='periods'?'work-periods':'tasks',
+      backLabel:'Вернуться к задаче',taskRun:workflowCardRun(current,card.cardKey)});
+  };
   const fileButtons=file=><div className="cw-file" key={file.id}><div><strong>{file.name}</strong><p>Версия {file.version} · <Status value={file.status}/></p></div><div className="task-batch-actions">
     <button className="btn mini" onClick={()=>download(file.id)}>Скачать</button>
     {data.canManage&&file.current?<><button className="btn mini" disabled={busy} onClick={()=>act('mail_draft',{fileId:file.id}).then(value=>setMail({...value,requestId:id()})).catch(()=>{})}>Письмо клиенту</button>
@@ -104,15 +110,17 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
         {plan.approval?.proof?<a className="btn mini" href={endpoint+'/proof?portal_id='+portal.id+'&periodId='+plan.id}>Подтверждение клиента</a>:null}
         {data.canManage?<button className="btn mini" disabled={busy} onClick={()=>act('export_plan',{periodId:plan.id}).then(r=>act('mail_draft',{fileId:r.fileId})).then(value=>setMail({...value,requestId:id()})).catch(()=>{})}>Письмо с планом</button>:null}
       </div>{plan.versions?.length>1?<details><summary>Предыдущие версии плана</summary>{plan.versions.filter(v=>v.version!==plan.version).map(v=><p key={v.version}>Версия {v.version} {v.pdfId?<button className="btn mini" onClick={()=>download(v.pdfId)}>PDF</button>:null} {v.proof?<a className="btn mini" href={endpoint+'/proof?portal_id='+portal.id+'&periodId='+plan.id+'&version='+v.version}>Подтверждение</a>:null}</p>)}</details>:null}<p className="status-note">Подбор СЯ начинается при создании периода. Автоматическая работа модели не занимает 8 часов специалиста.</p>
-      <div className="cw-plan-task-list">{batches.filter(b=>b.periodId===plan.id&&b.planVersion===plan.version).map(b=><div className="cw-plan-task-row" key={b.id}><div><button className="btn" onClick={()=>choose(b)}>{b.title} · {labels[b.status]||b.status}</button><p>{[...b.schedule.map(s=>s.day+' · '+s.minutes+' мин'),...(b.plannedDays||[]).map(s=>s.day+' · нужно оценить')].join('; ')||'День выполнения пока не назначен'}</p></div>{data.canManage&&!['approved','cancelled','archived'].includes(b.status)?<button className="btn mini primary" onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:today()<plan.start?plan.start:today()>plan.end?plan.end:today()})}>Поставить в план</button>:null}{data.canManage?(b.plannedDays||[]).map(slot=><button className="btn mini" key={slot.id} onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:slot.day,slot:{...slot,plannedOnly:true}})}>Перенести {slot.day}</button>):null}</div>)}</div>
+      <div className="cw-plan-task-list">{batches.filter(b=>b.periodId===plan.id&&b.planVersion===plan.version).map(b=><div className="cw-plan-task-row" key={b.id}><div><button className="btn" onClick={()=>choose(b)}>{b.title} · {labels[b.status]||b.status}</button><p>{[...b.schedule.map(s=>s.day+' · '+s.minutes+' мин'),...(b.plannedDays||[]).map(s=>s.day+' · нужно оценить')].join('; ')||'День выполнения пока не назначен'}</p></div>{data.canManage&&!['approved','cancelled','archived'].includes(b.status)?<button className="btn mini primary" onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:today()<plan.start?plan.start:today()>plan.end?plan.end:today()})}>Назначить день</button>:null}{data.canManage?(b.plannedDays||[]).map(slot=><button className="btn mini" key={slot.id} onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:slot.day,slot:{...slot,plannedOnly:true}})}>Перенести {slot.day}</button>):null}</div>)}</div>
     </article>)}</div>:null}
     <div className="cw-task-grid">{batches.filter(b=>b.status!=='archived'&&(mode!=='periods'||!b.periodId)).map(b=><button key={b.id} className={'cw-task '+(selected===b.id?'selected':'')} onClick={()=>choose(b)}>
-      <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span><Status value={b.status}/><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
+      <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span><Status value={b.status}/><small>{workflowCalendarLabel(b)}</small><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
     </button>)}</div>
     {!batches.length?<p className="cw-empty">{mode==='tasks'&&plans.length?'Запланированные работы остаются в периоде. Здесь они появятся после запуска работы.':'Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.'}</p>:null}
     {current?<article className="cw-detail"><div className="strip-head"><div><h2>{current.title}</h2><p>{current.cards.length} карточек · исполнитель {current.assignee}</p></div><Status value={current.status}/></div>
-      {current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
+      <p className="status-note cw-calendar-state">{workflowCalendarLabel(current)}</p>
+      {current.kind==='content'&&current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
       <div className="task-batch-actions">
+        {current.kind==='semantic'&&current.cards.length?<button className="btn primary" onClick={()=>openWorkflowCard(current.cards.find(c=>!c.reviewed)||current.cards[0])}>Проверять карточки по порядку</button>:null}
         {canWork&&!['approved','cancelled'].includes(current.status)?<>
           <button className="btn primary" disabled={busy||['collecting','generating','awaiting_semantic'].includes(current.status)||!current.cards.some(c=>['queued','failed','cancelled','empty'].includes(c.state))} onClick={()=>safe('start',{batchId:current.id})}>{current.kind==='semantic'?'Запустить / продолжить подбор по набору':current.kind==='content'?'Работать · переоптимизировать набор':'Работать'}</button>
           <button className="btn" disabled={busy} onClick={()=>safe('cancel',{batchId:current.id})}>Отменить</button>
@@ -125,14 +133,20 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       {!current.schedule.length&&canWork?<p className="status-note">Перед проверкой карточек назначьте длительность задачи в календаре.</p>:null}
       <ScheduleForm batch={current} busy={busy||!canWork} onRemove={p=>safe('unschedule',p)}/>
       <div className="cw-card-list">{current.cards.map(card=><div className="cw-card" key={card.cardKey}><div><strong>{card.title}</strong><p>{card.cardKey} · <Status value={card.state}/>{card.job?.total?' · '+card.job.completed+'/'+card.job.total+' запросов':''}</p><ErrorNote error={card.error}/></div>
-        <div className="task-batch-actions"><button className="btn mini" onClick={()=>{const source=cards.find(c=>keyOf(c)===card.cardKey);if(source)onOpenCard?.(source)}}>Открыть карточку</button>
+        <div className="task-batch-actions"><button className="btn mini" onClick={()=>openWorkflowCard(card)}>Открыть карточку</button>
         {current.kind==='semantic'?<button className="btn mini" disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||current.status==='approved'} onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>
           :current.kind==='content'&&card.result?<button className="btn mini" disabled={!canWork||current.status==='approved'} onClick={()=>setEditor({card,batch:current,content:structuredClone(card.result)})}>Проверить и исправить контент</button>:null}</div></div>)}</div>
       {current.kind==='semantic'?<p className="status-note">Откройте карточку, проверьте запросы и сохраните итоговое СЯ. Затем подтвердите проверку здесь — в файл попадёт именно этот итог.</p>:null}
       {current.files.map(fileButtons)}
     </article>:selectedBatch?<p>Загружаем задачу…</p>:null}
     {batches.some(b=>b.status==='archived')?<details><summary>Задачи прежних версий плана</summary>{batches.filter(b=>b.status==='archived').map(b=><button className="btn mini" key={b.id} onClick={()=>choose(b)}>{b.title} · план v{b.planVersion}</button>)}</details>:null}
-    {data.deliveries?.length?<details><summary>Уведомления и доставка писем</summary>{data.deliveries.map(d=><p key={d.id}>{d.kind==='bitrix'?'Б24':'Письмо'} · {labels[d.status]||d.status} · {messages[d.error]||d.error}</p>)}</details>:null}
+    {data.deliveries?.length?<details className="cw-deliveries"><summary>История уведомлений и писем</summary>{data.deliveries.map(d=><article key={d.id}>
+      <strong>{d.kind==='bitrix'?'Внутреннее уведомление Б24':'Письмо клиенту'} · {d.kind==='bitrix'&&d.status==='sent'?'Передано в Б24':labels[d.status]||d.status}</strong>
+      <p>{workflowDeliveryText(d)}</p>
+      <p>{d.automatic?'Сервис автоматически':d.actorName||d.actor||'Автор не указан'} → {d.recipientName||d.recipient||'Получатель не указан'}{d.bitrixUserId?' · Б24 ID '+d.bitrixUserId:''}</p>
+      <p><time>{new Date((d.status==='sent'?d.updated_at:d.created_at).replace(' ','T')+'Z').toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})} МСК</time>{d.generation?' · Версия результата '+d.generation:''}{d.previousGeneration?' · Предыдущая версия результата':''}</p>
+      {d.batchTitle?<p>Задача: {d.batchTitle}</p>:null}<ErrorNote error={d.error}/>
+    </article>)}</details>:null}
     {data.events.length?<details className="cw-events"><summary>История: файлы, передачи и согласование</summary>{data.events.map(e=><p key={e.id}><time>{new Date(e.created_at.replace(' ','T')+'Z').toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})} МСК</time> · {e.actor||'Сервис'} · {eventLabel(e.action)} {e.details.name||e.details.version&&'· версия '+e.details.version||''}</p>)}</details>:null}
     {create?<CreateWorkflow portal={portal} error={error} data={data} cards={cards} initial={create} busy={busy} onClose={()=>setCreate(null)} onSubmit={async payload=>{try{const r=await act(create.kind==='plan'?(create.plan?'revise_plan':'create_plan'):create.kind==='content'?'content_task':'standalone',payload);setCreate(null);if(create.kind==='plan'&&r.periodId){setSelected('');return}if(r.batchId)setSelected(r.batchId)}catch{}}}/>:null}
     {planning?<DayDialog value={planning} apiRequest={apiRequest} onClose={()=>setPlanning(null)} onSaved={()=>{setPlanning(null);reload().catch(e=>setError(e.message))}}/>:null}

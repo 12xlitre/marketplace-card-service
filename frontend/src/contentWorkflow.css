@@ -13,3 +13,5 @@
 
 .cw-plans{grid-template-columns:minmax(0,1fr)}
 .cw-plan-task-row>div>.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.cw-deliveries article{padding:12px 0;border-bottom:1px solid #e6e8ef;overflow-wrap:anywhere}.cw-deliveries p{font-size:13px;line-height:1.6;margin:6px 0}
+.ozon-semantic-workspace .task-run-strip{margin:0 0 16px;grid-template-columns:minmax(0,1fr)}.ozon-semantic-workspace .task-run-actions{justify-content:flex-start}.ozon-semantic-workspace .task-run-actions .btn{white-space:normal;max-width:100%}

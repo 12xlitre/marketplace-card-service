@@ -95,6 +95,35 @@ class ContentWorkflowTest(unittest.TestCase):
         self.assertNotIn('dataUrl',public['approval']['proof'])
         with self.assertRaises(PermissionError):server.workflow_list(self.portal,self.users['other'])
 
+    def test_delivery_history_explains_automatic_recipient_result_and_generation_without_payload_secrets(self):
+        self.plan();batch=self.batch()
+        with server.connect_db() as db:
+            db.execute("INSERT INTO workflow_people(login,bitrix_id) VALUES('tech',91)")
+            raw=dict(db.execute('SELECT * FROM workflow_batches WHERE id=?',(batch['id'],)).fetchone())
+            server.workflow_notify(db,raw,49,77)
+            db.execute("UPDATE workflow_outbox SET status='sent' WHERE portal_id=?",(self.portal,))
+            db.execute("UPDATE workflow_batches SET generation=3 WHERE id=?",(batch['id'],))
+        delivery=self.list()['deliveries'][0]
+        self.assertTrue(delivery['automatic']);self.assertEqual(delivery['recipient'],'tech')
+        self.assertEqual(delivery['recipientName'],'tech');self.assertEqual(delivery['bitrixUserId'],91)
+        self.assertEqual((delivery['good'],delivery['total'],delivery['generation']),(49,77,1))
+        self.assertTrue(delivery['previousGeneration']);self.assertEqual(delivery['batchTitle'],batch['title'])
+        self.assertTrue(delivery['updated_at']);self.assertNotIn('payload_json',delivery)
+        self.assertEqual(self.list(self.other,'other')['deliveries'],[])
+
+    def test_mail_delivery_details_do_not_expose_body_credentials_or_client_address_to_tech(self):
+        self.plan();batch=self.batch()
+        data={'actor':'account','to':'client@example.invalid','subject':'Согласование',
+              'body':'Private body','password':'secret-password','origin':'secret-webhook'}
+        with server.connect_db() as db:
+            db.execute("INSERT INTO workflow_outbox(id,portal_id,batch_id,kind,dedup_key,status,payload_json) VALUES('mail',?,?,'crm_email','mail-test','sent',?)",(self.portal,batch['id'],json.dumps(data)))
+        delivery=self.list()['deliveries'][0]
+        self.assertEqual(delivery['recipient'],'client@example.invalid');self.assertEqual(delivery['actorName'],'account')
+        self.assertFalse(delivery['automatic']);self.assertEqual(delivery['subject'],'Согласование')
+        for forbidden in ('body','password','origin','payload_json','dedup_key'):self.assertNotIn(forbidden,delivery)
+        tech=self.list(user='tech')['deliveries'][0]
+        for forbidden in ('recipient','subject','actor','actorName'):self.assertNotIn(forbidden,tech)
+
     def test_pdf_is_real_embedded_unicode_and_versioned(self):
         import font_roboto
         from reportlab.pdfbase.ttfonts import TTFont
