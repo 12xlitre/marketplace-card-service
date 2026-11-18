@@ -2,7 +2,7 @@
 
 Обновлено: 2026-11-18. Текущий статус здесь; постоянные правила — в [памяти проекта](docs/memory/INDEX.md).
 
-## Проход СЯ Ozon, дата работы и история Б24 — подготовлено 18.11.2026
+## Проход СЯ Ozon, дата работы и история Б24 — выложено 18.11.2026
 
 По уточнениям Дмитрия добавлен контекст набора при открытии карточки из
 workflow WB/Ozon: исходный порядок, номер, предыдущая/следующая и возврат
@@ -38,7 +38,22 @@ PASS, схемы/зависимости/инфраструктура прежн�
 Артефакты:var/research/2026-11-18-workflow-navigation/ (owner-only/ignored).
 Перед выкладкой idle guard0 и consistent backup quick_checkOK:
 `/opt/opticards/var/backups/workflow-navigation-status-20261118T131804Z/opticards.sqlite3`.
-Выпуск/production-приёмка продолжаются, runtime покаa63026b.
+Выпущен **a4dca98** штатным opticards-deploy, exit0; контейнер пересоздан.
+Публичный index SHA25693bf8d1ef79884542d8bcdbf14a403a20702d1b1c5c98875a9c6e055c37a0665
+совпадает с локальной сборкой. Production Chromium под dmitriy.admin и
+kristina.manager:1 задача СЯ, реальный проход1/77→2/77→задача; поставки
+«Не начата»/день не назначен; историческое уведомление Насте49/77/version1
+с датой/получателем/previous-version. Обе роли,390px,JS0,реальные POST0 PASS.
+Сохранение итога→следующая проверено штатным UI/HTTP/SQLite в отдельном
+временном Ozon-кабинете с2карточками; final1,исходный период сохранён,
+граница последней карточки PASS. Новые модели/подборы/письма не запускались.
+Кабинет и2точные acceptance-сессии удалены, локальные токены удалены.
+После cleanup все26 исходных business/workflow/semantic/cache таблиц,
+3 automatic-seo states и7 XLSX совпали по хешам; FK OK,active0.
+Артефакты:var/research/2026-11-18-workflow-navigation-release/ — backup.json,
+deploy.log,acceptance.json,preservation.json,cleanup.json. Постоянные правила
+уточнены в product_work_periods/product_crm_correspondence и контрактных доках.
+Документационный follow-up не требует повторного deploy/перезапуска.
 
 ## Выгрузка СЯ — выложено 18.11.2026
 
