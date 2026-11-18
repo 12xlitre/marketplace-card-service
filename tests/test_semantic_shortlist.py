@@ -54,6 +54,14 @@ class SemanticShortlistTest(unittest.TestCase):
         self.assertEqual([r['query'] for r in prepared['allKeywords']], queries)
         self.assertTrue(all(r['relevance'] == 'relevant' for r in prepared['allKeywords']))
 
+    def test_signed_temperatures_model_suffixes_and_dimension_order_are_preserved(self):
+        queries = ['пена при -10 градусах', 'пена при +10 градусах', 'пена 70+', 'пена 70',
+                   'пена 40x60', 'пена 60x40']
+        prepared = self.prepare(queries)
+        self.assertEqual(len({r['selectionGroup'] for r in prepared['allKeywords']}), len(queries))
+        prepared = self.prepare(['пена при −10 градусах', 'пена при -10 градусах'])
+        self.assertEqual(len({r['selectionGroup'] for r in prepared['allKeywords']}), 1)
+
     def test_own_brands_and_confirmed_technical_terms_are_not_treated_as_typos(self):
         prepared = self.prepare(['пена KOLT', 'пена для ПВХ', 'низкорасширяющаяся пена'])
         self.assertEqual([r['selectionStatus'] for r in prepared['allKeywords']], ['candidate','candidate','review'])

@@ -18223,6 +18223,7 @@ def semantic_classify_query_batch(card, rows):
 
 SEMANTIC_SHORTLIST_VERSION = 'meaning-shortlist-v1'
 SEMANTIC_SHORTLIST_SIZE = 30
+SEMANTIC_SHORTLIST_NUMBER = r'[+-]?\d+(?:[.,]\d+)?\+?'
 
 
 @lru_cache(maxsize=50000)
@@ -18237,7 +18238,8 @@ def semantic_shortlist_word(word):
 
 
 def semantic_shortlist_tokens(text):
-  return re.findall(r'\d+(?:[.,]\d+)?|[^\W\d_]+', str(text).casefold().replace('ё', 'е'))
+  normalized = str(text).casefold().replace('ё', 'е').replace('−', '-').replace('–', '-')
+  return re.findall(SEMANTIC_SHORTLIST_NUMBER + r'|[^\W\d_]+', normalized)
 
 
 def semantic_prepare_shortlist(core, card):
@@ -18256,16 +18258,16 @@ def semantic_prepare_shortlist(core, card):
     key = audit_normalized(row['query'])
     words = semantic_shortlist_tokens(row['query'])
     parsed = [semantic_shortlist_word(w) for w in words]
-    lemmas = [p[0] if not re.fullmatch(r'\d+(?:[.,]\d+)?', w) else w.replace(',', '.')
+    lemmas = [p[0] if not re.fullmatch(SEMANTIC_SHORTLIST_NUMBER, w) else w.replace(',', '.')
               for w, p in zip(words, parsed)]
     nouns = [i for i, p in enumerate(parsed) if p[1] == 'NOUN']
     relations = []
     for i, word in enumerate(words):
       if word in prepositions:
         stop = next((j for j in range(i+1, len(words)) if words[j] in prepositions
-                     or re.fullmatch(r'\d+(?:[.,]\d+)?', words[j])), len(words))
+                     or re.fullmatch(SEMANTIC_SHORTLIST_NUMBER, words[j])), len(words))
         relations.append((word, tuple(sorted(lemmas[j] for j in nouns if i < j < stop))))
-      if re.fullmatch(r'\d+(?:[.,]\d+)?', word):
+      if re.fullmatch(SEMANTIC_SHORTLIST_NUMBER, word):
         head = next((j for j in nouns if i < j <= i+3), None)
         relations.append(('number', lemmas[i], lemmas[head] if head is not None else ''))
       if word in {'не', 'ни'}:
@@ -18273,9 +18275,11 @@ def semantic_prepare_shortlist(core, card):
       # Dative recipients carry a different intent even without a preposition.
       if parsed[i][1] == 'NOUN' and all(p.tag.case == 'datv' for p in parsed[i][3]):
         relations.append(('recipient', lemmas[i]))
+    relations.append(('unbound-numbers', tuple(lemmas[i] for i, w in enumerate(words)
+                     if re.fullmatch(SEMANTIC_SHORTLIST_NUMBER, w) and not any(i < j <= i+3 for j in nouns))))
     signature = semantic_json([sorted(lemmas), sorted(relations, key=str)])
     group = hashlib.sha256(signature.encode()).hexdigest()[:24]
-    unknown = [w for w, p in zip(words, parsed) if not p[2] and not re.fullmatch(r'\d+(?:[.,]\d+)?', w)
+    unknown = [w for w, p in zip(words, parsed) if not p[2] and not re.fullmatch(SEMANTIC_SHORTLIST_NUMBER, w)
                and w not in protected and w not in fact_words]
     # Proper-name-only dictionary parses are not proof that a truncated word is valid.
     fragments = [w for w, p in zip(words, parsed) if w not in protected and w not in fact_words
