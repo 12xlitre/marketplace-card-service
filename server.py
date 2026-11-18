@@ -4512,6 +4512,9 @@ def normalize_ozon_semantic_keyword(item, fallback_source=""):
       payload["frequency"] = frequency
     if position:
       payload["position"] = position
+    for key in ('orgPos','avgPos','adPos'):
+      value = audit_position_value(item.get(key))
+      if value is not None: payload[key] = value
     if ozon_count > 0:
       payload["ozonCount"] = ozon_count
     if wb_count > 0:
@@ -4636,12 +4639,24 @@ def normalize_ozon_semantic_payload(payload):
       "relevanceCounts": {status: sum(row.get("relevance") == status for row in rows)
                           for status in ("relevant", "disputed", "irrelevant")},
     }
+    for key in ('rankedKeywords','rankingSource','rankingPeriod','rankingWarning'):
+      if key in core:
+        if key=='rankedKeywords': value=normalize_ozon_semantic_keywords(core[key])
+        elif key=='rankingPeriod': value={k:audit_str(core[key].get(k),10) for k in ('d1','d2')} if isinstance(core[key],dict) else {}
+        else:value=audit_str(core[key],120)
+        normalized['semanticCore'][key]=value
   final_selection = payload.get("finalSelection")
   if isinstance(final_selection, dict):
     normalized["finalSelection"] = {key: normalize_ozon_semantic_keywords(final_selection.get(key))
                                     for key in ("current", "selected", "removal")}
     period = final_selection.get("period") if isinstance(final_selection.get("period"), dict) else {}
     normalized["finalSelection"]["period"] = {key: audit_str(period.get(key), 10) for key in ("d1", "d2")}
+    for key in ('rankedKeywords','rankingSource','rankingPeriod','rankingWarning'):
+      if key in final_selection:
+        if key=='rankedKeywords':value=normalize_ozon_semantic_keywords(final_selection[key])
+        elif key=='rankingPeriod':value={k:audit_str(final_selection[key].get(k),10) for k in ('d1','d2')} if isinstance(final_selection[key],dict) else {}
+        else:value=audit_str(final_selection[key],120)
+        normalized['finalSelection'][key]=value
   return normalized if card_key else None
 
 
@@ -17838,30 +17853,37 @@ def audit_build_semantic_core(card, keywords):
   }
 
 
-def fetch_mpstats_keywords_core(card, force_refresh=False, period=None):
-  nm_id = audit_str(card.get("nmID") or card.get("nmId") or card.get("id") or "")
+def fetch_mpstats_keywords_core(card, force_refresh=False, period=None, marketplace='Wildberries'):
+  is_ozon = marketplace == 'Ozon'
+  nm_id = audit_str((card.get('sku') or card.get('id')) if is_ozon else (card.get("nmID") or card.get("nmId") or card.get("id") or ""))
   if not nm_id:
     raise ValueError("missing_nm_id")
+  if is_ozon and not nm_id.isdigit():
+    raise ValueError('invalid_ozon_sku')
   token = get_service_integration_secret(MPSTATS_PROVIDER)
   if not token:
     raise MpstatsApiError(HTTPStatus.CONFLICT, "mpstats_key_missing", retryable=False)
 
   period = period or mpstats_semantic_period_default()
-  path = f"/analytics/v1/wb/items/{nm_id}/keywords"
+  path = f"/analytics/v1/{'oz' if is_ozon else 'wb'}/items/{nm_id}/keywords"
   params = {"d1": period["d1"], "d2": period["d2"]}
   body = {"startRow": 0, "endRow": 500, "filterModel": {}, "sortModel": []}
-  cache_key = f"POST:{path}:{json.dumps(params, sort_keys=True, ensure_ascii=False)}:{json.dumps(body, sort_keys=True, ensure_ascii=False)}"
+  method = 'GET' if is_ozon else 'POST'
+  cache_key = f"{method}:{path}:{json.dumps(params, sort_keys=True, ensure_ascii=False)}:{'' if is_ozon else json.dumps(body, sort_keys=True, ensure_ascii=False)}"
   cached = None if force_refresh else audit_cache_get(cache_key)
   if cached is not None:
-    mpstats_usage_record("POST", path, source="cache", status="hit")
+    mpstats_usage_record(method, path, source="cache", status="hit")
     payload = cached
     cached_flag = True
   else:
-    payload = mpstats_post_body_json(token, path, body=body, params=params, attempts=2)
+    payload = (mpstats_get_json(token,path+'?'+urlencode(params),attempts=2) if is_ozon
+      else mpstats_post_body_json(token, path, body=body, params=params, attempts=2))
+    if is_ozon and not isinstance(payload,list) and not (isinstance(payload,dict) and payload.get('no_data')):
+      raise ValueError('mpstats_rankings_invalid_response')
     audit_cache_set(cache_key, payload, AUDIT_MARKET_CACHE_TTL_SECONDS)
     cached_flag = False
 
-  keywords = semantic_filter_mpstats_rows(card, audit_keywords_from_payload(payload, limit=500), limit=500)
+  keywords = audit_keywords_from_payload(payload, limit=5000) if is_ozon else semantic_filter_mpstats_rows(card, audit_keywords_from_payload(payload, limit=500), limit=500)
   semantic_core = audit_build_semantic_core(card, keywords)
   return {
     "source": "mpstats",
@@ -18632,21 +18654,24 @@ class SemanticJobWorker:
         job['source_json'] = semantic_json(source)
       else:
         source = json.loads(job['source_json'])
-      if job['marketplace'] == 'Wildberries' and not source.get('rankingCaptured'):
+      if not source.get('rankingCaptured'):
         with semantic_job_connection(self.path) as db:
           latest = db.execute('SELECT status,run_token FROM semantic_jobs WHERE id=?', (job_id,)).fetchone()
           if not latest or latest['status'] not in SEMANTIC_JOB_ACTIVE or latest['run_token'] != token:
             return
-          draft = db.execute('SELECT payload_json FROM card_drafts WHERE portal_id=? AND card_key=?', (job['portal_id'], job['card_key'])).fetchone()
+          table = 'ozon_semantic_drafts' if job['marketplace']=='Ozon' else 'card_drafts'
+          draft = db.execute(f'SELECT payload_json FROM {table} WHERE portal_id=? AND card_key=?', (job['portal_id'], job['card_key'])).fetchone()
         saved = json.loads(draft['payload_json']) if draft else {}
         reports = (saved.get('meta') or {}).get('semanticCoreReports') or []
-        ranking = next((item['semanticCore'] for item in reports if (item.get('semanticCore') or {}).get('rankingSource')), None)
+        candidates = [saved.get('semanticCore') or {}] if job['marketplace']=='Ozon' else [(item.get('semanticCore') or {}) for item in reports]
+        ranking = next((core for core in candidates if core.get('rankingSource') and (core.get('rankingPeriod') or core.get('period'))==request['period']), None)
         if ranking:
           source['semanticCore'].update({key: ranking[key] for key in ('rankedKeywords','rankingSource','rankingPeriod') if key in ranking})
         else:
           context = mpstats_call_context_start(user, 'СЯ: позиции фонового подбора', portal_id=job['portal_id'], card_key=job['card_key'])
           try:
-            payload = fetch_mpstats_keywords_core(card, force_refresh=False, period=request['period'])
+            options = {'marketplace':'Ozon'} if job['marketplace']=='Ozon' else {}
+            payload = fetch_mpstats_keywords_core(card, force_refresh=False, period=request['period'], **options)
             ranked = {audit_normalized(row['query']): row for row in payload.get('keywords') or []
                       if audit_position_value(row.get('orgPos'), row.get('adPos'), row.get('avgPos'))}
             source['semanticCore'].update(rankedKeywords=list(ranked.values()), rankingSource=payload.get('source') or 'mpstats', rankingPeriod=payload.get('period') or {})
@@ -24940,7 +24965,18 @@ def workflow_final_from_card(db, portal, key, marketplace):
     if not data.get('final'): raise workflow_error('semantic_final_missing')
     snapshot = data.get('finalSelection')
     if not isinstance(snapshot,dict): raise workflow_error('workflow_final_snapshot_required')
-    return workflow_canonical_final({**snapshot,'semanticCore':{'current':snapshot.get('current') or []}})
+    core = data.get('semanticCore') or {}
+    ranking = snapshot if 'rankedKeywords' in snapshot else core if snapshot.get('period')==core.get('period') else {}
+    selected=snapshot.get('selected') or []
+    if snapshot.get('period')==core.get('period'):
+      sources={audit_normalized(r.get('query')):r for r in core.get('allKeywords') or []}
+      enriched=[]
+      for row in selected:
+        source=sources.get(audit_normalized(row.get('query')),{})
+        enriched.append({**row,**{key:source[key] for key in ('relevanceReason','relevanceEvidence') if key in source}})
+      selected=enriched
+    return workflow_canonical_final({**snapshot,'selected':selected,'semanticCore':{'current':snapshot.get('current') or [],
+      **{k:ranking[k] for k in ('rankedKeywords','rankingSource','rankingPeriod','rankingWarning') if k in ranking}}})
   row = db.execute('SELECT payload_json FROM card_drafts WHERE portal_id=? AND card_key=?',(portal,key)).fetchone()
   data = json.loads(row[0]) if row else {}
   final = (data.get('meta') or {}).get('semanticCoreFinal')
@@ -24948,7 +24984,38 @@ def workflow_final_from_card(db, portal, key, marketplace):
   return workflow_canonical_final(final)
 
 
+def workflow_prepare_semantic_rankings(portal,payload,user):
+  # Read the source outside the review transaction; never rerun the classifier.
+  with semantic_job_connection() as db:
+    batch=workflow_batch(db,portal,payload.get('batchId'),user,write=True)
+    if batch['kind']!='semantic' or batch['status'] in ('approved','cancelled','archived'):return None
+    if payload.get('generation') is not None and int(payload['generation'])!=batch['generation']:raise workflow_error('workflow_version_conflict',409)
+    card=db.execute('SELECT * FROM workflow_cards WHERE batch_id=? AND card_key=?',(batch['id'],str(payload.get('cardKey')))).fetchone()
+    if not card or card['state'] not in ('ready','reviewed') or not db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone():return None
+    marketplace=db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
+    final=workflow_final_from_card(db,portal,card['card_key'],marketplace)
+    if (final.get('semanticCore') or {}).get('rankingSource') or (final.get('semanticCore') or {}).get('rankedKeywords'):return None
+    saved=json.loads(card['final_json'] or '{}')
+    period=final.get('period') or (final.get('semanticCore') or {}).get('period') or {}
+    if (saved.get('semanticCore') or {}).get('rankingSource') and (saved.get('period') or (saved.get('semanticCore') or {}).get('period') or {})==period:return None
+    if not period.get('d1') or not period.get('d2'):return None
+    raw=workflow_cards_scope(db,portal,[card['card_key']])[0]
+    if semantic_facts_hash(raw)!=card['facts_hash']:raise workflow_error('semantic_card_changed')
+    signature=hashlib.sha256(semantic_json(final).encode()).hexdigest()
+  context=mpstats_call_context_start(user,'СЯ: позиции для файла',portal_id=portal,card_key=card['card_key'])
+  try:
+    result=fetch_mpstats_keywords_core(raw,period=period,**({'marketplace':'Ozon'} if marketplace=='Ozon' else {}))
+  except MpstatsApiError as exc:
+    code='semantic_source_rate_limited' if exc.status==429 else 'semantic_source_access_denied' if exc.status in (401,403) else 'semantic_source_unavailable'
+    raise workflow_error(code,502) from None
+  except ValueError:
+    raise workflow_error('semantic_source_unavailable',502) from None
+  finally:mpstats_call_context_stop(context)
+  return {'signature':signature,'rankedKeywords':result['keywords'],'rankingSource':result['source'],'rankingPeriod':result['period']}
+
+
 def workflow_review_card(portal, payload, user):
+  ranking=workflow_prepare_semantic_rankings(portal,payload,user)
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
     batch = workflow_batch(db,portal,payload.get('batchId'),user,write=True)
@@ -24962,6 +25029,13 @@ def workflow_review_card(portal, payload, user):
     marketplace = db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
     if batch['kind']=='semantic':
       final = workflow_final_from_card(db,portal,card['card_key'],marketplace)
+      if ranking:
+        if hashlib.sha256(semantic_json(final).encode()).hexdigest()!=ranking['signature']:raise workflow_error('workflow_version_conflict',409)
+        final['semanticCore'].update({k:ranking[k] for k in ('rankedKeywords','rankingSource','rankingPeriod')})
+      elif card['state']=='reviewed':
+        saved=json.loads(card['final_json'] or '{}')
+        if (saved.get('semanticCore') or {}).get('rankingSource') and (saved.get('period') or {})==(final.get('period') or {}):
+          final['semanticCore'].update({k:saved['semanticCore'][k] for k in ('rankedKeywords','rankingSource','rankingPeriod') if k in saved['semanticCore']})
       if card['state']=='reviewed' and json.loads(card['final_json'] or '{}')==final: return {'reviewed':True}
       db.execute("UPDATE workflow_cards SET final_json=?,state='reviewed' WHERE batch_id=? AND card_key=?",(semantic_json(final),batch['id'],card['card_key']))
     else:
@@ -24988,9 +25062,27 @@ def workflow_review_card(portal, payload, user):
   return {'reviewed':True}
 
 
+def semantic_export_ranking_rows(core):
+  source = core.get('rankedKeywords') or [r for key in ('current','allKeywords','recommended','missing') for r in core.get(key) or []]
+  rows = {}
+  for row in source:
+    if not isinstance(row,dict) or not row.get('query'): continue
+    position = audit_position_value(row.get('orgPos'),row.get('avgPos'),row.get('adPos'),row.get('position'))
+    if position is not None: rows.setdefault(audit_normalized(row['query']),{**row,'position':position})
+  return sorted(rows.values(),key=lambda row:row['position'])
+
+
+def semantic_addition_explanation(row, core=None):
+  source = next((r for r in (core or {}).get('allKeywords') or [] if audit_normalized(r.get('query'))==audit_normalized(row.get('query'))),{})
+  reason = audit_str(source.get('relevanceReason') or row.get('relevanceReason') or row.get('reason'),2000)
+  evidence = source.get('relevanceEvidence') or row.get('relevanceEvidence') or []
+  quote = audit_str(evidence[0].get('quote'),500) if evidence and isinstance(evidence[0],dict) else ''
+  return '\n'.join(filter(None,[reason,'В карточке: «'+quote+'»' if quote else '']))
+
+
 def workflow_workbook(file_id, batch, kind, version, snapshots):
   from openpyxl import Workbook
-  from openpyxl.styles import Font,PatternFill,Alignment,Protection
+  from openpyxl.styles import Font,PatternFill,Alignment,Protection,Border,Side
   from openpyxl.worksheet.datavalidation import DataValidation
   book = Workbook()
   guide = book.active;guide.title='Инструкция'
@@ -24998,6 +25090,11 @@ def workflow_workbook(file_id, batch, kind, version, snapshots):
   guide.append(['Набор',batch['id']]);guide.append(['Версия',version])
   guide.append(['Изменяйте только выделенные ячейки. Да — принять; Нет — вернуть на доработку.'])
   guide.append(['Каждый лист относится к одной карточке этого набора. Не удаляйте строки/листы/столбцы.'])
+  guide.append(['Чтение','Текст переносится по ширине ячейки. Ширину столбцов и высоту строк можно менять.'])
+  if kind=='semantic':
+    guide.append(['Цвета','Синий — действующие ключи и позиции; зелёный — добавление; розовый — удаление.'])
+    guide.append(['Обоснование','Объяснение и цитата «В карточке» сохранены из сервиса.'])
+    guide.append(['Позиции','Пустые колонки означают, что позиции не получены или не найдены за период. Позиции другого товара или периода не подставляются.'])
   manifest = book.create_sheet('_OptiCards')
   manifest.append([file_id,batch['id'],batch['generation'],kind,version])
   manifest.sheet_state='veryHidden'
@@ -25007,12 +25104,13 @@ def workflow_workbook(file_id, batch, kind, version, snapshots):
     rows=[]
     if kind=='semantic':
       final = item['final'];selected,current,removed = workflow_semantic_lists(final)
-      ranked = (final.get('semanticCore') or {}).get('rankedKeywords') or []
-      sheet.append(['Ключи в карточке (действующие)','Ранжируемые ключи','Позиция ранжируемого ключа','Ключ к добавлению','Частота WB ключа к добавлению','Частота Ozon ключа к добавлению','Согласование добавления','Ключ к удалению из карточки','Причина удаления','Согласование удаления','Обоснование добавления'])
+      core=final.get('semanticCore') or {};ranked=semantic_export_ranking_rows(core)
+      marketplace=batch.get('marketplace') or core.get('marketplace') or item['card'].get('marketplace') or 'Wildberries'
+      sheet.append(['Ключи в карточке (действующие)','Ранжируемые ключи','Позиция ранжируемого ключа','Ключ к добавлению',f"Частота {'Ozon' if marketplace=='Ozon' else 'WB'} ключа к добавлению",'Обоснование добавления','Согласование добавления','Ключ к удалению из карточки','Причина удаления','Согласование удаления'])
       for pos in range(max(len(current),len(ranked),len(selected),len(removed),1)):
         c=current[pos] if pos<len(current) else {};r=ranked[pos] if pos<len(ranked) else {}
         add=selected[pos] if pos<len(selected) else {};remove=removed[pos] if pos<len(removed) else {}
-        rows.append([c.get('query',''),r.get('query',''),r.get('orgPos') or r.get('avgPos') or r.get('adPos') or '',add.get('query',''),add.get('wbCount',0) if add else '',add.get('ozonCount',0) if add else '','Да' if add else '',remove.get('query',''),remove.get('removalReason') or remove.get('reason') or '','Да' if remove else '',add.get('relevanceReason') or add.get('reason') or ''])
+        rows.append([c.get('query',''),r.get('query',''),r.get('position',''),add.get('query',''),add.get('ozonCount' if marketplace=='Ozon' else 'wbCount','') if add else '',semantic_addition_explanation(add,core),'Да' if add else '',remove.get('query',''),remove.get('removalReason') or remove.get('reason') or '','Да' if remove else ''])
       editable={7,10}
     else:
       sheet.append(['Карточка','Раздел','Поле','Было','Предложено','Согласовано'])
@@ -25032,16 +25130,32 @@ def workflow_workbook(file_id, batch, kind, version, snapshots):
         cell.alignment=Alignment(vertical='top',wrap_text=True)
         if cell.row==1:
           cell.font=Font(color='FFFFFF',bold=True);cell.fill=PatternFill('solid',fgColor='5144AA')
+          if kind=='semantic':
+            cell.font=Font(name='Calibri',size=11,color='293449',bold=True)
+            cell.fill=PatternFill('solid',fgColor='E3EBF5' if cell.column<=3 else 'E2F0E9' if cell.column<=7 else 'F8E8E3')
+            cell.border=Border(left=Side(style='medium',color='FFFFFF') if cell.column in (4,8) else Side())
         elif cell.column in editable:
           cell.fill=PatternFill('solid',fgColor='EDF6EA');cell.protection=Protection(locked=False)
     from openpyxl.utils import get_column_letter
     for column in range(1,sheet.max_column+1): sheet.column_dimensions[get_column_letter(column)].width=34 if column not in (3,5,6,7,10) else 20
+    if kind=='semantic':
+      import textwrap
+      widths=[42,42,22,42,24,64,22,42,54,22]
+      for column,width in enumerate(widths,1):sheet.column_dimensions[get_column_letter(column)].width=width
+      sheet.row_dimensions[1].height=84
+      for row in sheet.iter_rows(min_row=2):
+        lines=max(sum(max(1,len(textwrap.wrap(part,width=max(8,widths[cell.column-1]-4)))) for part in str(cell.value or '').split('\n')) for cell in row)
+        sheet.row_dimensions[row[0].row].height=min(409,max(30,lines*16+6))
     if kind=='description': sheet.column_dimensions['E'].width=85;sheet.column_dimensions['D'].width=70
     sheet.freeze_panes='A2';sheet.auto_filter.ref=sheet.dimensions;sheet.protection.sheet=True
+    sheet.sheet_view.showGridLines=False;sheet.protection.formatColumns=False;sheet.protection.formatRows=False
     choice=DataValidation(type='list',formula1='"Да,Нет"')
     sheet.add_data_validation(choice)
     for column in ([7,10] if kind=='semantic' else [6]): choice.add(get_column_letter(column)+'2:'+get_column_letter(column)+str(max(2,sheet.max_row)))
   guide.column_dimensions['A'].width=95;guide.column_dimensions['B'].width=45
+  guide.sheet_view.showGridLines=False
+  for row in guide:
+    for cell in row:cell.alignment=Alignment(vertical='top',wrap_text=True)
   buffer=io.BytesIO();book.save(buffer)
   return buffer.getvalue()
 
@@ -25057,9 +25171,10 @@ def workflow_make_file(db, batch, kind, snapshots, user, status='review'):
   snapshots=workflow_kind_snapshot(kind,snapshots)
   version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM workflow_files WHERE batch_id=? AND kind=?',(batch['id'],kind)).fetchone()[0]
   file_id=uuid.uuid4().hex
-  body=workflow_workbook(file_id,batch,kind,version,snapshots)
+  marketplace=db.execute('SELECT marketplace FROM portals WHERE id=?',(batch['portal_id'],)).fetchone()[0]
+  body=workflow_workbook(file_id,{**batch,'marketplace':marketplace},kind,version,snapshots)
   name={'semantic':'СЯ','main':'Наименования-характеристики','description':'Описания'}[kind]+'_'+batch['id'][:8]+'_v'+str(version)+'.xlsx'
-  snapshot={'generation':batch['generation'],'cards':snapshots}
+  snapshot={'generation':batch['generation'],'cards':snapshots,'layoutVersion':2}
   db.execute('INSERT INTO workflow_files(id,portal_id,period_id,batch_id,kind,version,status,name,sha256,body,snapshot_json,created_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
              (file_id,batch['portal_id'],batch['period_id'],batch['id'],kind,version,status,name,hashlib.sha256(body).hexdigest(),body,semantic_json(snapshot),user_login_value(user),utc_now().isoformat() if status=='approved' else None))
   workflow_event(db,batch['portal_id'],user,'file_created',batch['period_id'],batch['id'],fileId=file_id,kind=kind,version=version)
@@ -25078,7 +25193,7 @@ def workflow_export_files(portal, payload, user):
     snapshots={r['card_key']:{'card':json.loads(r['snapshot_json']),**({'final':json.loads(r['final_json'])} if batch['kind']=='semantic' else {'content':json.loads(r['result_json'])})} for r in rows}
     ids=[]
     for kind in kinds:
-      existing=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? AND json_extract(snapshot_json,\'$.generation\')=? ORDER BY version DESC LIMIT 1',(batch['id'],kind,batch['generation'])).fetchone()
+      existing=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? AND json_extract(snapshot_json,\'$.generation\')=?'+(" AND json_extract(snapshot_json,'$.layoutVersion')=2" if kind=='semantic' else '')+' ORDER BY version DESC LIMIT 1',(batch['id'],kind,batch['generation'])).fetchone()
       if existing:
         ids.append(existing[0])
       else:
@@ -25942,18 +26057,28 @@ def workflow_crm_bind(portal,payload,user):
 
 
 def workflow_crm_plain_text(body,kind):
-  if str(kind)!='2': return audit_str(body,70000)
+  # crm.enum.contenttype: 1 = text, 2 = BBCode, 3 = HTML.
+  if str(kind)!='3': return audit_str(body,70000)
   from html.parser import HTMLParser
   class Plain(HTMLParser):
     def __init__(self): super().__init__(convert_charrefs=True);self.parts=[];self.hidden=0
+    blocks={'p','div','tr','li','blockquote','table','section','article','ul','ol','pre','h1','h2','h3','h4','h5','h6'}
     def handle_starttag(self,tag,attrs):
       if tag in ('script','style','head','iframe','object'): self.hidden+=1
-      elif not self.hidden and tag in ('br','p','div','tr','li'): self.parts.append('\n')
+      elif not self.hidden:
+        if tag in self.blocks or tag in ('br','hr'): self.parts.append('\n')
+        elif tag in ('td','th'): self.parts.append(' ')
+    def handle_startendtag(self,tag,attrs):
+      if tag not in ('script','style','head','iframe','object'): self.handle_starttag(tag,attrs)
     def handle_endtag(self,tag):
       if tag in ('script','style','head','iframe','object'): self.hidden=max(0,self.hidden-1)
+      elif not self.hidden and tag in self.blocks: self.parts.append('\n')
     def handle_data(self,data):
       if not self.hidden: self.parts.append(data)
-  parser=Plain();parser.feed(str(body or '')[:150000]);return ''.join(parser.parts).strip()[:70000]
+  parser=Plain();parser.feed(str(body or '')[:150000]);parser.close()
+  text=''.join(parser.parts).replace('\xa0',' ').replace('\r\n','\n').replace('\r','\n')
+  text='\n'.join(re.sub(r'[ \t\f\v]+',' ',line).strip() for line in text.split('\n'))
+  return re.sub(r'\n{3,}','\n\n',text).strip()[:70000]
 
 
 def workflow_crm_mailbox(portal,user,before=None):
@@ -27810,13 +27935,26 @@ class OpticardsHandler(BaseHTTPRequestHandler):
       raw_card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
       force_refresh = bool(payload.get("refresh"))
       try:
+        with semantic_job_connection() as db:
+          portal = db.execute('SELECT marketplace FROM portals WHERE id=? AND is_active=1',(portal_id,)).fetchone()
+          marketplace = portal['marketplace'] if portal else 'Wildberries'
+          if marketplace=='Ozon':
+            _,raw_card = semantic_job_context(db,{'portal_id':int(portal_id),'card_key':semantic_job_key(raw_card),'user_login':user_login_value(user)})
+        period = payload.get('period')
+        if period is not None and not isinstance(period,dict):raise ValueError('invalid_report_period')
+        if period:
+          start,end=validate_work_period_dates(period.get('d1'),period.get('d2'))
+          period={'d1':start,'d2':end}
         context_token = mpstats_call_context_start(user, "СЯ: действующие позиции", portal_id=portal_id, card_key=card_key_from_snapshot_card(raw_card), nm_id=raw_card.get("nmID") or raw_card.get("nmId"), details={
           "refresh": force_refresh,
         })
         try:
-          result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh)
+          result = fetch_mpstats_keywords_core(raw_card, force_refresh=force_refresh,period=period,**({'marketplace':'Ozon'} if marketplace=='Ozon' else {}))
         finally:
           mpstats_call_context_stop(context_token)
+      except PermissionError:
+        self.send_json(HTTPStatus.FORBIDDEN, {"error":"forbidden"})
+        return
       except ValueError as exc:
         self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid_mpstats_keywords_request"})
         return

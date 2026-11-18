@@ -3,6 +3,7 @@ import './contentWorkflow.css';
 import {MailComposer} from './ClientMail';
 import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
+import {visibleWorkflowBatches} from './workflowTaskVisibility';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'В плане',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
@@ -73,8 +74,9 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   }
   const safe=(action,payload)=>act(action,payload).catch(()=>null);
   if(!data)return <section className="workspace-strip"><h2>План, задачи и согласование</h2><p>Загружаем рабочий процесс…</p><ErrorNote error={error}/></section>;
-  const plans=data.plans,batches=data.batches,byId=new Map(batches.map(b=>[b.id,b]));
-  const current=detail?.id===selected?detail:null;
+  const plans=data.plans,batches=visibleWorkflowBatches(data.batches,mode),byId=new Map(data.batches.map(b=>[b.id,b]));
+  const selectedBatch=batches.find(b=>b.id===selected);
+  const current=detail?.id===selected&&selectedBatch?detail:null;
   const canWork=current && (data.canManage||current.assignee===data.login) && current.status!=='archived';
   const choose=batch=>{setDetail(null);setSelected(batch.id)};
   const fileButtons=file=><div className="cw-file" key={file.id}><div><strong>{file.name}</strong><p>Версия {file.version} · <Status value={file.status}/></p></div><div className="task-batch-actions">
@@ -107,7 +109,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     <div className="cw-task-grid">{batches.filter(b=>b.status!=='archived'&&(mode!=='periods'||!b.periodId)).map(b=><button key={b.id} className={'cw-task '+(selected===b.id?'selected':'')} onClick={()=>choose(b)}>
       <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span><Status value={b.status}/><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
     </button>)}</div>
-    {!batches.length?<p className="cw-empty">Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.</p>:null}
+    {!batches.length?<p className="cw-empty">{mode==='tasks'&&plans.length?'Запланированные работы остаются в периоде. Здесь они появятся после запуска работы.':'Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.'}</p>:null}
     {current?<article className="cw-detail"><div className="strip-head"><div><h2>{current.title}</h2><p>{current.cards.length} карточек · исполнитель {current.assignee}</p></div><Status value={current.status}/></div>
       {current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
       <div className="task-batch-actions">
@@ -128,7 +130,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
           :current.kind==='content'&&card.result?<button className="btn mini" disabled={!canWork||current.status==='approved'} onClick={()=>setEditor({card,batch:current,content:structuredClone(card.result)})}>Проверить и исправить контент</button>:null}</div></div>)}</div>
       {current.kind==='semantic'?<p className="status-note">Откройте карточку, проверьте запросы и сохраните итоговое СЯ. Затем подтвердите проверку здесь — в файл попадёт именно этот итог.</p>:null}
       {current.files.map(fileButtons)}
-    </article>:selected?<p>Загружаем задачу…</p>:null}
+    </article>:selectedBatch?<p>Загружаем задачу…</p>:null}
     {batches.some(b=>b.status==='archived')?<details><summary>Задачи прежних версий плана</summary>{batches.filter(b=>b.status==='archived').map(b=><button className="btn mini" key={b.id} onClick={()=>choose(b)}>{b.title} · план v{b.planVersion}</button>)}</details>:null}
     {data.deliveries?.length?<details><summary>Уведомления и доставка писем</summary>{data.deliveries.map(d=><p key={d.id}>{d.kind==='bitrix'?'Б24':'Письмо'} · {labels[d.status]||d.status} · {messages[d.error]||d.error}</p>)}</details>:null}
     {data.events.length?<details className="cw-events"><summary>История: файлы, передачи и согласование</summary>{data.events.map(e=><p key={e.id}><time>{new Date(e.created_at.replace(' ','T')+'Z').toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})} МСК</time> · {e.actor||'Сервис'} · {eventLabel(e.action)} {e.details.name||e.details.version&&'· версия '+e.details.version||''}</p>)}</details>:null}

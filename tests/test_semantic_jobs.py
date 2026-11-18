@@ -289,6 +289,17 @@ class SemanticJobsTest(unittest.TestCase):
         self.assertEqual(saved['finalSelection']['selected'], previous['selected'])
         self.assertEqual(saved['finalSelection']['current'], previous['current'])
 
+    def test_ozon_rankings_survive_worker_autosave_without_reclassifying_ranked_rows(self):
+        row={**source(1,'Ozon')['semanticCore']['allKeywords'][0],'orgPos':7}
+        job=self.create(portal=self.ozon,result=source(2,'Ozon'))
+        with patch.object(server,'fetch_mpstats_keywords_core',return_value={'source':'mpstats','keywords':[row],'period':{'d1':'2026-10-01','d2':'2026-10-30'}}) as ranks:
+            done=self.finish(job)
+        ranks.assert_called_once();self.assertEqual(ranks.call_args.kwargs['marketplace'],'Ozon')
+        self.assertEqual(done['status'],'ready')
+        saved=server.get_ozon_semantic_draft(self.ozon,'1001',USER)['draft']['draft']
+        self.assertEqual(saved['semanticCore']['rankedKeywords'][0]['orgPos'],7)
+        self.assertEqual([r['query'] for r in saved['selected']],['средство от моли 1'])
+
     def test_facts_or_model_change_invalidates_cache_and_portals_are_separate(self):
         first = self.create(result=source(1));self.finish(first)
         for portal, card, model in ((self.ozon, CARD, server.semantic_model_key()),
@@ -365,7 +376,11 @@ assert row['status']=='ready',row['status']
         finally:
             for worker in workers: worker.stop.set(); worker.wake.set()
             for worker in workers: worker.thread.join(3)
-        self.assertEqual(calls, [('1001', 32), ('1002', 32), ('1001', 1), ('1002', 1)])
+        # Classifier slots run concurrently; completion order between cards varies.
+        # Each card must classify its durable chunks exactly once and in order.
+        self.assertEqual(len(calls),4)
+        for key in ('1001','1002'):
+            self.assertEqual([size for card,size in calls if card==key],[32,1])
 
 
 if __name__ == '__main__':

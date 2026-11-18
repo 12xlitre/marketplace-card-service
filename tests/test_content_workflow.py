@@ -128,8 +128,8 @@ class ContentWorkflowTest(unittest.TestCase):
         book=load_workbook(io.BytesIO(original['body']))
         sheet=book[book['_OptiCards'].cell(2,1).value]
         self.assertEqual(sheet['E2'].value,100)
-        self.assertEqual(sheet['F2'].value,60)
-        self.assertEqual(sheet['K2'].value,SELECTED['relevanceReason'])
+        self.assertEqual(sheet.max_column,10)
+        self.assertEqual(sheet['F2'].value,SELECTED['relevanceReason'])
         sheet['G2']='Нет'
         raw=io.BytesIO();book.save(raw)
         payload={'fileId':file_id,'body':base64.b64encode(raw.getvalue()).decode()}
@@ -178,6 +178,29 @@ class ContentWorkflowTest(unittest.TestCase):
         _,batch,file_id=self.reviewed_semantic(self.ozon)
         server.workflow_approve_file(self.ozon,{'fileId':file_id},self.users['account'])
         self.assertEqual(self.batch(portal=self.ozon)['status'],'approved')
+
+    def test_legacy_semantic_review_fetches_only_rankings_outside_transaction_and_freezes_them(self):
+        self.plan(self.ozon);batch=self.batch(portal=self.ozon)
+        period={'d1':'2026-10-18','d2':'2026-11-16'}
+        draft={'cardKey':'1001','final':[SELECTED],'finalSelection':{'current':[],'selected':[SELECTED],'removal':[],'period':period}}
+        with server.connect_db() as db:
+            db.execute("UPDATE workflow_cards SET state='ready' WHERE batch_id=?",(batch['id'],))
+            db.execute('INSERT INTO ozon_semantic_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',(self.ozon,'1001',json.dumps(draft)))
+        server.workflow_schedule_task(self.ozon,{'batchId':batch['id'],'day':'2026-11-09','minutes':30},self.users['tech'])
+        def ranks(card,**kwargs):
+            self.assertEqual(kwargs['period'],period);self.assertEqual(kwargs['marketplace'],'Ozon')
+            # A second writer can acquire the database: no network under the review transaction.
+            with server.connect_db() as db:db.execute('BEGIN IMMEDIATE');db.rollback()
+            return {'source':'mpstats','period':period,'keywords':[{'query':'ранжируется','avgPos':8.5}]}
+        with patch.object(server,'fetch_mpstats_keywords_core',side_effect=server.MpstatsApiError(429,'private provider message')):
+            with self.assertRaisesRegex(ValueError,'^semantic_source_rate_limited$'):
+                server.workflow_review_card(self.ozon,{'batchId':batch['id'],'cardKey':'1001'},self.users['tech'])
+        with server.connect_db() as db:self.assertIsNone(db.execute('SELECT final_json FROM workflow_cards WHERE batch_id=?',(batch['id'],)).fetchone()[0])
+        with patch.object(server,'fetch_mpstats_keywords_core',side_effect=ranks) as source,patch.object(server,'semantic_classify_query_batch') as classifier:
+            for _ in range(2):server.workflow_review_card(self.ozon,{'batchId':batch['id'],'cardKey':'1001'},self.users['tech'])
+        source.assert_called_once();classifier.assert_not_called()
+        with server.connect_db() as db:final=json.loads(db.execute('SELECT final_json FROM workflow_cards WHERE batch_id=?',(batch['id'],)).fetchone()[0])
+        self.assertEqual(final['selected'],[SELECTED]);self.assertEqual(final['semanticCore']['rankedKeywords'][0]['avgPos'],8.5)
 
     def test_mail_is_explicit_idempotent_and_unknown_delivery_is_not_repeated(self):
         _,_,file_id=self.reviewed_semantic()

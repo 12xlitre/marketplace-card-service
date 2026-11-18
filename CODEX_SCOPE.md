@@ -62,6 +62,7 @@ Keep this section compact. Add only stable locations that help avoid future sear
 - Plan title/mobile wrapping: `frontend/src/contentWorkflow.css` (`cw-plans`, `cw-plan-task-row`).
 - Semantic transport/evidence: `semantic_checked_decision`, `semantic_classify_query_batch`; durable portions and concurrency: `SemanticJobWorker` in `server.py`.
 - Final content XLSX builders: `frontend/src/App.jsx` (`buildFinalContentCardSheets`, `buildPortalContentSheets`)
+- СЯ XLSX: `frontend/src/semanticExport.js` + `App.jsx` (карточка/кабинет); `workflow_workbook`/`workflow_import_preview` в `server.py` (задачи, версии, обратная загрузка). Позиции Ozon: `fetch_mpstats_keywords_core(..., marketplace='Ozon')`.
 - Ozon content/SEO: `server.py` (`build_ozon_card_content_reoptimization_result`), `frontend/src/App.jsx` (`ozonSemanticDraftRows`, `buildOzonContentSheets`); BOSF analysis: `docs/bosf-mass-seo-analysis.md`
 - Ozon Seller connection: `server.py` (`update_ozon_connection`, `check_ozon_credentials`), `frontend/src/App.jsx` (`OzonConnectionPanel`), `docs/ozon-seller-connection.md`
 - Tests: `tests/`

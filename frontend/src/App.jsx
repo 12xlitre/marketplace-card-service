@@ -11,6 +11,7 @@ import CardMetrics from "./CardMetrics";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
+import {semanticExportRows, semanticExportWidths, semanticExportRowHeight, ozonFinalExportCore} from './semanticExport';
 import {
   Archive,
   AlertTriangle,
@@ -465,7 +466,8 @@ function sheetXml(sheet) {
       }
       return `<c r="${ref}" s="${style}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`;
     }).join("");
-    return `<row r="${rowNumber}">${cells}</row>`;
+    const height = sheet.rowHeights?.[rowIndex];
+    return `<row r="${rowNumber}"${height ? ` ht="${height}" customHeight="1"` : ''}>${cells}</row>`;
   }).join("");
   const autoFilterRow = Number(sheet.autoFilterRow || 1);
   const autoFilterStart = Math.max(1, Math.min(autoFilterRow, rows.length || 1));
@@ -475,7 +477,7 @@ function sheetXml(sheet) {
   const dataValidations = (sheet.dataValidations || []).length
     ? `<dataValidations count="${sheet.dataValidations.length}">${sheet.dataValidations.map((item) => `<dataValidation type="${item.type || "list"}" allowBlank="${item.allowBlank === false ? 0 : 1}" showErrorMessage="1" sqref="${xmlEscape(item.range)}"><formula1>${xmlEscape(item.formula1 || "")}</formula1></dataValidation>`).join("")}</dataValidations>`
     : "";
-  const sheetProtection = sheet.protected ? '<sheetProtection sheet="1" objects="1" scenarios="1" insertRows="0"/>' : "";
+  const sheetProtection = sheet.protected ? '<sheetProtection sheet="1" objects="1" scenarios="1" insertRows="0" formatColumns="0" formatRows="0"/>' : "";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${sheetViews}<cols>${columns}</cols><sheetData>${sheetRows}</sheetData>${sheetProtection}${autoFilter}${dataValidations}</worksheet>`;
 }
@@ -513,7 +515,7 @@ function xlsxFiles(sheets) {
     {
       name: "xl/styles.xml",
       data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF293449"/><name val="Calibri"/></font></fonts><fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE3EBF5"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE2F0E9"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF8E8E3"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="10"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/><protection locked="0"/></xf><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="5" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1" applyProtection="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`,
     },
     ...worksheetFiles,
   ];
@@ -3588,38 +3590,6 @@ function cardExportSheetName(card, draft, usedNames) {
   return safeSheetName(cardExportArticle(card, draft), `WB ${card?.nmID || draft?.nmID || "card"}`, usedNames);
 }
 
-function semanticCoreExportSheetRows(currentRows, rankingRows, selectedRows, removalRows, appendRows = 0) {
-  const rowCount = Math.max(currentRows.length, rankingRows.length, selectedRows.length, removalRows.length) + appendRows;
-  return [
-    [
-      "Ключи в карточке (действующие)",
-      "Ранжируемые ключи",
-      "Позиция ранжируемого ключа",
-      "Ключ к добавлению",
-      "Частота WB ключа к добавлению",
-      "Частота Ozon ключа к добавлению",
-      "Согласование добавления",
-      "Ключ к удалению из карточки",
-      "Причина удаления",
-      "Согласование удаления",
-      "Обоснование добавления",
-    ],
-    ...Array.from({ length: rowCount }, (_, index) => [
-      currentRows[index]?.query || "",
-      rankingRows[index]?.query || "",
-      semanticRankExportValue(rankingRows[index]?.position),
-      selectedRows[index]?.query || { value: "", style: 2 },
-      selectedRows[index]?.query ? semanticFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
-      selectedRows[index]?.query ? semanticOzonFrequencyValue(selectedRows[index]) : { value: "", style: 2 },
-      selectedRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
-      removalRows[index]?.query || { value: "", style: 2 },
-      removalRows[index]?.query ? { value: semanticRemovalReason(removalRows[index]), style: 2 } : { value: "", style: 2 },
-      removalRows[index]?.query ? { value: "Да", style: 2 } : { value: "", style: 2 },
-      selectedRows[index]?.relevanceReason || selectedRows[index]?.reason || "",
-    ]),
-  ];
-}
-
 function buildSemanticCoreExportSheet(name, core, selectedRows, removalRows = []) {
   const currentRows = semanticCurrentContentRows(core);
   const selectedRowsNormalized = semanticSelectedExportRows(selectedRows, core);
@@ -3630,11 +3600,14 @@ function buildSemanticCoreExportSheet(name, core, selectedRows, removalRows = []
   }
   const tableRowCount = Math.max(currentRows.length, rankingRows.length, selectedRowsNormalized.length, removalRowsNormalized.length) + semanticManualAppendRows;
   const agreementEndRow = Math.max(tableRowCount + 1, 2);
+  const rows = semanticExportRows(currentRows, rankingRows, selectedRowsNormalized, removalRowsNormalized, core?.marketplace, semanticManualAppendRows);
   return {
     name,
     freezeRows: 1,
-    widths: [48, 48, 22, 48, 32, 32, 22, 48, 54, 22, 64],
-    rows: semanticCoreExportSheetRows(currentRows, rankingRows, selectedRowsNormalized, removalRowsNormalized, semanticManualAppendRows),
+    widths: semanticExportWidths,
+    rows,
+    rowHeights: rows.map((row, index) => index ? semanticExportRowHeight(row, semanticExportWidths) : 84),
+    showGridLines: false,
     protected: true,
     dataValidations: tableRowCount ? [{
       type: "list",
@@ -3657,26 +3630,24 @@ function buildSemanticCoreInstructionSheet(card = null) {
     ? isOzon ? `карточки Ozon SKU ${card?.sku || card?.id || ""}, артикул ${card?.offerId || card?.vendorCode || ""}`
       : `карточки WB ${card?.nmID || ""}, артикул ${cardExportArticle(card)}`
     : `по выбранным карточкам кабинета${isOzon ? " Ozon" : ""}`;
-  return {
-    name: "Инструкция",
-    widths: [34, 100],
-    rows: [
+  const rows = [
       ["Раздел", "Описание"],
       ["Файл", `Семантическое ядро ${target}. Файл нужен для согласования новых ключей и запросов к исключению перед обновлением контента.`],
       ["Ключи в карточке (действующие)", "Ключи, которые уже заложены в текущий заголовок или описание карточки. По ним карточка может не иметь позиции."],
       ["Ранжируемые ключи", "Запросы из MPStats, по которым карточка уже ранжируется."],
       ["Позиция ранжируемого ключа", "Позиция карточки по ранжируемому запросу за период MPStats."],
       ["Ключ к добавлению", "Новый запрос из MPStats, которого нет среди действующих ключей карточки и ранжируемых запросов."],
-      ["Частота WB ключа к добавлению", "Прямая частотность WB по запросу из MPStats. Не подменяется кластером или wbcount из расширения."],
-      ["Частота Ozon ключа к добавлению", "Прямая частотность Ozon по запросу из MPStats, если WB-частота не передана или нужна для сравнения."],
+      [`Частота ${isOzon ? 'Ozon' : 'WB'} ключа к добавлению`, `Прямая частотность ${isOzon ? 'Ozon' : 'WB'} по запросу из MPStats. Частота другой площадки и кластера не подставляется.`],
       ["Согласование добавления", "Поменяйте только этот столбец: Да - ключ согласован, Нет - ключ не нужно добавлять. По умолчанию для всех ключей к добавлению стоит Да."],
-      ["Обоснование добавления", "Почему запрос соответствует названию, описанию и характеристикам. Спорные запросы включаются только после решения специалиста."],
+      ["Обоснование добавления", "Объяснение из сервиса и подтверждающая цитата «В карточке». Спорные запросы включаются только после решения специалиста."],
       ["Ключ к удалению из карточки", "Действующий ключ или ранжирующийся запрос, который специалист предлагает исключить перед переоптимизацией."],
       ["Причина удаления", "Почему ключ не нужен: нерелевантный, спорный, мешает позиционированию или больше не должен участвовать в переоптимизации."],
       ["Согласование удаления", `Да - после согласования специалист вручную удаляет ключ в SEO карточки ${isOzon ? "Ozon" : "WB"} и переоптимизирует текст без него. Нет - ключ оставить.`],
-      ["Защита", "Заполненные данные защищены от редактирования. Для будущей обратной загрузки меняйте только значения Да/Нет в столбцах согласования. Дополнительные ключи можно дописать в пустые строки блоков добавления или удаления."],
-    ],
-  };
+      ["Защита", "Заполненные данные защищены от редактирования. Меняйте Да/Нет в столбцах согласования. Ширину столбцов и высоту строк можно менять; перенос текста включён. Дополнительные ключи можно дописать в пустые строки блоков добавления или удаления."],
+    ].map((row,index)=>row.map(value=>({value,style:index?4:6})));
+  const widths=[34,100];
+  return {name:'Инструкция',widths,rows,showGridLines:false,freezeRows:1,autoFilter:false,
+    rowHeights:rows.map(row=>semanticExportRowHeight(row,widths))};
 }
 
 function normalizeSemanticFinalExport(value) {
@@ -4489,11 +4460,11 @@ function semanticFrequencyBucketLabel(bucket) {
 }
 
 function semanticHasKeywordRank(item) {
-  return Boolean(semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos));
+  return Boolean(semanticPrimaryPositionValue(item));
 }
 
 function semanticPrimaryPositionValue(item) {
-  return semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos);
+  return semanticRankValue(item?.orgPos) || semanticRankValue(item?.avgPos) || semanticRankValue(item?.adPos) || semanticRankValue(item?.position);
 }
 
 function semanticKeywordRankParts(item) {
@@ -4701,6 +4672,7 @@ function compactSemanticCore(core) {
     coveragePercent: core.coveragePercent ?? null,
     rankingSource: core.rankingSource || "",
     rankingPeriod: core.rankingPeriod || null,
+    rankingWarning: core.rankingWarning || '',
     reason: core.reason || "",
     ...(hasSemanticRelevance(core) ? { relevanceVersion: core.relevanceVersion, relevanceCounts: core.relevanceCounts } : {}),
   };
@@ -4842,6 +4814,9 @@ function semanticSelectedExportRows(selectedRows, core) {
     const key = semanticQueryKey(item);
     if (!key || seen.has(key) || currentKeys.has(key)) return;
     const merged = { ...(sourceByKey.get(key) || {}), ...item };
+    const source = sourceByKey.get(key);
+    if (source?.relevanceReason) merged.relevanceReason = source.relevanceReason;
+    if (source?.relevanceEvidence) merged.relevanceEvidence = source.relevanceEvidence;
     const importedAgreement = merged.source === "semantic-import" || merged.fileName || merged.sheetName;
     if (!semanticDirectDemandValue(merged) && !importedAgreement) return;
     seen.add(key);
@@ -9029,7 +9004,14 @@ function OzonSellerScreen({ portal, displayUsers, findUser, canManage = false, o
     setCabinetExportStatus("semantic-loading");
     try {
       const { semanticDrafts } = await loadOzonResultDrafts({ strict: true });
-      const sheets = buildOzonSemanticCoreSheets(portal.realCards || [], semanticDrafts);
+      const prepared = [];
+      for (const draft of semanticDrafts) {
+        if (!ozonSemanticDraftHasFinal(draft)) continue;
+        const data = draft.draft || {}, final = data.finalSelection || data;
+        const core = await ensureOzonSemanticRankings(ozonFinalExportCore(data), portal.id, {sku: draft.sku, cardKey: draft.cardKey});
+        prepared.push({...draft, draft:{...data,finalSelection:{...final,rankedKeywords:core.rankedKeywords || [],rankingSource:core.rankingSource,rankingPeriod:core.rankingPeriod}}});
+      }
+      const sheets = buildOzonSemanticCoreSheets(portal.realCards || [], prepared);
       if (!sheets.length) {
         setCabinetExportStatus("semantic-empty");
         onNotice?.("В Ozon-кабинете пока нет сохраненного итогового СЯ.");
@@ -10046,13 +10028,20 @@ function buildOzonSemanticCoreSheets(cards, drafts) {
     .map((draft) => {
       const data = draft.draft || {};
       const final = data.finalSelection || data;
-      const core = { marketplace: "Ozon", current: final.current || [], period: final.period || data.semanticCore?.period };
+      const core = ozonFinalExportCore(data);
       return buildSemanticCoreExportSheet(
         cardExportSheetName({ vendorCode: draft.offerId || draft.sku, nmID: draft.sku, title: draft.title }, draft, usedNames),
         core, final.selected || [], final.removal || [],
       );
     }).filter(Boolean);
   return sheets.length ? [buildSemanticCoreInstructionSheet({ marketplace: "Ozon" }), ...sheets] : [];
+}
+
+async function ensureOzonSemanticRankings(core, portalId, card) {
+  if (core?.rankingSource || core?.rankedKeywords?.length || !core?.period?.d1 || !core?.period?.d2) return core;
+  const payload = await apiRequest('/api/mpstats/keywords', {method:'POST',body:JSON.stringify({portalId,card,period:core.period})});
+  return {...semanticMergeKeywordRankings(core,payload),rankedKeywords:(payload.keywords || []).filter(semanticHasKeywordRank),
+    rankingSource:payload.source || 'mpstats',rankingPeriod:payload.period};
 }
 
 function buildOzonContentSheets(cards, drafts) {
@@ -12010,6 +11999,7 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
     }
     setDraftStatus("saving");
     try {
+      const exportCore = finalize ? await ensureOzonSemanticRankings(semanticCore,portal.id,card) : semanticCore;
       const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-semantic-draft`, {
         method: "POST",
         body: JSON.stringify({
@@ -12023,8 +12013,10 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
           selected: selectedRows,
           removal: removalRows,
           final: finalize ? finalRows : savedFinalRows,
-          finalSelection: finalize ? { current: currentRows, selected: selectedRows, removal: removalRows, period: semanticCore?.period } : savedFinalSelection,
-          semanticCore,
+          finalSelection: finalize ? { current: currentRows, selected: selectedRows, removal: removalRows, period: exportCore?.period,
+            rankedKeywords: exportCore?.rankedKeywords || [], rankingSource: exportCore?.rankingSource || '',
+            rankingPeriod: exportCore?.rankingPeriod || null } : savedFinalSelection,
+          semanticCore:exportCore,
           meta: { source: "ozon-semantic-relevance" },
         }),
       });
@@ -12162,10 +12154,14 @@ function OzonSemanticDraftPanel({ card, portal, canManage = false }) {
         <button className="btn" type="button" onClick={() => saveSemanticDraft({ finalize: true })} disabled={saveDisabled || dirty || !finalCount}>
           <CheckSquare size={16} />Добавить в итоговое СЯ
         </button>
-        <button className="btn" type="button" disabled={saveDisabled || dirty || !finalCount} onClick={() => {
-          const core = { ...semanticCore, current: currentRows };
-          const sheet = buildSemanticCoreExportSheet(cardExportSheetName({ vendorCode: offerId, nmID: sku, title }, {}, new Set()), core, selectedRows, removalRows);
-          if (sheet) downloadXlsx(`Ozon-СЯ-${safeFilePart(sku)}.xlsx`, [buildSemanticCoreInstructionSheet({ ...card, marketplace: "Ozon" }), sheet]);
+        <button className="btn" type="button" disabled={saveDisabled || dirty || !finalCount} onClick={async () => {
+          setDraftStatus('saving');
+          try {
+            const core = await ensureOzonSemanticRankings({ ...semanticCore, marketplace:'Ozon', current: currentRows },portal.id,card);
+            const sheet = buildSemanticCoreExportSheet(cardExportSheetName({ vendorCode: offerId, nmID: sku, title }, {}, new Set()), core, selectedRows, removalRows);
+            if (sheet) downloadXlsx(`Ozon-СЯ-${safeFilePart(sku)}.xlsx`, [buildSemanticCoreInstructionSheet({ ...card, marketplace: "Ozon" }), sheet]);
+            setDraftStatus('saved');
+          } catch { setDraftStatus('error'); }
         }}>
           <Download size={16} />Скачать файл карточки
         </button>

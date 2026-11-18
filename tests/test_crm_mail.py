@@ -64,10 +64,40 @@ class CrmMailTest(unittest.TestCase):
         def api(method,payload=None):
             if method=='scope':return {'result':['crm']}
             self.assertEqual(payload['filter'],{'BINDINGS':[{'OWNER_TYPE_ID':2,'OWNER_ID':123}],'TYPE_ID':4,'<ID':800})
-            return {'result':[{'ID':'799','DIRECTION':1,'SUBJECT':'Ответ','DESCRIPTION_TYPE':2,'DESCRIPTION':'<script>secret()</script><p>Принято<img src="https://tracker.invalid/pixel"></p>','COMMUNICATIONS':[{'TYPE':'EMAIL','VALUE':'client@example.invalid'}],'FILES':[{'id':1}]}],'next':50}
+            return {'result':[{'ID':'799','DIRECTION':1,'SUBJECT':'Ответ','DESCRIPTION_TYPE':3,'DESCRIPTION':'<script>secret()</script><p>Принято<img src="https://tracker.invalid/pixel"></p>','COMMUNICATIONS':[{'TYPE':'EMAIL','VALUE':'client@example.invalid'}],'FILES':[{'id':1}]}],'next':50}
         with patch.object(server,'workflow_crm_request',side_effect=api):value=server.workflow_crm_mailbox(self.portal,self.users['account'],'800')
         self.assertEqual(value['messages'][0]['body'],'Принято');self.assertTrue(value['hasMore']);self.assertEqual(value['before'],'799')
         self.assertNotIn('tracker',json.dumps(value));self.assertEqual(value['messages'][0]['direction'],'in')
+
+    def test_html_email_signature_and_quoted_reply_become_readable_text(self):
+        body='''<html><head><style>.signature{color:red}</style></head><body>
+<p>Цены повысили&nbsp;по двум графикам.</p>
+<div class="signature">--<br>С уважением,<br>Аккаунт-менеджер<br>
+<a href="https://example.invalid">Сайт компании</a>
+<img src="https://tracker.invalid/pixel" onerror="secret()"></div>
+<div>От кого: Менеджер &lt;account@example.invalid&gt;<br>Тема: График цен</div>
+<blockquote><p>Добрый день!</p><p>Цены повысили по графику.</p></blockquote>
+<script>secret()</script><iframe>private frame</iframe><object>private object</object>
+</body></html>'''
+        for kind in (3,'3'):
+            with self.subTest(kind=kind):
+                text=server.workflow_crm_plain_text(body,kind)
+                for expected in ('Цены повысили по двум графикам.','--\nС уважением,\nАккаунт-менеджер',
+                                 'От кого: Менеджер <account@example.invalid>','Добрый день!\n\nЦены повысили по графику.'):
+                    self.assertIn(expected,text)
+                for hidden in ('<br','<div','<blockquote','&nbsp;','tracker.invalid','secret()','private frame','private object','.signature','\n\n\n'):
+                    self.assertNotIn(hidden,text)
+
+    def test_plain_text_and_bbcode_are_not_interpreted_as_html(self):
+        for kind,text in ((1,'Цена < 100 & остаток > 5\nЛитерал <div>'),(2,'[b]Принято[/b] <товар>')):
+            with self.subTest(kind=kind):
+                self.assertEqual(server.workflow_crm_plain_text(text,kind),text)
+
+    def test_html_conversion_keeps_boundaries_and_bounds_output(self):
+        self.assertEqual(server.workflow_crm_plain_text('<div>Первая</div>Вторая<br/>Третья<table><tr><td>Товар</td><td>Цена</td></tr></table>',3),
+                         'Первая\nВторая\nТретья\n\nТовар Цена')
+        self.assertEqual(server.workflow_crm_plain_text('<iframe/><p>Текст после пустого элемента</p>',3),'Текст после пустого элемента')
+        self.assertEqual(len(server.workflow_crm_plain_text('<p>'+'А'*160000+'</p>',3)),70000)
 
     def test_foreign_deal_urls_cannot_change_request_destination(self):
         self.mocks()
