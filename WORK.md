@@ -2,7 +2,7 @@
 
 Обновлено: 2026-11-18. Текущий статус здесь; постоянные правила — в [памяти проекта](docs/memory/INDEX.md).
 
-## Почта и границы XLSX — подготовлено 18.11.2026
+## Почта и границы XLSX — выложено 18.11.2026
 
 По замечаниям Дмитрия исправлены две ошибки предыдущего оформления.
 Почта: список был ограничен640px, письмо растягивало всю страницу; теперь
@@ -32,7 +32,23 @@ Chromium/HTTP/SQLite:4скачивания WB/Ozon cabinet/workflow, все гр
 Артефакты:var/research/2026-11-18-mail-table/ (owner-only/ignored).
 Перед выпуском idle guard0,consistent backup quick_checkOK:
 `/opt/opticards/var/backups/mail-table-20261118T134502Z/opticards.sqlite3`.
-Выпуск/production-приёмка продолжаются, runtime покаa4dca98.
+Выпущен **082310a** штатным opticards-deploy, exit0; контейнер пересоздан.
+Публичный index SHA256f37d5f2bc374ac0ca58d752fb68bfd4b4799a156c4ff0549fe8189d413b0e9f6
+совпадает с локальным. Production Chromium под dmitriy.admin и kristina.manager:
+11 реальных писем DeLux, list/message678px, реальные scroll1172/802px,
+строка21.7px,отдельная прокрутка/сброс/390px/HTML0/JS0/POST0 PASS.
+В2 изолированных кабинетах WB/Ozon из рабочего UI скачаны4 XLSX кабинет+
+workflow; openpyxl подтвердил четыре тонкие границы у КАЖДОЙ ячейки,
+цвета/wrap/resize/protection/позицию12.5/частоту150или70 PASS.
+В тех же fixtures создан прежний borderless layout2: кнопка обновления
+создала новый layout3/v2, точный SHA старого BLOB сохранён. Реальные77
+карточек/черновиков/файлов не изменялись; внешних моделей/отправок не было.
+2 кабинета и2точные acceptance-сессии удалены, локальные токены удалены.
+После cleanup все26 исходных business/workflow/semantic/cache таблиц,
+3 automatic-seo states и7 XLSX совпали по хешам; FK OK,active0.
+Артефакты:var/research/2026-11-18-mail-table-release/ — backup.json,deploy.log,
+acceptance.json,xlsx-verified.json,preservation.json,cleanup.json.
+Документационный follow-up не требует повторного deploy/перезапуска.
 
 ## Проход СЯ Ozon, дата работы и история Б24 — выложено 18.11.2026
 
