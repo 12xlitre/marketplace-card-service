@@ -37,6 +37,9 @@ class SemanticExportTest(unittest.TestCase):
                 self.assertEqual(sheet['F2'].value,ADD['relevanceReason']+'\nВ карточке: «Для наружных работ.»')
                 self.assertEqual([sheet.cell(1,c).fill.fgColor.rgb[-6:] for c in (1,4,8)],['E3EBF5','E2F0E9','F8E8E3'])
                 self.assertFalse(sheet.sheet_view.showGridLines)
+                for row in sheet:
+                    for cell in row:
+                        self.assertTrue(all(getattr(cell.border,edge).style=='thin' for edge in ('left','right','top','bottom')))
                 self.assertTrue(sheet['F2'].alignment.wrap_text)
                 self.assertFalse(sheet.protection.formatColumns);self.assertFalse(sheet.protection.formatRows)
                 self.assertTrue(sheet['F2'].protection.locked);self.assertFalse(sheet['G2'].protection.locked)

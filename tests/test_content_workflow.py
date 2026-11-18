@@ -180,6 +180,19 @@ class ContentWorkflowTest(unittest.TestCase):
             server.workflow_approve_file(self.portal,{'fileId':file_id,'body':base64.b64encode(raw.getvalue()).decode()},self.users['account'],True,True)
         with self.assertRaises(PermissionError):server.workflow_approve_file(self.portal,{'fileId':file_id},self.users['tech'])
 
+    def test_new_semantic_format_creates_version_and_preserves_previous_workbook(self):
+        _,batch,file_id=self.reviewed_semantic()
+        previous=self.file(file_id)
+        with server.connect_db() as db:
+            snapshot=json.loads(previous['snapshot_json']);snapshot['layoutVersion']=2
+            db.execute('UPDATE workflow_files SET snapshot_json=? WHERE id=?',(json.dumps(snapshot),file_id))
+        exported=server.workflow_export_files(self.portal,{'batchId':batch['id']},self.users['account'])
+        self.assertNotEqual(exported['fileIds'],[file_id]);current=self.file(exported['fileIds'][0])
+        self.assertEqual(current['version'],previous['version']+1)
+        self.assertEqual(json.loads(current['snapshot_json'])['layoutVersion'],3)
+        self.assertEqual(self.file(file_id)['body'],previous['body'])
+        self.assertEqual(server.workflow_export_files(self.portal,{'batchId':batch['id']},self.users['account']),exported)
+
     def test_content_uses_frozen_agreed_semantic_and_independent_files(self):
         plan,_,file_id=self.reviewed_semantic()
         server.workflow_approve_file(self.portal,{'fileId':file_id},self.users['account'])

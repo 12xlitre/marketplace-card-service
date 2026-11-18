@@ -15,20 +15,20 @@ export function semanticAdditionExplanation(row) {
 }
 
 export function semanticExportRows(current, ranked, selected, removed, marketplace, appendRows = 0) {
-  const empty = () => ({value: '', style: 5});
+  const empty = () => ({value: '', style: 11});
   const rows = [semanticExportHeaders(marketplace).map((value, index) => ({value, style: index < 3 ? 6 : index < 7 ? 7 : 8}))];
   const count = Math.max(current.length, ranked.length, selected.length, removed.length, 1) + appendRows;
   for (let i = 0; i < count; i++) {
     const add = selected[i], remove = removed[i], rank = ranked[i];
     const frequency = Number(add?.[marketplace === 'Ozon' ? 'ozonCount' : 'wbCount']);
     rows.push([
-      {value: current[i]?.query || '', style: 4}, {value: rank?.query || '', style: 4}, {value: rank?.position || '', style: 4},
-      add?.query ? {value: add.query, style: 4} : empty(),
-      add?.query ? {value: Number.isFinite(frequency) && frequency > 0 ? frequency : '', style: 4} : empty(),
-      {value: semanticAdditionExplanation(add), style: 4},
+      {value: current[i]?.query || '', style: 10}, {value: rank?.query || '', style: 10}, {value: rank?.position || '', style: 10},
+      add?.query ? {value: add.query, style: 10} : empty(),
+      add?.query ? {value: Number.isFinite(frequency) && frequency > 0 ? frequency : '', style: 10} : empty(),
+      {value: semanticAdditionExplanation(add), style: 10},
       {value: add?.query ? 'Да' : '', style: 9},
-      remove?.query ? {value: remove.query, style: 4} : empty(),
-      {value: remove?.removalReason || remove?.reason || '', style: 5},
+      remove?.query ? {value: remove.query, style: 10} : empty(),
+      {value: remove?.removalReason || remove?.reason || '', style: 11},
       {value: remove?.query ? 'Да' : '', style: 9},
     ]);
   }

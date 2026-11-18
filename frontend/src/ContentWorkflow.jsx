@@ -87,6 +87,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   };
   const fileButtons=file=><div className="cw-file" key={file.id}><div><strong>{file.name}</strong><p>Версия {file.version} · <Status value={file.status}/></p></div><div className="task-batch-actions">
     <button className="btn mini" onClick={()=>download(file.id)}>Скачать</button>
+    {file.kind==='semantic'&&file.current&&(file.layoutVersion||0)<3&&canWork?<button className="btn mini" disabled={busy||current.cards.some(c=>!c.reviewed)} onClick={()=>safe('export_files',{batchId:current.id})}>Обновить оформление XLSX</button>:null}
     {data.canManage&&file.current?<><button className="btn mini" disabled={busy} onClick={()=>act('mail_draft',{fileId:file.id}).then(value=>setMail({...value,requestId:id()})).catch(()=>{})}>Письмо клиенту</button>
       {file.status!=='approved'&&file.status!=='superseded'?<>
         <button className="btn mini" disabled={busy} onClick={()=>setIncoming({file,body:'',preview:null})}>Клиент внёс правки</button>

@@ -24585,7 +24585,7 @@ def workflow_public_batch(db, row, detail=False):
       item['final'] = json.loads(card['final_json']) if card['final_json'] else None
     result['cards'].append(item)
   if result['status']=='review' and any(c['state']=='empty' for c in result['cards']): result['status']='partial'
-  result['files'] = [dict(r) for r in db.execute("SELECT id,kind,version,status,name,sha256,created_at,approved_at,json_extract(snapshot_json,'$.generation') AS generation FROM workflow_files WHERE batch_id=? ORDER BY created_at DESC,version DESC",(row['id'],))]
+  result['files'] = [dict(r) for r in db.execute("SELECT id,kind,version,status,name,sha256,created_at,approved_at,json_extract(snapshot_json,'$.generation') AS generation,json_extract(snapshot_json,'$.layoutVersion') AS layoutVersion FROM workflow_files WHERE batch_id=? ORDER BY created_at DESC,version DESC",(row['id'],))]
   latest={}
   for file in result['files']:
     latest[file['kind']]=max(latest.get(file['kind'],0),file['version'])
@@ -25144,6 +25144,8 @@ def workflow_workbook(file_id, batch, kind, version, snapshots):
       sheet.append([str(v) if isinstance(v,(dict,list)) else v for v in row])
     for row in sheet:
       for cell in row:
+        if kind=='semantic':
+          cell.border=Border(**{edge:Side(style='thin',color='CBD5E1') for edge in ('left','right','top','bottom')})
         if isinstance(cell.value,str) and cell.value.startswith(('=','+','-','@')):
           cell.data_type='s'
         cell.alignment=Alignment(vertical='top',wrap_text=True)
@@ -25152,7 +25154,6 @@ def workflow_workbook(file_id, batch, kind, version, snapshots):
           if kind=='semantic':
             cell.font=Font(name='Calibri',size=11,color='293449',bold=True)
             cell.fill=PatternFill('solid',fgColor='E3EBF5' if cell.column<=3 else 'E2F0E9' if cell.column<=7 else 'F8E8E3')
-            cell.border=Border(left=Side(style='medium',color='FFFFFF') if cell.column in (4,8) else Side())
         elif cell.column in editable:
           cell.fill=PatternFill('solid',fgColor='EDF6EA');cell.protection=Protection(locked=False)
     from openpyxl.utils import get_column_letter
@@ -25193,7 +25194,7 @@ def workflow_make_file(db, batch, kind, snapshots, user, status='review'):
   marketplace=db.execute('SELECT marketplace FROM portals WHERE id=?',(batch['portal_id'],)).fetchone()[0]
   body=workflow_workbook(file_id,{**batch,'marketplace':marketplace},kind,version,snapshots)
   name={'semantic':'СЯ','main':'Наименования-характеристики','description':'Описания'}[kind]+'_'+batch['id'][:8]+'_v'+str(version)+'.xlsx'
-  snapshot={'generation':batch['generation'],'cards':snapshots,'layoutVersion':2}
+  snapshot={'generation':batch['generation'],'cards':snapshots,'layoutVersion':3 if kind=='semantic' else 2}
   db.execute('INSERT INTO workflow_files(id,portal_id,period_id,batch_id,kind,version,status,name,sha256,body,snapshot_json,created_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
              (file_id,batch['portal_id'],batch['period_id'],batch['id'],kind,version,status,name,hashlib.sha256(body).hexdigest(),body,semantic_json(snapshot),user_login_value(user),utc_now().isoformat() if status=='approved' else None))
   workflow_event(db,batch['portal_id'],user,'file_created',batch['period_id'],batch['id'],fileId=file_id,kind=kind,version=version)
@@ -25212,7 +25213,7 @@ def workflow_export_files(portal, payload, user):
     snapshots={r['card_key']:{'card':json.loads(r['snapshot_json']),**({'final':json.loads(r['final_json'])} if batch['kind']=='semantic' else {'content':json.loads(r['result_json'])})} for r in rows}
     ids=[]
     for kind in kinds:
-      existing=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? AND json_extract(snapshot_json,\'$.generation\')=?'+(" AND json_extract(snapshot_json,'$.layoutVersion')=2" if kind=='semantic' else '')+' ORDER BY version DESC LIMIT 1',(batch['id'],kind,batch['generation'])).fetchone()
+      existing=db.execute('SELECT id FROM workflow_files WHERE batch_id=? AND kind=? AND json_extract(snapshot_json,\'$.generation\')=?'+(" AND json_extract(snapshot_json,'$.layoutVersion')=3" if kind=='semantic' else '')+' ORDER BY version DESC LIMIT 1',(batch['id'],kind,batch['generation'])).fetchone()
       if existing:
         ids.append(existing[0])
       else:
@@ -26080,20 +26081,23 @@ def workflow_crm_plain_text(body,kind):
   if str(kind)!='3': return audit_str(body,70000)
   from html.parser import HTMLParser
   class Plain(HTMLParser):
-    def __init__(self): super().__init__(convert_charrefs=True);self.parts=[];self.hidden=0
+    def __init__(self): super().__init__(convert_charrefs=True);self.parts=[];self.hidden=0;self.pre=0
     blocks={'p','div','tr','li','blockquote','table','section','article','ul','ol','pre','h1','h2','h3','h4','h5','h6'}
     def handle_starttag(self,tag,attrs):
       if tag in ('script','style','head','iframe','object'): self.hidden+=1
       elif not self.hidden:
+        if tag=='pre': self.pre+=1
         if tag in self.blocks or tag in ('br','hr'): self.parts.append('\n')
         elif tag in ('td','th'): self.parts.append(' ')
     def handle_startendtag(self,tag,attrs):
       if tag not in ('script','style','head','iframe','object'): self.handle_starttag(tag,attrs)
     def handle_endtag(self,tag):
       if tag in ('script','style','head','iframe','object'): self.hidden=max(0,self.hidden-1)
-      elif not self.hidden and tag in self.blocks: self.parts.append('\n')
+      elif not self.hidden and tag in self.blocks:
+        if tag=='pre': self.pre=max(0,self.pre-1)
+        self.parts.append('\n')
     def handle_data(self,data):
-      if not self.hidden: self.parts.append(data)
+      if not self.hidden: self.parts.append(data if self.pre else re.sub(r'[ \t\r\n\f\v]+',' ',data))
   parser=Plain();parser.feed(str(body or '')[:150000]);parser.close()
   text=''.join(parser.parts).replace('\xa0',' ').replace('\r\n','\n').replace('\r','\n')
   text='\n'.join(re.sub(r'[ \t\f\v]+',' ',line).strip() for line in text.split('\n'))

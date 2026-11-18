@@ -93,6 +93,22 @@ class CrmMailTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertEqual(server.workflow_crm_plain_text(text,kind),text)
 
+    def test_html_source_indentation_does_not_create_blank_lines_in_signature(self):
+        html='''<div>
+ --<br>
+
+ С уважением,<br>
+
+ Менеджер<br>
+
+ Компания<br>
+ <a href="https://example.invalid">Сайт</a><br>
+ <br>Следующий абзац
+ </div><pre>Строка 1\nСтрока 2</pre>'''
+        value=server.workflow_crm_plain_text(html,3)
+        self.assertIn('--\nС уважением,\nМенеджер\nКомпания\nСайт\n\nСледующий абзац',value)
+        self.assertIn('Строка 1\nСтрока 2',value)
+
     def test_html_conversion_keeps_boundaries_and_bounds_output(self):
         self.assertEqual(server.workflow_crm_plain_text('<div>Первая</div>Вторая<br/>Третья<table><tr><td>Товар</td><td>Цена</td></tr></table>',3),
                          'Первая\nВторая\nТретья\n\nТовар Цена')
