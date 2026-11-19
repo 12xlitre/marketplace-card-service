@@ -1,4 +1,4 @@
-import copy,json,threading,unittest
+import copy,json,os,threading,unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock,patch
 import server
@@ -9,7 +9,7 @@ MESSAGES=[{'role':'system','content':'Return JSON'},{'role':'user','content':'Pu
 
 class OpenAIAdapterTest(unittest.TestCase):
  def setUp(self):
-  self.patches=[patch.object(server,'OPTICARDS_LLM_PROVIDER','openai'),patch.object(server,'OPTICARDS_LLM_API_KEY','test-fixture-key'),patch.object(server,'OPTICARDS_LLM_API_BASE','https://api.openai.com/v1'),patch.object(server,'OPTICARDS_LLM_MODEL','gpt-6.1-terra'),patch.object(server,'OPTICARDS_LLM_CLASSIFIER_MODEL','gpt-6-luna'),patch.object(server,'OPTICARDS_LLM_REASONING_EFFORT','none'),patch.object(server,'OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT','low')]
+  self.patches=[patch.object(server,'OPTICARDS_LLM_PROVIDER','openai'),patch.object(server,'OPTICARDS_LLM_API_KEY','test-fixture-key'),patch.object(server,'OPTICARDS_LLM_API_BASE','https://api.openai.com/v1'),patch.object(server,'OPTICARDS_LLM_PROXY_URL',''),patch.object(server,'OPTICARDS_LLM_MODEL','gpt-6.1-terra'),patch.object(server,'OPTICARDS_LLM_CLASSIFIER_MODEL','gpt-6-luna'),patch.object(server,'OPTICARDS_LLM_REASONING_EFFORT','none'),patch.object(server,'OPTICARDS_LLM_CLASSIFIER_REASONING_EFFORT','low')]
   for p in self.patches:p.start()
   self.response=MagicMock();self.response.__enter__.return_value.read.return_value=b'{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}'
   self.transport=patch.object(server.urlrequest,'urlopen',return_value=self.response);self.request=self.transport.start()
@@ -22,6 +22,7 @@ class OpenAIAdapterTest(unittest.TestCase):
   _,model,provider=server._audit_llm_chat_completion(messages,response_schema=SCHEMA,max_output_tokens=8192)
   body=self.body();self.assertEqual((model,provider),('gpt-6.1-terra','openai'));self.assertEqual(body['max_completion_tokens'],8192);self.assertNotIn('max_tokens',body);self.assertEqual(body['reasoning_effort'],'none');self.assertEqual(body['temperature'],.2)
   self.assertEqual(body['response_format']['json_schema']['schema'],SCHEMA);self.assertTrue(body['response_format']['json_schema']['strict']);self.assertEqual(self.request.call_args.kwargs['timeout'],120);self.assertEqual(messages,MESSAGES)
+  self.assertIs(body['store'],False)
  def test_low_reasoning_omits_temperature_and_model_override_is_local(self):
   _,model,_=server._audit_llm_chat_completion(MESSAGES,model_override='gpt-6-luna',reasoning_effort='low');self.assertEqual(model,'gpt-6-luna');self.assertNotIn('temperature',self.body());self.assertEqual(self.body()['reasoning_effort'],'low');self.assertEqual(server.OPTICARDS_LLM_MODEL,'gpt-6.1-terra')
  def test_flagship_none_is_normalized_to_supported_low(self):
@@ -51,3 +52,48 @@ class OpenAIAdapterTest(unittest.TestCase):
  def test_response_size_is_bounded(self):
   self.response.__enter__.return_value.read.return_value=b'x'*(4*1024*1024+1)
   with self.assertRaisesRegex(ValueError,'llm_response_too_large'):server._audit_llm_chat_completion(MESSAGES)
+
+
+class OpenAIProxyTest(unittest.TestCase):
+ def test_explicit_proxy_ignores_environment_and_preserves_tls(self):
+  captured={}
+  class Connection:
+   debuglevel=0
+   _http_vsn=11
+   def __init__(self,host,**kwargs):captured.update(host=host,**kwargs)
+   def set_debuglevel(self,level):pass
+   def set_tunnel(self,host,**kwargs):captured['tunnel']=host
+   def request(self,method,path,body,headers,**kwargs):captured.update(method=method,path=path,headers=headers)
+   def getresponse(self):raise server.urlerror.URLError('fixture proxy unavailable')
+   def close(self):pass
+  request=server.urlrequest.Request('https://api.openai.com/v1/chat/completions',data=b'{}')
+  with patch.object(server,'OPTICARDS_LLM_PROXY_URL','http://127.0.0.1:24194'), \
+       patch.dict(os.environ,{'NO_PROXY':'*','no_proxy':'*','HTTPS_PROXY':'http://wrong:9999'}), \
+       patch.object(server.http.client,'HTTPSConnection',Connection), \
+       patch.object(server.urlrequest,'urlopen',side_effect=AssertionError('direct fallback')):
+   with self.assertRaises(server.urlerror.URLError):server.openai_urlopen(request,timeout=17)
+  self.assertEqual(captured['host'],'127.0.0.1:24194')
+  self.assertEqual(captured['tunnel'],'api.openai.com')
+  self.assertEqual(captured['timeout'],17)
+  self.assertTrue(captured['context'].check_hostname)
+  self.assertEqual(captured['context'].verify_mode,server.ssl.CERT_REQUIRED)
+  self.assertEqual(captured['method'],'POST')
+  self.assertEqual(captured['path'],'/v1/chat/completions')
+  self.assertNotIn('Proxy-Authorization',captured['headers'])
+ def test_invalid_configuration_fails_before_network_without_echoing_secret(self):
+  for proxy in ('https://127.0.0.1:24194','http://user:secret@127.0.0.1:24194','http://127.0.0.1:bad','http://127.0.0.1:24194/path','http://['):
+   with self.subTest(proxy=proxy),patch.object(server,'OPTICARDS_LLM_PROXY_URL',proxy), \
+        patch.object(server.urlrequest,'build_opener') as build:
+    with self.assertRaisesRegex(ValueError,'^llm_invalid_proxy_url$'):
+     server.openai_urlopen(server.urlrequest.Request('https://api.openai.com/v1'),timeout=17)
+    build.assert_not_called()
+ def test_proxy_rejects_plain_http_api_before_network(self):
+  with patch.object(server,'OPTICARDS_LLM_PROXY_URL','http://127.0.0.1:24194'):
+   with self.assertRaisesRegex(ValueError,'llm_proxy_requires_https'):
+    server.openai_urlopen(server.urlrequest.Request('http://api.openai.com/v1'),timeout=17)
+ def test_redirect_cannot_forward_credentials_or_escape_proxy(self):
+  request=server.urlrequest.Request('https://api.openai.com/v1',headers={'Authorization':'Bearer test-fixture'})
+  with self.assertRaises(server.urlerror.HTTPError) as error:
+   server.OpenAINoRedirectHandler().redirect_request(request,None,302,'Found',{},'http://other.example/')
+  self.assertEqual(error.exception.code,302)
+  self.assertEqual(error.exception.reason,'llm_redirect_disallowed')

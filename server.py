@@ -117,6 +117,7 @@ WB_CLIENT_REPORT_ANALYTICS_MAX_CALLS = int(os.environ.get("WB_CLIENT_REPORT_ANAL
 WB_CLIENT_REPORT_PROMO_MAX = int(os.environ.get("WB_CLIENT_REPORT_PROMO_MAX", "10"))
 OPTICARDS_LLM_API_KEY = os.environ.get("OPTICARDS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 OPTICARDS_LLM_API_BASE = os.environ.get("OPTICARDS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPTICARDS_LLM_PROXY_URL = os.environ.get("OPTICARDS_LLM_PROXY_URL", "").strip()
 OPTICARDS_LLM_MODEL = os.environ.get("OPTICARDS_LLM_MODEL", "gpt-4o-mini")
 OPTICARDS_LLM_CLASSIFIER_MODEL = os.environ.get("OPTICARDS_LLM_CLASSIFIER_MODEL", OPTICARDS_LLM_MODEL)
 OPTICARDS_LLM_REASONING_EFFORT = os.environ.get("OPTICARDS_LLM_REASONING_EFFORT", "none").strip()
@@ -20459,6 +20460,35 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
       # All workers observe the same cooldown on their next acquired slot.
 
 
+class OpenAIProxyHandler(urlrequest.ProxyHandler):
+  def proxy_open(self, request, proxy, protocol):
+    # An explicit route must also ignore NO_PROXY; never fall back to direct access.
+    request.set_proxy(proxy, 'http')
+
+
+class OpenAINoRedirectHandler(urlrequest.HTTPRedirectHandler):
+  def redirect_request(self, request, response, code, message, headers, new_url):
+    raise urlerror.HTTPError(request.full_url, code, 'llm_redirect_disallowed', headers, response)
+
+
+def openai_urlopen(request, timeout):
+  if not OPTICARDS_LLM_PROXY_URL:
+    return urlrequest.urlopen(request, timeout=timeout)
+  try:
+    proxy = urlparse(OPTICARDS_LLM_PROXY_URL)
+    valid_proxy = (proxy.scheme == 'http' and proxy.hostname and proxy.port and
+                   proxy.username is None and proxy.password is None and
+                   proxy.path in ('', '/') and not proxy.query and not proxy.fragment)
+  except ValueError:
+    valid_proxy = False
+  if not valid_proxy:
+    raise ValueError('llm_invalid_proxy_url')
+  if urlparse(request.full_url).scheme != 'https':
+    raise ValueError('llm_proxy_requires_https')
+  opener = urlrequest.build_opener(OpenAIProxyHandler({'https': proxy.netloc}), OpenAINoRedirectHandler())
+  return opener.open(request, timeout=timeout)
+
+
 def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
                                model_override=None, native_functions=True, reasoning_effort=None, structured_output=False):
   provider = OPTICARDS_LLM_PROVIDER
@@ -20508,6 +20538,7 @@ def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False,
   if modern and effort == 'none' and (selected_model.startswith(('gpt-6-astra','gpt-6.1-sol','gpt-5-mini','gpt-5-nano','o1','o3','o4')) or selected_model == 'gpt-5' or selected_model.startswith('gpt-5-2025')):
     effort = 'low'
   body = {'model':selected_model,'messages':messages,'response_format':{'type':'json_object'}}
+  if provider == 'openai': body['store'] = False
   if modern: body['reasoning_effort'] = 'low' if effort == 'minimal' and selected_model.startswith('gpt-6') else effort
   if not modern or effort == 'none': body['temperature'] = .2
   if response_schema is not None and not plain_text and provider == 'openai':
@@ -20517,7 +20548,7 @@ def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False,
   if plain_text: body.pop('response_format',None)
   request = urlrequest.Request(url,data=json.dumps(body,ensure_ascii=False).encode('utf-8'),headers={
       'Authorization':f'Bearer {token}','Content-Type':'application/json','Accept':'application/json','User-Agent':'OptiCards/0.1 audit-llm'},method='POST')
-  with urlrequest.urlopen(request,timeout=120 if response_schema is not None else 60) as response:
+  with openai_urlopen(request,timeout=120 if response_schema is not None else 60) as response:
     raw=response.read(4*1024*1024+1)
     if len(raw)>4*1024*1024: raise ValueError('llm_response_too_large')
     return json.loads(raw.decode('utf-8')),selected_model,provider or 'openai'
