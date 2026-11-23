@@ -3,13 +3,22 @@ export function workflowCalendarLabel(batch) {
   return dates.length ? `Назначено: ${dates.join(', ')}` : 'День выполнения не назначен';
 }
 
-export function workflowCardRun(batch, cardKey) {
-  if (batch.kind !== 'semantic' || !batch.cards?.length) return null;
+export function workflowSemanticProgress(cards) {
+  const pending = [];
+  const finalized = [];
+  for (const card of cards) {
+    (card.hasSemanticFinal ? finalized : pending).push(card);
+  }
+  return {pending, finalized};
+}
+
+export function workflowCardRun(batch, cardKey, cards = batch.cards) {
+  if (batch.kind !== 'semantic' || !cards?.length) return null;
   return {
     title: batch.title, workType: 'semantic', workTypeLabel: 'Проверка СЯ',
-    workflowBatchId: batch.id, total: batch.cards.length,
-    currentIndex: Math.max(0, batch.cards.findIndex(card => card.cardKey === cardKey)),
-    items: batch.cards.map(card => ({cardKey: card.cardKey, title: card.title, status: card.state})),
+    workflowBatchId: batch.id, total: cards.length,
+    currentIndex: Math.max(0, cards.findIndex(card => card.cardKey === cardKey)),
+    items: cards.map(card => ({cardKey: card.cardKey, title: card.title, status: card.state})),
   };
 }
 

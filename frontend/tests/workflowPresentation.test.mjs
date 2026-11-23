@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText} from '../src/workflowPresentation.js';
+import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from '../src/workflowPresentation.js';
 
 test('work included in a period does not imply a calendar day',()=>{
   assert.equal(workflowCalendarLabel({status:'planned',periodId:'16'}),'День выполнения не назначен');
@@ -14,6 +14,20 @@ test('semantic navigation follows only the chosen batch and starts at the opened
   assert.equal(run.currentIndex,1);assert.equal(run.workflowBatchId,'own-batch');
   assert.deepEqual(run.items.map(c=>c.cardKey),['second','first']);
   assert.equal(workflowCardRun({...batch,kind:'work'},'first'),null);
+});
+
+test('the working list skips saved finals and retains their identity for review',()=>{
+  const batch = {id:'workset', kind:'semantic', title:'СЯ', cards:[
+    {cardKey:'first', title:'Первая', reviewed:false, hasSemanticFinal:true},
+    {cardKey:'second', title:'Вторая', reviewed:false, hasSemanticFinal:false},
+    {cardKey:'third', title:'Третья', reviewed:false, hasSemanticFinal:false},
+  ]};
+  const {pending, finalized} = workflowSemanticProgress(batch.cards);
+  assert.deepEqual(finalized.map(card=>card.cardKey), ['first']);
+  assert.deepEqual(workflowCardRun(batch, 'second', pending).items.map(card=>card.cardKey), ['second', 'third']);
+  assert.equal(workflowCardRun(batch, 'third', pending).currentIndex, 1);
+  assert.equal(finalized[0].reviewed, false);
+  assert.equal(batch.cards.length, 3);
 });
 
 test('automatic Bitrix notification explains its cause and original result',()=>{

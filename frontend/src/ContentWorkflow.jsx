@@ -4,7 +4,7 @@ import {MailComposer} from './ClientMail';
 import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 import {visibleWorkflowBatches} from './workflowTaskVisibility';
-import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText} from './workflowPresentation';
+import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'Не начата',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
@@ -79,12 +79,29 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const selectedBatch=batches.find(b=>b.id===selected);
   const current=detail?.id===selected&&selectedBatch?detail:null;
   const canWork=current && (data.canManage||current.assignee===data.login) && current.status!=='archived';
+  const semanticProgress=current?.kind==='semantic'?workflowSemanticProgress(current.cards):null;
   const choose=batch=>{setDetail(null);setSelected(batch.id)};
-  const openWorkflowCard=card=>{
+  const openWorkflowCard=(card,runCards)=>{
     const source=cards.find(c=>keyOf(c)===card.cardKey);
     if(source)onOpenCard?.(source,{sellerTab:mode==='periods'?'work-periods':'tasks',
-      backLabel:'Вернуться к задаче',taskRun:workflowCardRun(current,card.cardKey)});
+      backLabel:'Вернуться к задаче',taskRun:workflowCardRun(current,card.cardKey,runCards)});
   };
+  const renderCard=(card,runCards)=><div className="cw-card" key={card.cardKey}>
+    <div>
+      <strong>{card.title}</strong>
+      <p>{card.cardKey} · <Status value={card.state}/>{card.job?.total?' · '+card.job.completed+'/'+card.job.total+' запросов':''}</p>
+      <ErrorNote error={card.error}/>
+    </div>
+    <div className="task-batch-actions">
+      <button className="btn mini" onClick={()=>openWorkflowCard(card,runCards)}>Открыть карточку</button>
+      {semanticProgress&&card.hasSemanticFinal?<button className="btn mini"
+        disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||['approved','cancelled'].includes(current.status)}
+        onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>:null
+      }
+      {current.kind==='content'&&card.result?<button className="btn mini" disabled={!canWork||current.status==='approved'}
+          onClick={()=>setEditor({card,batch:current,content:structuredClone(card.result)})}>Проверить и исправить контент</button>:null}
+    </div>
+  </div>;
   const fileButtons=file=><div className="cw-file" key={file.id}><div><strong>{file.name}</strong><p>Версия {file.version} · <Status value={file.status}/></p></div><div className="task-batch-actions">
     <button className="btn mini" onClick={()=>download(file.id)}>Скачать</button>
     {file.kind==='semantic'&&file.current&&(file.layoutVersion||0)<3&&canWork?<button className="btn mini" disabled={busy||current.cards.some(c=>!c.reviewed)} onClick={()=>safe('export_files',{batchId:current.id})}>Обновить оформление XLSX</button>:null}
@@ -114,14 +131,16 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       <div className="cw-plan-task-list">{batches.filter(b=>b.periodId===plan.id&&b.planVersion===plan.version).map(b=><div className="cw-plan-task-row" key={b.id}><div><button className="btn" onClick={()=>choose(b)}>{b.title} · {labels[b.status]||b.status}</button><p>{[...b.schedule.map(s=>s.day+' · '+s.minutes+' мин'),...(b.plannedDays||[]).map(s=>s.day+' · нужно оценить')].join('; ')||'День выполнения пока не назначен'}</p></div>{data.canManage&&!['approved','cancelled','archived'].includes(b.status)?<button className="btn mini primary" onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:today()<plan.start?plan.start:today()>plan.end?plan.end:today()})}>Назначить день</button>:null}{data.canManage?(b.plannedDays||[]).map(slot=><button className="btn mini" key={slot.id} onClick={()=>setPlanning({task:{...b,portalId:portal.id,project:portal.name,marketplace:portal.marketplace,periodStart:plan.start,periodEnd:plan.end},day:slot.day,slot:{...slot,plannedOnly:true}})}>Перенести {slot.day}</button>):null}</div>)}</div>
     </article>)}</div>:null}
     <div className="cw-task-grid">{batches.filter(b=>b.status!=='archived'&&(mode!=='periods'||!b.periodId)).map(b=><button key={b.id} className={'cw-task '+(selected===b.id?'selected':'')} onClick={()=>choose(b)}>
-      <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span><Status value={b.status}/><small>{workflowCalendarLabel(b)}</small><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
+      <strong>{b.title}</strong><span>{b.cards.length} карточек · {data.people.find(p=>p.login===b.assignee)?.name||b.assignee}</span>
+      {b.kind==='semantic'?<small>С итоговым СЯ: {b.cards.filter(card=>card.hasSemanticFinal).length} из {b.cards.length}</small>:null}
+      <Status value={b.status}/><small>{workflowCalendarLabel(b)}</small><small>{b.schedule.length?b.schedule.reduce((n,r)=>n+r.minutes,0)+' мин запланировано':'Нужно оценить длительность'}</small>
     </button>)}</div>
     {!batches.length?<p className="cw-empty">{mode==='tasks'&&plans.length?'Запланированные работы остаются в периоде. Здесь они появятся после запуска работы.':'Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.'}</p>:null}
     {current?<article className="cw-detail"><div className="strip-head"><div><h2>{current.title}</h2><p>{current.cards.length} карточек · исполнитель {current.assignee}</p></div><Status value={current.status}/></div>
       <p className="status-note cw-calendar-state">{workflowCalendarLabel(current)}</p>
       {current.kind==='content'&&current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
       <div className="task-batch-actions">
-        {current.kind==='semantic'&&current.cards.length?<button className="btn primary" onClick={()=>openWorkflowCard(current.cards.find(c=>!c.reviewed)||current.cards[0])}>Проверять карточки по порядку</button>:null}
+        {semanticProgress?.pending.length?<button className="btn primary" onClick={()=>openWorkflowCard(semanticProgress.pending[0],semanticProgress.pending)}>Проверять карточки по порядку</button>:null}
         {canWork&&!['approved','cancelled'].includes(current.status)?<>
           <button className="btn primary" disabled={busy||['collecting','generating','awaiting_semantic'].includes(current.status)||!current.cards.some(c=>['queued','failed','cancelled','empty'].includes(c.state))} onClick={()=>safe('start',{batchId:current.id})}>{current.kind==='semantic'?'Запустить / продолжить подбор по набору':current.kind==='content'?'Работать · переоптимизировать набор':'Работать'}</button>
           <button className="btn" disabled={busy} onClick={()=>safe('cancel',{batchId:current.id})}>Отменить</button>
@@ -133,11 +152,17 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       </div><ErrorNote error={current.error}/>
       {!current.schedule.length&&canWork?<p className="status-note">Перед проверкой карточек назначьте длительность задачи в календаре.</p>:null}
       <ScheduleForm batch={current} busy={busy||!canWork} onRemove={p=>safe('unschedule',p)}/>
-      <div className="cw-card-list">{current.cards.map(card=><div className="cw-card" key={card.cardKey}><div><strong>{card.title}</strong><p>{card.cardKey} · <Status value={card.state}/>{card.job?.total?' · '+card.job.completed+'/'+card.job.total+' запросов':''}</p><ErrorNote error={card.error}/></div>
-        <div className="task-batch-actions"><button className="btn mini" onClick={()=>openWorkflowCard(card)}>Открыть карточку</button>
-        {current.kind==='semantic'?<button className="btn mini" disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||current.status==='approved'} onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>
-          :current.kind==='content'&&card.result?<button className="btn mini" disabled={!canWork||current.status==='approved'} onClick={()=>setEditor({card,batch:current,content:structuredClone(card.result)})}>Проверить и исправить контент</button>:null}</div></div>)}</div>
-      {current.kind==='semantic'?<p className="status-note">Откройте карточку, проверьте запросы и сохраните итоговое СЯ. Затем подтвердите проверку здесь — в файл попадёт именно этот итог.</p>:null}
+      {semanticProgress?<div className="cw-card-list">
+        <p className="status-note">Проверено для клиентского файла: {current.cards.filter(card=>card.reviewed).length} из {current.cards.length}.</p>
+        <details>
+          <summary>С итоговым СЯ · {semanticProgress.finalized.length}</summary>
+          <p className="status-note">Подтвердите проверку карточек, чтобы сохранённое СЯ попало в файл.</p>
+          {semanticProgress.finalized.map(card=>renderCard(card,semanticProgress.finalized))}
+          {!semanticProgress.finalized.length?<p>Итоговое СЯ пока не добавлено ни для одной карточки.</p>:null}
+        </details>
+        <h3>Без итогового СЯ · {semanticProgress.pending.length}</h3>
+        {semanticProgress.pending.map(card=>renderCard(card,semanticProgress.pending))}
+      </div>:<div className="cw-card-list">{current.cards.map(card=>renderCard(card))}</div>}
       {current.files.map(fileButtons)}
     </article>:selectedBatch?<p>Загружаем задачу…</p>:null}
     {batches.some(b=>b.status==='archived')?<details><summary>Задачи прежних версий плана</summary>{batches.filter(b=>b.status==='archived').map(b=><button className="btn mini" key={b.id} onClick={()=>choose(b)}>{b.title} · план v{b.planVersion}</button>)}</details>:null}

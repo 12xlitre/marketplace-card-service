@@ -24821,15 +24821,33 @@ def workflow_revise_plan(portal, payload, user):
   return {'periodId':str(plan['period_id']),'version':version}
 
 
-def workflow_public_batch(db, row, detail=False):
-  value = dict(row)
-  cards = db.execute('SELECT card_key,position,state,error,job_id,final_json,result_json,snapshot_json FROM workflow_cards WHERE batch_id=? ORDER BY position',(row['id'],)).fetchall()
+def workflow_public_batch(db, row, marketplace, detail=False):
+  semantic = row['kind'] == 'semantic'
+  columns = 'c.card_key,c.state,c.error,c.job_id,c.final_json,c.result_json,c.snapshot_json'
+  source = 'workflow_cards c'
+  params = (row['id'],)
+  if semantic:
+    if row['status'] == 'archived':
+      columns += ',c.final_json IS NOT NULL AS has_semantic_final'
+    else:
+      table = 'ozon_semantic_drafts' if marketplace == 'Ozon' else 'card_drafts'
+      source += f' LEFT JOIN {table} d ON d.portal_id=? AND d.card_key=c.card_key'
+      params = (row['portal_id'], *params)
+      if marketplace == 'Ozon':
+        final = "json_type(d.payload_json,'$.final')='array' AND json_array_length(d.payload_json,'$.final')>0"
+      else:
+        path = '$.meta.semanticCoreFinal.semanticCore'
+        final = f"json_type(d.payload_json,'{path}')='object' AND json_extract(d.payload_json,'{path}')!='{{}}'"
+      columns += f',CASE WHEN json_valid(d.payload_json) THEN ({final}) END AS has_semantic_final'
+  cards = db.execute(f'SELECT {columns} FROM {source} WHERE c.batch_id=? ORDER BY c.position',params).fetchall()
   result = {'id':row['id'],'periodId':str(row['period_id'] or ''),'planVersion':row['plan_version'],'kind':row['kind'],
     'title':row['title'],'status':row['status'],'assignee':row['assignee'],'createdBy':row['created_by'],
     'generation':row['generation'],'fields':json.loads(row['fields_json']),'parentId':row['parent_id'],
     'error':row['error'],'createdAt':row['created_at'],'taskKey':row['task_key'],'cards':[]}
   for card in cards:
-    item = {'cardKey':card['card_key'],'state':card['state'],'error':card['error'],'reviewed':bool(card['final_json']) if row['kind']=='semantic' else card['state']=='reviewed'}
+    item = {'cardKey':card['card_key'],'state':card['state'],'error':card['error'],'reviewed':bool(card['final_json']) if semantic else card['state']=='reviewed'}
+    if semantic:
+      item['hasSemanticFinal'] = bool(card['has_semantic_final'])
     snapshot = json.loads(card['snapshot_json'])
     item['title'] = snapshot.get('title') or card['card_key']
     if card['job_id']:
@@ -24885,7 +24903,7 @@ def workflow_list(portal, user, batch_id=None):
         people.append({'login':row['login'],'name':row['full_name'],'canExecute':row['user_role'] in ('tech','admin') or roles.get('tech')==row['login']})
     if batch_id:
       row = workflow_batch(db,portal,batch_id,current)
-      return {'batch':workflow_public_batch(db,row,True)}
+      return {'batch':workflow_public_batch(db,row,record['marketplace'],detail=True)}
     batches = db.execute('SELECT * FROM workflow_batches WHERE portal_id=? ORDER BY created_at DESC,id',(portal,)).fetchall()
     visible = [r for r in batches if manager or r['assignee']==current['login'] or user_has_global_portal_access(current)]
     plans = []
@@ -24901,7 +24919,7 @@ def workflow_list(portal, user, batch_id=None):
     events = [dict(r) for r in db.execute('SELECT id,period_id,batch_id,actor,action,details_json,created_at FROM workflow_events WHERE portal_id=? ORDER BY id DESC LIMIT 100',(portal,))]
     for event in events: event['details'] = json.loads(event.pop('details_json'))
     deliveries=[workflow_public_delivery(db,r,manager) for r in db.execute('SELECT * FROM workflow_outbox WHERE portal_id=? ORDER BY created_at DESC LIMIT 100',(portal,))]
-    return {'deliveries':deliveries,'plans':plans,'batches':[workflow_public_batch(db,r) for r in visible],'people':people,'team':roles,
+    return {'deliveries':deliveries,'plans':plans,'batches':[workflow_public_batch(db,r,record['marketplace']) for r in visible],'people':people,'team':roles,
             'canManage':manager,'canConfigure':current['user_role']=='admin','login':current['login'],'contact':client_contact_from_json(record['client_contact_json']),
             'taskDescriptions':workflow_task_explanations(record['marketplace']),'taskDescriptionsSource':WORKFLOW_TASK_EXPLANATIONS_SOURCE,
             'taskOptions':{**{k:v for k,v in WORK_PERIOD_TASK_LABELS.items() if k in DEFAULT_WORK_PERIOD_TASK_KEYS},'content':'Контент: наименование, характеристики и описание'},

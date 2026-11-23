@@ -95,6 +95,45 @@ class ContentWorkflowTest(unittest.TestCase):
         self.assertNotIn('dataUrl',public['approval']['proof'])
         with self.assertRaises(PermissionError):server.workflow_list(self.portal,self.users['other'])
 
+    def test_semantic_workset_shows_saved_finals_to_assignee_and_admin(self):
+        self.plan(self.portal)
+        self.plan(self.ozon)
+        wb = self.batch(portal=self.portal)
+        ozon = self.batch(portal=self.ozon)
+        with server.connect_db() as db:
+            db.execute("UPDATE workflow_cards SET state='ready'")
+            db.executemany('INSERT INTO card_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)', [
+                (self.portal, '1001', json.dumps({'meta': {'semanticCore': FINAL['semanticCore']}})),
+                (self.other, '1001', json.dumps({'meta': {'semanticCoreFinal': FINAL}})),
+            ])
+
+        def check(portal, batch, expected):
+            for login in ('tech', 'admin'):
+                with self.subTest(portal=portal, login=login, has_final=expected):
+                    user = self.users[login]
+                    summary = next(b for b in server.workflow_list(portal, user)['batches'] if b['id'] == batch['id'])
+                    detail = server.workflow_list(portal, user, batch['id'])['batch']
+                    for view in (summary, detail):
+                        card, = view['cards']
+                        self.assertEqual(card['cardKey'], '1001')
+                        self.assertIs(card['hasSemanticFinal'], expected)
+                        self.assertFalse(card['reviewed'])
+
+        server.save_ozon_semantic_draft(self.ozon, {'cardKey': '1001', 'selected': [SELECTED]}, self.users['admin'])
+        check(self.ozon, ozon, False)
+        check(self.portal, wb, False)
+        server.save_ozon_semantic_draft(self.ozon, {
+            'cardKey': '1001', 'selected': [SELECTED], 'final': [SELECTED], 'finalSelection': FINAL,
+        }, self.users['admin'])
+        check(self.ozon, ozon, True)
+        check(self.portal, wb, False)
+        with server.connect_db() as db:
+            db.execute('UPDATE card_drafts SET payload_json=? WHERE portal_id=? AND card_key=?',
+                       (json.dumps({'meta': {'semanticCoreFinal': FINAL}}), self.portal, '1001'))
+        check(self.portal, wb, True)
+        with self.assertRaisesRegex(ValueError, 'workflow_review_all_cards'):
+            server.workflow_export_files(self.ozon, {'batchId': ozon['id']}, self.users['admin'])
+
     def test_delivery_history_explains_automatic_recipient_result_and_generation_without_payload_secrets(self):
         self.plan();batch=self.batch()
         with server.connect_db() as db:
