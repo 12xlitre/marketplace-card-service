@@ -24986,7 +24986,7 @@ def workflow_ozon_card_review_work(db, batch, row, fields, user):
     (batch['id'],),
   ).fetchall()
   return {
-    'batch': {'id':batch['id'],'title':batch['title'],'fields':fields,'generation':batch['generation'],'status':batch['status'],
+    'batch': {'id':batch['id'],'title':batch['title'],'fields':fields,'generation':batch['generation'],'status':batch['status'],'assignee':batch['assignee'],
               'canReview':(manager or current['login']==batch['assignee']) and batch['status'] not in ('approved','cancelled','archived'),
               'scheduled':bool(db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone())},
     'card': {'cardKey':row['card_key'],'state':row['state'],'error':row['error'],

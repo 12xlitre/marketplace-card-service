@@ -1,4 +1,4 @@
-import {useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Clock3, GripVertical, Search, Users, X} from 'lucide-react';
 import './workCalendar.css';
 
@@ -13,12 +13,22 @@ const initials=name=>name.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('');
 const workLabel=task=>({semantic:'СЯ',content:'Контент',prices:'Цены',stocks:'Остатки'})[task.workType]||'';
 const needsEstimate=task=>!task.schedule.length||task.schedule.some(s=>s.plannedOnly);
 const pendingSlot=task=>task.schedule.find(s=>s.plannedOnly);
+const taskIncludesDay=(task,day)=>!task.periodStart||(task.periodStart<=day&&day<=task.periodEnd);
+
+function taskCalendarDay(task, preferredDay, people){
+  if(!task.periodStart)return preferredDay;
+  const day=preferredDay<task.periodStart?task.periodStart:preferredDay>task.periodEnd?task.periodEnd:preferredDay;
+  const weekdays=people.find(person=>person.login===task.assignee)?.weekdays;
+  const offsets=[0,1,2,3,4,5,6,-1,-2,-3,-4,-5,-6];
+  return offsets.map(offset=>shift(day,offset)).find(candidate=>taskIncludesDay(task,candidate)
+    &&(!weekdays||weekdays.includes((new Date(candidate+'T12:00:00Z').getUTCDay()+6)%7)))||day;
+}
 function startDrag(event,task,slot){event.dataTransfer.setData('text/opticards-task',JSON.stringify({id:task.id,slot}));event.dataTransfer.effectAllowed='move';event.dataTransfer.setDragImage(event.currentTarget,15,15)}
 function DragGrip({task}){return <span className="lc-grip" draggable="true" role="img" aria-label={'Перетащить задачу: '+task.title} title="Перетащить задачу"><GripVertical size={13}/></span>}
 const status={planned:'В плане',draft:'В работе',collecting:'Подбор СЯ в фоне',review:'Проверить результат',partial:'Есть ошибки',awaiting_semantic:'Ожидает согласованного СЯ',generating:'Готовится контент',account_review:'У аккаунта',client_review:'Согласование клиента',approved:'Выполнено',done:'Завершено',submitted:'На согласовании',returned:'Возврат',changes_requested:'На доработке',later:'Отложено'};
 const errors={workflow_window_too_short:'В выбранном окне недостаточно места. Перетащите задачу в другой свободный интервал.',workflow_day_already_estimated:'На этот день специалист уже назначил время. Сохранённая оценка остаётся в календаре.',workflow_invalid_time:'Выберите свободную ячейку рабочего дня.',workflow_time_overlap:'Это время уже занято. Перетащите задачу в свободный интервал.',workflow_day_overloaded:'Лимит 8 часов на этот день уже исчерпан. Выберите другой день.',workflow_nonworking_day:'Это нерабочий день специалиста. Выберите другой день.',workflow_outside_period:'Выберите день внутри отчётного периода задачи.',workflow_version_conflict:'План изменился. Обновите график и откройте актуальную задачу.',workflow_task_closed:'Задача уже завершена.',forbidden:'Нет доступа к изменению этой задачи.'};
 const errorText=error=>errors[error]||'Не удалось сохранить. Обновите график и повторите.';
-function entryFromUrl(){const p=new URLSearchParams(location.search);const day=p.get('calendarDate');return {assignee:p.get('calendarAssignee')||'',period:p.get('calendarPeriod')||'',day:/^\d{4}-\d{2}-\d{2}$/.test(day||'')&&!Number.isNaN(new Date(day+'T12:00:00Z').valueOf())&&new Date(day+'T12:00:00Z').toISOString().slice(0,10)===day?day:today()}}
+function entryFromUrl(){const p=new URLSearchParams(location.search);const day=p.get('calendarDate');return {assignee:p.get('calendarAssignee')||'',period:p.get('calendarPeriod')||'',task:p.get('calendarTask')||'',day:/^\d{4}-\d{2}-\d{2}$/.test(day||'')&&!Number.isNaN(new Date(day+'T12:00:00Z').valueOf())&&new Date(day+'T12:00:00Z').toISOString().slice(0,10)===day?day:today()}}
 
 export function CalendarTaskFocus(){
   useEffect(()=>{
@@ -30,12 +40,25 @@ export function CalendarTaskFocus(){
 
 export default function WorkCalendar({apiRequest}){
   const [entry]=useState(entryFromUrl),[start,setStart]=useState(()=>monday(entry.day)),[selectedDay,setSelectedDay]=useState(entry.day),[view,setView]=useState('week');
+  const focusedTask=useRef(false);
   const [assignee,setAssignee]=useState(entry.assignee),[data,setData]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[refresh,setRefresh]=useState(0);
   const [query,setQuery]=useState(''),[editing,setEditing]=useState(null),[picker,setPicker]=useState(null),[placing,setPlacing]=useState(null),[focusPeriod,setFocusPeriod]=useState(entry.period);
   const rangeStart=view==='month'?monday(selectedDay.slice(0,7)+'-01'):start,rangeEnd=view==='month'?shift(rangeStart,41):shift(start,6);
-  useEffect(()=>{const p=new URLSearchParams(location.search);for(const key of ['calendarAssignee','calendarPeriod','calendarDate'])p.delete(key);history.replaceState(history.state,'',location.pathname+(p.size?'?'+p:'')+location.hash)},[]);
+  useEffect(()=>{const p=new URLSearchParams(location.search);for(const key of ['calendarAssignee','calendarPeriod','calendarTask','calendarDate'])p.delete(key);history.replaceState(history.state,'',location.pathname+(p.size?'?'+p:'')+location.hash)},[]);
   useEffect(()=>{let active=true,timer;setLoading(true);const poll=async()=>{try{const result=await apiRequest(api+'/calendar?start='+rangeStart+'&end='+rangeEnd+(assignee?'&assignee='+encodeURIComponent(assignee):''));if(active){setData(result);setError('')}}catch(e){if(active)setError(errorText(e.message))}finally{if(active){setLoading(false);timer=setTimeout(poll,15000)}}};poll();return()=>{active=false;clearTimeout(timer)}},[rangeStart,rangeEnd,assignee,refresh]);
-  const changeWeek=day=>{setStart(monday(day));setSelectedDay(day)};
+  const changeWeek=useCallback(day=>{setStart(monday(day));setSelectedDay(day)},[]);
+  useEffect(()=>{
+    if(!entry.task||!data||focusedTask.current)return;
+    focusedTask.current=true;
+    const task=data.tasks.find(item=>item.id===entry.task);
+    if(!task)return;
+    const slot=pendingSlot(task);
+    changeWeek(taskCalendarDay(task,slot?.day||task.schedule[0]?.day||entry.day,data.people));
+    if(task.canEdit&&!task.closed&&task.assignee===data.login&&needsEstimate(task)){
+      setPlacing({...task,_placementSlot:slot});
+      document.getElementById('lc-calendar-grid')?.scrollIntoView({block:'start'});
+    }
+  },[entry,data,changeWeek]);
   const navigate=n=>{if(view==='month'){const d=new Date(selectedDay.slice(0,7)+'-01T12:00:00Z');d.setUTCMonth(d.getUTCMonth()+n);changeWeek(d.toISOString().slice(0,10))}else changeWeek(shift(view==='day'?selectedDay:start,n*(view==='day'?1:7)))};
   const open=task=>location.assign(task.source==='workflow'?'/?portal='+task.portalId+'&tab=tasks&workflow='+encodeURIComponent(task.id):'/?portal='+task.portalId+'&tab=tasks#'+encodeURIComponent('calendar-task-'+task.groupKey));
   const matches=task=>[task.title,task.project,task.marketplace].join(' ').toLocaleLowerCase('ru').includes(query.trim().toLocaleLowerCase('ru'));
@@ -47,13 +70,20 @@ export default function WorkCalendar({apiRequest}){
   const summaryEnd=view==='day'?selectedDay:view==='month'?new Date(Date.UTC(Number(selectedDay.slice(0,4)),Number(selectedDay.slice(5,7)),0)).toISOString().slice(0,10):shift(start,6);
   const used=data?.days.filter(d=>d.day>=summaryStart&&d.day<=summaryEnd).reduce((sum,d)=>sum+d.used,0)||0;
   const scheduled=tasks.filter(t=>t.schedule.some(s=>s.day>=summaryStart&&s.day<=summaryEnd));
-  function choosePlace(task,slot){setPlacing({...task,_placementSlot:slot||pendingSlot(task)});document.getElementById('lc-calendar-grid')?.scrollIntoView({behavior:'smooth',block:'start'})}
+  function choosePlace(task,slot,day){
+    const targetSlot=slot||pendingSlot(task);
+    changeWeek(taskCalendarDay(task,day||targetSlot?.day||selectedDay,data.people));
+    if(view==='month')setView('week');
+    setPlacing({...task,_placementSlot:targetSlot});
+    document.getElementById('lc-calendar-grid')?.scrollIntoView({behavior:'smooth',block:'start'});
+  }
   function edit(value){
     const {task,slot}=value;
     if(!own(task)){
       if(slot&&!slot.plannedOnly&&slot.minutes!=null){setError('Время этой задачи уже назначено специалистом. Перенос интервала выполняет сам специалист.');return}
       setEditing({...value,kind:'day'});
-    }else if(value.startMinute==null&&slot?.startMinute==null){changeWeek(value.day);setView('day');choosePlace(task,slot)}
+    }else if(!taskIncludesDay(task,value.day))choosePlace(task,slot,value.day);
+    else if(value.startMinute==null&&slot?.startMinute==null){choosePlace(task,slot,value.day);setView('day')}
     else setEditing({...value,kind:'time'});
   }
   function pick(day,startMinute,windowEnd,login){
@@ -73,12 +103,17 @@ export default function WorkCalendar({apiRequest}){
     {loading&&!data?<p className="lc-empty" role="status">Загружаем задачи по всем проектам…</p>:null}
     {data?<>
       <section className="lc-backlog"><div className="lc-section-head"><div><h2>{data.canManage?'Распределить задачи по дням':'Нужно назначить время'} <span>{queue.length}</span></h2><p>{data.canManage?'Назначьте день без указания часов — длительность оценит специалист.':'Перетащите задачу в получасовую ячейку. В окне нужно выбрать только длительность.'}</p></div><label className="lc-search"><Search size={17}/><input type="search" aria-label="Найти задачу или проект" placeholder="Задача или проект" value={query} onChange={e=>setQuery(e.target.value)}/></label></div>
-        {queue.length?<div className="lc-backlog-grid">{queue.map(task=><article className={'lc-queue-task '+(placing?.id===task.id?'is-placing':'')} key={task.id} draggable={task.canEdit} onDragStart={e=>startDrag(e,task,pendingSlot(task))}>{task.canEdit?<DragGrip task={task}/>:null}<div><Project task={task}/><h3>{task.title}</h3><p>{workLabel(task)?workLabel(task)+' · ':''}{data.people.find(p=>p.login===task.assignee)?.name||task.assignee} · {status[task.status]||'В работе'}</p>{pendingSlot(task)?<p className="lc-pending-note">{task.schedule.filter(s=>s.plannedOnly).map(s=>date(s.day,{day:'numeric',month:'short'})).join(', ')} · нужно оценить</p>:null}</div><div className="lc-task-actions">{task.canEdit?<button className="btn primary" onClick={()=>own(task)?choosePlace(task):edit({task,day:selectedDay})}>{own(task)?<Clock3 size={15}/>:<CalendarDays size={15}/>} {own(task)?'Выбрать место':'Назначить день'}</button>:null}<button className="lc-open" aria-label={'Открыть задачу: '+task.title} onClick={()=>open(task)}><ArrowUpRight size={18}/></button></div></article>)}</div>:<div className="lc-empty">{query?'По этому запросу нет задач.':data.canManage?'Все задачи распределены по дням. Длительности специалист назначит в своём графике.':'Все текущие задачи оценены. Новые появятся здесь автоматически.'}</div>}
+        {queue.length?<div className="lc-backlog-grid">{queue.map(task=><article className={'lc-queue-task '+(placing?.id===task.id?'is-placing':'')} key={task.id} draggable={task.canEdit} onDragStart={e=>startDrag(e,task,pendingSlot(task))}>{task.canEdit?<DragGrip task={task}/>:null}<div><Project task={task}/><h3>{task.title}</h3><p>{workLabel(task)?workLabel(task)+' · ':''}{data.people.find(p=>p.login===task.assignee)?.name||task.assignee} · {status[task.status]||'В работе'}</p>{pendingSlot(task)?<p className="lc-pending-note">{task.schedule.filter(s=>s.plannedOnly).map(s=>date(s.day,{day:'numeric',month:'short'})).join(', ')} · нужно оценить</p>:null}</div><div className="lc-task-actions">{task.canEdit?<button className="btn primary" onClick={()=>own(task)?choosePlace(task):edit({task,day:taskCalendarDay(task,selectedDay,data.people)})}>{own(task)?<Clock3 size={15}/>:<CalendarDays size={15}/>} {own(task)?'Выбрать место':'Назначить день'}</button>:null}<button className="lc-open" aria-label={'Открыть задачу: '+task.title} onClick={()=>open(task)}><ArrowUpRight size={18}/></button></div></article>)}</div>:<div className="lc-empty">{query?'По этому запросу нет задач.':data.canManage?'Все задачи распределены по дням. Длительности специалист назначит в своём графике.':'Все текущие задачи оценены. Новые появятся здесь автоматически.'}</div>}
       </section>
       <div id="lc-calendar-grid" className="lc-section-head lc-calendar-head"><div><h2>{view==='month'?'План на месяц':view==='day'?'План на день':'План на неделю'}</h2><p>По московскому времени · часы суммируются по всем проектам каждого специалиста.</p></div><span className="lc-legend"><i/>Назначенное время</span></div>
-      {placing?<div className="lc-placing-banner"><span>Размещаем: <strong>{placing.title}</strong>. Нажмите свободную получасовую ячейку или перетащите задачу.</span><button className="btn mini" onClick={()=>setPlacing(null)}>Отмена</button></div>:null}
+      {placing?<div className="lc-placing-banner">
+        <span>Выберите свободную получасовую ячейку для задачи <strong>«{placing.title}»</strong>.
+          {placing.periodStart?<> Период с {date(placing.periodStart,{day:'numeric',month:'long'})} по {date(placing.periodEnd,{day:'numeric',month:'long'})}.</>:null}
+        </span>
+        <button className="btn mini" onClick={()=>setPlacing(null)}>Отмена</button>
+      </div>:null}
       <div className="lc-mobile-days" aria-label="Дни недели">{Array.from({length:7},(_,i)=>{const day=shift(start,i);return <button className={day===selectedDay?'active':''} key={day} onClick={()=>setSelectedDay(day)}><span>{date(day,{weekday:'short'})}</span><strong>{date(day,{day:'numeric'})}</strong></button>})}</div>
-      {people.map(person=><CalendarGrid key={person.login} person={person} data={data} view={view} start={start} selectedDay={selectedDay} rangeStart={rangeStart} matches={matches} onOpen={open} onEdit={edit} onPlace={choosePlace} onDay={day=>{changeWeek(day);setView('day')}} onPick={(day,minute,end)=>pick(day,minute,end,person.login)}/>) }
+      {people.map(person=><CalendarGrid key={person.login} person={person} data={data} view={view} start={start} selectedDay={selectedDay} rangeStart={rangeStart} placementTask={placing?.assignee===person.login?placing:null} matches={matches} onOpen={open} onEdit={edit} onPlace={choosePlace} onDay={day=>{changeWeek(day);setView('day')}} onPick={(day,minute,end)=>pick(day,minute,end,person.login)}/>) }
       {!people.length?<p className="lc-empty">Пока нет назначенных специалистов. Назначьте команду в кабинете клиента.</p>:null}
       <p className="lc-footnote">Аккаунт назначает дни, специалист размещает задачи в свободных интервалах и выбирает длительность. Задачи без оценки показаны отдельно и не занимают вымышленные часы. Лимит — 8 часов по всем проектам.</p>
     </>:null}
@@ -110,7 +145,7 @@ function DurationDialog({value,apiRequest,onClose,onSaved}){
 }
 function durationChoices(maximum){if(maximum<=0)return [];if(maximum<30)return [maximum];return Array.from({length:Math.floor(maximum/30)},(_,i)=>(i+1)*30)}
 
-function CalendarGrid({person,data,view,start,selectedDay,rangeStart,matches,onOpen,onEdit,onPlace,onDay,onPick}){
+function CalendarGrid({person,data,view,start,selectedDay,rangeStart,placementTask,matches,onOpen,onEdit,onPlace,onDay,onPick}){
   const days=Array.from({length:view==='month'?42:view==='day'?1:7},(_,i)=>view==='month'?shift(rangeStart,i):view==='day'?selectedDay:shift(start,i));
   const values=day=>data.days.find(d=>d.day===day&&d.assignee===person.login);
   const timed=data.days.filter(d=>d.assignee===person.login&&days.includes(d.day)).flatMap(d=>d.tasks).filter(t=>t.startMinute!=null);
@@ -125,6 +160,6 @@ function CalendarGrid({person,data,view,start,selectedDay,rangeStart,matches,onO
   return <section className="lc-person-week" aria-label={'График: '+person.name}><div className="lc-person-head"><span className="lc-avatar">{initials(person.name)}</span><div><h3>{person.name}</h3><p>{duration(data.days.filter(d=>d.assignee===person.login&&days.includes(d.day)).reduce((n,d)=>n+d.used,0))} {view==='month'?'за видимый период':view==='day'?'на день':'на неделю'}</p></div></div>
     {view==='month'?<div className="lc-month">{Array.from({length:7},(_,i)=><div className="lc-month-weekday" key={i}>{date(shift(start,i),{weekday:'short'})}</div>)}{days.map(day=>{const d=values(day);return <div key={day} className={'lc-month-day '+(day.slice(0,7)!==selectedDay.slice(0,7)?'is-outside ':'')+(day===today()?'is-today':'')} onDragOver={e=>e.preventDefault()} onDrop={e=>drop(e,day,null)}><button className="lc-month-date" onClick={()=>onDay(day)}>{date(day,{day:'numeric'})}</button>{d?.used?<span className="lc-month-load">{duration(d.used)}</span>:null}<div>{d?.tasks.filter(matches).map(t=>event(t,day))}</div></div>})}</div>:<div className={'lc-time-calendar '+(view==='day'?'lc-single-day':'')} style={{'--lc-days':view==='day'?1:7}}><div className="lc-time-head"><div className="lc-time-zone">МСК</div>{days.map(day=>{const d=values(day);return <div key={day} className={'lc-time-day-head '+(day===selectedDay?'is-selected ':'')+(day===today()?'is-today':'')}><button onClick={()=>onDay(day)}><span>{date(day,{weekday:'short'})}</span><strong>{date(day,{day:'numeric',month:'short'})}</strong></button><small>{duration(d?.used||0)} / 8 ч</small>{d?.unestimated?<span className="lc-pending-count">{d.unestimated} без оценки</span>:null}<progress aria-label={'Загрузка '+person.name+' '+day} value={d?.used||0} max="480"/></div>})}</div>
       {days.some(day=>values(day)?.tasks.some(t=>t.startMinute==null))?<div className="lc-no-start"><span>Без оценки / начала</span>{days.map(day=><div key={day} className={day===selectedDay?'is-selected':''} onDragOver={e=>e.preventDefault()} onDrop={e=>drop(e,day,null)}>{values(day)?.tasks.filter(t=>t.startMinute==null&&matches(t)).map(t=>event(t,day))}</div>)}</div>:null}
-      <div className="lc-time-scroll"><div className="lc-time-body" style={{height:(lastHour-firstHour)*60}}><div className="lc-hours">{hours.map(hour=><span key={hour}>{clock(hour*60)}</span>)}</div>{days.map(day=><div key={day} className={'lc-time-column '+(day===selectedDay?'is-selected ':'')+(!person.weekdays.includes((new Date(day+'T12:00:00Z').getUTCDay()+6)%7)?'is-off':'')} onDragOver={e=>e.preventDefault()} onDrop={e=>{const rect=e.currentTarget.getBoundingClientRect();drop(e,day,Math.floor((e.clientY-rect.top)/30)*30+firstHour*60)}}>{cells.map(minute=><button className="lc-hour-slot" aria-label={'Разместить на '+day+' в '+clock(minute)} key={minute} style={{top:minute-firstHour*60,height:30}} onClick={()=>onPick(day,minute,lastHour*60)}/>)}{values(day)?.tasks.filter(t=>t.startMinute!=null&&matches(t)).map(t=>event(t,day,true))}{(values(day)?.used||0)>(values(day)?.tasks.reduce((n,t)=>n+(t.minutes||0),0)||0)?<p className="lc-hidden">Другая занятость: {duration(values(day).used-values(day).tasks.reduce((n,t)=>n+(t.minutes||0),0))}</p>:null}</div>)}</div></div></div>}
+      <div className="lc-time-scroll"><div className="lc-time-body" style={{height:(lastHour-firstHour)*60}}><div className="lc-hours">{hours.map(hour=><span key={hour}>{clock(hour*60)}</span>)}</div>{days.map(day=><div key={day} className={'lc-time-column '+(day===selectedDay?'is-selected ':'')+(!person.weekdays.includes((new Date(day+'T12:00:00Z').getUTCDay()+6)%7)?'is-off':'')} onDragOver={e=>e.preventDefault()} onDrop={e=>{const rect=e.currentTarget.getBoundingClientRect();drop(e,day,Math.floor((e.clientY-rect.top)/30)*30+firstHour*60)}}>{cells.map(minute=><button className="lc-hour-slot" disabled={placementTask?!taskIncludesDay(placementTask,day):false} aria-label={'Разместить на '+day+' в '+clock(minute)} key={minute} style={{top:minute-firstHour*60,height:30}} onClick={()=>onPick(day,minute,lastHour*60)}/>)}{values(day)?.tasks.filter(t=>t.startMinute!=null&&matches(t)).map(t=>event(t,day,true))}{(values(day)?.used||0)>(values(day)?.tasks.reduce((n,t)=>n+(t.minutes||0),0)||0)?<p className="lc-hidden">Другая занятость: {duration(values(day).used-values(day).tasks.reduce((n,t)=>n+(t.minutes||0),0))}</p>:null}</div>)}</div></div></div>}
   </section>;
 }

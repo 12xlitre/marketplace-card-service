@@ -4,7 +4,7 @@ import {MailComposer} from './ClientMail';
 import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 import {visibleWorkflowBatches} from './workflowTaskVisibility';
-import {nextWorkflowContentCard, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
+import {nextWorkflowContentCard, workflowCalendarLabel, workflowCalendarTaskHref, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
 import WorkflowContentFields from './WorkflowContentFields';
 
 const endpoint='/api/content-workflow';
@@ -295,11 +295,10 @@ function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit})
 }
 
 function ScheduleForm({batch,busy,onRemove}){
-  const day=batch.plannedDays?.[0]?.day||batch.schedule[0]?.day||today();
   return <details className="cw-schedule"><summary>Плановая длительность · {batch.schedule.length?batch.schedule.reduce((v,s)=>v+s.minutes,0)+' мин':'нужно оценить'}</summary>
     {batch.plannedDays?.length?<p className="status-note">Аккаунт назначил дни: {batch.plannedDays.map(s=>s.day).join(', ')}. Нужно оценить длительность.</p>:null}
     <p className="status-note">Перетащите задачу в свободную ячейку календаря и выберите длительность. Дата и начало берутся из точки размещения.</p>
-    <a className="btn" href={'/?screen=calendar&calendarAssignee='+encodeURIComponent(batch.assignee)+'&calendarDate='+day}>Открыть календарь</a>
+    <a className="btn" href={workflowCalendarTaskHref(batch)}>Открыть календарь</a>
     {batch.schedule.map(s=><p key={s.id}>{s.day} · {s.minutes} мин <button className="btn mini" disabled={busy} onClick={()=>onRemove({batchId:batch.id,scheduleId:s.id})}>Убрать</button></p>)}
   </details>;
 }

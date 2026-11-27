@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useState} from 'react';
 import WorkflowContentFields from './WorkflowContentFields';
-import {ozonWorkflowReviewStatus} from './workflowPresentation';
+import {ozonWorkflowReviewStatus, workflowCalendarTaskHref} from './workflowPresentation';
 
 const sectionLabels = {title:'Заголовок',description:'Описание',characteristics:'Характеристики'};
 const waitingStates = {
@@ -134,7 +134,10 @@ export default function OzonWorkflowReview({portalId,taskRun,apiRequest,onNaviga
       <WorkflowContentFields editor={{batch:work.batch,card:work.card,content}} loadedComparison={comparison}
         sectionStatus={statuses} readOnly={!work.batch.canReview||saving||reloading} onChange={setContent}/>
       {work.batch.canReview?<>
-        {!work.batch.scheduled?<p className="status-note">{errorText.workflow_schedule_required}</p>:null}
+        {!work.batch.scheduled?<div className="task-batch-actions">
+          <p className="status-note">{errorText.workflow_schedule_required}</p>
+          <a className="btn" href={workflowCalendarTaskHref(work.batch)}>Открыть календарь задачи</a>
+        </div>:null}
         <div className="task-batch-actions">
           {nextReady?<button className="btn primary" type="submit" value="next" disabled={saving||reloading}>Сохранить и следующая</button>:null}
           <button className={nextReady?'btn':'btn primary'} type="submit" disabled={saving||reloading}>Проверено · сохранить</button>

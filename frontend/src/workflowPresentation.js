@@ -3,6 +3,12 @@ export function workflowCalendarLabel(batch) {
   return dates.length ? `Назначено: ${dates.join(', ')}` : 'День выполнения не назначен';
 }
 
+export function workflowCalendarTaskHref({id, assignee}) {
+  const query = new URLSearchParams({screen:'calendar', calendarTask:id});
+  if (assignee) query.set('calendarAssignee', assignee);
+  return '/?'+query;
+}
+
 export function workflowSemanticProgress(cards) {
   const pending = [];
   const finalized = [];
