@@ -54,7 +54,7 @@ class ContentWorkflowTest(unittest.TestCase):
         proof={'name':'approval.txt','dataUrl':'data:text/plain;base64,'+base64.b64encode(b'Client approved').decode(),'size':15}
         return server.workflow_approve_plan(portal or self.portal,{'periodId':plan['periodId'],'version':1,'day':'2026-11-09','proof':proof},self.users['account'])
 
-    def reviewed_semantic(self,portal=None):
+    def reviewed_semantic(self,portal=None,*,review=True):
         portal=portal or self.portal
         plan=self.plan(portal)
         batch=self.batch(portal=portal)
@@ -66,6 +66,8 @@ class ContentWorkflowTest(unittest.TestCase):
                 db.execute('INSERT INTO ozon_semantic_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',(portal,'1001',json.dumps(sem)))
             else:
                 db.execute('INSERT INTO card_drafts(portal_id,card_key,payload_json) VALUES(?,?,?)',(portal,'1001',json.dumps({'meta':{'semanticCoreFinal':FINAL}})))
+        if not review:
+            return plan,batch,None
         server.workflow_review_card(portal,{'batchId':batch['id'],'cardKey':'1001'},self.users['tech'])
         files=server.workflow_export_files(portal,{'batchId':batch['id']},self.users['tech'])
         return plan,batch,files['fileIds'][0]
@@ -259,6 +261,68 @@ class ContentWorkflowTest(unittest.TestCase):
         _,batch,file_id=self.reviewed_semantic(self.ozon)
         server.workflow_approve_file(self.ozon,{'fileId':file_id},self.users['account'])
         self.assertEqual(self.batch(portal=self.ozon)['status'],'approved')
+
+    def test_saved_semantic_starts_content_and_semantic_xlsx_can_be_exported_later(self):
+        for portal, operator in [(self.portal, 'tech'), (self.ozon, 'admin')]:
+            with self.subTest(portal=portal, operator=operator):
+                plan,parent,_=self.reviewed_semantic(portal,review=False)
+                self.approve_plan(plan,portal)
+                task=self.batch('content',portal)
+                start={'batchId':task['id'],'useSavedSemantic':True}
+                server.workflow_start_batch(portal,{'batchId':task['id']},self.users[operator])
+                self.assertEqual(self.batch('content',portal)['status'],'awaiting_semantic')
+                server.workflow_start_batch(portal,start,self.users[operator])
+                before=self.batch(portal=portal)
+                self.assertFalse(before['cards'][0]['reviewed'])
+                self.assertTrue(self.batch('content',portal)['usesInternalSemantic'])
+                with server.connect_db() as db:
+                    self.assertFalse(db.execute('SELECT 1 FROM workflow_files WHERE batch_id=?',(parent['id'],)).fetchone())
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM workflow_outbox WHERE batch_id IN (?,?)',(parent['id'],task['id'])).fetchone()[0],0)
+                fake={'draftContent':{'title':'Наименование','description':'Описание','characteristics':[]}}
+                builder='build_ozon_card_content_reoptimization_result' if portal==self.ozon else 'build_card_content_reoptimization'
+                with patch.object(server,builder,return_value=fake) as model:
+                    server.workflow_process_batch(task['id'])
+                selected=model.call_args.args[1]['selected'] if portal==self.ozon else model.call_args.args[3]
+                self.assertEqual(selected[0]['query'],SELECTED['query'])
+                server.workflow_review_card(portal,{'batchId':parent['id'],'cardKey':'1001'},self.users['tech'])
+                files=server.workflow_export_files(portal,{'batchId':parent['id']},self.users['tech'])['fileIds']
+                exported=self.file(files[0])
+                self.assertEqual(exported['status'],'review')
+                self.assertEqual(json.loads(exported['snapshot_json'])['cards']['1001']['final']['selected'][0]['query'],SELECTED['query'])
+
+    def test_saved_semantic_survives_retry_after_source_changes(self):
+        self.reviewed_semantic(review=False)
+        task=self.batch('content')
+        with self.assertRaisesRegex(ValueError,'workflow_plan_approval_required'):
+            server.workflow_start_batch(self.portal,{'batchId':task['id']},self.users['tech'])
+        server.workflow_start_batch(self.portal,{'batchId':task['id'],'useSavedSemantic':True},self.users['tech'])
+        with patch.object(server,'build_card_content_reoptimization',side_effect=RuntimeError('fixture unavailable')):
+            server.workflow_process_batch(task['id'])
+        server.workflow_process_batch(task['id'])
+        self.assertEqual(self.batch('content')['status'],'partial')
+        with server.connect_db() as db:
+            db.execute('DELETE FROM card_drafts WHERE portal_id=? AND card_key=?',(self.portal,'1001'))
+        server.workflow_start_batch(self.portal,{'batchId':task['id']},self.users['tech'])
+        fake={'draftContent':{'title':'Наименование','description':'Описание','characteristics':[]}}
+        with patch.object(server,'build_card_content_reoptimization',return_value=fake) as model:
+            server.workflow_process_batch(task['id'])
+        self.assertEqual(model.call_args.args[3][0]['query'],SELECTED['query'])
+        self.assertEqual(self.list()['plans'][0]['status'],'draft')
+
+    def test_saved_semantic_is_required_for_every_card_and_task_is_scoped(self):
+        plan=self.plan()
+        self.approve_plan(plan)
+        parent=self.batch()
+        with self.assertRaises(PermissionError):
+            server.workflow_content_task(self.portal,{'parentId':parent['id'],'requestId':'extra','assignee':'admin'},self.users['tech'])
+        task=server.workflow_content_task(self.portal,{'parentId':parent['id'],'requestId':'extra'},self.users['tech'])
+        with self.assertRaisesRegex(ValueError,'workflow_task_not_found'):
+            server.workflow_start_batch(self.ozon,{'batchId':task['batchId'],'useSavedSemantic':True},self.users['tech'])
+        with self.assertRaisesRegex(ValueError,'semantic_final_missing'):
+            server.workflow_start_batch(self.portal,{'batchId':task['batchId'],'useSavedSemantic':True},self.users['tech'])
+        detail=server.workflow_list(self.portal,self.users['tech'],task['batchId'])['batch']
+        self.assertEqual(detail['status'],'planned')
+        self.assertFalse(detail['semanticSourceLocked'])
 
     def test_legacy_semantic_review_fetches_only_rankings_outside_transaction_and_freezes_them(self):
         self.plan(self.ozon);batch=self.batch(portal=self.ozon)

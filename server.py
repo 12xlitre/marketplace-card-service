@@ -4985,12 +4985,13 @@ def ozon_card_value(raw_card, *keys):
 
 OZON_CONTENT_REOPTIMIZE_DESCRIPTION_LIMIT = 4000
 OZON_CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
-Ты — редактор карточек Ozon для живого покупателя. Переоптимизируй заголовок, описание и характеристики под согласованное семантическое ядро Ozon, но не превращай карточку в SEO-перечень.
+Ты — редактор карточек Ozon для живого покупателя. Переоптимизируй заголовок, описание и характеристики с учётом итогового семантического ядра Ozon.
 
 Правила:
 - используй только факты из evidenceBundle;
 - marketplace = Ozon: не применяй WB-лимит 60 символов к заголовку, но держи название читаемым и не длиннее evidenceBundle.constraints.titleMaxChars;
 - заголовок должен начинаться с типа товара и главного поискового признака, бренд можно добавлять ближе к концу, если он есть в карточке;
+- сверяй тип, бренд, обозначение модели, числовые признаки и единицы с исходной карточкой. Сохраняй написание маркировки. Не путай массу баллона с объёмом или выходом материала. При конфликте источников опусти спорный признак;
 - описание пиши как карточку товара для покупателя: понятные абзацы, разные начала предложений, конкретные преимущества из фактов, без канцелярита и служебных комментариев;
 - органично используй ключи из evidenceBundle.semanticCore.finalKeywords; removeKeywords не добавляй намеренно;
 - если ключ звучит неестественно или противоречит карточке, пропусти его и вынеси предупреждение в _meta.warnings;
@@ -5125,7 +5126,7 @@ def build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=Non
   selected_keywords = content_keywords_from_payload(semantic_payload.get("selected"), limit=140)
   if not final_keywords:
     raise ValueError("missing_ozon_semantic_keywords")
-  if not content_reoptimization_configured():
+  if not content_reoptimization_configured("openai"):
     raise ValueError("llm_key_missing")
 
   title = audit_str(ozon_card_value(raw_card, "title", "name"), 300)
@@ -5180,7 +5181,7 @@ def build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=Non
     {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
   ]
   try:
-    payload, model, provider = audit_llm_chat_completion(messages)
+    payload, model, provider = content_reoptimization_completion(messages)
     if not payload:
       raise ValueError("llm_key_missing")
     content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -11871,7 +11872,7 @@ description.recommended должен быть готовым переписан�
 """.strip()
 
 CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
-Ты — редактор карточек Wildberries для живого покупателя. SEO — это ограничение и источник словаря, но не стиль текста. Переоптимизируй заголовок, описание и черновик характеристик карточки под согласованное семантическое ядро так, чтобы карточку было приятно читать человеку.
+Ты — редактор карточек Wildberries для живого покупателя. Переоптимизируй заголовок, описание и черновик характеристик с учётом итогового семантического ядра.
 
 Правила:
 - используй только факты из evidenceBundle;
@@ -11895,6 +11896,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - если товар является солнцезащитными очками, это готовые очки, а не оправа: не называй их "оправа", не пиши про базу под индивидуальные линзы и не используй сценарий установки диоптрийных линз, если он явно не указан в evidenceBundle;
 - характеристики с названием "Материал оправы", "Ширина оправы" или "Конструкция оправы" у солнцезащитных очков описывают часть готовых очков и не меняют тип товара на "оправа";
 - заголовок должен быть готовым названием карточки WB длиной до 60 символов, отвечать на вопрос покупателя "что это, кому подходит, чем отличается", ставить тип товара в начало;
+- сверяй тип, бренд, обозначение модели, числовые признаки и единицы с исходной карточкой. Сохраняй написание маркировки. Не путай массу баллона с объёмом или выходом материала. При конфликте источников опусти спорный признак;
 - формула заголовка: Тип товара -> Назначение -> Целевая аудитория -> Главная характеристика -> Дополнительная характеристика -> Бренд -> Модель;
 - первые слова заголовка должны быть самым частотным товарным запросом, а не брендом, артикулом или моделью; модель/артикул допустимы только в конце, если не ухудшают читаемость;
 - в заголовок включай только самые сильные поисковые признаки, которые помогают выбрать товар и подтверждены evidenceBundle: например пол, форма, объем, размер, материал только если он является конкурентным преимуществом;
@@ -20420,7 +20422,8 @@ def automatic_seo_queue_seconds():
 
 
 def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                              model_override=None, native_functions=True, reasoning_effort=None, structured_output=False):
+                              model_override=None, native_functions=True, reasoning_effort=None, structured_output=False,
+                              provider_override=None):
   global LLM_COOLDOWN_UNTIL
   for attempt in range(3):
     try:
@@ -20443,6 +20446,8 @@ def audit_llm_chat_completion(messages, response_schema=None, plain_text=False, 
             options['native_functions'] = False
           if structured_output:
             options['structured_output'] = True
+          if provider_override is not None:
+            options['provider_override'] = provider_override
           return _audit_llm_chat_completion(messages, response_schema, plain_text, max_output_tokens, **options)
         except urlerror.HTTPError as exc:
           # Publish the pause before releasing the slot to another card worker.
@@ -20490,8 +20495,9 @@ def openai_urlopen(request, timeout):
 
 
 def _audit_llm_chat_completion(messages, response_schema=None, plain_text=False, max_output_tokens=None,
-                               model_override=None, native_functions=True, reasoning_effort=None, structured_output=False):
-  provider = OPTICARDS_LLM_PROVIDER
+                               model_override=None, native_functions=True, reasoning_effort=None, structured_output=False,
+                               provider_override=None):
+  provider = provider_override or OPTICARDS_LLM_PROVIDER
   if provider == "gigachat":
     access_token = gigachat_access_token()
     url = f"{GIGACHAT_API_BASE.rstrip('/')}/chat/completions"
@@ -20625,10 +20631,14 @@ def content_keywords_from_payload(items, limit=80):
   return output
 
 
-def content_reoptimization_configured():
-  if OPTICARDS_LLM_PROVIDER == "gigachat":
+def content_reoptimization_configured(provider=None):
+  if (provider or OPTICARDS_LLM_PROVIDER) == "gigachat":
     return bool(GIGACHAT_AUTH_KEY)
   return bool(audit_str(OPTICARDS_LLM_API_KEY))
+
+
+def content_reoptimization_completion(messages):
+  return audit_llm_chat_completion(messages, provider_override='openai')
 
 
 def ensure_wildberries_content_portal(portal_id):
@@ -21986,7 +21996,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     target_keywords = content_reoptimization_prioritize_desired_keywords(target_keywords, desired, limit=140)
   if not target_keywords and not remove:
     raise ValueError("missing_semantic_keywords")
-  if not content_reoptimization_configured():
+  if not content_reoptimization_configured("openai"):
     raise ValueError("llm_key_missing")
   title_keywords = content_merge_keyword_rows(target_keywords, [] if frozen_semantic else stored_semantic_title_keyword_rows(portal_id, card_key), limit=360)
 
@@ -22063,7 +22073,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
     {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
   ]
   try:
-    payload, model, provider = audit_llm_chat_completion(messages)
+    payload, model, provider = content_reoptimization_completion(messages)
     if not payload:
       raise ValueError("llm_key_missing")
     content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -22107,7 +22117,7 @@ def build_card_content_reoptimization(portal_id, card_key, raw_card, selected_ke
       },
     ]
     try:
-      retry_payload, retry_model, retry_provider = audit_llm_chat_completion(retry_messages)
+      retry_payload, retry_model, retry_provider = content_reoptimization_completion(retry_messages)
       retry_content = retry_payload.get("choices", [{}])[0].get("message", {}).get("content", "") if retry_payload else ""
       retry_parsed = parse_llm_json_content(retry_content)
       if isinstance(retry_parsed, dict):
@@ -22509,7 +22519,7 @@ def competitor_for_reoptimization(portal_id, card_key, competitor_nm_id, user=No
 
 def build_card_competitor_reoptimization(portal_id, card_key, raw_card, competitor_nm_id, draft=None, user=None):
   numeric_portal_id, card_key, row = competitor_for_reoptimization(portal_id, card_key, competitor_nm_id, user=user)
-  if not content_reoptimization_configured():
+  if not content_reoptimization_configured("openai"):
     raise ValueError("llm_key_missing")
   snapshot = safe_json_object(row["snapshot_json"])
   previous_snapshot = safe_json_object(row["previous_snapshot_json"])
@@ -22568,7 +22578,7 @@ def build_card_competitor_reoptimization(portal_id, card_key, raw_card, competit
     {"role": "user", "content": json.dumps({"evidenceBundle": evidence}, ensure_ascii=False)},
   ]
   try:
-    payload, model, provider = audit_llm_chat_completion(messages)
+    payload, model, provider = content_reoptimization_completion(messages)
     if not payload:
       raise ValueError("llm_key_missing")
     content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -24522,6 +24532,10 @@ def workflow_init_schema(db):
       position INTEGER NOT NULL,snapshot_json TEXT NOT NULL,facts_hash TEXT NOT NULL,
       job_id TEXT REFERENCES semantic_jobs(id) ON DELETE SET NULL,state TEXT NOT NULL DEFAULT 'queued',
       final_json TEXT,result_json TEXT,error TEXT NOT NULL DEFAULT '',PRIMARY KEY(batch_id,card_key));
+    CREATE TABLE IF NOT EXISTS workflow_content_semantics(
+      batch_id TEXT NOT NULL,card_key TEXT NOT NULL,keywords_json TEXT NOT NULL,
+      PRIMARY KEY(batch_id,card_key),
+      FOREIGN KEY(batch_id,card_key) REFERENCES workflow_cards(batch_id,card_key) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS workflow_files(
       id TEXT PRIMARY KEY,portal_id INTEGER NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
       period_id INTEGER REFERENCES workflow_plans(period_id) ON DELETE CASCADE,
@@ -24844,6 +24858,9 @@ def workflow_public_batch(db, row, marketplace, detail=False):
     'title':row['title'],'status':row['status'],'assignee':row['assignee'],'createdBy':row['created_by'],
     'generation':row['generation'],'fields':json.loads(row['fields_json']),'parentId':row['parent_id'],
     'error':row['error'],'createdAt':row['created_at'],'taskKey':row['task_key'],'cards':[]}
+  if row['kind']=='content':
+    internal=workflow_has_internal_semantic(db,row['id'])
+    result.update(usesInternalSemantic=internal,semanticSourceLocked=bool(internal or row['semantic_file_id']))
   for card in cards:
     item = {'cardKey':card['card_key'],'state':card['state'],'error':card['error'],'reviewed':bool(card['final_json']) if semantic else card['state']=='reviewed'}
     if semantic:
@@ -25632,6 +25649,29 @@ def workflow_approve_file(portal,payload,user,edited=False,preview_only=False):
   return {'approved':True,'fileId':file_id}
 
 
+def workflow_has_internal_semantic(db, batch_id):
+  return bool(db.execute('SELECT 1 FROM workflow_content_semantics WHERE batch_id=? LIMIT 1',(batch_id,)).fetchone())
+
+
+def workflow_freeze_internal_semantic(db, batch):
+  parent = db.execute("SELECT * FROM workflow_batches WHERE id=? AND portal_id=? AND kind='semantic' AND status NOT IN ('archived','cancelled')",
+                      (batch['parent_id'],batch['portal_id'])).fetchone()
+  if not parent:
+    raise workflow_error('workflow_semantic_required')
+  keys = [row[0] for row in db.execute('SELECT card_key FROM workflow_cards WHERE batch_id=? ORDER BY position',(batch['id'],))]
+  parent_keys = {row[0] for row in db.execute('SELECT card_key FROM workflow_cards WHERE batch_id=?',(parent['id'],))}
+  if not keys or set(keys) != parent_keys:
+    raise workflow_error('workflow_file_scope_mismatch')
+  marketplace = db.execute('SELECT marketplace FROM portals WHERE id=?',(batch['portal_id'],)).fetchone()[0]
+  for key in keys:
+    final = workflow_final_from_card(db,batch['portal_id'],key,marketplace)
+    selected,current,removed = semantic_final_keyword_lists(final)
+    if not (selected or current or removed) or marketplace == 'Ozon' and not (selected or current):
+      raise workflow_error('workflow_internal_semantic_incomplete',cardKey=key)
+    db.execute('INSERT INTO workflow_content_semantics(batch_id,card_key,keywords_json) VALUES(?,?,?)',
+               (batch['id'],key,semantic_json([selected,current,removed])))
+
+
 def workflow_start_batch(portal,payload,user):
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
@@ -25647,13 +25687,17 @@ def workflow_start_batch(portal,payload,user):
       workflow_sync_plan_task(db,batch,'planned')
       workflow_event(db,portal,user,'task_cancelled',batch['period_id'],batch['id'])
       return {'cancelled':True}
-    if batch['status'] in ('collecting','generating','awaiting_semantic'):
+    use_saved_semantic = batch['kind']=='content' and payload.get('useSavedSemantic') is True
+    if batch['status'] in ('collecting','generating') or batch['status']=='awaiting_semantic' and not use_saved_semantic:
       return {'started':True}
+    internal_semantic = batch['kind']=='content' and workflow_has_internal_semantic(db,batch['id'])
     if regenerate:
       if batch['period_id']:
         plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=?',(batch['period_id'],)).fetchone()
-        if not plan or plan['status']!='approved' or plan['version']!=batch['plan_version']: raise workflow_error('workflow_plan_approval_required')
-      db.execute("UPDATE workflow_batches SET generation=generation+1,status='awaiting_semantic',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+        if not plan or plan['version']!=batch['plan_version'] or (plan['status']!='approved' and not internal_semantic):
+          raise workflow_error('workflow_plan_approval_required')
+      status='generating' if internal_semantic else 'awaiting_semantic'
+      db.execute("UPDATE workflow_batches SET generation=generation+1,status=?,error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(status,batch['id']))
       db.execute("UPDATE workflow_cards SET state='queued',result_json=NULL,error='' WHERE batch_id=?",(batch['id'],))
       workflow_sync_plan_task(db,batch,'in_progress')
       workflow_event(db,portal,user,'content_regenerated',batch['period_id'],batch['id'],generation=batch['generation']+1)
@@ -25672,12 +25716,20 @@ def workflow_start_batch(portal,payload,user):
     else:
       if batch['period_id']:
         plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=? AND portal_id=?',(batch['period_id'],portal)).fetchone()
-        if not plan or plan['status']!='approved' or plan['version']!=batch['plan_version']: raise workflow_error('workflow_plan_approval_required')
+        if not plan or plan['version']!=batch['plan_version'] or (plan['status']!='approved' and not (internal_semantic or use_saved_semantic)):
+          raise workflow_error('workflow_plan_approval_required')
       if batch['kind']=='work':
         if payload.get('complete') and not db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone(): raise workflow_error('workflow_schedule_required')
         db.execute("UPDATE workflow_batches SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",('approved' if payload.get('complete') else 'in_progress',batch['id']))
       else:
-        db.execute("UPDATE workflow_batches SET status='awaiting_semantic',error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
+        if use_saved_semantic and not internal_semantic:
+          if batch['semantic_file_id']:
+            raise workflow_error('workflow_version_conflict',409)
+          workflow_freeze_internal_semantic(db,batch)
+          internal_semantic = True
+          workflow_event(db,portal,user,'content_started_from_saved_semantic',batch['period_id'],batch['id'],parentId=batch['parent_id'])
+        status='generating' if internal_semantic else 'awaiting_semantic'
+        db.execute("UPDATE workflow_batches SET status=?,error='',updated_at=CURRENT_TIMESTAMP WHERE id=?",(status,batch['id']))
         db.execute("UPDATE workflow_cards SET state='queued',error='' WHERE batch_id=? AND state IN ('failed','cancelled')",(batch['id'],))
     workflow_event(db,portal,user,'task_started',batch['period_id'],batch['id'])
     workflow_sync_plan_task(db,batch,'done' if batch['kind']=='work' and payload.get('complete') else 'in_progress')
@@ -25716,10 +25768,14 @@ def workflow_create_standalone(portal,payload,user):
 def workflow_content_task(portal,payload,user):
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
-    parent=workflow_batch(db,portal,payload.get('parentId'),user,True)
-    if parent['kind']!='semantic': raise workflow_error('workflow_semantic_required')
+    _,current,manager=workflow_access(db,portal,user)
+    parent=workflow_batch(db,portal,payload.get('parentId'),current,write=True)
+    if parent['kind']!='semantic' or parent['status'] in ('archived','cancelled'):
+      raise workflow_error('workflow_semantic_required')
     fields=content_reoptimization_sections(payload.get('fields'))
     assignee=workflow_assignee(db,portal,payload.get('assignee') or parent['assignee'])
+    if not manager and assignee!=current['login']:
+      raise PermissionError('forbidden')
     key='content:'+audit_str(payload.get('requestId'),80)
     if key=='content:': raise workflow_error('workflow_request_id_required')
     old=db.execute('SELECT id FROM workflow_batches WHERE portal_id=? AND parent_id=? AND task_key=?',(portal,parent['id'],key)).fetchone()
@@ -25824,24 +25880,28 @@ def workflow_process_batch(batch_id):
     db.execute('BEGIN IMMEDIATE')
     current=db.execute('SELECT * FROM workflow_batches WHERE id=?',(batch_id,)).fetchone()
     if not current or current['status']!='generating': return
+    internal=db.execute('SELECT keywords_json FROM workflow_content_semantics WHERE batch_id=? AND card_key=?',(batch_id,card['card_key'])).fetchone()
     if current['period_id']:
       plan=db.execute('SELECT status,version FROM workflow_plans WHERE period_id=?',(current['period_id'],)).fetchone()
-      if not plan or plan['status']!='approved' or plan['version']!=current['plan_version']: return
-    file=db.execute("SELECT * FROM workflow_files WHERE id=? AND portal_id=? AND status='approved'",(current['semantic_file_id'],batch['portal_id'])).fetchone()
-    if not file: raise workflow_error('workflow_semantic_required')
-    frozen=json.loads(file['snapshot_json'])['cards'].get(card['card_key'])
-    if not frozen: raise workflow_error('workflow_file_scope_mismatch')
+      if not plan or plan['version']!=current['plan_version'] or (plan['status']!='approved' and not internal): return
+    if internal:
+      selected,current_keywords,removed=json.loads(internal['keywords_json'])
+    else:
+      file=db.execute("SELECT * FROM workflow_files WHERE id=? AND portal_id=? AND status='approved'",(current['semantic_file_id'],batch['portal_id'])).fetchone()
+      if not file: raise workflow_error('workflow_semantic_required')
+      final=json.loads(file['snapshot_json'])['cards'].get(card['card_key'],{}).get('final')
+      if not final: raise workflow_error('workflow_file_scope_mismatch')
+      selected,current_keywords,removed=semantic_final_keyword_lists(final)
     db.execute("UPDATE workflow_cards SET state='running' WHERE batch_id=? AND card_key=?",(batch_id,card['card_key']))
   try:
     raw=workflow_cards_scope_for_worker(batch['portal_id'],card['card_key'])
     if semantic_facts_hash(raw)!=card['facts_hash']: raise workflow_error('semantic_card_changed')
     fields=json.loads(batch['fields_json'])
-    selected,current,removed=semantic_final_keyword_lists(frozen['final'])
     if portal['marketplace']=='Ozon':
-      sem={'cardKey':card['card_key'],'current':current,'selected':selected,'removal':removed,'final':[ *current,*selected]}
+      sem={'cardKey':card['card_key'],'current':current_keywords,'selected':selected,'removal':removed,'final':[ *current_keywords,*selected]}
       result=build_ozon_card_content_reoptimization_result(raw,sem)
     else:
-      result=build_card_content_reoptimization(batch['portal_id'],card['card_key'],raw,selected,current,removed,sections=fields,frozen_semantic=True)
+      result=build_card_content_reoptimization(batch['portal_id'],card['card_key'],raw,selected,current_keywords,removed,sections=fields,frozen_semantic=True)
     content=result['draftContent'];output={}
     for field in fields:
       value=content.get(field)

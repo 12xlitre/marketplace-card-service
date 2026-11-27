@@ -35,6 +35,16 @@ class OpenAIAdapterTest(unittest.TestCase):
   with patch.object(server,'OPTICARDS_LLM_API_KEY',''):
    self.assertEqual(server._audit_llm_chat_completion(MESSAGES),(None,'','openai'))
   self.request.assert_not_called()
+ def test_reoptimization_routes_to_openai_when_default_provider_is_gigachat(self):
+  with patch.object(server,'OPTICARDS_LLM_PROVIDER','gigachat'), patch.object(server,'gigachat_access_token') as gigachat:
+   _,model,provider=server.content_reoptimization_completion(MESSAGES)
+   self.assertEqual((model,provider),('gpt-6.1-terra','openai'))
+   self.assertIs(self.body()['store'],False)
+   with patch.object(server,'OPTICARDS_LLM_API_KEY',''), patch.object(server,'GIGACHAT_AUTH_KEY','fixture'):
+    self.assertFalse(server.content_reoptimization_configured('openai'))
+    self.assertEqual(server.content_reoptimization_completion(MESSAGES),(None,'','openai'))
+   gigachat.assert_not_called()
+  self.request.assert_called_once()
  def test_classifier_routes_separately_in_automatic_and_durable_workflows(self):
   with patch.object(server,'audit_llm_chat_completion',return_value=({},'fake','openai')) as model:
    OzonSeoHost(server).automatic_seo_classify_completion(MESSAGES,SCHEMA)

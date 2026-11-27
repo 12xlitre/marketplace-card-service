@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from '../src/workflowPresentation.js';
+import {nextWorkflowContentCard, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from '../src/workflowPresentation.js';
 
 test('work included in a period does not imply a calendar day',()=>{
   assert.equal(workflowCalendarLabel({status:'planned',periodId:'16'}),'День выполнения не назначен');
@@ -33,4 +33,20 @@ test('the working list skips saved finals and retains their identity for review'
 test('automatic Bitrix notification explains its cause and original result',()=>{
   assert.equal(workflowDeliveryText({kind:'bitrix',good:49,total:77}),'Автоматическое уведомление о завершении подбора СЯ. Готово 49 из 77 карточек.');
   assert.equal(workflowDeliveryText({kind:'crm_email',subject:'Согласование СЯ'}),'Тема: Согласование СЯ');
+});
+
+test('content review follows the batch order and skips cards without a draft or already checked',()=>{
+  const result={title:'Готовый черновик'};
+  const cards=[
+    {cardKey:'queued',state:'queued'},
+    {cardKey:'first',state:'generated',result},
+    {cardKey:'invalid',state:'generated'},
+    {cardKey:'checked',state:'reviewed',reviewed:true,result},
+    {cardKey:'failed',state:'failed'},
+    {cardKey:'last',state:'generated',result},
+  ];
+  assert.equal(nextWorkflowContentCard(cards)?.cardKey,'first');
+  assert.equal(nextWorkflowContentCard(cards,'first')?.cardKey,'last');
+  assert.equal(nextWorkflowContentCard(cards,'last'),null);
+  assert.equal(nextWorkflowContentCard(cards,'another-task'),null);
 });

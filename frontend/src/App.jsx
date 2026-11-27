@@ -11,6 +11,7 @@ import CardMetrics from "./CardMetrics";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
+import { cardDescriptionText } from "./cardDescription";
 import {semanticExportRows, semanticExportWidths, semanticExportRowHeight, ozonFinalExportCore} from './semanticExport';
 import {
   Archive,
@@ -11769,7 +11770,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
                   </div>
                   <div className="snapshot-description">
                     <span>Описание</span>
-                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                    <p>{cardDescriptionText(description) || "Пусто"}</p>
                   </div>
                   {Array.isArray(photos) && photos.length ? (
                     <div className="ozon-photo-strip">
@@ -19469,7 +19470,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                 </div>
                 {cardDescriptionOpen && !isEmptyValue(description) ? (
                   <div className="description-inline-box">
-                    <p>{description}</p>
+                    <p>{cardDescriptionText(description)}</p>
                   </div>
                 ) : null}
                 <div className="list-row expandable-row">
@@ -20056,7 +20057,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </div>
                   <div className="snapshot-description">
                     <span>Описание</span>
-                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                    <p>{cardDescriptionText(description) || "Пусто"}</p>
                   </div>
                 </section>
 
@@ -20253,7 +20254,7 @@ function CardDetailScreen({ card, portal, currentUser, onBack, backLabel = "Ка
                   </div>
                   <div className="field-box description-box">
                     <strong>Текущее описание</strong>
-                    <p>{isEmptyValue(description) ? "Пусто" : description}</p>
+                    <p>{cardDescriptionText(description) || "Пусто"}</p>
                   </div>
                   <div className="field-box description-box">
                     <div className="field-box-head">

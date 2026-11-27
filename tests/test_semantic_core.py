@@ -298,7 +298,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -344,7 +344,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "367373520",
@@ -389,7 +389,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "391030226",
@@ -430,7 +430,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "traverin-1",
@@ -472,7 +472,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "367374601",
@@ -512,7 +512,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "391030226",
@@ -564,7 +564,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "243430592",
@@ -610,7 +610,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "243430592",
@@ -662,7 +662,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "243430592",
@@ -713,7 +713,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "243430592",
@@ -763,7 +763,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -819,7 +819,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -877,7 +877,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -923,7 +923,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -981,7 +981,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
       patch.object(server, "content_reoptimization_expand_description", side_effect=lambda description, *_args, **_kwargs: description), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "262693847",
@@ -1035,7 +1035,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_ozon_card_content_reoptimization_result(
         card,
         semantic_payload=semantic,
@@ -1201,7 +1201,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
       }, "test-model", "test-provider"
 
     with patch.object(server, "content_reoptimization_configured", return_value=True), \
-      patch.object(server, "audit_llm_chat_completion", side_effect=fake_llm):
+      patch.object(server, "content_reoptimization_completion", side_effect=fake_llm):
       result = server.build_card_content_reoptimization(
         "demo-wb",
         "936467969",

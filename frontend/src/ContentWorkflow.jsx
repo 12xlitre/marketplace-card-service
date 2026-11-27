@@ -4,7 +4,7 @@ import {MailComposer} from './ClientMail';
 import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 import {visibleWorkflowBatches} from './workflowTaskVisibility';
-import {workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
+import {nextWorkflowContentCard, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'Не начата',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
@@ -17,7 +17,9 @@ const messages={semantic_source_rate_limited:'MPStats ограничил час�
   workflow_schedule_required:'Сначала назначьте плановую длительность задачи в календаре.',workflow_cards_required:'Выберите от 1 до 200 карточек.',workflow_assignee_required:'Выберите исполнителя с доступом к кабинету.',
   workflow_approval_proof_required:'Укажите дату и приложите подтверждение клиента (до 2 МБ).',
   workflow_version_conflict:'Версия изменилась. Обновите задачу и проверьте актуальный файл.',
-  workflow_plan_approval_required:'Сначала подтвердите план клиентом.',workflow_semantic_required:'Нужно согласованное СЯ этого набора.',
+  workflow_plan_approval_required:'Сначала подтвердите план клиентом.',workflow_semantic_required:'Нужно СЯ этого набора.',
+  workflow_internal_semantic_incomplete:'В итоговом СЯ одной из карточек нет запросов для контента.',
+  llm_key_missing:'Для переоптимизации подключите OpenAI.',
   semantic_relevance_incomplete:'Модель вернула решения не для всех запросов. Проверенные части сохранены.',semantic_relevance_invalid_response:'Модель вернула некорректный ответ. Проверенные части сохранены.',semantic_final_missing:'Сначала сохраните итоговое СЯ в карточке.',workflow_final_snapshot_required:'Откройте карточку и заново сохраните итоговое СЯ.',
   workflow_card_not_ready:'Карточка ещё не готова к проверке.',workflow_review_all_cards:'Проверьте и подтвердите все карточки набора.',
   workflow_day_overloaded:'На этот день не хватает рабочего времени.',workflow_duration_required:'Выделите от 1 до 480 минут на один день. Большую работу разделите по дням.',
@@ -57,7 +59,10 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const download=file=>{location.assign(endpoint+'/file?portal_id='+encodeURIComponent(portal.id)+'&id='+encodeURIComponent(file))};
   async function reload(){
     const next=await apiRequest(base);setData(next);
-    if(selected)setDetail((await apiRequest(base+'&batch_id='+encodeURIComponent(selected))).batch);
+    if(!selected)return null;
+    const {batch}=await apiRequest(base+'&batch_id='+encodeURIComponent(selected));
+    setDetail(batch);
+    return batch;
   }
   useEffect(()=>{
     const current=++generation.current;let timer,stopped=false;
@@ -67,20 +72,48 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     }catch(e){if(!stopped)setError(e.message)}if(!stopped)timer=setTimeout(poll,5000)};
     poll();return()=>{stopped=true;clearTimeout(timer);generation.current++};
   },[portal.id,selected]);
-  async function act(action,payload={}){
+  async function act(action,payload={},afterReload){
     setBusy(true);setError('');
-    try{const result=await apiRequest(endpoint,{method:'POST',body:JSON.stringify({portalId:portal.id,action,...payload})});await reload();return result}
+    try{
+      const result=await apiRequest(endpoint,{method:'POST',body:JSON.stringify({portalId:portal.id,action,...payload})});
+      const batch=await reload();
+      afterReload?.(batch);
+      return result;
+    }
     catch(e){setError(e.message);if(e.message==='workflow_day_overloaded')setSuggestions({...e.payload,batchId:payload.batchId,minutes:payload.minutes,day:payload.day});throw e}
     finally{setBusy(false)}
   }
   const safe=(action,payload)=>act(action,payload).catch(()=>null);
   if(!data)return <section className="workspace-strip"><h2>План, задачи и согласование</h2><p>Загружаем рабочий процесс…</p><ErrorNote error={error}/></section>;
   const plans=data.plans,batches=visibleWorkflowBatches(data.batches,mode),byId=new Map(data.batches.map(b=>[b.id,b]));
-  const selectedBatch=batches.find(b=>b.id===selected);
+  const selectedBatch=byId.get(selected);
   const current=detail?.id===selected&&selectedBatch?detail:null;
   const canWork=current && (data.canManage||current.assignee===data.login) && current.status!=='archived';
   const semanticProgress=current?.kind==='semantic'?workflowSemanticProgress(current.cards):null;
+  const canReviewContent=canWork&&current.kind==='content'&&!['approved','cancelled'].includes(current.status);
+  const firstContentCard=canReviewContent?nextWorkflowContentCard(current.cards):null;
+  const nextContentCard=canReviewContent&&editor?.batch.id===current.id?nextWorkflowContentCard(current.cards,editor.card.cardKey):null;
+  const parentSemantic=current?.kind==='content'?byId.get(current.parentId):null;
+  const contentTasks=current?.kind==='semantic'?data.batches.filter(b=>b.parentId===current.id&&!['archived','cancelled'].includes(b.status)):[];
+  const canStartFromSavedSemantic=canWork&&parentSemantic&&!['approved','archived','cancelled'].includes(parentSemantic.status)
+    &&!current.semanticSourceLocked&&!['generating','approved','cancelled'].includes(current.status)
+    &&current.cards.some(c=>['queued','failed','empty'].includes(c.state));
+  const savedSemanticComplete=parentSemantic?.cards.length>0&&parentSemantic.cards.every(c=>c.hasSemanticFinal);
   const choose=batch=>{setDetail(null);setSelected(batch.id)};
+  const openContentReview=(batch,card)=>setEditor({batch,card,content:structuredClone(card.result)});
+  async function saveContentReview(event){
+    event.preventDefault();
+    if(busy)return;
+    const advance=event.nativeEvent.submitter?.value==='next';
+    try{
+      await act('review_card',{batchId:editor.batch.id,cardKey:editor.card.cardKey,generation:editor.batch.generation,content:editor.content},batch=>{
+        const next=advance&&batch?.id===editor.batch.id&&!['approved','cancelled','archived'].includes(batch.status)
+          ?nextWorkflowContentCard(batch.cards,editor.card.cardKey):null;
+        if(next)openContentReview(batch,next);
+        else setEditor(null);
+      });
+    }catch{}
+  }
   const openWorkflowCard=(card,runCards)=>{
     const source=cards.find(c=>keyOf(c)===card.cardKey);
     if(source)onOpenCard?.(source,{sellerTab:mode==='periods'?'work-periods':'tasks',
@@ -98,8 +131,8 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
         disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||['approved','cancelled'].includes(current.status)}
         onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>:null
       }
-      {current.kind==='content'&&card.result?<button className="btn mini" disabled={!canWork||current.status==='approved'}
-          onClick={()=>setEditor({card,batch:current,content:structuredClone(card.result)})}>Проверить и исправить контент</button>:null}
+      {current.kind==='content'&&card.result?<button className="btn mini" disabled={busy||!canReviewContent}
+          onClick={()=>openContentReview(current,card)}>Проверить и исправить контент</button>:null}
     </div>
   </div>;
   const fileButtons=file=><div className="cw-file" key={file.id}><div><strong>{file.name}</strong><p>Версия {file.version} · <Status value={file.status}/></p></div><div className="task-batch-actions">
@@ -138,18 +171,23 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     {!batches.length?<p className="cw-empty">{mode==='tasks'&&plans.length?'Запланированные работы остаются в периоде. Здесь они появятся после запуска работы.':'Создайте период с выбранными карточками или выберите товары → «Взять в работу». Задачу можно создать без добавления в план работ.'}</p>:null}
     {current?<article className="cw-detail"><div className="strip-head"><div><h2>{current.title}</h2><p>{current.cards.length} карточек · исполнитель {current.assignee}</p></div><Status value={current.status}/></div>
       <p className="status-note cw-calendar-state">{workflowCalendarLabel(current)}</p>
-      {current.kind==='content'&&current.parentId?<p className="status-note">СЯ: {byId.get(current.parentId)?.title||current.parentId}. Переоптимизация использует согласованный файл, а не новый рабочий подбор.</p>:null}
+      {current.kind==='content'&&current.parentId?<p className="status-note">СЯ: {parentSemantic?.title||current.parentId}. {current.usesInternalSemantic?'Используется сохранённое итоговое СЯ. Согласование СЯ доступно в исходной задаче.':'Обычный запуск использует согласованный файл СЯ.'}</p>:null}
       <div className="task-batch-actions">
         {semanticProgress?.pending.length?<button className="btn primary" onClick={()=>openWorkflowCard(semanticProgress.pending[0],semanticProgress.pending)}>Проверять карточки по порядку</button>:null}
+        {firstContentCard?<button className="btn primary" disabled={busy} onClick={()=>openContentReview(current,firstContentCard)}>Проверять контент по порядку</button>:null}
         {canWork&&!['approved','cancelled'].includes(current.status)?<>
           <button className="btn primary" disabled={busy||['collecting','generating','awaiting_semantic'].includes(current.status)||!current.cards.some(c=>['queued','failed','cancelled','empty'].includes(c.state))} onClick={()=>safe('start',{batchId:current.id})}>{current.kind==='semantic'?'Запустить / продолжить подбор по набору':current.kind==='content'?'Работать · переоптимизировать набор':'Работать'}</button>
           <button className="btn" disabled={busy} onClick={()=>safe('cancel',{batchId:current.id})}>Отменить</button>
         </>:canWork&&current.status==='cancelled'?<button className="btn" disabled={busy} onClick={()=>safe('start',{batchId:current.id})}>Продолжить</button>:null}
         {canWork&&current.kind!=='work'?<button className="btn" disabled={busy||current.cards.some(c=>!c.reviewed)||current.status==='approved'} onClick={()=>safe('export_files',{batchId:current.id})}>Подготовить файл и передать аккаунту</button>:null}
-        {current.kind==='semantic'&&data.canManage&&current.status!=='archived'?<button className="btn" onClick={()=>setCreate({kind:'content',parentId:current.id})}>Создать задачу на контент</button>:null}
+        {canStartFromSavedSemantic?<button className="btn" disabled={busy||!savedSemanticComplete}
+          onClick={()=>safe('start',{batchId:current.id,useSavedSemantic:true})}>Начать по итоговому СЯ без согласования</button>:null}
+        {contentTasks.map(task=><button className="btn" key={task.id} onClick={()=>choose(task)}>Открыть: {task.title}</button>)}
+        {current.kind==='semantic'&&canWork&&current.status!=='cancelled'?<button className="btn" onClick={()=>setCreate({kind:'content',parentId:current.id,assignee:current.assignee})}>{contentTasks.length?'Создать ещё задачу на контент':'Создать задачу на контент'}</button>:null}
         {canWork&&current.kind==='content'&&current.cards.some(c=>c.result)&&!['generating','awaiting_semantic'].includes(current.status)?<button className="btn" disabled={busy} onClick={()=>safe('regenerate',{batchId:current.id})}>Переоптимизировать набор · новая версия</button>:null}
         {canWork&&current.kind==='work'&&current.status!=='approved'?<button className="btn" disabled={busy} onClick={()=>safe('start',{batchId:current.id,complete:true})}>Работа выполнена</button>:null}
       </div><ErrorNote error={current.error}/>
+      {canStartFromSavedSemantic&&!savedSemanticComplete?<p className="status-note">Для запуска сохраните итоговое СЯ по всем карточкам исходной задачи.</p>:null}
       {!current.schedule.length&&canWork?<p className="status-note">Перед проверкой карточек назначьте длительность задачи в календаре.</p>:null}
       <ScheduleForm batch={current} busy={busy||!canWork} onRemove={p=>safe('unschedule',p)}/>
       {semanticProgress?<div className="cw-card-list">
@@ -181,11 +219,15 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       <label className="field-label">Подтверждение клиента · до 2 МБ<input type="file" required onChange={async e=>{try{if(e.target.files[0])setApproval({...approval,proof:await attachment(e.target.files[0])})}catch(e){setError(e.message)}}}/></label>
       <label className="field-label">Комментарий<textarea value={approval.comment} onChange={e=>setApproval({...approval,comment:e.target.value})}/></label>
       <ErrorNote error={error}/><button className="btn primary" disabled={busy||!approval.proof}>Сохранить подтверждение</button></form></Modal>:null}
-    {editor?<Modal title={'Проверка · '+editor.card.title} onClose={()=>setEditor(null)}><form onSubmit={async e=>{e.preventDefault();try{await act('review_card',{batchId:editor.batch.id,cardKey:editor.card.cardKey,generation:editor.batch.generation,content:editor.content});setEditor(null)}catch{}}}>
+    {editor?<Modal key={editor.card.cardKey} title={'Проверка · '+editor.card.title} onClose={()=>{if(!busy)setEditor(null)}}><form onSubmit={saveContentReview}>
       {editor.batch.fields.includes('title')?<label className="field-label">Наименование<textarea required value={editor.content.title||''} onChange={e=>setEditor({...editor,content:{...editor.content,title:e.target.value}})}/></label>:null}
       {editor.batch.fields.includes('description')?<label className="field-label">Описание<textarea required rows={12} value={editor.content.description||''} onChange={e=>setEditor({...editor,content:{...editor.content,description:e.target.value}})}/></label>:null}
       {(editor.content.characteristics||[]).map((c,i)=><label className="field-label" key={i}>{c.name}<input value={c.value} onChange={e=>setEditor({...editor,content:{...editor.content,characteristics:editor.content.characteristics.map((v,n)=>n===i?{...v,value:e.target.value}:v)}})}/></label>)}
-      <ErrorNote error={error}/><button className="btn primary" disabled={busy}>Проверено · сохранить</button></form></Modal>:null}
+      <ErrorNote error={error}/>
+      <div className="task-batch-actions">
+        {nextContentCard?<button className="btn primary" type="submit" value="next" disabled={busy}>Сохранить и следующая</button>:null}
+        <button className={nextContentCard?'btn':'btn primary'} type="submit" disabled={busy}>Проверено · сохранить</button>
+      </div></form></Modal>:null}
     {mail?<Modal title="Письмо клиенту на согласование" onClose={()=>setMail(null)}><MailComposer draft={mail} portalId={portal.id} apiRequest={apiRequest} onClose={()=>setMail(null)} onSent={reload}/></Modal>:null}
     {incoming?<Modal title="Клиент внёс правки" onClose={()=>setIncoming(null)}><p>{incoming.file.name}. Загрузите возвращённый XLSX из этой задачи.</p>
       <input type="file" accept=".xlsx" onChange={async e=>{try{const file=e.target.files[0];if(!file)return;const value=await attachment(file,8*1024*1024);const body=value.dataUrl.split(',')[1];const preview=await act('import_preview',{fileId:incoming.file.id,body});setIncoming({...incoming,body,preview})}catch(e){setError(e.message)}}}/>
@@ -199,7 +241,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
 
 function Modal({title,onClose,children}){return <div className="modal-backdrop" role="dialog" aria-modal="true"><section className="modal cw-modal"><div className="modal-head"><h2>{title}</h2><button className="btn mini" onClick={onClose} aria-label="Закрыть">×</button></div><div className="modal-body">{children}</div></section></div>}
 function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit}){
-  const [form,setForm]=useState({requestId:id(),title:'',customerTitle:initial.plan?.presentation?.customer||portal.name||'',managerName:initial.plan?.presentation?.manager?.name||(data.people.find(p=>p.login===data.team.manager)?.name)||'',managerPhone:initial.plan?.presentation?.manager?.phone||'',managerEmail:initial.plan?.presentation?.manager?.email||'',taskDescriptions:Object.fromEntries((initial.plan?.tasks||[]).map(t=>[t.key,t.description||''])),start:today(),end:shift(today(),29),tasks:['semantic_core_collection','content'],cardKeys:[],assignee:data.team.tech||(data.people.find(p=>p.login===data.login&&p.canExecute)||data.people.find(p=>p.canExecute))?.login||'',contact:data.contact,parentId:initial.parentId,fields:['title','characteristics','description'],...(initial.plan?{...initial.plan,periodId:initial.plan.id,tasks:initial.plan.tasks.map(t=>t.key)}:{})});
+  const [form,setForm]=useState({requestId:id(),title:'',customerTitle:initial.plan?.presentation?.customer||portal.name||'',managerName:initial.plan?.presentation?.manager?.name||(data.people.find(p=>p.login===data.team.manager)?.name)||'',managerPhone:initial.plan?.presentation?.manager?.phone||'',managerEmail:initial.plan?.presentation?.manager?.email||'',taskDescriptions:Object.fromEntries((initial.plan?.tasks||[]).map(t=>[t.key,t.description||''])),start:today(),end:shift(today(),29),tasks:['semantic_core_collection','content'],cardKeys:[],assignee:initial.assignee||data.team.tech||(data.people.find(p=>p.login===data.login&&p.canExecute)||data.people.find(p=>p.canExecute))?.login||'',contact:data.contact,parentId:initial.parentId,fields:['title','characteristics','description'],...(initial.plan?{...initial.plan,periodId:initial.plan.id,tasks:initial.plan.tasks.map(t=>t.key)}:{})});
   const [search,setSearch]=useState('');
   const [cardNumbers,setCardNumbers]=useState('');
   const matching=matchWorkflowCards(cards,cardNumbers);
@@ -213,7 +255,7 @@ function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit})
   };
   return <Modal title={initial.kind==='plan'?(initial.plan?'Новая версия плана':'Новый период и план'):initial.kind==='content'?'Контент по этому набору СЯ':'Набор СЯ без периода'} onClose={onClose}><form onSubmit={e=>{e.preventDefault();if(!unresolved)onSubmit({...form,tasks:form.tasks.map(key=>({key,description:form.taskDescriptions[key]||data.taskDescriptions?.[key]||''}))})}}>
     <label className="field-label">Название<input value={form.title} onChange={e=>set('title',e.target.value)} placeholder="Работы на отчётный период"/></label>
-    <label className="field-label">Исполнитель<select required value={form.assignee} onChange={e=>set('assignee',e.target.value)}>{data.people.filter(p=>p.canExecute).map(p=><option key={p.login} value={p.login}>{p.name}</option>)}</select></label>
+    <label className="field-label">Исполнитель<select required value={form.assignee} onChange={e=>set('assignee',e.target.value)}>{data.people.filter(p=>p.canExecute&&(initial.kind!=='content'||data.canManage||p.login===data.login)).map(p=><option key={p.login} value={p.login}>{p.name}</option>)}</select></label>
     {initial.kind==='plan'?<><label className="field-label">Название клиента в PDF<input value={form.customerTitle} onChange={e=>set('customerTitle',e.target.value)} placeholder="Организация или имя клиента" maxLength="180"/></label><div className="form-two"><label className="field-label">Начало<input type="date" required value={form.start} onChange={e=>set('start',e.target.value)}/></label><label className="field-label">Окончание<input type="date" required value={form.end} min={form.start} onChange={e=>set('end',e.target.value)}/></label></div>
       <fieldset><legend>Контакты клиента</legend>{[['name','Контактное лицо'],['email','Email'],['phone','Телефон']].map(([key,label])=><label className="field-label" key={key}>{label}<input required type={key==='email'?'email':'text'} value={form.contact?.[key]||''} onChange={e=>set('contact',{...form.contact,[key]:e.target.value})}/></label>)}</fieldset>
       <details><summary>Менеджер на контактной странице PDF</summary><p className="status-note">Имя берётся из команды кабинета. Укажите рабочие контакты менеджера; пустые телефон и email заменяются общими контактами агентства.</p><label className="field-label">Имя менеджера в PDF<input value={form.managerName} maxLength={160} onChange={e=>set('managerName',e.target.value)}/></label><div className="form-two"><label className="field-label">Телефон менеджера в PDF<input type="tel" value={form.managerPhone} maxLength={80} onChange={e=>set('managerPhone',e.target.value)}/></label><label className="field-label">Email менеджера в PDF<input type="email" value={form.managerEmail} maxLength={180} onChange={e=>set('managerEmail',e.target.value)}/></label></div></details>
@@ -232,7 +274,7 @@ function CreateWorkflow({portal,data,cards,initial,error,busy,onClose,onSubmit})
       </div>
       <div className="task-batch-actions"><button className="btn mini" type="button" onClick={()=>set('cardKeys',cards.slice(0,200).map(keyOf))}>{cards.length>200?'Выбрать первые 200':'Выбрать все'}</button><button className="btn mini" type="button" onClick={()=>set('cardKeys',[])}>Снять выбор</button></div>
       <div className="cw-card-picker">{cards.filter(c=>(c.title+' '+[...workflowCardIdentifiers(c)].join(' ')).toLowerCase().includes(search.toLowerCase())).map(card=><label key={keyOf(card)}><input type="checkbox" checked={form.cardKeys.includes(keyOf(card))} disabled={form.cardKeys.length>=200&&!form.cardKeys.includes(keyOf(card))} onChange={()=>toggle('cardKeys',keyOf(card))}/><span>{card.title}<small>{[...new Set([keyOf(card),card.vendorCode,card.offerId,card.offer_id].filter(Boolean))].join(' · ')}</small></span></label>)}</div></>}
-    <p className="status-note">{initial.kind==='content'?'Будет использован согласованный файл СЯ этого набора.':'Подбор запросов начнётся на сервере для выбранного набора после создания. Можно закрыть страницу.'}</p>
+    <p className="status-note">{initial.kind==='content'?'Задача использует тот же набор карточек. Способ запуска можно выбрать после создания.':'Подбор запросов начнётся на сервере для выбранного набора после создания. Можно закрыть страницу.'}</p>
     {initial.plan?<p className="status-note">Новая версия потребует повторного подтверждения клиента. Результаты и файлы сохранятся в истории. Подходящие записи календаря перенесутся, остальные освободятся.</p>:null}
     <ErrorNote error={error}/><button className="btn primary" disabled={busy||unresolved||(initial.kind!=='content'&&!form.cardKeys.length)||(initial.kind==='plan'&&!form.tasks.length)||(initial.kind==='content'&&!form.fields.length)}>{busy?'Сохраняем…':initial.plan?'Сохранить новую версию':'Создать'}</button>
   </form></Modal>;
@@ -248,7 +290,7 @@ function ScheduleForm({batch,busy,onRemove}){
   </details>;
 }
 
-const eventLabel=action=>({task_day_assigned:'Аккаунт назначил день задачи',task_day_removed:'Назначение дня снято',content_regenerated:'Создана новая версия контента',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',crm_deal_linked:'Кабинет связан со сделкой Б24',crm_deal_unlinked:'Привязка сделки снята',crm_mail_sent:'Письмо передано в Б24',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
+const eventLabel=action=>({task_day_assigned:'Аккаунт назначил день задачи',task_day_removed:'Назначение дня снято',content_regenerated:'Создана новая версия контента',content_started_from_saved_semantic:'Контент запущен по сохранённому СЯ до согласования',plan_revised:'План изменён, требуется новое подтверждение',plan_created:'План создан',plan_approved:'Клиент согласовал план',plan_pdf_created:'PDF плана подготовлен',task_created:'Задача создана',task_started:'Задача запущена',task_cancelled:'Задача отменена',task_scheduled:'Назначено время',schedule_removed:'Время освобождено',card_reviewed:'Карточка проверена',file_created:'Файл подготовлен',file_approved:'Клиент принял файл',file_returned:'Применены клиентские правки',account_downloaded:'Аккаунт забрал файл',file_downloaded:'Файл скачан',mail_queued:'Письмо поставлено в очередь',crm_deal_linked:'Кабинет связан со сделкой Б24',crm_deal_unlinked:'Привязка сделки снята',crm_mail_sent:'Письмо передано в Б24',mail_sent:'Письмо принято почтовым сервером',bitrix_sent:'Уведомление Б24 доставлено'})[action]||action;
 
 export function ContentWorkflowSettings({apiRequest}){
   const [data,setData]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);

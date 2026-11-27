@@ -22,6 +22,12 @@ export function workflowCardRun(batch, cardKey, cards = batch.cards) {
   };
 }
 
+export function nextWorkflowContentCard(cards, afterCardKey) {
+  const index = afterCardKey == null ? -1 : cards.findIndex(card => card.cardKey === afterCardKey);
+  if (afterCardKey != null && index === -1) return null;
+  return cards.slice(index + 1).find(card => card.state === 'generated' && !card.reviewed && card.result) ?? null;
+}
+
 export function workflowDeliveryText(delivery) {
   if (delivery.kind === 'bitrix') {
     const count = Number.isInteger(delivery.good) && Number.isInteger(delivery.total)
