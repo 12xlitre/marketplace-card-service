@@ -21,6 +21,10 @@
 .cw-comparison-facts dl{margin:5px 0}
 .cw-comparison-facts dl>div{display:flex;gap:8px;flex-wrap:wrap}
 .cw-comparison-facts dd{margin:0;font-weight:600}
+.cw-field-status{font-size:13px;margin:5px 0 8px;color:var(--muted);overflow-wrap:anywhere}
+.cw-inactive-sections{margin-top:18px}
+.cw-inactive-sections>div{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;padding:10px 0;border-top:1px solid var(--line,#e1e5eb);font-size:13px}
+.cw-inactive-sections span{color:var(--muted);overflow-wrap:anywhere}
 @media(max-width:540px){.cw-comparison-columns{grid-template-columns:minmax(0,1fr)}}
 
 .cw-plans{grid-template-columns:minmax(0,1fr)}

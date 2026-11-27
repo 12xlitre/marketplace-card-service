@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {nextWorkflowContentCard, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from '../src/workflowPresentation.js';
+import {nextWorkflowContentCard, ozonWorkflowReviewStatus, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from '../src/workflowPresentation.js';
 
 test('work included in a period does not imply a calendar day',()=>{
   assert.equal(workflowCalendarLabel({status:'planned',periodId:'16'}),'День выполнения не назначен');
@@ -49,4 +49,16 @@ test('content review follows the batch order and skips cards without a draft or 
   assert.equal(nextWorkflowContentCard(cards,'first')?.cardKey,'last');
   assert.equal(nextWorkflowContentCard(cards,'last'),null);
   assert.equal(nextWorkflowContentCard(cards,'another-task'),null);
+});
+
+test('content uses the same card navigation and shows the save time in Moscow',()=>{
+  const cards=[{cardKey:'1',state:'reviewed'},{cardKey:'2',state:'generated'}];
+  const run=workflowCardRun({kind:'content',id:'task',title:'Заголовки',cards},'2');
+  assert.equal(run.currentIndex,1);
+  assert.equal(run.workType,'content');
+  assert.equal(run.workflowBatchId,'task');
+  assert.deepEqual(run.items.map(card=>card.cardKey),['1','2']);
+  assert.match(ozonWorkflowReviewStatus({reviewedAt:'2026-11-26T22:20:00+00:00',taskTitle:'Заголовки'}),
+    /Сохранено 27 ноября 2026 г\. в 01:20 МСК · Заголовки/);
+  assert.equal(ozonWorkflowReviewStatus(null,'planned'),'Задача на изменение не запускалась');
 });

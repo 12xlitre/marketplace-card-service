@@ -54,7 +54,15 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const [create,setCreate]=useState(null),[approval,setApproval]=useState(null),[editor,setEditor]=useState(null),[mail,setMail]=useState(null),[incoming,setIncoming]=useState(null);
   const [suggestions,setSuggestions]=useState(null),[planning,setPlanning]=useState(null);
   const generation=useRef(0);
-  useEffect(()=>{if(selected)sessionStorage.setItem('workflow:'+portal.id,selected)},[portal.id,selected]);
+  useEffect(()=>{
+    if(!selected)return;
+    sessionStorage.setItem('workflow:'+portal.id,selected);
+    const url = new URL(location.href);
+    if(url.searchParams.has('workflow')&&url.searchParams.get('workflow')!==selected){
+      url.searchParams.set('workflow',selected);
+      window.history.replaceState(window.history.state,'',url);
+    }
+  },[portal.id,selected]);
   const base=endpoint+'?portal_id='+encodeURIComponent(portal.id);
   useEffect(()=>{const open=event=>{if(String(event.detail.portalId)===String(portal.id)){setDetail(null);setSelected(event.detail.batchId)}};window.addEventListener('opticards-open-workflow',open);return()=>window.removeEventListener('opticards-open-workflow',open)},[portal.id]);
   const download=file=>{location.assign(endpoint+'/file?portal_id='+encodeURIComponent(portal.id)+'&id='+encodeURIComponent(file))};
@@ -91,6 +99,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const current=detail?.id===selected&&selectedBatch?detail:null;
   const canWork=current && (data.canManage||current.assignee===data.login) && current.status!=='archived';
   const semanticProgress=current?.kind==='semantic'?workflowSemanticProgress(current.cards):null;
+  const opensContentInCard=portal.marketplace==='Ozon'&&current?.kind==='content';
   const canReviewContent=canWork&&current.kind==='content'&&!['approved','cancelled'].includes(current.status);
   const firstContentCard=canReviewContent?nextWorkflowContentCard(current.cards):null;
   const nextContentCard=canReviewContent&&editor?.batch.id===current.id?nextWorkflowContentCard(current.cards,editor.card.cardKey):null;
@@ -101,7 +110,13 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
     &&current.cards.some(c=>['queued','failed','empty'].includes(c.state));
   const savedSemanticComplete=parentSemantic?.cards.length>0&&parentSemantic.cards.every(c=>c.hasSemanticFinal);
   const choose=batch=>{setDetail(null);setSelected(batch.id)};
-  const openContentReview=(batch,card)=>setEditor({batch,card,content:structuredClone(card.result)});
+  function openContentReview(batch,card){
+    if(opensContentInCard){
+      openWorkflowCard(card,batch.cards);
+    }else{
+      setEditor({batch,card,content:structuredClone(card.result)});
+    }
+  }
   async function saveContentReview(event){
     event.preventDefault();
     if(busy)return;
@@ -118,7 +133,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
   const openWorkflowCard=(card,runCards)=>{
     const source=cards.find(c=>keyOf(c)===card.cardKey);
     if(source)onOpenCard?.(source,{sellerTab:mode==='periods'?'work-periods':'tasks',
-      backLabel:'Вернуться к задаче',taskRun:workflowCardRun(current,card.cardKey,runCards)});
+      backLabel:'Вернуться к задаче',taskRun:current.kind==='semantic'||opensContentInCard?workflowCardRun(current,card.cardKey,runCards):null});
   };
   const renderCard=(card,runCards)=><div className="cw-card" key={card.cardKey}>
     <div>
@@ -132,7 +147,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
         disabled={busy||!canWork||!['ready','reviewed'].includes(card.state)||['approved','cancelled'].includes(current.status)}
         onClick={()=>safe('review_card',{batchId:current.id,cardKey:card.cardKey,generation:current.generation})}>Итог карточки проверен</button>:null
       }
-      {current.kind==='content'&&card.result?<button className="btn mini" disabled={busy||!canReviewContent}
+      {current.kind==='content'&&card.result&&!opensContentInCard?<button className="btn mini" disabled={busy||!canReviewContent}
           onClick={()=>openContentReview(current,card)}>Проверить и исправить контент</button>:null}
     </div>
   </div>;

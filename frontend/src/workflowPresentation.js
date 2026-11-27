@@ -13,13 +13,29 @@ export function workflowSemanticProgress(cards) {
 }
 
 export function workflowCardRun(batch, cardKey, cards = batch.cards) {
-  if (batch.kind !== 'semantic' || !cards?.length) return null;
+  if (!['semantic','content'].includes(batch.kind) || !cards?.length) return null;
   return {
-    title: batch.title, workType: 'semantic', workTypeLabel: 'Проверка СЯ',
+    title: batch.title, workType: batch.kind, workTypeLabel: batch.kind === 'semantic' ? 'Проверка СЯ' : 'Проверка контента',
     workflowBatchId: batch.id, total: cards.length,
     currentIndex: Math.max(0, cards.findIndex(card => card.cardKey === cardKey)),
     items: cards.map(card => ({cardKey: card.cardKey, title: card.title, status: card.state})),
   };
+}
+
+export function ozonWorkflowReviewStatus(review, relatedState) {
+  if (review?.reviewedAt) {
+    const date = new Date(review.reviewedAt);
+    if (Number.isFinite(date.getTime())) {
+      const day = date.toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric',timeZone:'Europe/Moscow'});
+      const time = date.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'});
+      return ['Сохранено '+day+' в '+time+' МСК', review.taskTitle].filter(Boolean).join(' · ');
+    }
+  }
+  return ({
+    planned:'Задача на изменение не запускалась', queued:'Готовится в другой задаче', running:'Готовится в другой задаче',
+    ready:'Черновик готов в другой задаче', generated:'Черновик готов в другой задаче',
+    reviewed:'Проверено в другой задаче', failed:'Ошибка подготовки в другой задаче',
+  })[relatedState] || 'Без изменений в этой задаче';
 }
 
 export function nextWorkflowContentCard(cards, afterCardKey) {

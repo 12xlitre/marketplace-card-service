@@ -273,6 +273,108 @@ class ContentWorkflowTest(unittest.TestCase):
         server.workflow_approve_file(self.ozon,{'fileId':file_id},self.users['account'])
         self.assertEqual(self.batch(portal=self.ozon)['status'],'approved')
 
+    def test_ozon_content_review_updates_the_card_draft_and_its_task_file(self):
+        second={**CARD,'nmID':'1002','sku':'1002','cardKey':'1002','title':'Вторая карточка'}
+        with server.connect_db() as db:
+            db.execute('UPDATE portals SET cards_snapshot_json=? WHERE id=?',(json.dumps([CARD,second]),self.ozon))
+        self.plan(self.ozon,cardKeys=['1001','1002'],tasks=[
+            'semantic_core_collection','optimized_product_title','optimized_description','optimized_characteristics'])
+        tasks={tuple(batch['fields']):batch for batch in self.list(self.ozon)['batches']}
+        batch=tasks[('title',)]
+        specialist=self.users['tech']
+        initial=server.save_ozon_card_draft(self.ozon,{
+            'cardKey':'1001','sku':'1001','title':CARD['title'],
+            'content':{'title':'Старое локальное имя','description':'Описание редактора',
+                       'characteristics':[{'name':'Цвет','value':'белый'}]},
+            'approval':{'contentStatus':'approved'},
+        },specialist)['draft']
+        with server.connect_db() as db:
+            db.execute("UPDATE workflow_batches SET status='review' WHERE id=?",(batch['id'],))
+            db.execute("UPDATE workflow_cards SET state='generated',result_json=? WHERE batch_id=?",
+                       (json.dumps({'title':'Предложенное имя'}),batch['id']))
+        server.workflow_schedule_task(self.ozon,{'batchId':batch['id'],'day':'2026-11-09','minutes':30},specialist)
+        work=server.workflow_content_comparison(self.ozon,batch['id'],'1001',specialist,include_work=True)['work']
+        self.assertEqual(work['batch']['fields'],['title'])
+        self.assertEqual(work['related'],{'description':'planned','characteristics':'planned'})
+        self.assertEqual(work['card']['result'],{'title':'Предложенное имя'})
+        payload={'batchId':batch['id'],'cardKey':'1001','generation':1,'reviewRevision':work['reviewRevision'],
+                 'content':{'title':'Проверенное имя','description':'Эта правка вне задачи'}}
+        with patch.object(server,'workflow_event',side_effect=RuntimeError('fixture rollback')):
+            with self.assertRaisesRegex(RuntimeError,'fixture rollback'):
+                server.workflow_review_card(self.ozon,payload,specialist)
+        self.assertEqual(server.get_ozon_card_draft(self.ozon,'1001',specialist)['draft']['revision'],initial['revision'])
+        self.assertEqual(server.workflow_content_comparison(self.ozon,batch['id'],'1001',specialist,include_work=True)['work']['card']['state'],
+                         'generated')
+        saved=server.workflow_review_card(self.ozon,payload,specialist)
+        self.assertEqual(saved['nextCardKey'],'1002')
+        draft=saved['ozonDraft']['draft']
+        self.assertEqual(draft['content'],{**initial['draft']['content'],'title':'Проверенное имя'})
+        self.assertEqual(draft['approval']['contentStatus'],'draft')
+        self.assertEqual(list(draft['workflowReview']),['title'])
+        self.assertEqual(draft['workflowReview']['title']['taskTitle'],batch['title'])
+        self.assertEqual(draft['workflowReview']['title']['batchId'],batch['id'])
+        with patch.object(server,'utc_now',return_value=server.utc_now()+server.dt.timedelta(hours=1)):
+            repeated=server.workflow_review_card(self.ozon,payload,specialist)
+        self.assertEqual(repeated['ozonDraft']['draft']['workflowReview'],draft['workflowReview'])
+        self.assertEqual(server.get_ozon_card_draft(self.ozon,'1001',specialist)['draft']['draft'],draft)
+        with self.assertRaisesRegex(ValueError,'ozon_card_draft_conflict'):
+            server.save_ozon_card_draft(self.ozon,{**initial['draft'],'expectedRevision':initial['revision']},specialist)
+        server.workflow_review_card(self.ozon,{'batchId':batch['id'],'cardKey':'1002','content':{'title':'Второе имя'}},specialist)
+        [file_id]=server.workflow_export_files(self.ozon,{'batchId':batch['id']},specialist)['fileIds']
+        cards=json.loads(self.file(file_id)['snapshot_json'])['cards']
+        self.assertEqual(cards['1001']['content'],{'title':'Проверенное имя'})
+        self.assertEqual(cards['1002']['content'],{'title':'Второе имя'})
+        with server.connect_db() as db:
+            db.execute("UPDATE workflow_batches SET status='generating',generation=2 WHERE id=?",(batch['id'],))
+            db.execute("UPDATE workflow_cards SET state='generated' WHERE batch_id=? AND card_key='1001'",(batch['id'],))
+            db.execute("UPDATE workflow_cards SET state='queued',result_json=NULL WHERE batch_id=? AND card_key='1002'",(batch['id'],))
+        server.workflow_review_card(self.ozon,{'batchId':batch['id'],'cardKey':'1001','generation':2,'content':{'title':'Имя из новой версии'}},specialist)
+        running=server.workflow_content_comparison(self.ozon,batch['id'],'1001',specialist,include_work=True)['work']
+        self.assertEqual((running['batch']['status'],running['batch']['generation']),('generating',2))
+        self.assertEqual(running['cards'][1]['state'],'queued')
+        self.assertEqual(json.loads(self.file(file_id)['snapshot_json'])['cards'],cards)
+
+    def test_ozon_reviews_merge_fields_and_detect_a_new_save_in_the_same_field(self):
+        self.plan(self.ozon,tasks=['semantic_core_collection','optimized_product_title','optimized_description','optimized_characteristics'])
+        tasks={tuple(batch['fields']):batch for batch in self.list(self.ozon)['batches']}
+        specialist=self.users['tech']
+
+        def ready(field,content):
+            batch=tasks[(field,)]
+            with server.connect_db() as db:
+                db.execute("UPDATE workflow_batches SET status='review' WHERE id=?",(batch['id'],))
+                db.execute("UPDATE workflow_cards SET state='generated',result_json=? WHERE batch_id=?",(json.dumps(content),batch['id']))
+            server.workflow_schedule_task(self.ozon,{'batchId':batch['id'],'day':'2026-11-09','minutes':30},specialist)
+            view=server.workflow_content_comparison(self.ozon,batch['id'],'1001',specialist,include_work=True)['work']
+            return {'batchId':batch['id'],'cardKey':'1001','reviewRevision':view['reviewRevision'],'content':content}
+
+        title=ready('title',{'title':'Проверенный заголовок'})
+        description=ready('description',{'description':'Проверенное описание'})
+        desc=server.workflow_review_card(self.ozon,description,specialist)['ozonDraft']
+        both=server.workflow_review_card(self.ozon,title,specialist)['ozonDraft']
+        self.assertEqual(both['draft']['content']['description'],'Проверенное описание')
+        self.assertEqual(both['draft']['workflowReview']['description'],desc['draft']['workflowReview']['description'])
+        self.assertEqual(set(both['draft']['workflowReview']),{'title','description'})
+        server.build_ozon_card_audit(self.ozon,{'card':CARD},specialist)
+        stored=server.get_ozon_card_draft(self.ozon,'1001',specialist)['draft']
+        self.assertEqual(stored['draft']['content'],both['draft']['content'])
+
+        # Updating one field directly clears its old review mark and leaves the others.
+        manual={**stored['draft'],'expectedRevision':stored['revision'],
+                'content':{**stored['draft']['content'],'title':'Новое ручное имя'}}
+        result=server.save_ozon_card_draft(self.ozon,manual,specialist)['draft']['draft']
+        self.assertEqual(set(result['workflowReview']),{'description'})
+        with self.assertRaisesRegex(ValueError,'workflow_content_review_conflict'):
+            server.workflow_review_card(self.ozon,title,specialist)
+        view=server.workflow_content_comparison(self.ozon,title['batchId'],'1001',specialist,include_work=True)['work']
+        self.assertEqual(view['card']['result'],{'title':'Проверенный заголовок'})
+        changes=ready('characteristics',{'characteristics':[{'name':'Цвет','value':'белый'}]})
+        saved=server.workflow_review_card(self.ozon,changes,specialist)['ozonDraft']['draft']
+        self.assertEqual({row['name']:row['value'] for row in saved['content']['characteristics']},
+                         {'Форма':'спрей','Цвет':'белый'})
+        self.assertEqual(saved['content']['title'],'Новое ручное имя')
+        self.assertEqual(set(saved['workflowReview']),{'description','characteristics'})
+
     def test_saved_semantic_starts_content_and_semantic_xlsx_can_be_exported_later(self):
         for portal, operator in [(self.portal, 'tech'), (self.ozon, 'admin')]:
             with self.subTest(portal=portal, operator=operator):

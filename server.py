@@ -4708,7 +4708,10 @@ def normalize_ozon_content_payload(payload):
   if not card_key:
     card_key = draft_card_key(sku or offer_id or title)
   content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
-  content_title = audit_str(content.get("title") or payload.get("contentTitle") or title, 300)
+  meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+  source = audit_str(payload.get("source") or meta.get("source") or "ozon-card-draft", 80)
+  content_title = audit_str(content.get("title") if source=="ozon-content-workflow" and "title" in content
+                            else content.get("title") or payload.get("contentTitle") or title, 300)
   description = audit_str(content.get("description") or payload.get("description"), 6000)
   characteristics = content.get("characteristics")
   if isinstance(characteristics, dict):
@@ -4765,12 +4768,25 @@ def normalize_ozon_content_payload(payload):
     "auditStatus": audit_status,
     "auditResult": audit_result,
     "meta": {
-      "source": audit_str(payload.get("source") or "ozon-card-draft", 80),
+      "source": source,
       "marketplace": "Ozon",
     },
   }
   if content_optimization:
     normalized["contentOptimization"] = content_optimization
+  review = payload.get("workflowReview")
+  if isinstance(review, dict):
+    entries = {}
+    for field in ("title", "description", "characteristics"):
+      entry = review.get(field)
+      if isinstance(entry, dict) and entry.get("reviewedAt") and entry.get("batchId"):
+        entries[field] = {
+          "reviewedAt": audit_str(entry["reviewedAt"], 40),
+          "batchId": audit_str(entry["batchId"], 80),
+          "taskTitle": audit_str(entry.get("taskTitle"), 200),
+        }
+    if entries:
+      normalized["workflowReview"] = entries
   return normalized if card_key else None
 
 
@@ -4804,6 +4820,7 @@ def public_ozon_card_draft(row):
     "updatedBy": row["updated_by"] or "",
     "createdAt": row["created_at"] or "",
     "updatedAt": row["updated_at"] or "",
+    "revision": ozon_card_draft_revision(row),
   }
 
 
@@ -4920,15 +4937,31 @@ def save_ozon_semantic_draft(portal_id, payload, user):
   return {"draft": public_ozon_semantic_draft(row)}
 
 
-def save_ozon_card_draft(portal_id, payload, user):
-  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
-  draft = normalize_ozon_content_payload(payload)
-  if not draft:
-    raise ValueError("invalid_ozon_card_draft")
+def ozon_card_draft_row(db, portal, card_key):
+  return db.execute("SELECT * FROM ozon_card_drafts WHERE portal_id=? AND card_key=?", (portal, card_key)).fetchone()
+
+
+def ozon_card_draft_revision(row):
+  return hashlib.sha256(row["payload_json"].encode()).hexdigest() if row else None
+
+
+def ozon_draft_characteristic_rows(value):
+  if isinstance(value, dict):
+    return [{"name": name, "value": text} for name, text in value.items()]
+  return value if isinstance(value, list) else []
+
+
+def ozon_draft_section_value(content, field):
+  if field != "characteristics":
+    return content.get(field) or ""
+  return sorted((audit_normalized_characteristic_name(row["name"]), row["value"])
+                for row in ozon_draft_characteristic_rows(content.get(field)))
+
+
+def write_ozon_card_draft(db, portal, draft, user):
   actor_login = user_login_value(user) or ""
-  with connect_db() as db:
-    db.execute(
-      """
+  db.execute(
+    """
       INSERT INTO ozon_card_drafts (
         portal_id, card_key, sku, offer_id, title, payload_json,
         audit_status, created_by, updated_by, updated_at
@@ -4942,27 +4975,44 @@ def save_ozon_card_draft(portal_id, payload, user):
         audit_status = excluded.audit_status,
         updated_by = excluded.updated_by,
         updated_at = CURRENT_TIMESTAMP
-      """,
-      (
-        numeric_portal_id,
-        draft["cardKey"],
-        draft["sku"],
-        draft["offerId"],
-        draft["title"],
-        json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
-        draft["auditStatus"],
-        actor_login or None,
-        actor_login or None,
-      ),
-    )
-    row = db.execute(
-      """
-      SELECT *
-      FROM ozon_card_drafts
-      WHERE portal_id = ? AND card_key = ?
-      """,
-      (numeric_portal_id, draft["cardKey"]),
-    ).fetchone()
+    """,
+    (
+      portal,
+      draft["cardKey"],
+      draft["sku"],
+      draft["offerId"],
+      draft["title"],
+      json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
+      draft["auditStatus"],
+      actor_login or None,
+      actor_login or None,
+    ),
+  )
+  return ozon_card_draft_row(db, portal, draft["cardKey"])
+
+
+def save_ozon_card_draft(portal_id, payload, user, *, audit_only=False):
+  numeric_portal_id = ensure_ozon_portal_access(portal_id, user, edit=True, local_work=True)
+  draft = normalize_ozon_content_payload(payload)
+  if not draft:
+    raise ValueError("invalid_ozon_card_draft")
+  draft.pop("workflowReview", None)
+  with connect_db() as db:
+    db.execute("BEGIN IMMEDIATE")
+    current = ozon_card_draft_row(db, numeric_portal_id, draft["cardKey"])
+    if "expectedRevision" in payload and payload["expectedRevision"] != ozon_card_draft_revision(current):
+      raise workflow_error("ozon_card_draft_conflict", 409)
+    if current:
+      previous = public_ozon_card_draft(current)["draft"]
+      verified = previous.get("workflowReview") or {}
+      if audit_only and verified:
+        draft = {**previous, "auditStatus": draft["auditStatus"], "auditResult": draft["auditResult"]}
+      elif verified:
+        unchanged = {field: entry for field, entry in verified.items()
+                     if ozon_draft_section_value(previous["content"], field) == ozon_draft_section_value(draft["content"], field)}
+        if unchanged:
+          draft["workflowReview"] = unchanged
+    row = write_ozon_card_draft(db, numeric_portal_id, draft, user)
   record_admin_event(user, "ozon_card_draft_saved", "portal", numeric_portal_id, portal_id=numeric_portal_id, details={
     "cardKey": draft["cardKey"],
     "contentStatus": draft["approval"]["contentStatus"],
@@ -5016,7 +5066,7 @@ OZON_CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 """
 
 
-def ozon_card_characteristics_for_content(raw_card):
+def ozon_card_characteristics_for_content(raw_card, limit=120):
   characteristics = ozon_card_value(raw_card, "characteristics")
   if isinstance(characteristics, dict):
     rows = [
@@ -5047,7 +5097,7 @@ def ozon_card_characteristics_for_content(raw_card):
         rows.append({"name": f"Характеристика {index + 1}", "value": item})
   else:
     rows = []
-  return audit_card_characteristics({"characteristics": rows})[:120]
+  return audit_card_characteristics({"characteristics": rows})[:limit]
 
 
 def ozon_content_title_limit(value):
@@ -5290,6 +5340,7 @@ def build_ozon_card_content_reoptimization(portal_id, payload, user):
     "auditResult": previous_audit,
     "source": "ozon-semantic-content",
     "contentOptimization": result["contentOptimization"],
+    **({"expectedRevision": payload["expectedRevision"]} if "expectedRevision" in payload else {}),
   }, user)
   result["draft"] = saved.get("draft")
   return result
@@ -5364,7 +5415,7 @@ def build_ozon_card_audit(portal_id, payload, user):
     "auditStatus": "done",
     "auditResult": audit_result,
     "source": "ozon-audit",
-  }, user)
+  }, user, audit_only=True)
 
 
 _AUTOMATIC_SEO_SERVICES = {}
@@ -24903,17 +24954,70 @@ def workflow_content_reason_hash(value):
   return hashlib.sha256(semantic_json(value).encode()).hexdigest()
 
 
-def workflow_content_comparison(portal, batch_id, card_key, user):
+def workflow_ozon_review_revision(row, draft, fields):
+  content = draft.get('content') or {}
+  values = {field:ozon_draft_section_value(content,field) for field in fields}
+  if 'title' in values and not values['title']:
+    values['title'] = audit_str(ozon_card_value(json.loads(row['snapshot_json']),'title','name'),240)
+  return workflow_content_reason_hash([row['result_json'],values])
+
+
+def workflow_ozon_card_review_work(db, batch, row, fields, user):
+  portal = batch['portal_id']
+  _, current, manager = workflow_access(db,portal,user)
+  draft_row = ozon_card_draft_row(db,portal,row['card_key'])
+  draft = public_ozon_card_draft(draft_row)['draft'] if draft_row else {}
+  related = {}
+  tasks = db.execute(
+    """SELECT b.fields_json,b.status AS batch_status,c.state
+       FROM workflow_batches b JOIN workflow_cards c ON c.batch_id=b.id
+       WHERE b.portal_id=? AND b.parent_id IS ? AND b.id<>? AND b.kind='content'
+         AND b.status NOT IN ('archived','cancelled') AND c.card_key=?
+         AND (? OR b.assignee=?)
+       ORDER BY (b.status='planned'),b.updated_at DESC,b.id""",
+    (portal,batch['parent_id'],batch['id'],row['card_key'],manager or user_has_global_portal_access(current),current['login']),
+  )
+  for task in tasks:
+    for field in json.loads(task['fields_json']):
+      related.setdefault(field, 'planned' if task['batch_status']=='planned' else task['state'])
+  result = json.loads(row['result_json']) if row['result_json'] else {}
+  batch_cards = db.execute(
+    'SELECT card_key,state,result_json IS NOT NULL AS has_result FROM workflow_cards WHERE batch_id=? ORDER BY position',
+    (batch['id'],),
+  ).fetchall()
+  return {
+    'batch': {'id':batch['id'],'title':batch['title'],'fields':fields,'generation':batch['generation'],'status':batch['status'],
+              'canReview':(manager or current['login']==batch['assignee']) and batch['status'] not in ('approved','cancelled','archived'),
+              'scheduled':bool(db.execute('SELECT 1 FROM workflow_schedule WHERE batch_id=?',(batch['id'],)).fetchone())},
+    'card': {'cardKey':row['card_key'],'state':row['state'],'error':row['error'],
+             'result':{field:result[field] for field in fields if field in result} if row['result_json'] else None},
+    'cards': [{'cardKey':item['card_key'],'state':item['state'],'hasResult':bool(item['has_result'])} for item in batch_cards],
+    'related': related,
+    'reviewRevision': workflow_ozon_review_revision(row,draft,fields),
+    'workflowReview': draft.get('workflowReview') or {},
+  }
+
+
+def workflow_content_comparison(portal, batch_id, card_key, user, include_work=False):
   with semantic_job_connection() as db:
+    if include_work:
+      db.execute('BEGIN')
     batch=workflow_batch(db,portal,batch_id,user)
     if batch['kind']!='content':
       raise workflow_error('workflow_task_not_found',404)
-    row=db.execute('SELECT snapshot_json,result_json FROM workflow_cards WHERE batch_id=? AND card_key=?',
+    row=db.execute('SELECT card_key,state,error,snapshot_json,result_json FROM workflow_cards WHERE batch_id=? AND card_key=?',
                    (batch['id'],card_key)).fetchone()
-    if not row or not row['result_json']:
+    if not row or (not include_work and not row['result_json']):
       raise workflow_error('workflow_card_not_ready',404)
     marketplace=db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
-  fields=json.loads(batch['fields_json'])
+    fields=json.loads(batch['fields_json'])
+    work={}
+    if include_work:
+      if marketplace!='Ozon':
+        raise workflow_error('workflow_task_not_found',404)
+      work={'work':workflow_ozon_card_review_work(db,batch,row,fields,user)}
+  if not row['result_json']:
+    return {'generation':batch['generation'],**work}
   raw=json.loads(row['snapshot_json'])
   result=json.loads(row['result_json'])
   saved=result.get('_generationReasons') or {}
@@ -24929,7 +25033,7 @@ def workflow_content_comparison(portal, batch_id, card_key, user):
                for c in characteristics if c['values']]
   if 'characteristics' in fields:
     original['characteristics']=source_rows
-  return {'generation':batch['generation'],'original':original,'reasons':reasons,'facts':[
+  return {**work,'generation':batch['generation'],'original':original,'reasons':reasons,'facts':[
     row for row in source_rows if row['unit'] or re.search(r'вес|масс|об[ъь][её]м|размер|модел|сезон|количеств|комплект',row['name'],re.I)
   ][:30]}
 
@@ -25371,8 +25475,58 @@ def workflow_prepare_semantic_rankings(portal,payload,user):
   return {'signature':signature,'rankedKeywords':result['keywords'],'rankingSource':result['source'],'rankingPeriod':result['period']}
 
 
+def workflow_merge_ozon_characteristics(draft_value, proposals, raw):
+  existing = ozon_draft_characteristic_rows(draft_value)
+  if not existing:
+    existing = [
+      {'name':audit_str(row['name'],120),'value':audit_str(', '.join(row['values']),500),'values':row['values'][:8]}
+      for row in ozon_card_characteristics_for_content(raw,limit=300) if row['values']
+    ]
+  changes = {audit_normalized_characteristic_name(row['name']):row for row in proposals}
+  merged = []
+  for row in existing:
+    proposal = changes.pop(audit_normalized_characteristic_name(row['name']), None)
+    merged.append({**proposal,'name':row['name']} if proposal and proposal['value']!=row['value'] else row)
+  merged.extend(changes.values())
+  if len(merged)>300:
+    raise workflow_error('invalid_content')
+  return merged
+
+
+def workflow_apply_ozon_review(db, batch, card, fields, content, user, expected_revision, already_reviewed):
+  current = ozon_card_draft_row(db,batch['portal_id'],card['card_key'])
+  raw = json.loads(card['snapshot_json'])
+  previous = public_ozon_card_draft(current)['draft'] if current else {}
+  draft = previous or normalize_ozon_content_payload({
+    'cardKey':card['card_key'],'sku':ozon_card_value(raw,'sku','id','productId'),
+    'offerId':ozon_card_value(raw,'offerId','offer_id','vendorCode'),
+    'title':ozon_card_value(raw,'title','name'),'content':{'title':''},'source':'ozon-content-workflow',
+  })
+  values = {field:content[field] for field in fields}
+  if 'characteristics' in values:
+    values['characteristics'] = workflow_merge_ozon_characteristics(draft['content'].get('characteristics'),values['characteristics'],raw)
+  reviewed = dict(draft.get('workflowReview') or {})
+  changed = {field for field in fields
+             if ozon_draft_section_value(draft['content'],field)!=ozon_draft_section_value(values,field)}
+  # Repeating a successfully saved review keeps its date and file version.
+  if already_reviewed and not changed and all(reviewed.get(field,{}).get('batchId')==batch['id'] for field in fields):
+    return current,False
+  if expected_revision is not None and expected_revision!=workflow_ozon_review_revision(card,previous,fields):
+    raise workflow_error('workflow_content_review_conflict',409)
+  now = utc_now().isoformat()
+  for field in fields:
+    if card['state']!='reviewed' or field in changed or reviewed.get(field,{}).get('batchId')!=batch['id']:
+      reviewed[field] = {'reviewedAt':now,'batchId':batch['id'],'taskTitle':audit_str(batch['title'],200)}
+  draft['content'] = {**draft['content'],**values}
+  draft['workflowReview'] = reviewed
+  if changed:
+    draft['approval'] = {'contentStatus':'draft'}
+  return write_ozon_card_draft(db,batch['portal_id'],draft,user),True
+
+
 def workflow_review_card(portal, payload, user):
   ranking=workflow_prepare_semantic_rankings(portal,payload,user)
+  response={'reviewed':True}
   with semantic_job_connection() as db:
     db.execute('BEGIN IMMEDIATE')
     batch = workflow_batch(db,portal,payload.get('batchId'),user,write=True)
@@ -25380,7 +25534,7 @@ def workflow_review_card(portal, payload, user):
       raise workflow_error('workflow_schedule_required')
     card = db.execute('SELECT * FROM workflow_cards WHERE batch_id=? AND card_key=?',(batch['id'],str(payload.get('cardKey')))).fetchone()
     if not card: raise workflow_error('semantic_card_not_found')
-    if batch['status'] in ('approved','cancelled'): raise workflow_error('workflow_task_closed',409)
+    if batch['status'] in ('approved','cancelled','archived'): raise workflow_error('workflow_task_closed',409)
     if payload.get('generation') is not None and int(payload['generation'])!=batch['generation']: raise workflow_error('workflow_version_conflict',409)
     if card['state'] not in ('ready','generated','reviewed'): raise workflow_error('workflow_card_not_ready')
     marketplace = db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
@@ -25400,27 +25554,43 @@ def workflow_review_card(portal, payload, user):
       if not isinstance(content,dict): raise workflow_error('invalid_content')
       previous = json.loads(card['result_json'] or '{}')
       clean = {}
-      for section in json.loads(batch['fields_json']):
+      fields = json.loads(batch['fields_json'])
+      for section in fields:
         if section == 'characteristics':
           rows = content.get(section)
           if not isinstance(rows,list) or len(rows)>100: raise workflow_error('invalid_content')
+          if marketplace=='Ozon' and any(isinstance(r,dict) and len(audit_str(r.get('value')))>500 for r in rows):
+            raise workflow_error('workflow_ozon_characteristic_too_long')
           clean[section] = [{'name':audit_str(r.get('name'),120),'value':audit_str(r.get('value'),1000)} for r in rows if isinstance(r,dict) and audit_str(r.get('name'),120)]
         else:
           limit = 300 if section=='title' else 7000
           value = audit_str(content.get(section),limit)
           if not value: raise workflow_error('invalid_content')
+          if marketplace=='Ozon' and section=='description' and len(value)>6000:
+            raise workflow_error('workflow_ozon_description_too_long')
           clean[section] = value
       saved_reasons={field:reason for field,reason in (previous.get('_generationReasons') or {}).items()
                      if field in clean and previous.get(field)==clean[field]}
       if saved_reasons:
         clean['_generationReasons']=saved_reasons
-      if card['state']=='reviewed' and previous==clean: return {'reviewed':True}
+      unchanged = card['state']=='reviewed' and previous==clean
+      if marketplace=='Ozon' and batch['kind']=='content':
+        draft_row,transferred=workflow_apply_ozon_review(db,batch,card,fields,clean,user,payload.get('reviewRevision'),unchanged)
+        response['ozonDraft']=public_ozon_card_draft(draft_row)
+        next_card=db.execute(
+          "SELECT card_key FROM workflow_cards WHERE batch_id=? AND position>? AND state='generated' AND result_json IS NOT NULL ORDER BY position LIMIT 1",
+          (batch['id'],card['position']),
+        ).fetchone()
+        response['nextCardKey']=next_card['card_key'] if next_card else None
+        if unchanged and transferred:
+          workflow_event(db,portal,user,'card_reviewed',batch['period_id'],batch['id'],cardKey=card['card_key'])
+      if unchanged: return response
       db.execute("UPDATE workflow_cards SET result_json=?,state='reviewed' WHERE batch_id=? AND card_key=?",(semantic_json(clean),batch['id'],card['card_key']))
-    # Existing immutable files remain in history; a changed review creates a new generation.
-    if db.execute('SELECT 1 FROM workflow_files WHERE batch_id=?',(batch['id'],)).fetchone():
+    # Regeneration already invalidated earlier files and still owns its queue.
+    if batch['status']!='generating' and db.execute('SELECT 1 FROM workflow_files WHERE batch_id=?',(batch['id'],)).fetchone():
       db.execute("UPDATE workflow_batches SET generation=generation+1,status='review',updated_at=CURRENT_TIMESTAMP WHERE id=?",(batch['id'],))
     workflow_event(db,portal,user,'card_reviewed',batch['period_id'],batch['id'],cardKey=card['card_key'])
-  return {'reviewed':True}
+  return response
 
 
 def semantic_export_ranking_rows(core):
@@ -26984,7 +27154,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         if path=='/api/content-workflow/mail' and method=='GET':
           self.send_json(200,workflow_crm_mailbox(portal,user,data.get('before')));return True
         if path=='/api/content-workflow/comparison' and method=='GET':
-          self.send_json(200,workflow_content_comparison(portal,data.get('batch_id'),data.get('card_key'),user));return True
+          self.send_json(200,workflow_content_comparison(portal,data.get('batch_id'),data.get('card_key'),user,include_work=data.get('work')=='1'));return True
         if path=='/api/content-workflow/crm-binding' and method=='GET':
           with semantic_job_connection() as db:
             record,_,manager=workflow_crm_access(db,portal,user)
@@ -29203,7 +29373,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         error_text = str(exc) or "invalid_ozon_card_draft"
-        status = HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST
+        status = getattr(exc,"status",HTTPStatus.NOT_FOUND if error_text == "portal_not_found" else HTTPStatus.BAD_REQUEST)
         self.send_json(status, {"error": error_text})
         return
       self.send_json(HTTPStatus.OK, result)
@@ -29222,7 +29392,7 @@ class OpticardsHandler(BaseHTTPRequestHandler):
         return
       except ValueError as exc:
         message = str(exc) or "invalid_ozon_card_content_reoptimization"
-        status = HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST
+        status = getattr(exc,"status",HTTPStatus.CONFLICT if message == "llm_key_missing" else HTTPStatus.BAD_REQUEST)
         self.send_json(status, {"error": message})
         return
       except RuntimeError as exc:

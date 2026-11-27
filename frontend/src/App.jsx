@@ -9,6 +9,8 @@ import ServiceGuide from "./ServiceGuide";
 import WorkCalendar, {CalendarTaskFocus} from "./WorkCalendar";
 import CardMetrics from "./CardMetrics";
 import ContentWorkflow, {ContentWorkflowSettings, LegacySemanticBatchButton} from "./ContentWorkflow";
+import OzonWorkflowReview from "./OzonWorkflowReview";
+import { ozonWorkflowReviewStatus } from "./workflowPresentation";
 import { hasSemanticRelevance, reconcileSemanticRelevance, setSemanticRelevanceDecision, semanticJobSelectionState } from "./semanticRelevance";
 import { readBrowserValue, writeBrowserValue } from "./browserStorage";
 import { cardDescriptionText } from "./cardDescription";
@@ -7087,32 +7089,31 @@ export default function App() {
 
   function navigateTaskRun(command) {
     if (!taskRun?.items?.length) {
-      return;
+      return false;
     }
     const action = typeof command === "number" ? { type: "move", delta: command } : (command || {});
     const currentIndex = Math.max(0, Math.min(Number(taskRun.currentIndex || 0), taskRun.items.length - 1));
     if (action.type === "defer-current") {
       if (taskRun.items.length < 2) {
         setNotice("В текущем проходе только одна карточка.");
-        return;
+        return false;
       }
       const currentItem = taskRun.items[currentIndex];
       const remainingItems = taskRun.items.filter((_, index) => index !== currentIndex);
       const nextItems = [...remainingItems, { ...currentItem, deferred: true }];
       const nextIndex = Math.min(currentIndex, remainingItems.length - 1);
-      openTaskRunIndex(
+      return openTaskRunIndex(
         { ...taskRun, items: nextItems, total: nextItems.length },
         nextIndex,
         "Карточка перенесена в конец текущего прохода.",
       );
-      return;
     }
     const delta = Number(action.delta || 0);
     const nextIndex = Math.max(0, Math.min(currentIndex + delta, taskRun.items.length - 1));
     if (nextIndex === currentIndex) {
-      return;
+      return false;
     }
-    openTaskRunIndex(taskRun, nextIndex);
+    return openTaskRunIndex(taskRun, nextIndex);
   }
 
   async function createPortal(payload) {
@@ -11610,12 +11611,18 @@ function OzonMpstatsProbeResult({ result, status, canSave = false, saveStatus = 
 }
 
 function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLabel = "Карточки Ozon", taskRun = null, onTaskRunNavigate, helpEnabled = false }) {
-  const [activeTab, setActiveTab] = useState(taskRun?.workType==='semantic' ? 'semantic' : 'card');
+  const contentRun=taskRun?.workType==='content'&&taskRun.workflowBatchId;
+  const [activeTab, setActiveTab] = useState(contentRun?'changes':taskRun?.workType==='semantic'?'semantic':'card');
   const [semanticDirty, setSemanticDirty] = useState(false);
   const [semanticSaving, setSemanticSaving] = useState(false);
-  const mayLeave = () => !semanticSaving && (!semanticDirty || window.confirm('Текущий выбор СЯ не сохранён. Уйти без сохранения?'));
+  const [contentDirty, setContentDirty] = useState(false);
+  const [contentSaving, setContentSaving] = useState(false);
+  const mayLeave = () => !semanticSaving&&!contentSaving
+    && (!semanticDirty||window.confirm('Текущий выбор СЯ не сохранён. Уйти без сохранения?'))
+    && (!contentDirty||window.confirm('Правки этой карточки не сохранены. Уйти без сохранения?'));
   const [ozonCardDraft, setOzonCardDraft] = useState(null);
   const [ozonCardDraftStatus, setOzonCardDraftStatus] = useState("idle");
+  const ozonDraftRequest = useRef(0);
   const rawFields = rawFieldsForCard(card);
   const mpstats = card?.mpstats && typeof card.mpstats === "object" ? card.mpstats : {};
   const photoUrl = bestPhotoUrl(card);
@@ -11645,6 +11652,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
 
   useEffect(() => {
     let active = true;
+    const request = ++ozonDraftRequest.current;
     if (!portal?.id || portal.isDemo || !cardKey) {
       setOzonCardDraft(null);
       setOzonCardDraftStatus("idle");
@@ -11655,12 +11663,12 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
     setOzonCardDraftStatus("loading");
     apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-card-draft?card_key=${encodeURIComponent(cardKey)}`)
       .then((payload) => {
-        if (!active) return;
+        if (!active || request!==ozonDraftRequest.current) return;
         setOzonCardDraft(payload.draft || null);
         setOzonCardDraftStatus(payload.draft ? "loaded" : "empty");
       })
       .catch(() => {
-        if (!active) return;
+        if (!active || request!==ozonDraftRequest.current) return;
         setOzonCardDraftStatus("error");
       });
     return () => {
@@ -11669,6 +11677,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
   }, [portal?.id, portal?.isDemo, cardKey]);
 
   function replaceOzonCardDraft(draft) {
+    ozonDraftRequest.current++;
     setOzonCardDraft(draft || null);
     setOzonCardDraftStatus(draft ? "saved" : "empty");
   }
@@ -11681,14 +11690,14 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
           <p>{title} · SKU {sku} · offer ID {offerId} · {category}</p>
         </div>
         <div className="toolbar">
-          <button className="btn ghost" type="button" disabled={semanticSaving} onClick={()=>{if(mayLeave())onBack()}}><ArrowLeft size={17} />{backLabel}</button>
+          <button className="btn ghost" type="button" disabled={semanticSaving||contentSaving} onClick={()=>{if(mayLeave())onBack()}}><ArrowLeft size={17} />{backLabel}</button>
           {externalUrl ? <a className="btn" href={externalUrl} target="_blank" rel="noreferrer"><ExternalLink size={17} />Открыть Ozon</a> : null}
           <Tag tone={issueCount ? "amber" : "green"}>{status}</Tag>
         </div>
       </header>
 
       <div className="content">
-        <div className={`detail-layout ${activeTab === "technical" ? "wide-changes" : ""}`}>
+        <div className={`detail-layout ${activeTab==="technical"||contentRun&&activeTab==="changes"?"wide-changes":""}`}>
           <aside className="detail-aside">
             <div className={`photo-preview ${photoUrl ? "has-image" : ""}`}>
               {photoUrl ? <img src={photoUrl} alt={title} loading="eager" decoding="async" /> : <span>OZ</span>}
@@ -11712,7 +11721,7 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
           </aside>
 
           <div className="detail-main">
-            <WorkspaceTabs items={ozonCardWorkspaceTabs} active={activeTab} onChange={tab=>{if(tab!==activeTab&&mayLeave()){setSemanticDirty(false);setActiveTab(tab)}}} className="detail-tabs" ariaLabel="Разделы Ozon-карточки" />
+            <WorkspaceTabs items={ozonCardWorkspaceTabs} active={activeTab} onChange={tab=>{if(tab!==activeTab&&mayLeave()){setSemanticDirty(false);setContentDirty(false);setActiveTab(tab)}}} className="detail-tabs" ariaLabel="Разделы Ozon-карточки" />
             <HelpHint enabled={helpEnabled} title="Ozon-карточка">
               Экран использует сохраненный Ozon snapshot. Аудит, черновики и экспорты Ozon здесь не запускают логику других маркетплейсов.
             </HelpHint>
@@ -11847,7 +11856,10 @@ function OzonCardDetailScreen({ card, portal, canManage = false, onBack, backLab
             ) : null}
 
             {activeTab === "changes" ? (
-              <OzonChangesPanel card={card} portal={portal} draft={ozonCardDraft} status={ozonCardDraftStatus} onDraftSaved={replaceOzonCardDraft} />
+              contentRun?<OzonWorkflowReview key={contentRun+':'+cardKey} portalId={portal.id} taskRun={taskRun} apiRequest={apiRequest}
+                onNavigate={onTaskRunNavigate} onBack={onBack} onDraftSaved={replaceOzonCardDraft}
+                onDirtyChange={setContentDirty} onSavingChange={setContentSaving}/>
+                : <OzonChangesPanel card={card} portal={portal} draft={ozonCardDraft} status={ozonCardDraftStatus} onDraftSaved={replaceOzonCardDraft} />
             ) : null}
 
             {activeTab === "technical" ? (
@@ -12478,13 +12490,16 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const currentCharacteristics = ozonCardCharacteristicItems(card);
   const savedContent = draft?.draft?.content || {};
   const savedApproval = draft?.draft?.approval || {};
+  const reviewedFields = draft?.draft?.workflowReview || {};
   const savedCharacteristics = ozonContentCharacteristicItems(savedContent.characteristics);
-  const hasSavedContent = Boolean(savedContent.title || savedContent.description || savedCharacteristics.length);
+  const hasSavedContent = Boolean(savedContent.title || savedContent.description || savedCharacteristics.length || reviewedFields.characteristics);
   const [titleDraft, setTitleDraft] = useState(savedContent.title || currentTitle);
   const [descriptionDraft, setDescriptionDraft] = useState(cardDescriptionText(savedContent.description) || currentDescription);
   const [characteristicDraft, setCharacteristicDraft] = useState(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
   const [saveStatus, setSaveStatus] = useState("idle");
   const [generateStatus, setGenerateStatus] = useState("idle");
+  const draftReady = ["loaded","empty","saved"].includes(status);
+  const actionBlocked = !draftReady || saveStatus === "saving" || generateStatus === "loading";
   const approvalMeta = ozonCardContentStatusMeta(draft);
   const contentApproval = normalizeApprovalState({ status: savedApproval.contentStatus || "draft" });
   const titleChanged = normalizedCharacteristicOption(titleDraft) !== normalizedCharacteristicOption(currentTitle);
@@ -12501,10 +12516,10 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
     setTitleDraft(savedContent.title || currentTitle);
     setDescriptionDraft(cardDescriptionText(savedContent.description) || currentDescription);
     setCharacteristicDraft(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
-  }, [draft?.updatedAt, cardKey]);
+  }, [draft?.revision, draft?.updatedAt, cardKey]);
 
   async function saveContent(nextStatus = savedApproval.contentStatus || "draft") {
-    if (!portal?.id || portal.isDemo || saveStatus === "saving" || generateStatus === "loading") return;
+    if (!portal?.id || portal.isDemo || actionBlocked) return;
     setSaveStatus("saving");
     try {
       const payload = await apiRequest(`/api/portals/${encodeURIComponent(portal.id)}/ozon-card-draft`, {
@@ -12514,9 +12529,10 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           sku: sku === "Не указано" ? "" : sku,
           offerId: offerId === "Не указано" ? "" : offerId,
           title: card?.title || rawFields.title || rawFields.name || "",
+          expectedRevision: draft?.revision ?? null,
           content: {
             title: titleDraft,
-            description: descriptionDraft,
+            description: savedContent.description&&descriptionDraft===cardDescriptionText(savedContent.description) ? savedContent.description : descriptionDraft,
             characteristics: characteristicDraft,
           },
           approval: { contentStatus: nextStatus },
@@ -12527,13 +12543,13 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
       });
       onDraftSaved?.(payload.draft || null);
       setSaveStatus("saved");
-    } catch {
-      setSaveStatus("error");
+    } catch (error) {
+      setSaveStatus(error.message==="ozon_card_draft_conflict"?"conflict":"error");
     }
   }
 
   async function generateContent() {
-    if (!portal?.id || portal.isDemo || generateStatus === "loading") return;
+    if (!portal?.id || portal.isDemo || actionBlocked) return;
     setGenerateStatus("loading");
     setSaveStatus("idle");
     try {
@@ -12544,6 +12560,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           sku: sku === "Не указано" ? "" : sku,
           offerId: offerId === "Не указано" ? "" : offerId,
           title: card?.title || rawFields.title || rawFields.name || "",
+          expectedRevision: draft?.revision ?? null,
           card,
           draft: {
             cardKey,
@@ -12564,8 +12581,8 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
       setCharacteristicDraft(ozonContentCharacteristicItems(nextContent.characteristics));
       onDraftSaved?.(payload.draft || null);
       setGenerateStatus("done");
-    } catch {
-      setGenerateStatus("error");
+    } catch (error) {
+      setGenerateStatus(error.message==="ozon_card_draft_conflict"?"conflict":"error");
     }
   }
 
@@ -12604,7 +12621,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
             <p>{changesReadinessStatusText({ approval: contentApproval, changesCount })}</p>
             <span>{titleChanged ? "заголовок изменен" : "заголовок без изменений"} · {descriptionChanged ? "описание изменено" : "описание без изменений"} · {characteristicsChanged ? "характеристики изменены" : "характеристики без изменений"}</span>
             <div className="changes-readiness-actions">
-              <button className={loadingButtonClass("btn mini", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
+              <button className={loadingButtonClass("btn mini", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={actionBlocked}>
                 <Save size={14} />Сохранить
               </button>
               {changesCount > 0 ? <em>{changesCount} {pluralRu(changesCount, "правка", "правки", "правок")}</em> : null}
@@ -12623,18 +12640,20 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
         <label className="field-label">
           Итоговый заголовок
           <input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} maxLength={300} />
+          {reviewedFields.title?<span className="cw-field-status">{ozonWorkflowReviewStatus(reviewedFields.title)}</span>:null}
         </label>
         <label className="field-label">
           Итоговое описание
           <textarea value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} rows={8} />
+          {reviewedFields.description?<span className="cw-field-status">{ozonWorkflowReviewStatus(reviewedFields.description)}</span>:null}
         </label>
       </div>
-      {characteristicDraft.length ? (
+      {characteristicDraft.length || reviewedFields.characteristics ? (
         <section className="workspace-strip compact-inner">
           <div className="strip-head">
             <div>
               <h2>Итоговые характеристики</h2>
-              <p>Черновик для Ozon сохраняется вместе с заголовком и описанием.</p>
+              {reviewedFields.characteristics?<p>{ozonWorkflowReviewStatus(reviewedFields.characteristics)}</p>:null}
             </div>
             <Tag tone={characteristicsChanged ? "amber" : "blue"}>{characteristicsChanged ? "изменены" : "snapshot"}</Tag>
           </div>
@@ -12642,29 +12661,30 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
         </section>
       ) : null}
       <div className="panel-actions">
-        <button className={loadingButtonClass("btn", generateStatus === "loading")} type="button" onClick={generateContent} disabled={portal?.isDemo || generateStatus === "loading" || saveStatus === "saving"} aria-busy={generateStatus === "loading" || undefined}>
+        <button className={loadingButtonClass("btn", generateStatus === "loading")} type="button" onClick={generateContent} disabled={portal?.isDemo || actionBlocked} aria-busy={generateStatus === "loading" || undefined}>
           <WandSparkles size={16} />{generateStatus === "loading" ? "Готовим" : "Подготовить по СЯ"}
         </button>
-        <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
+        <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={actionBlocked}>
           <Save size={16} />Сохранить черновик
         </button>
         {ozonCanSubmitContent ? (
-          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("submitted")} disabled={saveStatus === "saving" || !titleDraft.trim()}>
+          <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("submitted")} disabled={actionBlocked || !titleDraft.trim()}>
             <Upload size={16} />На согласование
           </button>
         ) : null}
         {ozonCanWithdrawContent ? (
-          <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={saveStatus === "saving"}>
+          <button className={loadingButtonClass("btn", saveStatus === "saving")} type="button" onClick={() => saveContent("draft")} disabled={actionBlocked}>
             <RotateCcw size={16} />Забрать с согласования
           </button>
         ) : null}
-        <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("approved")} disabled={saveStatus === "saving" || !titleDraft.trim()}>
+        <button className={loadingButtonClass("btn primary", saveStatus === "saving")} type="button" onClick={() => saveContent("approved")} disabled={actionBlocked || !titleDraft.trim()}>
           <CheckSquare size={16} />Принять контент
         </button>
       </div>
       {generateStatus === "done" ? <p className="status-note">Ozon-контент подготовлен по сохраненному итоговому СЯ и сохранен в черновик.</p> : null}
       {generateStatus === "error" ? <p className="status-note">Не удалось подготовить Ozon-контент. Проверьте, что итоговое СЯ сохранено и доступна модель генерации.</p> : null}
       {saveStatus === "error" ? <p className="status-note">Не удалось сохранить Ozon-контент.</p> : null}
+      {saveStatus==="conflict"||generateStatus==="conflict"?<p className="form-error" role="alert">Черновик карточки обновился. Откройте карточку заново, чтобы сверить сохранённые правки.</p>:null}
       {status === "loading" ? <p className="status-note">Загружаем сохраненный Ozon-черновик.</p> : null}
     </section>
   );
