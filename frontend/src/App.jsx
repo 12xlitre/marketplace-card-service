@@ -12474,13 +12474,14 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const { sku, offerId } = ozonCardIdentity(card);
   const photoUrl = bestPhotoUrl(card);
   const currentTitle = String(card?.title || rawFields.title || rawFields.name || "");
-  const currentDescription = String(card?.description || rawFields.description || "");
+  const currentDescription = cardDescriptionText(card?.description || rawFields.description);
   const currentCharacteristics = ozonCardCharacteristicItems(card);
   const savedContent = draft?.draft?.content || {};
   const savedApproval = draft?.draft?.approval || {};
   const savedCharacteristics = ozonContentCharacteristicItems(savedContent.characteristics);
+  const hasSavedContent = Boolean(savedContent.title || savedContent.description || savedCharacteristics.length);
   const [titleDraft, setTitleDraft] = useState(savedContent.title || currentTitle);
-  const [descriptionDraft, setDescriptionDraft] = useState(savedContent.description || currentDescription);
+  const [descriptionDraft, setDescriptionDraft] = useState(cardDescriptionText(savedContent.description) || currentDescription);
   const [characteristicDraft, setCharacteristicDraft] = useState(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
   const [saveStatus, setSaveStatus] = useState("idle");
   const [generateStatus, setGenerateStatus] = useState("idle");
@@ -12494,11 +12495,11 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
   const ozonCanWithdrawContent = contentApproval.status === "submitted";
   const readinessSummary = changesCount
     ? `${formatNumber(changesCount)} ${pluralRu(changesCount, "правка", "правки", "правок")} в Ozon-контенте`
-    : "Ozon-черновик совпадает с текущим снимком";
+    : hasSavedContent ? "Ozon-черновик совпадает с текущим снимком" : "Черновика карточки пока нет";
 
   useEffect(() => {
     setTitleDraft(savedContent.title || currentTitle);
-    setDescriptionDraft(savedContent.description || currentDescription);
+    setDescriptionDraft(cardDescriptionText(savedContent.description) || currentDescription);
     setCharacteristicDraft(savedCharacteristics.length ? savedCharacteristics : currentCharacteristics);
   }, [draft?.updatedAt, cardKey]);
 
@@ -12559,7 +12560,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
       });
       const nextContent = payload?.draft?.draft?.content || payload?.draftContent || {};
       setTitleDraft(nextContent.title || "");
-      setDescriptionDraft(nextContent.description || "");
+      setDescriptionDraft(cardDescriptionText(nextContent.description));
       setCharacteristicDraft(ozonContentCharacteristicItems(nextContent.characteristics));
       onDraftSaved?.(payload.draft || null);
       setGenerateStatus("done");
@@ -12590,6 +12591,7 @@ function OzonChangesPanel({ card, portal, draft, status = "idle", onDraftSaved }
           <div>
             <span>Что готово к согласованию</span>
             <strong>{readinessSummary}</strong>
+            {!hasSavedContent&&!changesCount?<p>Пакетные результаты доступны в задаче на контент.</p>:null}
           </div>
         </div>
         <div className="changes-readiness-grid ozon-changes-readiness-grid">

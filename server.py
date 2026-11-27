@@ -4992,6 +4992,7 @@ OZON_CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - marketplace = Ozon: не применяй WB-лимит 60 символов к заголовку, но держи название читаемым и не длиннее evidenceBundle.constraints.titleMaxChars;
 - заголовок должен начинаться с типа товара и главного поискового признака, бренд можно добавлять ближе к концу, если он есть в карточке;
 - сверяй тип, бренд, обозначение модели, числовые признаки и единицы с исходной карточкой. Сохраняй написание маркировки. Не путай массу баллона с объёмом или выходом материала. При конфликте источников опусти спорный признак;
+- в reason кратко назови существенные добавления и удаления. Укажи исходное поле или поисковый запрос, на который опирается изменение. При противоречии укажи, какие данные расходятся.
 - описание пиши как карточку товара для покупателя: понятные абзацы, разные начала предложений, конкретные преимущества из фактов, без канцелярита и служебных комментариев;
 - органично используй ключи из evidenceBundle.semanticCore.finalKeywords; removeKeywords не добавляй намеренно;
 - если ключ звучит неестественно или противоречит карточке, пропусти его и вынеси предупреждение в _meta.warnings;
@@ -5237,6 +5238,10 @@ def build_ozon_card_content_reoptimization_result(raw_card, semantic_payload=Non
       "title": next_title,
       "description": next_description,
       "characteristics": characteristic_rows,
+    },
+    "reasons": {
+      "title": audit_str(title_block.get("reason"), 1000),
+      "description": audit_str(description_block.get("reason"), 1000),
     },
     "contentOptimization": {
       "id": f"ozon-semantic-content-{int(time.time() * 1000)}",
@@ -11897,6 +11902,7 @@ CONTENT_REOPTIMIZE_SYSTEM_PROMPT = """
 - характеристики с названием "Материал оправы", "Ширина оправы" или "Конструкция оправы" у солнцезащитных очков описывают часть готовых очков и не меняют тип товара на "оправа";
 - заголовок должен быть готовым названием карточки WB длиной до 60 символов, отвечать на вопрос покупателя "что это, кому подходит, чем отличается", ставить тип товара в начало;
 - сверяй тип, бренд, обозначение модели, числовые признаки и единицы с исходной карточкой. Сохраняй написание маркировки. Не путай массу баллона с объёмом или выходом материала. При конфликте источников опусти спорный признак;
+- в reason кратко назови существенные добавления и удаления. Укажи исходное поле или поисковый запрос, на который опирается изменение. При противоречии укажи, какие данные расходятся.
 - формула заголовка: Тип товара -> Назначение -> Целевая аудитория -> Главная характеристика -> Дополнительная характеристика -> Бренд -> Модель;
 - первые слова заголовка должны быть самым частотным товарным запросом, а не брендом, артикулом или моделью; модель/артикул допустимы только в конце, если не ухудшают читаемость;
 - в заголовок включай только самые сильные поисковые признаки, которые помогают выбрать товар и подтверждены evidenceBundle: например пол, форма, объем, размер, материал только если он является конкурентным преимуществом;
@@ -24875,7 +24881,10 @@ def workflow_public_batch(db, row, marketplace, detail=False):
           item['job']['status']='empty'
           if card['state']!='reviewed' and row['kind']=='semantic': item.update(state='empty',error='')
     if detail:
-      item['result'] = json.loads(card['result_json']) if card['result_json'] else None
+      content = json.loads(card['result_json']) if card['result_json'] else None
+      if content is not None and row['kind']=='content':
+        content.pop('_generationReasons',None)
+      item['result'] = content
       item['final'] = json.loads(card['final_json']) if card['final_json'] else None
     result['cards'].append(item)
   if result['status']=='review' and any(c['state']=='empty' for c in result['cards']): result['status']='partial'
@@ -24888,6 +24897,41 @@ def workflow_public_batch(db, row, marketplace, detail=False):
   result['schedule'] = [dict(r) for r in db.execute('SELECT id,day,minutes,assignee FROM workflow_schedule WHERE batch_id=? ORDER BY day',(row['id'],))]
   result['plannedDays']=[dict(r) for r in db.execute('SELECT id,day,assignee FROM workflow_day_assignments WHERE batch_id=? ORDER BY day',(row['id'],))]
   return result
+
+
+def workflow_content_reason_hash(value):
+  return hashlib.sha256(semantic_json(value).encode()).hexdigest()
+
+
+def workflow_content_comparison(portal, batch_id, card_key, user):
+  with semantic_job_connection() as db:
+    batch=workflow_batch(db,portal,batch_id,user)
+    if batch['kind']!='content':
+      raise workflow_error('workflow_task_not_found',404)
+    row=db.execute('SELECT snapshot_json,result_json FROM workflow_cards WHERE batch_id=? AND card_key=?',
+                   (batch['id'],card_key)).fetchone()
+    if not row or not row['result_json']:
+      raise workflow_error('workflow_card_not_ready',404)
+    marketplace=db.execute('SELECT marketplace FROM portals WHERE id=?',(portal,)).fetchone()[0]
+  fields=json.loads(batch['fields_json'])
+  raw=json.loads(row['snapshot_json'])
+  result=json.loads(row['result_json'])
+  saved=result.get('_generationReasons') or {}
+  reasons={field:saved[field]['reason'] for field in fields if field in saved and field in result
+           and saved[field]['hash']==workflow_content_reason_hash(result[field])}
+  original={}
+  if 'title' in fields:
+    original['title']=audit_str(ozon_card_value(raw,'title','name'),300)
+  if 'description' in fields:
+    original['description']=audit_str(ozon_card_value(raw,'description'),7000)
+  characteristics=ozon_card_characteristics_for_content(raw) if marketplace=='Ozon' else audit_card_characteristics(raw)
+  source_rows=[{'name':audit_str(c['name'],120),'value':audit_str(', '.join(c['values']),1000),'unit':audit_str(c.get('unitName'),30)}
+               for c in characteristics if c['values']]
+  if 'characteristics' in fields:
+    original['characteristics']=source_rows
+  return {'generation':batch['generation'],'original':original,'reasons':reasons,'facts':[
+    row for row in source_rows if row['unit'] or re.search(r'вес|масс|об[ъь][её]м|размер|модел|сезон|количеств|комплект',row['name'],re.I)
+  ][:30]}
 
 
 def workflow_public_delivery(db, row, manager):
@@ -25366,7 +25410,11 @@ def workflow_review_card(portal, payload, user):
           value = audit_str(content.get(section),limit)
           if not value: raise workflow_error('invalid_content')
           clean[section] = value
-      if card['state']=='reviewed' and json.loads(card['result_json'] or '{}')==clean: return {'reviewed':True}
+      saved_reasons={field:reason for field,reason in (previous.get('_generationReasons') or {}).items()
+                     if field in clean and previous.get(field)==clean[field]}
+      if saved_reasons:
+        clean['_generationReasons']=saved_reasons
+      if card['state']=='reviewed' and previous==clean: return {'reviewed':True}
       db.execute("UPDATE workflow_cards SET result_json=?,state='reviewed' WHERE batch_id=? AND card_key=?",(semantic_json(clean),batch['id'],card['card_key']))
     # Existing immutable files remain in history; a changed review creates a new generation.
     if db.execute('SELECT 1 FROM workflow_files WHERE batch_id=?',(batch['id'],)).fetchone():
@@ -25902,15 +25950,22 @@ def workflow_process_batch(batch_id):
       result=build_ozon_card_content_reoptimization_result(raw,sem)
     else:
       result=build_card_content_reoptimization(batch['portal_id'],card['card_key'],raw,selected,current_keywords,removed,sections=fields,frozen_semantic=True)
-    content=result['draftContent'];output={}
+    content=result['draftContent'];output={};reasons={}
     for field in fields:
       value=content.get(field)
       if field=='characteristics':
-        output[field]=[{'name':audit_str(r['name'],120),'value':audit_str(r['value'],1000)} for r in ozon_content_characteristics_list(value,limit=100)]
+        proposed=ozon_content_characteristics_list(value,limit=100)
+        output[field]=[{'name':audit_str(r['name'],120),'value':audit_str(r['value'],1000)} for r in proposed]
         if value and not output[field]: raise workflow_error('invalid_content')
+        reason={audit_str(item['name'],120):audit_str(item['reason'],1000) for item in proposed if item['reason']}
       else:
         output[field]=audit_str(value.get('value') if isinstance(value,dict) else value,300 if field=='title' else 7000)
         if not output[field]: raise workflow_error('invalid_content')
+        reason=audit_str(value.get('reason') if isinstance(value,dict) else (result.get('reasons') or {}).get(field),1000)
+      if reason:
+        reasons[field]={'reason':reason,'hash':workflow_content_reason_hash(output[field])}
+    if reasons:
+      output['_generationReasons']=reasons
     with semantic_job_connection() as db:
       db.execute('BEGIN IMMEDIATE')
       workflow_current_user(db,batch)
@@ -26928,6 +26983,8 @@ class OpticardsHandler(BaseHTTPRequestHandler):
           return True
         if path=='/api/content-workflow/mail' and method=='GET':
           self.send_json(200,workflow_crm_mailbox(portal,user,data.get('before')));return True
+        if path=='/api/content-workflow/comparison' and method=='GET':
+          self.send_json(200,workflow_content_comparison(portal,data.get('batch_id'),data.get('card_key'),user));return True
         if path=='/api/content-workflow/crm-binding' and method=='GET':
           with semantic_job_connection() as db:
             record,_,manager=workflow_crm_access(db,portal,user)

@@ -10,6 +10,18 @@
 .cw-plan-task-list{display:grid;gap:12px;margin-top:16px}.cw-plan-task-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 0;border-top:1px solid #e6e8ef}.cw-plan-task-row>div{flex:1;min-width:min(100%,240px)}.cw-plan-task-row p{font-size:12px;color:#737c91;margin:8px 0 0}.lc-day-load{margin:16px 0;padding:12px;border:1px solid #e5dcee;border-radius:8px;font-size:12px;overflow-wrap:anywhere}
 
 .cw-modal .status-note{overflow-wrap:anywhere}
+.cw-review-field{margin-bottom:16px}
+.cw-comparison{border:1px solid var(--line,#e1e5eb);border-radius:8px;padding:8px 12px;margin-top:8px}
+.cw-comparison summary{cursor:pointer;font-weight:600;font-size:13px}
+.cw-comparison-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:10px;font-size:13px}
+.cw-comparison-value{white-space:pre-wrap;overflow-wrap:anywhere;max-height:16rem;overflow:auto;margin:4px 0 0}
+.cw-comparison-value del{background:#fae7e7;color:#8d2e2e}
+.cw-comparison-value ins{background:#e0f2e5;color:#225b39;text-decoration:none}
+.cw-comparison-facts,.cw-comparison-reason{font-size:13px;margin-top:8px;overflow-wrap:anywhere}
+.cw-comparison-facts dl{margin:5px 0}
+.cw-comparison-facts dl>div{display:flex;gap:8px;flex-wrap:wrap}
+.cw-comparison-facts dd{margin:0;font-weight:600}
+@media(max-width:540px){.cw-comparison-columns{grid-template-columns:minmax(0,1fr)}}
 
 .cw-plans{grid-template-columns:minmax(0,1fr)}
 .cw-plan-task-row>div>.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere;text-align:left}

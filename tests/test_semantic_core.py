@@ -1050,6 +1050,7 @@ class SemanticCoreFilteringTest(unittest.TestCase):
     self.assertEqual(evidence["characteristicsContext"]["mpstatsCharacteristics"][0]["name"], "Пол")
     self.assertEqual(result["draftContent"]["title"], "Солнцезащитные очки женские Polaroid")
     self.assertEqual(result["draftContent"]["characteristics"][0]["name"], "Пол")
+    self.assertEqual(result["reasons"], {"title": "test", "description": "test"})
     self.assertEqual(result["contentOptimization"]["marketplace"], "Ozon")
 
   def test_output_leaks_and_unconfirmed_claims_are_removed(self):

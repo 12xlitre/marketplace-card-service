@@ -242,16 +242,27 @@ class ContentWorkflowTest(unittest.TestCase):
         server.workflow_schedule_task(self.portal,{'batchId':batch['id'],'day':'2026-11-09','minutes':30},self.users['tech'])
         server.workflow_start_batch(self.portal,{'batchId':batch['id']},self.users['account'])
         server.workflow_process_batch(batch['id'])
-        fake={'draftContent':{'title':{'value':'Название по принятому СЯ'},'description':{'value':'Описание по принятому СЯ'},'characteristics':{'shape':{'name':'Форма','value':['спрей']}}}}
+        fake={'draftContent':{'title':{'value':'Название по принятому СЯ','reason':'Учтён поисковый запрос'},'description':{'value':'Описание по принятому СЯ','reason':'Указано применение'},'characteristics':{'shape':{'name':'Форма','value':['спрей']}}}}
         with patch.object(server,'build_card_content_reoptimization',return_value=fake) as model:
             server.workflow_process_batch(batch['id'])
         self.assertTrue(model.call_args.kwargs['frozen_semantic'])
         self.assertEqual(model.call_args.args[3][0]['query'],SELECTED['query'])
         card=server.workflow_list(self.portal,self.users['account'],batch['id'])['batch']['cards'][0]
         self.assertEqual(card['result']['characteristics'],[{'name':'Форма','value':'спрей'}])
+        self.assertNotIn('_generationReasons',card['result'])
+        comparison=server.workflow_content_comparison(self.portal,batch['id'],'1001',self.users['tech'])
+        self.assertEqual(comparison['original']['title'],CARD['title'])
+        self.assertEqual(comparison['original']['characteristics'][0]['value'],'спрей')
+        self.assertEqual(comparison['reasons'],{'title':'Учтён поисковый запрос','description':'Указано применение'})
+        with self.assertRaisesRegex(ValueError,'workflow_task_not_found'):
+            server.workflow_content_comparison(self.ozon,batch['id'],'1001',self.users['tech'])
+        card['result']['title']='Заголовок после ручной проверки'
         server.workflow_review_card(self.portal,{'batchId':batch['id'],'cardKey':'1001','content':card['result']},self.users['tech'])
+        self.assertEqual(server.workflow_content_comparison(self.portal,batch['id'],'1001',self.users['tech'])['reasons'],{'description':'Указано применение'})
         files=server.workflow_export_files(self.portal,{'batchId':batch['id']},self.users['tech'])['fileIds']
         self.assertEqual({self.file(f)['kind'] for f in files},{'main','description'})
+        for file_id in files:
+            self.assertNotIn('_generationReasons',json.loads(self.file(file_id)['snapshot_json'])['cards']['1001']['content'])
         server.workflow_approve_file(self.portal,{'fileId':files[0]},self.users['account'])
         self.assertNotEqual(self.batch('content')['status'],'approved')
         server.workflow_approve_file(self.portal,{'fileId':files[1]},self.users['account'])
@@ -284,6 +295,9 @@ class ContentWorkflowTest(unittest.TestCase):
                     server.workflow_process_batch(task['id'])
                 selected=model.call_args.args[1]['selected'] if portal==self.ozon else model.call_args.args[3]
                 self.assertEqual(selected[0]['query'],SELECTED['query'])
+                comparison=server.workflow_content_comparison(portal,task['id'],'1001',self.users['tech'])
+                self.assertEqual(comparison['original']['title'],CARD['title'])
+                self.assertEqual(comparison['reasons'],{})
                 server.workflow_review_card(portal,{'batchId':parent['id'],'cardKey':'1001'},self.users['tech'])
                 files=server.workflow_export_files(portal,{'batchId':parent['id']},self.users['tech'])['fileIds']
                 exported=self.file(files[0])

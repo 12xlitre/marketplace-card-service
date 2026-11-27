@@ -5,6 +5,7 @@ import {DayDialog} from './WorkCalendar';
 import {matchWorkflowCards, workflowCardKey, workflowCardIdentifiers} from './workflowCardSelection';
 import {visibleWorkflowBatches} from './workflowTaskVisibility';
 import {nextWorkflowContentCard, workflowCalendarLabel, workflowCardRun, workflowDeliveryText, workflowSemanticProgress} from './workflowPresentation';
+import WorkflowContentFields from './WorkflowContentFields';
 
 const endpoint='/api/content-workflow';
 const labels={planned:'Не начата',collecting:'Подбор СЯ в фоне',review:'Проверка специалистом',partial:'Есть ошибки',
@@ -220,9 +221,7 @@ export default function ContentWorkflow({portal,cards=[],onOpenCard,apiRequest,o
       <label className="field-label">Комментарий<textarea value={approval.comment} onChange={e=>setApproval({...approval,comment:e.target.value})}/></label>
       <ErrorNote error={error}/><button className="btn primary" disabled={busy||!approval.proof}>Сохранить подтверждение</button></form></Modal>:null}
     {editor?<Modal key={editor.card.cardKey} title={'Проверка · '+editor.card.title} onClose={()=>{if(!busy)setEditor(null)}}><form onSubmit={saveContentReview}>
-      {editor.batch.fields.includes('title')?<label className="field-label">Наименование<textarea required value={editor.content.title||''} onChange={e=>setEditor({...editor,content:{...editor.content,title:e.target.value}})}/></label>:null}
-      {editor.batch.fields.includes('description')?<label className="field-label">Описание<textarea required rows={12} value={editor.content.description||''} onChange={e=>setEditor({...editor,content:{...editor.content,description:e.target.value}})}/></label>:null}
-      {(editor.content.characteristics||[]).map((c,i)=><label className="field-label" key={i}>{c.name}<input value={c.value} onChange={e=>setEditor({...editor,content:{...editor.content,characteristics:editor.content.characteristics.map((v,n)=>n===i?{...v,value:e.target.value}:v)}})}/></label>)}
+      <WorkflowContentFields editor={editor} base={base} apiRequest={apiRequest} onChange={content=>setEditor({...editor,content})}/>
       <ErrorNote error={error}/>
       <div className="task-batch-actions">
         {nextContentCard?<button className="btn primary" type="submit" value="next" disabled={busy}>Сохранить и следующая</button>:null}
